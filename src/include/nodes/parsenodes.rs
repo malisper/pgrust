@@ -2301,6 +2301,7 @@ pub struct IndexColumnDef {
     pub expr_type: Option<SqlType>,
     pub collation: Option<String>,
     pub opclass: Option<String>,
+    pub opclass_options: Vec<RelOption>,
     pub descending: bool,
     pub nulls_first: Option<bool>,
 }
@@ -2313,6 +2314,7 @@ impl From<&str> for IndexColumnDef {
             expr_type: None,
             collation: None,
             opclass: None,
+            opclass_options: Vec::new(),
             descending: false,
             nulls_first: None,
         }

@@ -37,6 +37,7 @@ const TRIGGER_OLD_CTID_COLUMN: &str = "__trigger_old_ctid";
 #[derive(Debug, Clone, Copy)]
 enum BuiltinTriggerFunction {
     SuppressRedundantUpdates,
+    TsVectorUpdate,
 }
 
 #[derive(Debug, Clone)]
@@ -528,6 +529,9 @@ fn load_trigger_function(
             "suppress_redundant_updates_trigger" => Ok(LoadedTriggerFunction::Builtin(
                 BuiltinTriggerFunction::SuppressRedundantUpdates,
             )),
+            "tsvector_update_trigger" | "tsvector_update_trigger_column" => Ok(
+                LoadedTriggerFunction::Builtin(BuiltinTriggerFunction::TsVectorUpdate),
+            ),
             _ => Err(trigger_runtime_error(
                 "unsupported internal trigger function",
                 Some(proc_row.proname),
@@ -570,7 +574,78 @@ fn execute_builtin_trigger_function(
                 Ok(TriggerFunctionResult::ReturnNew(new_row.clone()))
             }
         }
+        BuiltinTriggerFunction::TsVectorUpdate => {
+            if call.timing != TriggerTiming::Before
+                || call.level != TriggerLevel::Row
+                || !matches!(call.op, TriggerOperation::Insert | TriggerOperation::Update)
+            {
+                return Err(trigger_runtime_error(
+                    "tsvector_update_trigger must be fired BEFORE INSERT OR UPDATE FOR EACH ROW",
+                    None,
+                ));
+            }
+            if call.trigger_args.len() < 3 {
+                return Err(trigger_runtime_error(
+                    "tsvector_update_trigger requires target column, configuration, and source columns",
+                    None,
+                ));
+            }
+            let mut new_row = call.new_row.clone().ok_or_else(|| {
+                trigger_runtime_error("tsvector_update_trigger requires NEW row data", None)
+            })?;
+            let target_index = trigger_column_index(&call.relation_desc, &call.trigger_args[0])?;
+            // :HACK: tsvector_update_trigger_column should read the regconfig
+            // from a row column. The current trigger runtime only preserves
+            // trigger argv text here, so both builtin trigger variants treat
+            // argv[1] as the configuration name.
+            let config_name = call.trigger_args[1].as_str();
+            let mut document = String::new();
+            for source_name in &call.trigger_args[2..] {
+                let source_index = trigger_column_index(&call.relation_desc, source_name)?;
+                let Some(value) = new_row.get(source_index) else {
+                    continue;
+                };
+                if matches!(value, Value::Null) {
+                    continue;
+                }
+                if !document.is_empty() {
+                    document.push(' ');
+                }
+                document.push_str(value.as_text().unwrap_or_default());
+            }
+            let vector = crate::backend::tsearch::to_tsvector_with_config_name(
+                Some(config_name),
+                &document,
+                None,
+            )
+            .map_err(|message| {
+                trigger_runtime_error(
+                    "tsvector_update_trigger failed to build tsvector",
+                    Some(message),
+                )
+            })?;
+            if target_index >= new_row.len() {
+                return Err(trigger_runtime_error(
+                    "tsvector_update_trigger target column is outside NEW row",
+                    None,
+                ));
+            }
+            new_row[target_index] = Value::TsVector(vector);
+            Ok(TriggerFunctionResult::ReturnNew(new_row))
+        }
     }
+}
+
+fn trigger_column_index(desc: &RelationDesc, name: &str) -> Result<usize, ExecError> {
+    desc.columns
+        .iter()
+        .position(|column| column.name.eq_ignore_ascii_case(name) && !column.dropped)
+        .ok_or_else(|| {
+            trigger_runtime_error(
+                "trigger column does not exist",
+                Some(format!("column \"{name}\" was not found")),
+            )
+        })
 }
 
 fn compile_when_expr(

@@ -32,6 +32,7 @@ use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::tidbitmap::TidBitmap;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::RelationDesc;
+use crate::include::nodes::tsearch::{TsQuery, TsQueryNode};
 use crate::{BufferPool, ClientId, PinnedBuffer};
 
 const INLINE_POSTING_LIMIT: usize = 256;
@@ -334,15 +335,25 @@ pub(crate) fn gingetbitmap(
     for key in &scan.key_data {
         let attnum = u16::try_from(key.attribute_number)
             .map_err(|_| CatalogError::Corrupt("GIN scan key attnum out of range"))?;
-        let query = jsonb_ops::extract_query(attnum, key.strategy, &key.argument)?;
-        let _search_mode = jsonb_ops::query_search_mode(&query);
-        let tids = match query {
-            GinJsonbQuery::All => all_tids(&image),
-            GinJsonbQuery::None => BTreeSet::new(),
-            GinJsonbQuery::Any(entries) if jsonb_ops::strategy_requires_all(key.strategy) => {
-                intersect_entry_tids(&image, &entries)
+        let tids = if let Value::TsQuery(query) = &key.argument {
+            // :HACK: tsvector GIN scans are deliberately lossy for now. The
+            // executor rechecks @@ against the heap row, so correctness comes
+            // from the recheck while this path provides index visibility.
+            match extract_tsvector_query(attnum, query) {
+                GinTsvectorQuery::All => all_tids(&image),
+                GinTsvectorQuery::Any(entries) => union_entry_tids(&image, &entries),
             }
-            GinJsonbQuery::Any(entries) => union_entry_tids(&image, &entries),
+        } else {
+            let query = jsonb_ops::extract_query(attnum, key.strategy, &key.argument)?;
+            let _search_mode = jsonb_ops::query_search_mode(&query);
+            match query {
+                GinJsonbQuery::All => all_tids(&image),
+                GinJsonbQuery::None => BTreeSet::new(),
+                GinJsonbQuery::Any(entries) if jsonb_ops::strategy_requires_all(key.strategy) => {
+                    intersect_entry_tids(&image, &entries)
+                }
+                GinJsonbQuery::Any(entries) => union_entry_tids(&image, &entries),
+            }
         };
         result = Some(match result.take() {
             Some(existing) => existing.intersection(&tids).copied().collect(),
@@ -428,7 +439,92 @@ fn extract_row_entries(
 }
 
 fn extract_value_entries(attnum: u16, value: &Value) -> Result<Vec<GinEntryKey>, CatalogError> {
-    jsonb_ops::extract_value(attnum, value)
+    match value {
+        Value::TsVector(vector) => {
+            let mut entries = Vec::new();
+            for lexeme in &vector.lexemes {
+                entries.push(GinEntryKey {
+                    attnum,
+                    category: crate::include::access::gin::GinNullCategory::NormalKey,
+                    bytes: lexeme.text.as_str().as_bytes().to_vec(),
+                });
+            }
+            if vector.lexemes.is_empty() {
+                entries.push(GinEntryKey {
+                    attnum,
+                    category: crate::include::access::gin::GinNullCategory::EmptyItem,
+                    bytes: Vec::new(),
+                });
+            }
+            Ok(entries)
+        }
+        _ => jsonb_ops::extract_value(attnum, value),
+    }
+}
+
+enum GinTsvectorQuery {
+    All,
+    Any(Vec<GinEntryKey>),
+}
+
+fn extract_tsvector_query(attnum: u16, query: &TsQuery) -> GinTsvectorQuery {
+    if tsquery_has_prefix_operand(&query.root) || tsquery_has_not_operand(&query.root) {
+        return GinTsvectorQuery::All;
+    }
+    let mut entries = Vec::new();
+    collect_tsquery_entries(attnum, &query.root, &mut entries);
+    entries.sort();
+    entries.dedup();
+    if entries.is_empty() {
+        GinTsvectorQuery::All
+    } else {
+        GinTsvectorQuery::Any(entries)
+    }
+}
+
+fn tsquery_has_not_operand(node: &TsQueryNode) -> bool {
+    match node {
+        TsQueryNode::Operand(_) => false,
+        TsQueryNode::Not(_) => true,
+        TsQueryNode::And(left, right) | TsQueryNode::Or(left, right) => {
+            tsquery_has_not_operand(left) || tsquery_has_not_operand(right)
+        }
+        TsQueryNode::Phrase { left, right, .. } => {
+            tsquery_has_not_operand(left) || tsquery_has_not_operand(right)
+        }
+    }
+}
+
+fn collect_tsquery_entries(attnum: u16, node: &TsQueryNode, out: &mut Vec<GinEntryKey>) {
+    match node {
+        TsQueryNode::Operand(operand) => out.push(GinEntryKey {
+            attnum,
+            category: crate::include::access::gin::GinNullCategory::NormalKey,
+            bytes: operand.lexeme.as_str().as_bytes().to_vec(),
+        }),
+        TsQueryNode::Not(inner) => collect_tsquery_entries(attnum, inner, out),
+        TsQueryNode::And(left, right) | TsQueryNode::Or(left, right) => {
+            collect_tsquery_entries(attnum, left, out);
+            collect_tsquery_entries(attnum, right, out);
+        }
+        TsQueryNode::Phrase { left, right, .. } => {
+            collect_tsquery_entries(attnum, left, out);
+            collect_tsquery_entries(attnum, right, out);
+        }
+    }
+}
+
+fn tsquery_has_prefix_operand(node: &TsQueryNode) -> bool {
+    match node {
+        TsQueryNode::Operand(operand) => operand.prefix,
+        TsQueryNode::Not(inner) => tsquery_has_prefix_operand(inner),
+        TsQueryNode::And(left, right) | TsQueryNode::Or(left, right) => {
+            tsquery_has_prefix_operand(left) || tsquery_has_prefix_operand(right)
+        }
+        TsQueryNode::Phrase { left, right, .. } => {
+            tsquery_has_prefix_operand(left) || tsquery_has_prefix_operand(right)
+        }
+    }
 }
 
 fn cleanup_pending_into_entries(image: &mut GinIndexImage) {

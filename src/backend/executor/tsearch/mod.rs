@@ -13,7 +13,7 @@ pub(crate) use tsquery_io::{
 };
 pub(crate) use tsquery_op::{
     compare_tsquery, numnode, tsquery_and, tsquery_contained_by, tsquery_contains, tsquery_not,
-    tsquery_or, tsquery_phrase, tsquery_rewrite,
+    tsquery_operands, tsquery_or, tsquery_phrase, tsquery_rewrite,
 };
 pub(crate) use tsvector_io::{
     decode_tsvector_bytes, encode_tsvector_bytes, parse_tsvector_text, render_tsvector_text,

@@ -40,6 +40,7 @@ pub(super) enum ResolvedSrfImpl {
     PartitionAncestors,
     PgLockStatus,
     TxidSnapshotXip,
+    TextSearch(TextSearchTableFunction),
     JsonTable(JsonTableFunction),
     RegexTable(RegexTableFunction),
     StringTable(StringTableFunction),
@@ -372,6 +373,7 @@ pub(super) fn resolve_text_search_table_function(name: &str) -> Option<TextSearc
         "ts_token_type" => Some(TextSearchTableFunction::TokenType),
         "ts_parse" => Some(TextSearchTableFunction::Parse),
         "ts_debug" => Some(TextSearchTableFunction::Debug),
+        "ts_stat" => Some(TextSearchTableFunction::Stat),
         _ => None,
     }
 }
@@ -410,6 +412,19 @@ pub(super) fn text_search_table_function_columns(
             QueryColumn {
                 name: "lexemes".into(),
                 sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                wire_type_oid: None,
+            },
+        ],
+        TextSearchTableFunction::Stat => vec![
+            QueryColumn::text("word"),
+            QueryColumn {
+                name: "ndoc".into(),
+                sql_type: SqlType::new(SqlTypeKind::Int4),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "nentry".into(),
+                sql_type: SqlType::new(SqlTypeKind::Int4),
                 wire_type_oid: None,
             },
         ],
@@ -452,6 +467,12 @@ fn builtin_srf_impl_for_proc_row(row: &PgProcRow) -> Option<ResolvedSrfImpl> {
         "pg_partition_ancestors" => Some(ResolvedSrfImpl::PartitionAncestors),
         "pg_lock_status" => Some(ResolvedSrfImpl::PgLockStatus),
         "txid_snapshot_xip" | "pg_snapshot_xip" => Some(ResolvedSrfImpl::TxidSnapshotXip),
+        "ts_token_type" => Some(ResolvedSrfImpl::TextSearch(
+            TextSearchTableFunction::TokenType,
+        )),
+        "ts_parse" => Some(ResolvedSrfImpl::TextSearch(TextSearchTableFunction::Parse)),
+        "ts_debug" => Some(ResolvedSrfImpl::TextSearch(TextSearchTableFunction::Debug)),
+        "ts_stat" => Some(ResolvedSrfImpl::TextSearch(TextSearchTableFunction::Stat)),
         other => resolve_json_table_function(other)
             .map(ResolvedSrfImpl::JsonTable)
             .or_else(|| resolve_regex_table_function(other).map(ResolvedSrfImpl::RegexTable))
@@ -1320,16 +1341,16 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::TsVectorToArray
             | BuiltinScalarFunction::ArrayToTsVector => args.len() == 1,
             BuiltinScalarFunction::TsQueryPhrase => matches!(args.len(), 2 | 3),
-            BuiltinScalarFunction::TsRewrite => args.len() == 3,
             BuiltinScalarFunction::TsVectorDelete
             | BuiltinScalarFunction::TsVectorFilter
             | BuiltinScalarFunction::TsRank
             | BuiltinScalarFunction::TsRankCd => matches!(args.len(), 2 | 3 | 4),
+            BuiltinScalarFunction::TsRewrite => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::TsVectorSetWeight => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::TsMatch
+            | BuiltinScalarFunction::TsQueryContains
             | BuiltinScalarFunction::TsQueryAnd
             | BuiltinScalarFunction::TsQueryOr
-            | BuiltinScalarFunction::TsQueryContains
             | BuiltinScalarFunction::TsQueryContainedBy
             | BuiltinScalarFunction::TsVectorConcat
             | BuiltinScalarFunction::TextCat => args.len() == 2,
@@ -3285,6 +3306,15 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("ts_rankcd_wtt", BuiltinScalarFunction::TsRankCd),
         ("ts_rankcd_ttf", BuiltinScalarFunction::TsRankCd),
         ("ts_rankcd_tt", BuiltinScalarFunction::TsRankCd),
+        ("tsq_mcontains", BuiltinScalarFunction::TsQueryContains),
+        ("tsq_mcontained", BuiltinScalarFunction::TsQueryContains),
+        ("ts_rewrite", BuiltinScalarFunction::TsRewrite),
+        ("tsquery_rewrite", BuiltinScalarFunction::TsRewrite),
+        ("tsquery_rewrite_query", BuiltinScalarFunction::TsRewrite),
+        ("ts_headline", BuiltinScalarFunction::TsHeadline),
+        ("ts_headline_byid", BuiltinScalarFunction::TsHeadline),
+        ("ts_headline_opt", BuiltinScalarFunction::TsHeadline),
+        ("ts_headline_byid_opt", BuiltinScalarFunction::TsHeadline),
         ("array_to_json", BuiltinScalarFunction::ArrayToJson),
         ("row_to_json", BuiltinScalarFunction::RowToJson),
         ("row_to_json_pretty", BuiltinScalarFunction::RowToJson),

@@ -688,6 +688,7 @@ fn int4_btree_options(num_keys: usize, indnullsnotdistinct: bool) -> CatalogInde
     CatalogIndexBuildOptions {
         am_oid: crate::include::catalog::BTREE_AM_OID,
         indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID; num_keys],
+        indclass_options: vec![Vec::new(); num_keys],
         indcollation: vec![0; num_keys],
         indoption: vec![0; num_keys],
         reloptions: None,
@@ -704,6 +705,7 @@ fn box_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
     CatalogIndexBuildOptions {
         am_oid: crate::include::catalog::SPGIST_AM_OID,
         indclass: vec![crate::include::catalog::BOX_SPGIST_OPCLASS_OID; num_keys],
+        indclass_options: vec![Vec::new(); num_keys],
         indcollation: vec![0; num_keys],
         indoption: vec![0; num_keys],
         reloptions: None,
@@ -720,6 +722,7 @@ fn polygon_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
     CatalogIndexBuildOptions {
         am_oid: crate::include::catalog::SPGIST_AM_OID,
         indclass: vec![crate::include::catalog::POLY_SPGIST_OPCLASS_OID; num_keys],
+        indclass_options: vec![Vec::new(); num_keys],
         indcollation: vec![0; num_keys],
         indoption: vec![0; num_keys],
         reloptions: None,
@@ -1004,6 +1007,7 @@ fn catalog_with_inherited_indexed_items()
         crate::backend::catalog::CatalogIndexBuildOptions {
             am_oid: crate::include::catalog::BTREE_AM_OID,
             indclass,
+            indclass_options: vec![Vec::new(); indcollation.len()],
             indcollation,
             indoption,
             reloptions: None,
@@ -1070,6 +1074,7 @@ fn catalog_with_inherited_indexed_items()
                 expr_type: None,
                 collation: None,
                 opclass: None,
+                opclass_options: Vec::new(),
                 descending: true,
                 nulls_first: None,
             }],
@@ -1082,6 +1087,7 @@ fn catalog_with_inherited_indexed_items()
                     expr_type: None,
                     collation: None,
                     opclass: None,
+                    opclass_options: Vec::new(),
                     descending: true,
                     nulls_first: None,
                 }],
@@ -1594,6 +1600,7 @@ fn catalog_with_t4_partial_and_expression_indexes() -> Catalog {
             expr_type: Some(int4()),
             collation: None,
             opclass: None,
+            opclass_options: Vec::new(),
             descending: false,
             nulls_first: None,
         }],

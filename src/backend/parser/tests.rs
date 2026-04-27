@@ -800,6 +800,7 @@ fn catalog_with_people_id_index() -> Catalog {
                 indimmediate: true,
                 indkey: vec![1],
                 indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
+                indclass_options: vec![Vec::new()],
                 indcollation: vec![0],
                 indoption: vec![0],
                 indexprs: None,
@@ -868,6 +869,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
                 indimmediate: true,
                 indkey: vec![1],
                 indclass: vec![opclass_oid],
+                indclass_options: vec![Vec::new()],
                 indcollation: vec![0],
                 indoption: vec![0],
                 indexprs: None,
@@ -965,6 +967,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
                 indimmediate: true,
                 indkey: vec![1],
                 indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
+                indclass_options: vec![Vec::new()],
                 indcollation: vec![0],
                 indoption: vec![0],
                 indexprs: None,
@@ -1030,6 +1033,7 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
                 indimmediate: true,
                 indkey: vec![1],
                 indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
+                indclass_options: vec![Vec::new()],
                 indcollation: vec![0],
                 indoption: vec![0],
                 indexprs: None,
@@ -1095,6 +1099,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
                 indimmediate: true,
                 indkey: vec![0],
                 indclass: vec![crate::include::catalog::TEXT_BTREE_OPCLASS_OID],
+                indclass_options: vec![Vec::new()],
                 indcollation: vec![0],
                 indoption: vec![0],
                 indexprs: Some(serde_json::to_string(&vec!["lower(name)"]).unwrap()),
@@ -1275,6 +1280,7 @@ fn bind_expression_index_metadata_does_not_discover_heap_indexes() {
                 indimmediate: true,
                 indkey: vec![0],
                 indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
+                indclass_options: vec![Vec::new()],
                 indcollation: vec![0],
                 indoption: vec![0],
                 indexprs: Some(serde_json::to_string(&vec!["a * a"]).unwrap()),
@@ -1348,6 +1354,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
                 indimmediate: true,
                 indkey: vec![2],
                 indclass: vec![crate::include::catalog::TEXT_BTREE_OPCLASS_OID],
+                indclass_options: vec![Vec::new()],
                 indcollation: vec![crate::include::catalog::C_COLLATION_OID],
                 indoption: vec![0],
                 indexprs: None,
@@ -1421,6 +1428,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
                 indimmediate: true,
                 indkey: vec![1],
                 indclass: vec![crate::include::catalog::TEXT_BTREE_OPCLASS_OID],
+                indclass_options: vec![Vec::new()],
                 indcollation: vec![0],
                 indoption: vec![0],
                 indexprs: None,
@@ -2094,6 +2102,7 @@ fn parse_create_unique_index_statement() {
                     expr_type: None,
                     collation: None,
                     opclass: None,
+                    opclass_options: Vec::new(),
                     descending: false,
                     nulls_first: None,
                 },
@@ -2103,6 +2112,7 @@ fn parse_create_unique_index_statement() {
                     expr_type: None,
                     collation: None,
                     opclass: None,
+                    opclass_options: Vec::new(),
                     descending: false,
                     nulls_first: None,
                 },
@@ -2535,6 +2545,7 @@ fn parse_create_index_with_method_and_ordering() {
                     expr_type: None,
                     collation: None,
                     opclass: None,
+                    opclass_options: Vec::new(),
                     descending: true,
                     nulls_first: Some(true),
                 },
@@ -2544,6 +2555,7 @@ fn parse_create_index_with_method_and_ordering() {
                     expr_type: None,
                     collation: None,
                     opclass: None,
+                    opclass_options: Vec::new(),
                     descending: false,
                     nulls_first: None,
                 },
@@ -2579,6 +2591,7 @@ fn parse_create_index_with_if_not_exists_and_opclass() {
                 expr_type: None,
                 collation: None,
                 opclass: Some("int4_ops".into()),
+                opclass_options: Vec::new(),
                 descending: false,
                 nulls_first: None,
             }],
@@ -2606,6 +2619,28 @@ fn parse_create_index_column_collation() {
 }
 
 #[test]
+fn parse_create_index_with_opclass_options() {
+    let stmt = parse_statement(
+        "create index wowidx on test_tsvector using gist (a tsvector_ops(siglen=1))",
+    )
+    .unwrap();
+    let Statement::CreateIndex(stmt) = stmt else {
+        panic!("expected create index");
+    };
+    assert_eq!(stmt.using_method.as_deref(), Some("gist"));
+    assert_eq!(stmt.columns.len(), 1);
+    assert_eq!(stmt.columns[0].opclass.as_deref(), Some("tsvector_ops"));
+    assert_eq!(
+        stmt.columns[0].opclass_options,
+        vec![crate::include::nodes::parsenodes::RelOption {
+            name: "siglen".into(),
+            value: "1".into(),
+        }]
+    );
+    assert!(stmt.options.is_empty());
+}
+
+#[test]
 fn parse_create_index_without_name() {
     let stmt = parse_statement("create index on tenk1 (thousand, tenthous)").unwrap();
     assert_eq!(
@@ -2626,6 +2661,7 @@ fn parse_create_index_without_name() {
                     expr_type: None,
                     collation: None,
                     opclass: None,
+                    opclass_options: Vec::new(),
                     descending: false,
                     nulls_first: None,
                 },
@@ -2635,6 +2671,7 @@ fn parse_create_index_without_name() {
                     expr_type: None,
                     collation: None,
                     opclass: None,
+                    opclass_options: Vec::new(),
                     descending: false,
                     nulls_first: None,
                 },
@@ -2861,6 +2898,7 @@ fn parse_create_index_with_expression_item() {
                     expr_type: None,
                     collation: None,
                     opclass: None,
+                    opclass_options: Vec::new(),
                     descending: false,
                     nulls_first: None,
                 },
@@ -2870,6 +2908,7 @@ fn parse_create_index_with_expression_item() {
                     expr_type: None,
                     collation: None,
                     opclass: None,
+                    opclass_options: Vec::new(),
                     descending: false,
                     nulls_first: None,
                 },
@@ -2879,6 +2918,7 @@ fn parse_create_index_with_expression_item() {
                     expr_type: None,
                     collation: None,
                     opclass: None,
+                    opclass_options: Vec::new(),
                     descending: false,
                     nulls_first: None,
                 },
@@ -2912,6 +2952,7 @@ fn parse_create_index_with_function_expression_item() {
                 expr_type: None,
                 collation: None,
                 opclass: None,
+                opclass_options: Vec::new(),
                 descending: false,
                 nulls_first: None,
             }],
@@ -2946,6 +2987,7 @@ fn parse_create_partial_index_statement_captures_predicate_sql() {
                 expr_type: None,
                 collation: None,
                 opclass: Some("int4_ops".into()),
+                opclass_options: Vec::new(),
                 descending: false,
                 nulls_first: None,
             }],

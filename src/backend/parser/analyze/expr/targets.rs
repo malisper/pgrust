@@ -1032,6 +1032,35 @@ fn bind_select_list_srf_call(
                             with_ordinality: false,
                         });
                     }
+                    if let Some(ResolvedSrfImpl::TextSearch(kind)) = resolved.srf_impl {
+                        let bound_args = bind_user_defined_srf_args(
+                            &args,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                            &resolved.declared_arg_types,
+                        )?;
+                        let output_columns = match &resolved.row_shape {
+                            ResolvedFunctionRowShape::OutParameters(columns)
+                            | ResolvedFunctionRowShape::NamedComposite { columns, .. } => {
+                                columns.clone()
+                            }
+                            ResolvedFunctionRowShape::AnonymousRecord
+                            | ResolvedFunctionRowShape::None => vec![QueryColumn {
+                                name: other.to_string(),
+                                sql_type: resolved.result_type,
+                                wire_type_oid: None,
+                            }],
+                        };
+                        return Ok(SetReturningCall::TextSearchTableFunction {
+                            kind,
+                            args: bound_args,
+                            output_columns,
+                            with_ordinality: false,
+                        });
+                    }
                     if resolved.prokind != 'f' || !resolved.proretset {
                         return Err(ParseError::UnexpectedToken {
                             expected: "supported set-returning function",

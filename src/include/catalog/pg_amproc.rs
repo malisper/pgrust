@@ -454,6 +454,40 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         oid = oid.saturating_add(1);
     }
     for (procnum, proc_oid) in [
+        (1_i16, GIST_TSVECTOR_CONSISTENT_PROC_OID),
+        (2, GIST_TSVECTOR_UNION_PROC_OID),
+        (5, GIST_TSVECTOR_PENALTY_PROC_OID),
+        (6, GIST_TSVECTOR_PICKSPLIT_PROC_OID),
+        (7, GIST_TSVECTOR_SAME_PROC_OID),
+    ] {
+        rows.push(PgAmprocRow {
+            oid,
+            amprocfamily: GIST_TSVECTOR_FAMILY_OID,
+            amproclefttype: TSVECTOR_TYPE_OID,
+            amprocrighttype: TSVECTOR_TYPE_OID,
+            amprocnum: procnum,
+            amproc: proc_oid,
+        });
+        oid = oid.saturating_add(1);
+    }
+    for (procnum, proc_oid) in [
+        (1_i16, GIST_TSQUERY_CONSISTENT_PROC_OID),
+        (2, GIST_TSQUERY_UNION_PROC_OID),
+        (5, GIST_TSQUERY_PENALTY_PROC_OID),
+        (6, GIST_TSQUERY_PICKSPLIT_PROC_OID),
+        (7, GIST_TSQUERY_SAME_PROC_OID),
+    ] {
+        rows.push(PgAmprocRow {
+            oid,
+            amprocfamily: GIST_TSQUERY_FAMILY_OID,
+            amproclefttype: TSQUERY_TYPE_OID,
+            amprocrighttype: TSQUERY_TYPE_OID,
+            amprocnum: procnum,
+            amproc: proc_oid,
+        });
+        oid = oid.saturating_add(1);
+    }
+    for (procnum, proc_oid) in [
         (1_i16, SPG_NETWORK_CONFIG_PROC_OID),
         (2, SPG_NETWORK_CHOOSE_PROC_OID),
         (3, SPG_NETWORK_PICKSPLIT_PROC_OID),

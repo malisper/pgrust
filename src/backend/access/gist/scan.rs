@@ -9,6 +9,7 @@ use crate::include::access::relscan::{
     IndexScanOpaque, ScanDirection,
 };
 use crate::include::access::scankey::ScanKeyData;
+use crate::include::access::tidbitmap::TidBitmap;
 
 use super::page::{page_lsn, read_buffered_page};
 use super::state::GistState;
@@ -240,6 +241,20 @@ pub(crate) fn gistgettuple(scan: &mut IndexScanDesc) -> Result<bool, CatalogErro
             }
         }
     }
+}
+
+pub(crate) fn gistgetbitmap(
+    scan: &mut IndexScanDesc,
+    bitmap: &mut TidBitmap,
+) -> Result<i64, CatalogError> {
+    let mut count = 0_i64;
+    while gistgettuple(scan)? {
+        if let Some(tid) = scan.xs_heaptid {
+            bitmap.add_tid(tid);
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 pub(crate) fn gistendscan(_scan: IndexScanDesc) -> Result<(), CatalogError> {

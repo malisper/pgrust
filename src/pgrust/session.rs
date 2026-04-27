@@ -8264,6 +8264,7 @@ impl Session {
                 | "enable_bitmapscan"
                 | "enable_hashagg"
                 | "enable_sort"
+                | "default_text_search_config"
         ) {
             db.plan_cache.invalidate_all();
         }
@@ -11530,6 +11531,47 @@ mod tests {
             copy.direction,
             CopyDirection::From(CopyEndpoint::Stdin)
         ));
+    }
+
+    #[test]
+    fn default_text_search_config_guc_drives_one_arg_tsearch() {
+        let db = Database::open_ephemeral(32).expect("open ephemeral database");
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "set default_text_search_config=simple")
+            .unwrap();
+        let result = session
+            .execute(&db, "select to_tsvector('SKIES My booKs')")
+            .unwrap();
+        let StatementResult::Query { rows, .. } = result else {
+            panic!("expected query result");
+        };
+        let Value::TsVector(vector) = &rows[0][0] else {
+            panic!("expected tsvector result");
+        };
+        assert_eq!(
+            crate::backend::executor::render_tsvector_text(vector),
+            "'books':3 'my':2 'skies':1"
+        );
+
+        session
+            .execute(&db, "set default_text_search_config=english")
+            .unwrap();
+        let result = session
+            .execute(&db, "select to_tsvector('SKIES My booKs')")
+            .unwrap();
+
+        let StatementResult::Query { rows, .. } = result else {
+            panic!("expected query result");
+        };
+        let Value::TsVector(vector) = &rows[0][0] else {
+            panic!("expected tsvector result");
+        };
+        assert_eq!(
+            crate::backend::executor::render_tsvector_text(vector),
+            "'book':3 'sky':1"
+        );
     }
 
     #[test]

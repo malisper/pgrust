@@ -470,6 +470,20 @@ fn build_bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         amopsortfamily: 0,
     });
     oid = oid.saturating_add(1);
+    for (strategy, name) in [(7_i16, "@>"), (8, "<@")] {
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: GIST_TSQUERY_FAMILY_OID,
+            amoplefttype: TSQUERY_TYPE_OID,
+            amoprighttype: TSQUERY_TYPE_OID,
+            amopstrategy: strategy,
+            amoppurpose: 's',
+            amopopr: operator_oid(&operators, name, TSQUERY_TYPE_OID, TSQUERY_TYPE_OID),
+            amopmethod: GIST_AM_OID,
+            amopsortfamily: 0,
+        });
+        oid = oid.saturating_add(1);
+    }
     for (family, method) in [
         (GIST_NETWORK_FAMILY_OID, GIST_AM_OID),
         (SPGIST_NETWORK_FAMILY_OID, SPGIST_AM_OID),

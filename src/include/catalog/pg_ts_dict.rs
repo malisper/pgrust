@@ -30,13 +30,23 @@ pub fn pg_ts_dict_desc() -> RelationDesc {
     }
 }
 
-pub fn bootstrap_pg_ts_dict_rows() -> [PgTsDictRow; 1] {
-    [PgTsDictRow {
-        oid: SIMPLE_TS_DICTIONARY_OID,
-        dictname: "simple".into(),
-        dictnamespace: PG_CATALOG_NAMESPACE_OID,
-        dictowner: BOOTSTRAP_SUPERUSER_OID,
-        dicttemplate: SIMPLE_TS_TEMPLATE_OID,
-        dictinitoption: None,
-    }]
+pub fn bootstrap_pg_ts_dict_rows() -> [PgTsDictRow; 2] {
+    [
+        PgTsDictRow {
+            oid: SIMPLE_TS_DICTIONARY_OID,
+            dictname: "simple".into(),
+            dictnamespace: PG_CATALOG_NAMESPACE_OID,
+            dictowner: BOOTSTRAP_SUPERUSER_OID,
+            dicttemplate: SIMPLE_TS_TEMPLATE_OID,
+            dictinitoption: None,
+        },
+        PgTsDictRow {
+            oid: ENGLISH_STEM_TS_DICTIONARY_OID,
+            dictname: "english_stem".into(),
+            dictnamespace: PG_CATALOG_NAMESPACE_OID,
+            dictowner: BOOTSTRAP_SUPERUSER_OID,
+            dicttemplate: SIMPLE_TS_TEMPLATE_OID,
+            dictinitoption: None,
+        },
+    ]
 }

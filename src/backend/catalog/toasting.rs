@@ -250,6 +250,7 @@ pub fn new_relation_create_toast_table(
         &CatalogIndexBuildOptions {
             am_oid: BTREE_AM_OID,
             indclass: vec![OID_BTREE_OPCLASS_OID, INT4_BTREE_OPCLASS_OID],
+            indclass_options: vec![Vec::new(), Vec::new()],
             indcollation: vec![0, 0],
             indoption: vec![0, 0],
             reloptions: None,

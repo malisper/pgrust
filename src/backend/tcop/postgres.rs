@@ -4872,7 +4872,9 @@ fn psql_index_display_columns(
                     .unwrap_or_else(|| format!("column{}", index + 1));
                 return PsqlIndexDisplayColumn {
                     display_name: name.clone(),
-                    definition: name,
+                    definition: psql_index_column_definition_with_opclass_options(
+                        index_meta, index, name,
+                    ),
                 };
             }
             let expression_sql = expression_sqls
@@ -4894,7 +4896,11 @@ fn psql_index_display_columns(
             }
             PsqlIndexDisplayColumn {
                 display_name: "expr".into(),
-                definition: parenthesized_index_expression(&expression_sql),
+                definition: psql_index_column_definition_with_opclass_options(
+                    index_meta,
+                    index,
+                    parenthesized_index_expression(&expression_sql),
+                ),
             }
         })
         .collect()
@@ -4996,6 +5002,39 @@ fn split_top_level_commas(input: &str) -> Vec<&str> {
     }
     parts.push(input[start..].trim());
     parts
+}
+
+fn psql_index_column_definition_with_opclass_options(
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    index: usize,
+    base: String,
+) -> String {
+    let Some(options) = index_meta
+        .indclass_options
+        .get(index)
+        .filter(|options| !options.is_empty())
+    else {
+        return base;
+    };
+    let Some(opclass_oid) = index_meta.indclass.get(index) else {
+        return base;
+    };
+    let opclass_name = match *opclass_oid {
+        crate::include::catalog::TSVECTOR_GIST_OPCLASS_OID => "tsvector_ops",
+        _ => return base,
+    };
+    let rendered_options = options
+        .iter()
+        .map(|(name, value)| {
+            format!(
+                "{}='{}'",
+                name.to_ascii_lowercase(),
+                sql_quote_literal(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{base} {opclass_name} ({rendered_options})")
 }
 
 fn parenthesized_index_expression(expr_sql: &str) -> String {

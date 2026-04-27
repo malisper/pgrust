@@ -9869,6 +9869,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
             &crate::backend::catalog::CatalogIndexBuildOptions {
                 am_oid: crate::include::catalog::BTREE_AM_OID,
                 indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
+                indclass_options: vec![Vec::new()],
                 indcollation: vec![0],
                 indoption: vec![0],
                 reloptions: None,
@@ -9892,6 +9893,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
             &crate::backend::catalog::CatalogIndexBuildOptions {
                 am_oid: crate::include::catalog::GIST_AM_OID,
                 indclass: vec![crate::include::catalog::BOX_GIST_OPCLASS_OID],
+                indclass_options: vec![Vec::new()],
                 indcollation: vec![0],
                 indoption: vec![0],
                 reloptions: None,
@@ -9915,6 +9917,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
             &crate::backend::catalog::CatalogIndexBuildOptions {
                 am_oid: crate::include::catalog::SPGIST_AM_OID,
                 indclass: vec![crate::include::catalog::BOX_SPGIST_OPCLASS_OID],
+                indclass_options: vec![Vec::new()],
                 indcollation: vec![0],
                 indoption: vec![0],
                 reloptions: None,

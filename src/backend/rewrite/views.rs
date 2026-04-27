@@ -875,6 +875,7 @@ fn render_set_returning_call(
                 }
                 crate::include::nodes::primnodes::TextSearchTableFunction::Parse => "ts_parse",
                 crate::include::nodes::primnodes::TextSearchTableFunction::Debug => "ts_debug",
+                crate::include::nodes::primnodes::TextSearchTableFunction::Stat => "ts_stat",
             }
             .to_string(),
             args.iter().collect(),

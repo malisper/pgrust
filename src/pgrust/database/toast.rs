@@ -33,6 +33,7 @@ fn toast_index_relation_from_changes(changes: &ToastCatalogChanges) -> Option<Bo
             am_handler_oid: None,
             indkey: meta.indkey.clone(),
             indclass: meta.indclass.clone(),
+            indclass_options: meta.indclass_options.clone(),
             indcollation: meta.indcollation.clone(),
             indoption: meta.indoption.clone(),
             opfamily_oids: Vec::new(),

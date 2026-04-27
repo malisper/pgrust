@@ -68,9 +68,9 @@ use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
     ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID, BOX_TYPE_OID, BRIN_AM_OID,
-    BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, PG_CATALOG_NAMESPACE_OID, PgAmRow,
-    PgOpclassRow, SPGIST_AM_OID, bootstrap_pg_am_rows, builtin_range_name_for_sql_type,
-    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID, HASH_AM_OID,
+    PG_CATALOG_NAMESPACE_OID, PgAmRow, PgOpclassRow, SPGIST_AM_OID, bootstrap_pg_am_rows,
+    builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
@@ -1245,13 +1245,26 @@ pub(crate) fn coerce_index_key_to_opckeytype(
     am_oid: u32,
     opckeytype_oid: Option<u32>,
 ) -> Value {
-    if am_oid != GIST_AM_OID || opckeytype_oid != Some(BOX_TYPE_OID) {
+    if am_oid != GIST_AM_OID {
         return value;
     }
-    match value {
-        Value::Polygon(poly) => Value::Box(poly.bound_box),
-        Value::Circle(circle) => Value::Box(circle_bound_box(&circle)),
-        other => other,
+    match opckeytype_oid {
+        Some(BOX_TYPE_OID) => match value {
+            Value::Polygon(poly) => Value::Box(poly.bound_box),
+            Value::Circle(circle) => Value::Box(circle_bound_box(&circle)),
+            other => other,
+        },
+        Some(GTSVECTOR_TYPE_OID) => match value {
+            Value::Null => Value::Null,
+            Value::TsVector(_) => {
+                // :HACK: pgrust's current GiST tsvector support is lossy and
+                // always heap-rechecks. Store a compact gtsvector placeholder
+                // instead of raw tsvector data so leaf tuples fit on pages.
+                Value::TsVector(Default::default())
+            }
+            other => other,
+        },
+        _ => value,
     }
 }
 
@@ -3455,6 +3468,7 @@ fn resolve_create_index_build_options(
     Ok(crate::backend::catalog::CatalogIndexBuildOptions {
         am_oid: access_method.oid,
         indclass,
+        indclass_options: vec![Vec::new(); indcollation.len()],
         indcollation,
         indoption,
         reloptions: index_reloptions(options),

@@ -17224,6 +17224,7 @@ fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, Parse
     let mut expr_sql = None;
     let mut collation = None;
     let mut opclass = None;
+    let mut opclass_options = Vec::new();
     let mut descending = false;
     let mut nulls_first = None;
     for part in pair.into_inner() {
@@ -17246,9 +17247,15 @@ fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, Parse
                 }
             }
             Rule::create_index_opclass if opclass.is_none() => {
-                opclass = Some(build_identifier(
-                    part.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
-                ))
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::identifier if opclass.is_none() => {
+                            opclass = Some(build_identifier(inner));
+                        }
+                        Rule::reloption => opclass_options.push(build_reloption(inner)?),
+                        _ => {}
+                    }
+                }
             }
             Rule::collate_suffix if collation.is_none() => {
                 collation = Some(build_collation_name(
@@ -17271,6 +17278,7 @@ fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, Parse
         expr_type: None,
         collation,
         opclass,
+        opclass_options,
         descending,
         nulls_first,
     })

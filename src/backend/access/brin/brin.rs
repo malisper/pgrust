@@ -788,6 +788,7 @@ mod tests {
             am_handler_oid: None,
             indkey: vec![1],
             indclass: vec![crate::include::catalog::INT4_BRIN_MINMAX_OPCLASS_OID],
+            indclass_options: vec![Vec::new()],
             indcollation: Vec::new(),
             indoption: Vec::new(),
             opfamily_oids: vec![crate::include::catalog::BRIN_INTEGER_MINMAX_FAMILY_OID],

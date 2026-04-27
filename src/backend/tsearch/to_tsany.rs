@@ -3,9 +3,11 @@ use crate::backend::tsearch::cache::{
     TextSearchConfig, TextSearchDictionary, dictionaries_for_asciiword, resolve_config,
     resolve_dictionary,
 };
+use crate::backend::tsearch::parser::{DocumentToken, document_tokens};
 use crate::backend::tsearch::ts_utils::{
     LexizeAlternative, LexizeLexeme, LexizeOutcome, empty_tsquery, lexize_dictionary,
-    lexize_token_for_config, lexize_token_with_config, tokenize_document,
+    lexize_token_for_config, lexize_token_for_config_and_type, lexize_token_with_config,
+    lexize_token_with_config_and_type,
 };
 use crate::include::nodes::tsearch::{
     TsLexeme, TsPosition, TsQuery, TsQueryNode, TsQueryOperand, TsVector,
@@ -36,7 +38,7 @@ fn tsvector_lexemes_for_config(
     text: &str,
     start_position: u16,
 ) -> (Vec<TsLexeme>, u16) {
-    let tokens = tokenize_document(text);
+    let tokens = document_tokens(text);
     let next_position = start_position.saturating_add(tokens.len() as u16);
     let lexemes = if config_has_thesaurus(config) {
         tsvector_lexemes_with_thesaurus(config, &tokens, start_position)
@@ -48,15 +50,15 @@ fn tsvector_lexemes_for_config(
 
 fn tsvector_lexemes_without_phrases(
     config: &TextSearchConfig,
-    tokens: &[(String, u16)],
+    tokens: &[DocumentToken],
     start_position: u16,
 ) -> Vec<TsLexeme> {
     let mut lexemes = Vec::new();
-    for (token, position) in tokens {
-        let output_position = start_position.saturating_add(position.saturating_sub(1));
+    for token in tokens {
+        let output_position = start_position.saturating_add(token.position.saturating_sub(1));
         push_lexize_outcome_lexemes(
             &mut lexemes,
-            lexize_token_with_config(config, token),
+            lexize_token_with_config_and_type(config, token.tokid, &token.token),
             output_position,
         );
     }
@@ -88,7 +90,7 @@ fn config_has_thesaurus(config: &TextSearchConfig) -> bool {
 
 fn tsvector_lexemes_with_thesaurus(
     config: &TextSearchConfig,
-    tokens: &[(String, u16)],
+    tokens: &[DocumentToken],
     start_position: u16,
 ) -> Vec<TsLexeme> {
     let mut lexemes = Vec::new();
@@ -97,7 +99,8 @@ fn tsvector_lexemes_with_thesaurus(
 
     while index < tokens.len() {
         if let Some((replacement, consumed)) = thesaurus_phrase_match(tokens, index) {
-            let output_start = adjusted_position(start_position, tokens[index].1, phrase_delta);
+            let output_start =
+                adjusted_position(start_position, tokens[index].position, phrase_delta);
             for (offset, text) in replacement.iter().enumerate() {
                 lexemes.push(TsLexeme {
                     text: (*text).into(),
@@ -112,10 +115,11 @@ fn tsvector_lexemes_with_thesaurus(
             continue;
         }
 
-        let output_position = adjusted_position(start_position, tokens[index].1, phrase_delta);
+        let output_position =
+            adjusted_position(start_position, tokens[index].position, phrase_delta);
         push_lexize_outcome_lexemes(
             &mut lexemes,
-            lexize_token_with_config(config, &tokens[index].0),
+            lexize_token_with_config_and_type(config, tokens[index].tokid, &tokens[index].token),
             output_position,
         );
         index += 1;
@@ -132,7 +136,7 @@ fn adjusted_position(start_position: u16, token_position: u16, phrase_delta: i32
 // :HACK: These phrase replacements mirror the bundled PostgreSQL regression
 // sample thesaurus until pgrust loads `.ths` files through a real template.
 fn thesaurus_phrase_match(
-    tokens: &[(String, u16)],
+    tokens: &[DocumentToken],
     index: usize,
 ) -> Option<(Vec<&'static str>, usize)> {
     if token_eq(tokens, index, "one")
@@ -158,10 +162,10 @@ fn thesaurus_phrase_match(
     None
 }
 
-fn token_eq(tokens: &[(String, u16)], index: usize, expected: &str) -> bool {
+fn token_eq(tokens: &[DocumentToken], index: usize, expected: &str) -> bool {
     tokens
         .get(index)
-        .is_some_and(|(token, _)| token.eq_ignore_ascii_case(expected))
+        .is_some_and(|token| token.token.eq_ignore_ascii_case(expected))
 }
 
 pub(crate) fn to_tsquery_with_config_name(
@@ -183,12 +187,13 @@ pub(crate) fn plainto_tsquery_with_config_name(
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<TsQuery, String> {
     let config = resolve_config(config_name, catalog)?;
-    let mut terms = tokenize_document(text)
-        .into_iter()
-        .filter_map(|(token, _)| {
-            let source = TsQueryOperand::new(token.clone());
-            node_from_lexize_outcome(lexize_token_with_config(&config, &token), &source)
-        });
+    let mut terms = document_tokens(text).into_iter().filter_map(|token| {
+        let source = TsQueryOperand::new(token.token.clone());
+        node_from_lexize_outcome(
+            lexize_token_with_config_and_type(&config, token.tokid, &token.token),
+            &source,
+        )
+    });
     let Some(mut root) = terms.next() else {
         return Ok(empty_tsquery());
     };
@@ -204,13 +209,14 @@ pub(crate) fn phraseto_tsquery_with_config_name(
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<TsQuery, String> {
     let config = resolve_config(config_name, catalog)?;
-    let mut terms = tokenize_document(text)
-        .into_iter()
-        .filter_map(|(token, position)| {
-            let source = TsQueryOperand::new(token.clone());
-            node_from_lexize_outcome(lexize_token_with_config(&config, &token), &source)
-                .map(|node| (position, node))
-        });
+    let mut terms = document_tokens(text).into_iter().filter_map(|token| {
+        let source = TsQueryOperand::new(token.token.clone());
+        node_from_lexize_outcome(
+            lexize_token_with_config_and_type(&config, token.tokid, &token.token),
+            &source,
+        )
+        .map(|node| (token.position, node))
+    });
     let Some((mut previous_position, mut root)) = terms.next() else {
         return Ok(empty_tsquery());
     };
@@ -334,24 +340,28 @@ fn normalize_query_operand(
     operand: TsQueryOperand,
     config: &TextSearchConfig,
 ) -> NormalizedQueryNode {
-    let tokens = tokenize_document(operand.lexeme.as_str());
+    let tokens = document_tokens(operand.lexeme.as_str());
     if tokens.len() <= 1 {
-        return node_from_lexize_outcome(
-            lexize_token_with_config(config, operand.lexeme.as_str()),
-            &operand,
-        )
-        .map(NormalizedQueryNode::operand)
-        .unwrap_or_else(NormalizedQueryNode::stop_word);
+        let outcome = tokens
+            .first()
+            .map(|token| lexize_token_with_config_and_type(config, token.tokid, &token.token))
+            .unwrap_or_else(|| lexize_token_with_config(config, operand.lexeme.as_str()));
+        return node_from_lexize_outcome(outcome, &operand)
+            .map(NormalizedQueryNode::operand)
+            .unwrap_or_else(NormalizedQueryNode::stop_word);
     }
 
-    let mut terms = tokens.into_iter().filter_map(|(token, position)| {
+    let mut terms = tokens.into_iter().filter_map(|token| {
         let source = TsQueryOperand {
-            lexeme: token.clone().into(),
+            lexeme: token.token.clone().into(),
             weights: operand.weights.clone(),
             prefix: operand.prefix,
         };
-        node_from_lexize_outcome(lexize_token_with_config(config, &token), &source)
-            .map(|node| (position, node))
+        node_from_lexize_outcome(
+            lexize_token_with_config_and_type(config, token.tokid, &token.token),
+            &source,
+        )
+        .map(|node| (token.position, node))
     });
     let Some((mut previous_position, mut root)) = terms.next() else {
         return NormalizedQueryNode::stop_word();
@@ -620,8 +630,18 @@ fn websearch_unit_to_node(config: &TextSearchConfig, unit: &str) -> Option<TsQue
 fn websearch_terms(config: &TextSearchConfig, text: &str) -> Vec<String> {
     let mut terms = Vec::new();
     for raw in websearch_raw_terms(text) {
-        if let Some(lexeme) = lexize_token_for_config(config, &raw) {
-            terms.push(lexeme);
+        if raw.contains('-') && document_tokens(&raw).len() > 1 {
+            if let Some(lexeme) = lexize_token_for_config(config, &raw) {
+                terms.push(lexeme);
+            }
+            continue;
+        }
+        for token in document_tokens(&raw) {
+            if let Some(lexeme) =
+                lexize_token_for_config_and_type(config, token.tokid, &token.token)
+            {
+                terms.push(lexeme);
+            }
         }
     }
     terms
