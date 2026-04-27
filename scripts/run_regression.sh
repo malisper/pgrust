@@ -565,6 +565,7 @@ SKIP_SERVER=false
 TIMEOUT=60
 JOBS=4
 STATEMENT_TIMEOUT="${PGRUST_STATEMENT_TIMEOUT:-5}"
+BASE_SETUP_TIMEOUT="${PGRUST_REGRESS_BASE_SETUP_TIMEOUT:-300}"
 SINGLE_TEST=""
 RESULTS_DIR=""
 DATA_DIR=""
@@ -1022,7 +1023,7 @@ run_base_dependency_setup() {
     prepare_test_fixture "$sql_file" "$expected_file" "$dependency_name"
     mkdir -p "$(dirname "$output_file")"
     echo "Running base dependency setup for $base_name: $dependency_name"
-    if run_psql_file "$TIMEOUT" "$PREPARED_SQL_FILE" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
+    if run_psql_file "$BASE_SETUP_TIMEOUT" "$PREPARED_SQL_FILE" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
         if ! reset_dependency_session_state "$output_file"; then
             echo "ERROR: failed to reset dependency session state for $base_name: $dependency_name" >&2
             echo "See: $output_file" >&2
@@ -1113,6 +1114,7 @@ build_isolated_regression_bases() {
 
 echo "Per-query statement_timeout: ${STATEMENT_TIMEOUT}s"
 echo "Per-file timeout: ${TIMEOUT}s"
+echo "Base setup timeout: ${BASE_SETUP_TIMEOUT}s"
 
 if [[ "$ISOLATED_PARALLEL" == true ]]; then
     echo "Parallel isolation: each concurrent test gets its own pgrust server, port, data dir, and tablespace."
