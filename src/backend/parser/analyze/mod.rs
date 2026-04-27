@@ -1026,6 +1026,9 @@ pub trait CatalogLookup {
         }
         let mut fallback = None;
         for row in self.type_rows() {
+            if row.oid == crate::include::catalog::UNKNOWN_TYPE_OID {
+                continue;
+            }
             if row.sql_type.kind != sql_type.kind || row.sql_type.is_array != sql_type.is_array {
                 continue;
             }
@@ -1775,6 +1778,9 @@ impl CatalogLookup for Catalog {
         }
         let mut fallback = None;
         for row in builtin_type_rows() {
+            if row.oid == crate::include::catalog::UNKNOWN_TYPE_OID {
+                continue;
+            }
             if row.sql_type.kind != sql_type.kind || row.sql_type.is_array != sql_type.is_array {
                 continue;
             }
@@ -2474,6 +2480,11 @@ fn builtin_named_type_alias(name: &str) -> Option<SqlType> {
         Some(SqlType::new(SqlTypeKind::RegCollation))
     } else if name.eq_ignore_ascii_case("cstring") {
         Some(SqlType::new(SqlTypeKind::Cstring))
+    } else if name.eq_ignore_ascii_case("unknown") {
+        Some(
+            SqlType::new(SqlTypeKind::Text)
+                .with_identity(crate::include::catalog::UNKNOWN_TYPE_OID, 0),
+        )
     } else {
         None
     }
@@ -2713,7 +2724,17 @@ fn normalize_create_table_name_parts(
     on_commit: OnCommitAction,
 ) -> Result<(String, TablePersistence), ParseError> {
     let effective_persistence = match schema_name.map(|s| s.to_ascii_lowercase()) {
-        Some(schema) if schema == "pg_temp" => TablePersistence::Temporary,
+        Some(schema) if schema == "pg_temp" => {
+            if persistence == TablePersistence::Unlogged {
+                return Err(ParseError::DetailedError {
+                    message: "only temporary relations may be created in temporary schemas".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P16",
+                });
+            }
+            TablePersistence::Temporary
+        }
         Some(schema) => {
             if persistence == TablePersistence::Temporary {
                 return Err(ParseError::TempTableInNonTempSchema(schema));

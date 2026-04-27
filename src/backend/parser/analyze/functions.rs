@@ -1379,6 +1379,8 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgColumnToastChunkId
             | BuiltinScalarFunction::PgColumnSize => args.len() == 1,
             BuiltinScalarFunction::PgRelationSize => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgRelationFilenode => args.len() == 1,
+            BuiltinScalarFunction::PgFilenodeRelation => args.len() == 2,
             BuiltinScalarFunction::NumNulls | BuiltinScalarFunction::NumNonNulls => {
                 !args.is_empty()
             }
@@ -1406,7 +1408,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgGetAcl => args.len() == 3,
             BuiltinScalarFunction::MakeAclItem => args.len() == 4,
             BuiltinScalarFunction::PgGetUserById => args.len() == 1,
-            BuiltinScalarFunction::ObjDescription => args.len() == 2,
+            BuiltinScalarFunction::ObjDescription => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgDescribeObject => args.len() == 3,
             BuiltinScalarFunction::PgGetFunctionArguments
             | BuiltinScalarFunction::PgGetFunctionDef
@@ -1415,6 +1417,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetPartKeyDef => args.len() == 1,
             BuiltinScalarFunction::PgGetConstraintDef => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgGetPartitionConstraintDef => args.len() == 1,
             BuiltinScalarFunction::PgGetIndexDef => matches!(args.len(), 1 | 3),
             BuiltinScalarFunction::PgGetRuleDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgGetViewDef => matches!(args.len(), 1 | 2),
@@ -2543,8 +2546,13 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_get_constraintdef_ext",
             BuiltinScalarFunction::PgGetConstraintDef,
         ),
+        (
+            "pg_get_partition_constraintdef",
+            BuiltinScalarFunction::PgGetPartitionConstraintDef,
+        ),
         ("pg_get_indexdef", BuiltinScalarFunction::PgGetIndexDef),
         ("pg_get_indexdef_ext", BuiltinScalarFunction::PgGetIndexDef),
+        ("pg_get_partkeydef", BuiltinScalarFunction::PgGetPartKeyDef),
         ("pg_get_triggerdef", BuiltinScalarFunction::PgGetTriggerDef),
         ("pg_trigger_depth", BuiltinScalarFunction::PgTriggerDepth),
         ("now", BuiltinScalarFunction::Now),
@@ -2592,6 +2600,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgEncodingToChar,
         ),
         ("pg_partition_root", BuiltinScalarFunction::PgPartitionRoot),
+        (
+            "pg_relation_filenode",
+            BuiltinScalarFunction::PgRelationFilenode,
+        ),
+        (
+            "pg_filenode_relation",
+            BuiltinScalarFunction::PgFilenodeRelation,
+        ),
         ("pg_my_temp_schema", BuiltinScalarFunction::PgMyTempSchema),
         (
             "pg_rust_internal_binary_coercible",
@@ -3877,6 +3893,7 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             BuiltinScalarFunction::PgGetExpr,
             BuiltinScalarFunction::PgGetPartKeyDef,
             BuiltinScalarFunction::PgGetConstraintDef,
+            BuiltinScalarFunction::PgGetPartitionConstraintDef,
             BuiltinScalarFunction::PgGetIndexDef,
             BuiltinScalarFunction::PgGetRuleDef,
             BuiltinScalarFunction::PgGetViewDef,
@@ -4105,6 +4122,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetExpr
             | BuiltinScalarFunction::PgGetPartKeyDef
             | BuiltinScalarFunction::PgGetConstraintDef
+            | BuiltinScalarFunction::PgGetPartitionConstraintDef
             | BuiltinScalarFunction::PgGetIndexDef
             | BuiltinScalarFunction::PgGetRuleDef
             | BuiltinScalarFunction::PgGetViewDef
@@ -4283,6 +4301,7 @@ fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Overlay
             | BuiltinScalarFunction::LPad
             | BuiltinScalarFunction::RPad
+            | BuiltinScalarFunction::ObjDescription
             | BuiltinScalarFunction::BTrim
             | BuiltinScalarFunction::LTrim
             | BuiltinScalarFunction::RTrim
@@ -4540,6 +4559,22 @@ mod tests {
         assert_eq!(
             resolve_scalar_function("pg_clear_attribute_stats"),
             Some(BuiltinScalarFunction::PgClearAttributeStats)
+        );
+        assert_eq!(
+            resolve_scalar_function("pg_relation_filenode"),
+            Some(BuiltinScalarFunction::PgRelationFilenode)
+        );
+        assert_eq!(
+            resolve_scalar_function("pg_catalog.pg_filenode_relation"),
+            Some(BuiltinScalarFunction::PgFilenodeRelation)
+        );
+        assert_eq!(
+            resolve_scalar_function("pg_catalog.pg_get_partkeydef"),
+            Some(BuiltinScalarFunction::PgGetPartKeyDef)
+        );
+        assert_eq!(
+            resolve_scalar_function("pg_catalog.pg_get_partition_constraintdef"),
+            Some(BuiltinScalarFunction::PgGetPartitionConstraintDef)
         );
         assert_eq!(resolve_scalar_function("count"), None);
         assert_eq!(resolve_scalar_function("json_array_elements"), None);

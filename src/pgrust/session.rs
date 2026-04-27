@@ -30,10 +30,12 @@ use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{
     AlterTableAddColumnStatement, CallStatement, CatalogLookup, CopyFormat as ParserCopyFormat,
     CopyFromStatement, CopyOptions as ParserCopyOptions, CopySource, CopyToDestination,
-    CopyToSource, CopyToStatement, CteBody, DetachPartitionMode, ParseError, ParseOptions,
-    PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared,
-    bind_insert_with_outer_scopes_and_ctes, bind_update, bound_cte_from_query_rows,
-    pg_plan_query_with_config, pg_plan_query_with_outer_scopes_and_ctes, plan_merge,
+    CopyToSource, CopyToStatement, CreateTableAsQuery, CreateTableAsStatement, CteBody,
+    DeallocateStatement, DetachPartitionMode, ExecuteStatement, ParseError, ParseOptions,
+    PrepareStatement, PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert,
+    bind_insert_prepared, bind_insert_with_outer_scopes_and_ctes, bind_update,
+    bound_cte_from_query_rows, pg_plan_query_with_config, pg_plan_query_with_outer_scopes_and_ctes,
+    plan_merge,
 };
 use crate::backend::rewrite::relation_has_row_security;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
@@ -489,9 +491,21 @@ struct ActiveTransaction {
     local_guc_snapshot: Option<(HashMap<String, String>, DateTimeConfig)>,
 }
 
+#[derive(Clone)]
 struct SavepointState {
     name: String,
     dynamic_type_snapshot: DynamicTypeSnapshot,
+    catalog_snapshot: crate::backend::catalog::store::CatalogStoreSnapshot,
+    catalog_effect_len: usize,
+    prior_catalog_invalidation_len: usize,
+    temp_effect_len: usize,
+    sequence_effect_len: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedSelectStatement {
+    query: SelectStatement,
+    query_sql: String,
 }
 
 pub struct Session {
@@ -507,6 +521,7 @@ pub struct Session {
     random_state: Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
     portals: PortalManager,
     plpgsql_function_cache: Arc<RwLock<PlpgsqlFunctionCache>>,
+    prepared_selects: HashMap<String, PreparedSelectStatement>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1231,6 +1246,7 @@ impl Session {
             random_state: crate::backend::executor::PgPrngState::shared(),
             portals: PortalManager::default(),
             plpgsql_function_cache: Arc::new(RwLock::new(PlpgsqlFunctionCache::default())),
+            prepared_selects: HashMap::new(),
         }
     }
 
@@ -2012,6 +2028,9 @@ impl Session {
                 | Statement::SetConstraints(_)
                 | Statement::Reset(_)
                 | Statement::Checkpoint(_)
+                | Statement::Prepare(_)
+                | Statement::Execute(_)
+                | Statement::Deallocate(_)
                 | Statement::Select(_)
                 | Statement::Values(_)
                 | Statement::Explain(_)
@@ -2402,6 +2421,13 @@ impl Session {
                 self.execute_call_stmt_autocommit(db, stmt, statement_lock_scope_id)
             }
             Statement::Do(ref do_stmt) => execute_do_with_gucs(do_stmt, &self.gucs),
+            Statement::Prepare(ref prepare_stmt) => self.apply_prepare_statement(prepare_stmt),
+            Statement::Execute(ref execute_stmt) => {
+                self.execute_prepared_statement(db, execute_stmt, statement_lock_scope_id)
+            }
+            Statement::Deallocate(ref deallocate_stmt) => {
+                self.apply_deallocate_statement(deallocate_stmt)
+            }
             Statement::Show(ref show_stmt) => self.apply_show(db, show_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(db, set_stmt),
             Statement::SetTransaction(ref set_txn_stmt) => self.apply_set_transaction(set_txn_stmt),
@@ -2893,6 +2919,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_alter_table_set_schema_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterTableSetPersistence(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err()
+                        && let Some(ref mut txn) = self.active_txn
+                    {
+                        txn.failed = true;
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_set_persistence_stmt_with_search_path(
                         self.client_id,
                         alter_stmt,
                         search_path.as_deref(),
@@ -3811,6 +3855,32 @@ impl Session {
             }
             Statement::AlterTableSet(ref alter_stmt) => self.apply_alter_table_set(db, alter_stmt),
             Statement::AlterIndexSet(_) => Ok(StatementResult::AffectedRows(0)),
+            Statement::CreateTableAs(ref create_stmt) => {
+                let create_stmt = self.resolve_create_table_as_statement(create_stmt)?;
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(
+                        db,
+                        Statement::CreateTableAs(create_stmt),
+                        statement_lock_scope_id,
+                    );
+                    if result.is_err()
+                        && let Some(ref mut txn) = self.active_txn
+                    {
+                        txn.failed = true;
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_create_table_as_stmt_with_search_path(
+                        self.client_id,
+                        &create_stmt,
+                        None,
+                        0,
+                        search_path.as_deref(),
+                        self.planner_config(),
+                    )
+                }
+            }
             Statement::CommentOnTable(ref comment_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -3823,6 +3893,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_comment_on_table_stmt_with_search_path(
+                        self.client_id,
+                        comment_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::CommentOnColumn(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_comment_on_column_stmt_with_search_path(
                         self.client_id,
                         comment_stmt,
                         search_path.as_deref(),
@@ -3877,24 +3965,6 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_comment_on_type_stmt_with_search_path(
-                        self.client_id,
-                        comment_stmt,
-                        search_path.as_deref(),
-                    )
-                }
-            }
-            Statement::CommentOnColumn(ref comment_stmt) => {
-                if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
-                    if result.is_err() {
-                        if let Some(ref mut txn) = self.active_txn {
-                            txn.failed = true;
-                        }
-                    }
-                    result
-                } else {
-                    let search_path = self.configured_search_path();
-                    db.execute_comment_on_column_stmt_with_search_path(
                         self.client_id,
                         comment_stmt,
                         search_path.as_deref(),
@@ -4204,6 +4274,14 @@ impl Session {
                 txn.savepoints.push(SavepointState {
                     name: name.clone(),
                     dynamic_type_snapshot: db.dynamic_type_snapshot(),
+                    catalog_snapshot: db.catalog_store_snapshot(
+                        self.client_id,
+                        txn.xid.map(|xid| (xid, txn.next_command_id)),
+                    )?,
+                    catalog_effect_len: txn.catalog_effects.len(),
+                    prior_catalog_invalidation_len: txn.prior_cmd_catalog_invalidations.len(),
+                    temp_effect_len: txn.temp_effects.len(),
+                    sequence_effect_len: txn.sequence_effects.len(),
                 });
                 Ok(StatementResult::AffectedRows(0))
             }
@@ -4227,7 +4305,63 @@ impl Session {
                         sqlstate: "3B001",
                     });
                 };
-                let snapshot = txn.savepoints[index].dynamic_type_snapshot.clone();
+                let savepoint = txn.savepoints[index].clone();
+                let aborted_catalog_effects =
+                    txn.catalog_effects[savepoint.catalog_effect_len..].to_vec();
+                let aborted_prior_invalidations = txn.prior_cmd_catalog_invalidations
+                    [savepoint.prior_catalog_invalidation_len..]
+                    .to_vec();
+                let aborted_current_invalidations = txn.current_cmd_catalog_invalidations.clone();
+                let aborted_temp_effects = txn.temp_effects[savepoint.temp_effect_len..].to_vec();
+                let aborted_sequence_effects =
+                    txn.sequence_effects[savepoint.sequence_effect_len..].to_vec();
+                let rollback_catalog_ctx = (!aborted_catalog_effects.is_empty())
+                    .then(|| {
+                        txn.xid.map(|xid| {
+                            let cid = txn.next_command_id;
+                            txn.next_command_id = txn.next_command_id.saturating_add(1);
+                            (xid, cid)
+                        })
+                    })
+                    .flatten();
+                db.finalize_aborted_catalog_effects(&aborted_catalog_effects);
+                db.finalize_aborted_temp_effects(self.client_id, &aborted_temp_effects);
+                db.finalize_aborted_sequence_effects(&aborted_sequence_effects);
+                let repair_effect = if let Some((xid, cid)) = rollback_catalog_ctx {
+                    db.restore_catalog_store_snapshot_for_savepoint(
+                        self.client_id,
+                        xid,
+                        cid,
+                        savepoint.catalog_snapshot,
+                        &aborted_catalog_effects,
+                    )?
+                } else {
+                    db.restore_catalog_store_snapshot(savepoint.catalog_snapshot);
+                    CatalogMutationEffect::default()
+                };
+                db.finalize_aborted_local_catalog_invalidations(
+                    self.client_id,
+                    &aborted_prior_invalidations,
+                    &aborted_current_invalidations,
+                );
+                txn.catalog_effects.truncate(savepoint.catalog_effect_len);
+                txn.prior_cmd_catalog_invalidations
+                    .truncate(savepoint.prior_catalog_invalidation_len);
+                txn.current_cmd_catalog_invalidations.clear();
+                txn.temp_effects.truncate(savepoint.temp_effect_len);
+                txn.sequence_effects.truncate(savepoint.sequence_effect_len);
+                let repair_invalidation =
+                    Database::catalog_invalidation_from_effect(&repair_effect);
+                if !repair_invalidation.is_empty() {
+                    db.finalize_command_end_local_catalog_invalidations(
+                        self.client_id,
+                        std::slice::from_ref(&repair_invalidation),
+                    );
+                    txn.prior_cmd_catalog_invalidations
+                        .push(repair_invalidation);
+                    txn.catalog_effects.push(repair_effect);
+                }
+                let snapshot = savepoint.dynamic_type_snapshot;
                 db.restore_dynamic_type_snapshot(&snapshot);
                 txn.savepoints.truncate(index + 1);
                 txn.failed = false;
@@ -4269,6 +4403,111 @@ impl Session {
                 }
             }
         }
+    }
+
+    fn prepared_statement_name(name: &str) -> String {
+        name.to_ascii_lowercase()
+    }
+
+    fn prepared_statement_error(name: &str) -> ExecError {
+        ExecError::Parse(ParseError::DetailedError {
+            message: format!("prepared statement \"{name}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "26000",
+        })
+    }
+
+    fn apply_prepare_statement(
+        &mut self,
+        prepare_stmt: &PrepareStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let name = Self::prepared_statement_name(&prepare_stmt.name);
+        if self.prepared_selects.contains_key(&name) {
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: format!("prepared statement \"{name}\" already exists"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P05",
+            }));
+        }
+        self.prepared_selects.insert(
+            name,
+            PreparedSelectStatement {
+                query: prepare_stmt.query.clone(),
+                query_sql: prepare_stmt.query_sql.clone(),
+            },
+        );
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn apply_deallocate_statement(
+        &mut self,
+        deallocate_stmt: &DeallocateStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let Some(name) = deallocate_stmt.name.as_deref() else {
+            self.prepared_selects.clear();
+            return Ok(StatementResult::AffectedRows(0));
+        };
+        let name = Self::prepared_statement_name(name);
+        if self.prepared_selects.remove(&name).is_none() {
+            return Err(Self::prepared_statement_error(&name));
+        }
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn resolve_prepared_select(
+        &self,
+        execute_stmt: &ExecuteStatement,
+    ) -> Result<PreparedSelectStatement, ExecError> {
+        let name = Self::prepared_statement_name(&execute_stmt.name);
+        self.prepared_selects
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| Self::prepared_statement_error(&name))
+    }
+
+    fn resolve_create_table_as_statement(
+        &self,
+        create_stmt: &CreateTableAsStatement,
+    ) -> Result<CreateTableAsStatement, ExecError> {
+        let CreateTableAsQuery::Execute(name) = &create_stmt.query else {
+            return Ok(create_stmt.clone());
+        };
+        let prepared = self
+            .prepared_selects
+            .get(&Self::prepared_statement_name(name))
+            .cloned()
+            .ok_or_else(|| Self::prepared_statement_error(name))?;
+        let mut resolved = create_stmt.clone();
+        resolved.query = CreateTableAsQuery::Select(prepared.query);
+        resolved.query_sql = Some(prepared.query_sql);
+        Ok(resolved)
+    }
+
+    fn execute_prepared_statement(
+        &mut self,
+        db: &Database,
+        execute_stmt: &ExecuteStatement,
+        statement_lock_scope_id: Option<u64>,
+    ) -> Result<StatementResult, ExecError> {
+        let prepared = self.resolve_prepared_select(execute_stmt)?;
+        if self.active_txn.is_some() {
+            return self.execute_in_transaction(
+                db,
+                Statement::Select(prepared.query),
+                statement_lock_scope_id,
+            );
+        }
+        let search_path = self.configured_search_path();
+        db.execute_statement_with_search_path_datetime_config_gucs_and_planner_config(
+            self.client_id,
+            Statement::Select(prepared.query),
+            search_path.as_deref(),
+            &self.datetime_config,
+            &self.gucs,
+            self.planner_config(),
+        )
     }
 
     fn statement_timeout_duration(&self) -> Result<Option<Duration>, ExecError> {
@@ -4846,6 +5085,13 @@ impl Session {
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::Do(ref do_stmt) => self.execute_plpgsql_do(db, do_stmt, xid, cid),
+            Statement::Prepare(ref prepare_stmt) => self.apply_prepare_statement(prepare_stmt),
+            Statement::Execute(ref execute_stmt) => {
+                self.execute_prepared_statement(db, execute_stmt, None)
+            }
+            Statement::Deallocate(ref deallocate_stmt) => {
+                self.apply_deallocate_statement(deallocate_stmt)
+            }
             Statement::Show(ref show_stmt) => self.apply_show(db, show_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(db, set_stmt),
             Statement::SetTransaction(ref set_txn_stmt) => self.apply_set_transaction(set_txn_stmt),
@@ -4888,18 +5134,6 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_comment_on_type_stmt_in_transaction_with_search_path(
-                    client_id,
-                    comment_stmt,
-                    xid,
-                    cid,
-                    search_path.as_deref(),
-                    &mut txn.catalog_effects,
-                )
-            }
-            Statement::CommentOnColumn(ref comment_stmt) => {
-                let search_path = self.configured_search_path();
-                let txn = self.active_txn.as_mut().unwrap();
-                db.execute_comment_on_column_stmt_in_transaction_with_search_path(
                     client_id,
                     comment_stmt,
                     xid,
@@ -5205,6 +5439,14 @@ impl Session {
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
                     &mut txn.temp_effects,
+                )
+            }
+            Statement::AlterTableSetPersistence(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_alter_table_set_persistence_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    search_path.as_deref(),
                 )
             }
             Statement::AlterIndexRename(ref rename_stmt) => {
@@ -6326,7 +6568,8 @@ impl Session {
             Statement::CommentOnTable(ref comment_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
-                    .lookup_relation(&comment_stmt.table_name)
+                    .lookup_any_relation(&comment_stmt.table_name)
+                    .filter(|relation| matches!(relation.relkind, 'r' | 'p'))
                     .ok_or_else(|| ExecError::DetailedError {
                         message: format!("relation \"{}\" does not exist", comment_stmt.table_name),
                         detail: None,
@@ -6337,6 +6580,29 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_comment_on_table_stmt_in_transaction_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::CommentOnColumn(ref comment_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&comment_stmt.table_name)
+                    .filter(|relation| matches!(relation.relkind, 'r' | 'p'))
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("relation \"{}\" does not exist", comment_stmt.table_name),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P01",
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_comment_on_column_stmt_in_transaction_with_search_path(
                     client_id,
                     comment_stmt,
                     xid,
@@ -7228,12 +7494,13 @@ impl Session {
                 )
             }
             Statement::CreateTableAs(ref create_stmt) => {
+                let create_stmt = self.resolve_create_table_as_statement(create_stmt)?;
                 let search_path = self.configured_search_path();
                 let planner_config = self.planner_config();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_table_as_stmt_in_transaction_with_search_path(
                     client_id,
-                    create_stmt,
+                    &create_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),

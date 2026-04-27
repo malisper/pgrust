@@ -1013,7 +1013,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 Some(BuiltinScalarFunction::ToRegOperator) => {
                     SqlType::new(SqlTypeKind::RegOperator)
                 }
-                Some(BuiltinScalarFunction::ToRegClass) => SqlType::new(SqlTypeKind::RegClass),
+                Some(BuiltinScalarFunction::PgFilenodeRelation)
+                | Some(BuiltinScalarFunction::ToRegClass) => SqlType::new(SqlTypeKind::RegClass),
                 Some(BuiltinScalarFunction::ToRegType) => SqlType::new(SqlTypeKind::RegType),
                 Some(BuiltinScalarFunction::ToRegTypeMod) => SqlType::new(SqlTypeKind::Int4),
                 Some(BuiltinScalarFunction::ToRegRole) => SqlType::new(SqlTypeKind::RegRole),
@@ -1208,6 +1209,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::Chr)
                 | Some(BuiltinScalarFunction::QuoteLiteral)
                 | Some(BuiltinScalarFunction::FormatType)
+                | Some(BuiltinScalarFunction::PgGetPartKeyDef)
+                | Some(BuiltinScalarFunction::PgGetPartitionConstraintDef)
                 | Some(BuiltinScalarFunction::RegProcToText)
                 | Some(BuiltinScalarFunction::RegOperToText)
                 | Some(BuiltinScalarFunction::RegOperatorToText)
@@ -1247,6 +1250,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::MinScale)
                 | Some(BuiltinScalarFunction::WidthBucket)
                 | Some(BuiltinScalarFunction::GetByte) => SqlType::new(SqlTypeKind::Int4),
+                Some(BuiltinScalarFunction::PgRelationFilenode) => SqlType::new(SqlTypeKind::Oid),
                 Some(BuiltinScalarFunction::PgRelationSize) => SqlType::new(SqlTypeKind::Int8),
                 Some(BuiltinScalarFunction::Crc32)
                 | Some(BuiltinScalarFunction::Crc32c)
