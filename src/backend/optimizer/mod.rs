@@ -7,6 +7,7 @@ mod constfold;
 mod groupby_rewrite;
 mod inherit;
 mod joininfo;
+mod partition_cache;
 mod partition_prune;
 mod partitionwise;
 mod path;

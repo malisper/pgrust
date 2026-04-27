@@ -811,6 +811,7 @@ impl Database {
             relpartbound: entry.relpartbound.clone(),
             desc: entry.desc.clone(),
             partitioned_table: entry.partitioned_table.clone(),
+            partition_spec: None,
         };
         self.install_create_table_constraints_in_transaction(
             client_id,

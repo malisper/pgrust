@@ -5,7 +5,7 @@ use crate::include::catalog::*;
 use crate::include::nodes::primnodes::{
     AggFunc, BuiltinScalarFunction, BuiltinWindowFunction, HashFunctionKind, HypotheticalAggFunc,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{OnceLock, RwLock};
 
 const VOID_TYPE_OID: u32 = 2278;
@@ -444,13 +444,58 @@ pub fn pg_proc_desc() -> RelationDesc {
     }
 }
 
-pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
+pub fn bootstrap_pg_proc_rows_ref() -> &'static [PgProcRow] {
     static ROWS: OnceLock<Vec<PgProcRow>> = OnceLock::new();
-    ROWS.get_or_init(build_bootstrap_pg_proc_rows).clone()
+    ROWS.get_or_init(build_bootstrap_pg_proc_rows).as_slice()
+}
+
+pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
+    bootstrap_pg_proc_rows_ref().to_vec()
+}
+
+fn bootstrap_pg_proc_by_oid() -> &'static BTreeMap<u32, &'static PgProcRow> {
+    static ROWS_BY_OID: OnceLock<BTreeMap<u32, &'static PgProcRow>> = OnceLock::new();
+    ROWS_BY_OID.get_or_init(|| {
+        bootstrap_pg_proc_rows_ref()
+            .iter()
+            .map(|row| (row.oid, row))
+            .collect()
+    })
+}
+
+pub fn bootstrap_pg_proc_row_by_oid(oid: u32) -> Option<PgProcRow> {
+    bootstrap_pg_proc_by_oid()
+        .get(&oid)
+        .map(|row| (**row).clone())
+}
+
+fn bootstrap_pg_proc_by_name() -> &'static BTreeMap<String, Vec<&'static PgProcRow>> {
+    static ROWS_BY_NAME: OnceLock<BTreeMap<String, Vec<&'static PgProcRow>>> = OnceLock::new();
+    ROWS_BY_NAME.get_or_init(|| {
+        let mut rows_by_name: BTreeMap<String, Vec<&'static PgProcRow>> = BTreeMap::new();
+        for row in bootstrap_pg_proc_rows_ref() {
+            rows_by_name
+                .entry(row.proname.to_ascii_lowercase())
+                .or_default()
+                .push(row);
+        }
+        rows_by_name
+    })
+}
+
+pub fn bootstrap_pg_proc_rows_by_name(name: &str) -> Vec<PgProcRow> {
+    let normalized = name
+        .strip_prefix("pg_catalog.")
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+    bootstrap_pg_proc_by_name()
+        .get(&normalized)
+        .map(|rows| rows.iter().map(|row| (**row).clone()).collect())
+        .unwrap_or_default()
 }
 
 pub fn is_bootstrap_proc_oid(oid: u32) -> bool {
-    bootstrap_pg_proc_rows().iter().any(|row| row.oid == oid)
+    bootstrap_pg_proc_by_oid().contains_key(&oid)
 }
 
 fn bootstrap_proc_execute_acl_overrides() -> &'static RwLock<BTreeSet<(u32, String)>> {
@@ -9433,11 +9478,103 @@ fn selectivity_estimator_proc_rows() -> Vec<PgProcRow> {
     ]
 }
 
+fn bootstrap_scalar_functions_by_proc_oid() -> &'static BTreeMap<u32, BuiltinScalarFunction> {
+    static FUNCTIONS: OnceLock<BTreeMap<u32, BuiltinScalarFunction>> = OnceLock::new();
+    FUNCTIONS.get_or_init(|| {
+        bootstrap_pg_proc_rows_ref()
+            .iter()
+            .filter(|row| row.prokind == 'f' && !row.proretset)
+            .filter_map(|row| builtin_scalar_function_for_proc_row(row).map(|func| (row.oid, func)))
+            .collect()
+    })
+}
+
+fn bootstrap_scalar_proc_oids() -> &'static Vec<(BuiltinScalarFunction, u32)> {
+    static OIDS: OnceLock<Vec<(BuiltinScalarFunction, u32)>> = OnceLock::new();
+    OIDS.get_or_init(|| {
+        bootstrap_pg_proc_rows_ref()
+            .iter()
+            .filter(|row| row.prokind == 'f' && !row.proretset)
+            .filter_map(|row| builtin_scalar_function_for_proc_row(row).map(|func| (func, row.oid)))
+            .collect()
+    })
+}
+
+fn bootstrap_aggregate_functions_by_proc_oid() -> &'static BTreeMap<u32, AggFunc> {
+    static FUNCTIONS: OnceLock<BTreeMap<u32, AggFunc>> = OnceLock::new();
+    FUNCTIONS.get_or_init(|| {
+        bootstrap_pg_proc_rows_ref()
+            .iter()
+            .filter(|row| row.prokind == 'a')
+            .filter_map(|row| aggregate_func_for_proname(&row.proname).map(|func| (row.oid, func)))
+            .collect()
+    })
+}
+
+fn bootstrap_aggregate_proc_oids() -> &'static Vec<(AggFunc, u32)> {
+    static OIDS: OnceLock<Vec<(AggFunc, u32)>> = OnceLock::new();
+    OIDS.get_or_init(|| {
+        bootstrap_pg_proc_rows_ref()
+            .iter()
+            .filter(|row| row.prokind == 'a')
+            .filter_map(|row| aggregate_func_for_proname(&row.proname).map(|func| (func, row.oid)))
+            .collect()
+    })
+}
+
+fn bootstrap_window_functions_by_proc_oid() -> &'static BTreeMap<u32, BuiltinWindowFunction> {
+    static FUNCTIONS: OnceLock<BTreeMap<u32, BuiltinWindowFunction>> = OnceLock::new();
+    FUNCTIONS.get_or_init(|| {
+        bootstrap_pg_proc_rows_ref()
+            .iter()
+            .filter(|row| row.prokind == 'w')
+            .filter_map(|row| window_func_for_proname(&row.proname).map(|func| (row.oid, func)))
+            .collect()
+    })
+}
+
+fn bootstrap_window_proc_oids() -> &'static Vec<(BuiltinWindowFunction, u32)> {
+    static OIDS: OnceLock<Vec<(BuiltinWindowFunction, u32)>> = OnceLock::new();
+    OIDS.get_or_init(|| {
+        bootstrap_pg_proc_rows_ref()
+            .iter()
+            .filter(|row| row.prokind == 'w')
+            .filter_map(|row| window_func_for_proname(&row.proname).map(|func| (func, row.oid)))
+            .collect()
+    })
+}
+
+fn bootstrap_hypothetical_aggregate_functions_by_proc_oid()
+-> &'static BTreeMap<u32, HypotheticalAggFunc> {
+    static FUNCTIONS: OnceLock<BTreeMap<u32, HypotheticalAggFunc>> = OnceLock::new();
+    FUNCTIONS.get_or_init(|| {
+        bootstrap_pg_proc_rows_ref()
+            .iter()
+            .filter(|row| row.prokind == 'a')
+            .filter_map(|row| {
+                hypothetical_aggregate_func_for_proname(&row.proname).map(|func| (row.oid, func))
+            })
+            .collect()
+    })
+}
+
+fn bootstrap_hypothetical_aggregate_proc_oids() -> &'static Vec<(HypotheticalAggFunc, u32)> {
+    static OIDS: OnceLock<Vec<(HypotheticalAggFunc, u32)>> = OnceLock::new();
+    OIDS.get_or_init(|| {
+        bootstrap_pg_proc_rows_ref()
+            .iter()
+            .filter(|row| row.prokind == 'a')
+            .filter_map(|row| {
+                hypothetical_aggregate_func_for_proname(&row.proname).map(|func| (func, row.oid))
+            })
+            .collect()
+    })
+}
+
 pub fn builtin_scalar_function_for_proc_oid(oid: u32) -> Option<BuiltinScalarFunction> {
-    bootstrap_pg_proc_rows()
-        .into_iter()
-        .find(|row| row.oid == oid && row.prokind == 'f' && !row.proretset)
-        .and_then(|row| builtin_scalar_function_for_proc_row(&row))
+    bootstrap_scalar_functions_by_proc_oid()
+        .get(&oid)
+        .copied()
         .or_else(|| {
             synthetic_scalar_proc_oids()
                 .iter()
@@ -9446,14 +9583,9 @@ pub fn builtin_scalar_function_for_proc_oid(oid: u32) -> Option<BuiltinScalarFun
 }
 
 pub fn proc_oid_for_builtin_scalar_function(func: BuiltinScalarFunction) -> Option<u32> {
-    bootstrap_pg_proc_rows()
-        .into_iter()
-        .find(|row| {
-            row.prokind == 'f'
-                && !row.proretset
-                && builtin_scalar_function_for_proc_row(row) == Some(func)
-        })
-        .map(|row| row.oid)
+    bootstrap_scalar_proc_oids()
+        .iter()
+        .find_map(|(candidate, oid)| (*candidate == func).then_some(*oid))
         .or_else(|| {
             synthetic_scalar_proc_oids()
                 .iter()
@@ -9462,10 +9594,9 @@ pub fn proc_oid_for_builtin_scalar_function(func: BuiltinScalarFunction) -> Opti
 }
 
 pub fn builtin_aggregate_function_for_proc_oid(oid: u32) -> Option<AggFunc> {
-    bootstrap_pg_proc_rows()
-        .into_iter()
-        .find(|row| row.oid == oid && row.prokind == 'a')
-        .and_then(|row| aggregate_func_for_proname(&row.proname))
+    bootstrap_aggregate_functions_by_proc_oid()
+        .get(&oid)
+        .copied()
         .or_else(|| aggregate_func_for_dynamic_range_proc_oid(oid))
         .or_else(|| {
             synthetic_aggregate_proc_oids()
@@ -9475,10 +9606,9 @@ pub fn builtin_aggregate_function_for_proc_oid(oid: u32) -> Option<AggFunc> {
 }
 
 pub fn builtin_window_function_for_proc_oid(oid: u32) -> Option<BuiltinWindowFunction> {
-    bootstrap_pg_proc_rows()
-        .into_iter()
-        .find(|row| row.oid == oid && row.prokind == 'w')
-        .and_then(|row| window_func_for_proname(&row.proname))
+    bootstrap_window_functions_by_proc_oid()
+        .get(&oid)
+        .copied()
         .or_else(|| {
             synthetic_window_proc_oids()
                 .iter()
@@ -9487,10 +9617,9 @@ pub fn builtin_window_function_for_proc_oid(oid: u32) -> Option<BuiltinWindowFun
 }
 
 pub fn proc_oid_for_builtin_aggregate_function(func: AggFunc) -> Option<u32> {
-    bootstrap_pg_proc_rows()
-        .into_iter()
-        .find(|row| row.prokind == 'a' && aggregate_func_for_proname(&row.proname) == Some(func))
-        .map(|row| row.oid)
+    bootstrap_aggregate_proc_oids()
+        .iter()
+        .find_map(|(candidate, oid)| (*candidate == func).then_some(*oid))
         .or_else(|| {
             synthetic_aggregate_proc_oids()
                 .iter()
@@ -9501,29 +9630,23 @@ pub fn proc_oid_for_builtin_aggregate_function(func: AggFunc) -> Option<u32> {
 pub fn builtin_hypothetical_aggregate_function_for_proc_oid(
     oid: u32,
 ) -> Option<HypotheticalAggFunc> {
-    bootstrap_pg_proc_rows()
-        .into_iter()
-        .find(|row| row.oid == oid && row.prokind == 'a')
-        .and_then(|row| hypothetical_aggregate_func_for_proname(&row.proname))
+    bootstrap_hypothetical_aggregate_functions_by_proc_oid()
+        .get(&oid)
+        .copied()
 }
 
 pub fn proc_oid_for_builtin_hypothetical_aggregate_function(
     func: HypotheticalAggFunc,
 ) -> Option<u32> {
-    bootstrap_pg_proc_rows()
-        .into_iter()
-        .find(|row| {
-            row.prokind == 'a'
-                && hypothetical_aggregate_func_for_proname(&row.proname) == Some(func)
-        })
-        .map(|row| row.oid)
+    bootstrap_hypothetical_aggregate_proc_oids()
+        .iter()
+        .find_map(|(candidate, oid)| (*candidate == func).then_some(*oid))
 }
 
 pub fn proc_oid_for_builtin_window_function(func: BuiltinWindowFunction) -> Option<u32> {
-    bootstrap_pg_proc_rows()
-        .into_iter()
-        .find(|row| row.prokind == 'w' && window_func_for_proname(&row.proname) == Some(func))
-        .map(|row| row.oid)
+    bootstrap_window_proc_oids()
+        .iter()
+        .find_map(|(candidate, oid)| (*candidate == func).then_some(*oid))
         .or_else(|| {
             synthetic_window_proc_oids()
                 .iter()
@@ -16755,6 +16878,48 @@ mod tests {
                 row.oid,
                 row.proname
             );
+        }
+    }
+
+    #[test]
+    fn indexed_builtin_proc_helpers_match_bootstrap_rows() {
+        let lower_rows = bootstrap_pg_proc_rows_ref()
+            .iter()
+            .filter(|row| row.proname == "lower")
+            .map(|row| (*row).clone())
+            .collect::<Vec<_>>();
+        assert_eq!(bootstrap_pg_proc_rows_by_name("lower"), lower_rows);
+        assert_eq!(
+            bootstrap_pg_proc_rows_by_name("pg_catalog.lower"),
+            lower_rows
+        );
+
+        for row in bootstrap_pg_proc_rows_ref() {
+            if row.prokind == 'f' && !row.proretset {
+                let expected = builtin_scalar_function_for_proc_row(row);
+                if expected.is_some() {
+                    assert_eq!(builtin_scalar_function_for_proc_oid(row.oid), expected);
+                }
+            }
+            if row.prokind == 'a' {
+                let expected = aggregate_func_for_proname(&row.proname);
+                if expected.is_some() {
+                    assert_eq!(builtin_aggregate_function_for_proc_oid(row.oid), expected);
+                }
+                let expected = hypothetical_aggregate_func_for_proname(&row.proname);
+                if expected.is_some() {
+                    assert_eq!(
+                        builtin_hypothetical_aggregate_function_for_proc_oid(row.oid),
+                        expected
+                    );
+                }
+            }
+            if row.prokind == 'w' {
+                let expected = window_func_for_proname(&row.proname);
+                if expected.is_some() {
+                    assert_eq!(builtin_window_function_for_proc_oid(row.oid), expected);
+                }
+            }
         }
     }
 

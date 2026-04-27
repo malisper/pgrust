@@ -1,7 +1,8 @@
 use crate::RelFileLocator;
-use crate::backend::parser::{PartitionBoundSpec, PartitionStrategy};
+use crate::backend::parser::{LoweredPartitionSpec, PartitionBoundSpec, PartitionStrategy};
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
+use crate::include::catalog::PgInheritsRow;
 use crate::include::nodes::parsenodes::SetOperator;
 use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::plannodes::{AggregateStrategy, IndexScanKey, PlanEstimate};
@@ -10,6 +11,8 @@ use crate::include::nodes::primnodes::{
     SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var, WindowClause,
     user_attrno,
 };
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,6 +338,18 @@ pub struct AggregateLayout {
     pub passthrough_exprs: Vec<Expr>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannerPartitionChildBound {
+    pub row: PgInheritsRow,
+    pub bound: Option<PartitionBoundSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannerIndexExprCacheEntry {
+    pub exprs: Vec<Expr>,
+    pub predicate: Option<Expr>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PlannerInfo {
     pub config: PlannerConfig,
@@ -355,6 +370,9 @@ pub struct PlannerInfo {
     pub final_target: PathTarget,
     pub query_pathkeys: Vec<PathKey>,
     pub final_rel: Option<RelOptInfo>,
+    pub partition_spec_cache: RefCell<BTreeMap<u32, Option<LoweredPartitionSpec>>>,
+    pub partition_child_bounds_cache: RefCell<BTreeMap<u32, Vec<PlannerPartitionChildBound>>>,
+    pub index_expr_cache: RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>,
 }
 
 impl PlannerInfo {

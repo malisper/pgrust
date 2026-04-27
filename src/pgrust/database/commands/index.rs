@@ -1652,6 +1652,7 @@ impl Database {
                     relforcerowsecurity: index_entry.relforcerowsecurity,
                     desc: index_entry.desc.clone(),
                     partitioned_table: index_entry.partitioned_table.clone(),
+                    partition_spec: None,
                     index: Some(self.relcache_index_meta_from_catalog(
                         client_id,
                         Some((xid, cid)),

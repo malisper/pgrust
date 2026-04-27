@@ -16,7 +16,8 @@ use crate::backend::parser::{
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
     SysCacheId, SysCacheTuple, ensure_class_rows, ensure_depend_rows, ensure_namespace_rows,
-    ensure_rewrite_rows, search_sys_cache_list1_db, search_sys_cache1_db,
+    ensure_rewrite_rows, search_sys_cache_list1_db, search_sys_cache_list2_db,
+    search_sys_cache1_db,
 };
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::access::htup::{AttributeCompression, AttributeStorage};
@@ -455,23 +456,85 @@ fn direct_dependent_view_oids(
     txn_ctx: CatalogTxnContext,
     relation_oid: u32,
 ) -> Vec<u32> {
-    let rewrites = ensure_rewrite_rows(db, client_id, txn_ctx)
+    let mut oids = rewrite_dependency_rows_for_relation(db, client_id, txn_ctx, relation_oid)
         .into_iter()
-        .map(|row| (row.oid, row))
-        .collect::<BTreeMap<_, _>>();
-    let mut oids = ensure_depend_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .filter(|row| {
-            row.classid == PG_REWRITE_RELATION_OID
-                && row.refclassid == PG_CLASS_RELATION_OID
-                && row.refobjid == relation_oid
-                && row.deptype == DEPENDENCY_NORMAL
-        })
-        .filter_map(|row| rewrites.get(&row.objid).map(|rewrite| rewrite.ev_class))
+        .filter_map(|row| rewrite_row_by_oid_for_ddl(db, client_id, txn_ctx, row.objid))
+        .map(|rewrite| rewrite.ev_class)
         .collect::<Vec<_>>();
     oids.sort_unstable();
     oids.dedup();
     oids
+}
+
+fn rewrite_row_by_oid_for_ddl(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    rewrite_oid: u32,
+) -> Option<crate::include::catalog::PgRewriteRow> {
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::RewriteOid,
+        ddl_oid_key(rewrite_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Rewrite(row) => Some(row),
+        _ => None,
+    })
+}
+
+fn class_row_by_oid_for_ddl(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    relation_oid: u32,
+) -> Option<crate::include::catalog::PgClassRow> {
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::RelOid,
+        ddl_oid_key(relation_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Class(row) => Some(row),
+        _ => None,
+    })
+}
+
+fn rewrite_dependency_rows_for_relation(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    relation_oid: u32,
+) -> Vec<crate::include::catalog::PgDependRow> {
+    search_sys_cache_list2_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::DependReference,
+        ddl_oid_key(PG_CLASS_RELATION_OID),
+        ddl_oid_key(relation_oid),
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .filter_map(|tuple| match tuple {
+        SysCacheTuple::Depend(row) => Some(row),
+        _ => None,
+    })
+    .filter(|row| {
+        row.classid == PG_REWRITE_RELATION_OID
+            && row.refclassid == PG_CLASS_RELATION_OID
+            && row.refobjid == relation_oid
+            && row.deptype == DEPENDENCY_NORMAL
+    })
+    .collect()
 }
 
 fn rewrite_return_rule_sql(
@@ -941,30 +1004,21 @@ pub(crate) fn reject_column_with_rule_dependencies(
     column_name: &str,
     attnum: i16,
 ) -> Result<(), ExecError> {
-    let rewrites = ensure_rewrite_rows(db, client_id, txn_ctx)
+    let rewrites = rewrite_dependency_rows_for_relation(db, client_id, txn_ctx, relation_oid)
         .into_iter()
-        .map(|row| (row.oid, row))
-        .collect::<BTreeMap<_, _>>();
-    let classes = ensure_class_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .map(|row| (row.oid, row))
-        .collect::<BTreeMap<_, _>>();
-    let relation_name = classes
-        .get(&relation_oid)
+        .filter(|row| row.refobjsubid == i32::from(attnum))
+        .filter_map(|row| rewrite_row_by_oid_for_ddl(db, client_id, txn_ctx, row.objid))
+        .collect::<Vec<_>>();
+    if rewrites.is_empty() {
+        return Ok(());
+    }
+    let relation_name = class_row_by_oid_for_ddl(db, client_id, txn_ctx, relation_oid)
         .map(|row| row.relname.clone())
         .unwrap_or_else(|| relation_oid.to_string());
-    let mut details = ensure_depend_rows(db, client_id, txn_ctx)
+    let mut details = rewrites
         .into_iter()
-        .filter(|row| {
-            row.classid == PG_REWRITE_RELATION_OID
-                && row.refclassid == PG_CLASS_RELATION_OID
-                && row.refobjid == relation_oid
-                && row.refobjsubid == i32::from(attnum)
-                && row.deptype == DEPENDENCY_NORMAL
-        })
-        .filter_map(|row| {
-            let rewrite = rewrites.get(&row.objid)?;
-            let view = classes.get(&rewrite.ev_class)?;
+        .filter_map(|rewrite| {
+            let view = class_row_by_oid_for_ddl(db, client_id, txn_ctx, rewrite.ev_class)?;
             Some(format!(
                 "view {} depends on column {} of table {}",
                 view.relname, column_name, relation_name
@@ -994,26 +1048,15 @@ pub(crate) fn reject_column_type_change_with_rule_dependencies(
     column_name: &str,
     attnum: i16,
 ) -> Result<(), ExecError> {
-    let rewrites = ensure_rewrite_rows(db, client_id, txn_ctx)
+    let rewrites = rewrite_dependency_rows_for_relation(db, client_id, txn_ctx, relation_oid)
         .into_iter()
-        .map(|row| (row.oid, row))
-        .collect::<BTreeMap<_, _>>();
-    let classes = ensure_class_rows(db, client_id, txn_ctx)
+        .filter(|row| row.refobjsubid == i32::from(attnum))
+        .filter_map(|row| rewrite_row_by_oid_for_ddl(db, client_id, txn_ctx, row.objid))
+        .collect::<Vec<_>>();
+    let mut details = rewrites
         .into_iter()
-        .map(|row| (row.oid, row))
-        .collect::<BTreeMap<_, _>>();
-    let mut details = ensure_depend_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .filter(|row| {
-            row.classid == PG_REWRITE_RELATION_OID
-                && row.refclassid == PG_CLASS_RELATION_OID
-                && row.refobjid == relation_oid
-                && row.refobjsubid == i32::from(attnum)
-                && row.deptype == DEPENDENCY_NORMAL
-        })
-        .filter_map(|row| {
-            let rewrite = rewrites.get(&row.objid)?;
-            let view = classes.get(&rewrite.ev_class)?;
+        .filter_map(|rewrite| {
+            let view = class_row_by_oid_for_ddl(db, client_id, txn_ctx, rewrite.ev_class)?;
             Some(format!(
                 "rule {} on view {} depends on column \"{}\"",
                 rewrite.rulename, view.relname, column_name

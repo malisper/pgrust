@@ -560,6 +560,7 @@ impl Database {
                     columns: Vec::new(),
                 },
                 partitioned_table: None,
+                partition_spec: None,
                 index: None,
             },
             on_commit: OnCommitAction::PreserveRows,
@@ -687,6 +688,7 @@ impl Database {
             relforcerowsecurity: created.entry.relforcerowsecurity,
             desc: created.entry.desc.clone(),
             partitioned_table: created.entry.partitioned_table.clone(),
+            partition_spec: None,
             index: None,
         };
         {

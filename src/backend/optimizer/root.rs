@@ -934,6 +934,9 @@ impl PlannerInfo {
             inner_join_clauses: Vec::new(),
             aggregate_layout,
             final_rel: None,
+            partition_spec_cache: Default::default(),
+            partition_child_bounds_cache: Default::default(),
+            index_expr_cache: Default::default(),
             parse,
         }
     }

@@ -1,5 +1,5 @@
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
-use crate::backend::parser::analyze::bound_index_relation_from_relcache_entry;
+use crate::backend::parser::analyze::bound_index_relation_from_relcache_entry_with_heap_and_cache;
 use crate::backend::parser::{BoundRelation, CatalogLookup, DomainLookup};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
@@ -20,11 +20,14 @@ use crate::include::catalog::{
     bootstrap_pg_aggregate_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
     bootstrap_pg_collation_rows, bootstrap_pg_database_rows, bootstrap_pg_enum_rows,
     bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
-    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, bootstrap_pg_ts_config_map_rows,
-    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_template_rows,
-    builtin_range_rows, builtin_type_rows, synthetic_range_proc_rows_by_name,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_row_by_oid, bootstrap_pg_proc_rows,
+    bootstrap_pg_proc_rows_by_name, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
+    bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_template_rows, builtin_range_rows,
+    builtin_type_rows, synthetic_range_proc_rows_by_name,
 };
+use crate::include::nodes::pathnodes::PlannerIndexExprCacheEntry;
 use crate::pgrust::database::DatabaseStatsStore;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -228,7 +231,7 @@ impl VisibleCatalog {
         self.catcache
             .as_ref()
             .map(|catcache| catcache.proc_rows())
-            .unwrap_or_else(crate::include::catalog::bootstrap_pg_proc_rows)
+            .unwrap_or_else(bootstrap_pg_proc_rows)
     }
 
     pub fn amproc_rows(&self) -> Vec<PgAmprocRow> {
@@ -377,6 +380,18 @@ impl CatalogLookup for VisibleCatalog {
         &self,
         relation_oid: u32,
     ) -> Vec<crate::backend::parser::BoundIndexRelation> {
+        self.index_relations_for_heap_with_cache(relation_oid, &RefCell::new(BTreeMap::new()))
+    }
+
+    fn index_relations_for_heap_with_cache(
+        &self,
+        relation_oid: u32,
+        index_expr_cache: &RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>,
+    ) -> Vec<crate::backend::parser::BoundIndexRelation> {
+        let heap_relation = self
+            .relcache
+            .get_by_oid(relation_oid)
+            .map(|entry| bound_relation_from_relcache_entry(&self.relcache, entry));
         self.relcache
             .relation_get_index_list(relation_oid)
             .into_iter()
@@ -386,7 +401,13 @@ impl CatalogLookup for VisibleCatalog {
                     .relcache
                     .relation_name_by_oid(index_oid)
                     .unwrap_or_else(|| index_oid.to_string());
-                bound_index_relation_from_relcache_entry(name, entry, self)
+                bound_index_relation_from_relcache_entry_with_heap_and_cache(
+                    name,
+                    entry,
+                    self,
+                    heap_relation.as_ref(),
+                    Some(index_expr_cache),
+                )
             })
             .collect()
     }
@@ -449,11 +470,7 @@ impl CatalogLookup for VisibleCatalog {
             return rows;
         }
 
-        let normalized = normalize_name(name);
-        let mut rows: Vec<_> = bootstrap_pg_proc_rows()
-            .into_iter()
-            .filter(|row| row.proname.eq_ignore_ascii_case(normalized))
-            .collect();
+        let mut rows = bootstrap_pg_proc_rows_by_name(name);
         rows.extend(synthetic_range_proc_rows_by_name(
             name,
             &self.type_rows(),
@@ -467,11 +484,7 @@ impl CatalogLookup for VisibleCatalog {
         self.catcache
             .as_ref()
             .and_then(|catcache| catcache.proc_by_oid(oid).cloned())
-            .or_else(|| {
-                bootstrap_pg_proc_rows()
-                    .into_iter()
-                    .find(|row| row.oid == oid)
-            })
+            .or_else(|| bootstrap_pg_proc_row_by_oid(oid))
             .or_else(|| {
                 crate::include::catalog::synthetic_range_proc_row_by_oid(
                     oid,
@@ -1001,6 +1014,7 @@ fn bound_relation_from_relcache_entry(
         relpartbound: entry.relpartbound.clone(),
         desc: entry.desc.clone(),
         partitioned_table: entry.partitioned_table.clone(),
+        partition_spec: entry.partition_spec.clone(),
     }
 }
 

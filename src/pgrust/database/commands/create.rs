@@ -3978,6 +3978,7 @@ impl Database {
                                 relpartbound: created.entry.relpartbound.clone(),
                                 desc: created.entry.desc.clone(),
                                 partitioned_table: created.entry.partitioned_table.clone(),
+                                partition_spec: None,
                             }
                         };
                         let mut constraint_cid_base = table_cid.saturating_add(1);
@@ -4138,6 +4139,7 @@ impl Database {
                             relpartbound: created.entry.relpartbound.clone(),
                             desc: created.entry.desc.clone(),
                             partitioned_table: created.entry.partitioned_table.clone(),
+                            partition_spec: None,
                         }
                     };
                 let mut constraint_cid_base = table_cid.saturating_add(1);
@@ -4434,6 +4436,7 @@ impl Database {
                         relpartbound: entry.relpartbound.clone(),
                         desc: entry.desc.clone(),
                         partitioned_table: entry.partitioned_table.clone(),
+                        partition_spec: None,
                     }
                 })
             })

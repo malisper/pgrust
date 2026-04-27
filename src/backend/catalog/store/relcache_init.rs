@@ -257,6 +257,7 @@ fn relcache_entry_from_file(entry: RelCacheEntryFile) -> RelCacheEntry {
                 .collect(),
         },
         partitioned_table: None,
+        partition_spec: None,
         index: entry.index,
     }
 }

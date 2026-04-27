@@ -52,8 +52,15 @@ pub(super) struct CatalogDependencyGraph {
 
 impl CatalogDependencyGraph {
     pub(super) fn new(catcache: &CatCache) -> Self {
+        Self::from_rows(catcache.depend_rows(), catcache.inherit_rows())
+    }
+
+    pub(super) fn from_rows(
+        depend_rows: Vec<PgDependRow>,
+        inherit_rows: Vec<PgInheritsRow>,
+    ) -> Self {
         let mut dependents_by_ref: BTreeMap<ObjectAddress, Vec<PgDependRow>> = BTreeMap::new();
-        for row in catcache.depend_rows() {
+        for row in depend_rows {
             dependents_by_ref
                 .entry(ObjectAddress::new(
                     row.refclassid,
@@ -78,7 +85,7 @@ impl CatalogDependencyGraph {
         }
 
         let mut inherits_by_parent: BTreeMap<u32, Vec<PgInheritsRow>> = BTreeMap::new();
-        for row in catcache.inherit_rows() {
+        for row in inherit_rows {
             inherits_by_parent
                 .entry(row.inhparent)
                 .or_default()

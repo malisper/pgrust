@@ -2,8 +2,8 @@ use std::cmp::Ordering;
 
 use crate::backend::executor::compare_order_values;
 use crate::backend::parser::{
-    CatalogLookup, PartitionBoundSpec, PartitionRangeDatumValue, PartitionStrategy,
-    SerializedPartitionValue, SubqueryComparisonOp, deserialize_partition_bound,
+    CatalogLookup, LoweredPartitionSpec, PartitionBoundSpec, PartitionRangeDatumValue,
+    PartitionStrategy, SerializedPartitionValue, SubqueryComparisonOp, deserialize_partition_bound,
     partition_value_to_value, relation_partition_spec,
 };
 use crate::backend::utils::cache::catcache::sql_type_oid;
@@ -15,41 +15,22 @@ use crate::include::nodes::primnodes::{
 };
 
 pub(super) fn partition_may_satisfy_filter(
-    catalog: &dyn CatalogLookup,
-    parent_oid: u32,
-    child_oid: u32,
+    spec: Option<&LoweredPartitionSpec>,
+    bound: Option<&PartitionBoundSpec>,
+    sibling_bounds: &[PartitionBoundSpec],
     filter: Option<&Expr>,
+    catalog: Option<&dyn CatalogLookup>,
 ) -> bool {
     let Some(filter) = filter else {
         return true;
     };
-    let (Some(parent), Some(child)) = (
-        catalog.relation_by_oid(parent_oid),
-        catalog.relation_by_oid(child_oid),
-    ) else {
+    let Some(spec) = spec else {
         return true;
     };
-    let Ok(spec) = relation_partition_spec(&parent) else {
+    let Some(bound) = bound else {
         return true;
     };
-    let Some(bound) = child
-        .relpartbound
-        .as_deref()
-        .and_then(|text| deserialize_partition_bound(text).ok())
-    else {
-        return true;
-    };
-    let sibling_bounds = catalog
-        .inheritance_children(parent_oid)
-        .into_iter()
-        .filter(|row| !row.inhdetachpending)
-        .filter_map(|row| catalog.relation_by_oid(row.inhrelid))
-        .filter_map(|rel| {
-            rel.relpartbound
-                .and_then(|text| deserialize_partition_bound(&text).ok())
-        })
-        .collect::<Vec<_>>();
-    expr_may_match_bound(filter, &spec, &bound, &sibling_bounds, Some(catalog))
+    expr_may_match_bound(filter, spec, bound, sibling_bounds, catalog)
 }
 
 pub(super) fn relation_may_satisfy_own_partition_bound(
@@ -157,7 +138,7 @@ fn translate_partition_key_expr_to_relation(
 
 fn expr_may_match_bound(
     expr: &Expr,
-    spec: &crate::backend::parser::LoweredPartitionSpec,
+    spec: &LoweredPartitionSpec,
     bound: &PartitionBoundSpec,
     sibling_bounds: &[PartitionBoundSpec],
     catalog: Option<&dyn CatalogLookup>,
@@ -396,7 +377,7 @@ fn list_value_may_match_expr(
 fn partition_key_const_cmp(
     left: &Expr,
     right: &Expr,
-    spec: &crate::backend::parser::LoweredPartitionSpec,
+    spec: &LoweredPartitionSpec,
     query_collation_oid: Option<u32>,
 ) -> Option<(usize, bool, Value)> {
     for (index, key_expr) in spec.key_exprs.iter().enumerate() {
@@ -421,7 +402,7 @@ fn partition_key_const_cmp(
 fn partition_key_const_distinct_cmp(
     left: &Expr,
     right: &Expr,
-    spec: &crate::backend::parser::LoweredPartitionSpec,
+    spec: &LoweredPartitionSpec,
 ) -> Option<(usize, Value)> {
     for (index, key_expr) in spec.key_exprs.iter().enumerate() {
         if partition_key_expr_matches(left, key_expr).is_some()
@@ -438,10 +419,7 @@ fn partition_key_const_distinct_cmp(
     None
 }
 
-fn partition_key_index(
-    expr: &Expr,
-    spec: &crate::backend::parser::LoweredPartitionSpec,
-) -> Option<usize> {
+fn partition_key_index(expr: &Expr, spec: &LoweredPartitionSpec) -> Option<usize> {
     spec.key_exprs
         .iter()
         .position(|key_expr| partition_key_expr_matches(expr, key_expr).is_some())
@@ -646,7 +624,7 @@ fn subquery_comparison_op_kind(op: SubqueryComparisonOp) -> Option<OpExprKind> {
 }
 
 fn bound_may_satisfy_comparison(
-    spec: &crate::backend::parser::LoweredPartitionSpec,
+    spec: &LoweredPartitionSpec,
     bound: &PartitionBoundSpec,
     sibling_bounds: &[PartitionBoundSpec],
     key_index: usize,
@@ -693,7 +671,7 @@ fn commute_op(op: OpExprKind) -> OpExprKind {
 }
 
 fn bound_may_contain_value(
-    spec: &crate::backend::parser::LoweredPartitionSpec,
+    spec: &LoweredPartitionSpec,
     bound: &PartitionBoundSpec,
     sibling_bounds: &[PartitionBoundSpec],
     key_index: usize,
@@ -731,7 +709,7 @@ fn bound_may_contain_value(
 }
 
 fn bound_may_contain_non_null(
-    spec: &crate::backend::parser::LoweredPartitionSpec,
+    spec: &LoweredPartitionSpec,
     bound: &PartitionBoundSpec,
     key_index: usize,
 ) -> bool {
@@ -751,7 +729,7 @@ fn bound_may_contain_non_null(
 }
 
 fn bound_may_contain_non_equal_value(
-    spec: &crate::backend::parser::LoweredPartitionSpec,
+    spec: &LoweredPartitionSpec,
     bound: &PartitionBoundSpec,
     key_index: usize,
     value: &Value,
@@ -850,7 +828,7 @@ fn bound_may_satisfy_distinctness(
 }
 
 fn bound_may_overlap_inequality(
-    spec: &crate::backend::parser::LoweredPartitionSpec,
+    spec: &LoweredPartitionSpec,
     bound: &PartitionBoundSpec,
     sibling_bounds: &[PartitionBoundSpec],
     key_index: usize,
@@ -1121,7 +1099,7 @@ enum ConstraintApplyResult {
 
 fn range_may_satisfy_conjunction(
     expr: &Expr,
-    spec: &crate::backend::parser::LoweredPartitionSpec,
+    spec: &LoweredPartitionSpec,
     bound: &PartitionBoundSpec,
     sibling_bounds: &[PartitionBoundSpec],
 ) -> Option<bool> {
@@ -1144,7 +1122,7 @@ fn range_may_satisfy_conjunction(
 }
 
 fn range_may_satisfy_conjunction_value(
-    spec: &crate::backend::parser::LoweredPartitionSpec,
+    spec: &LoweredPartitionSpec,
     bound: &PartitionBoundSpec,
     sibling_bounds: &[PartitionBoundSpec],
     key_index: usize,
@@ -1403,7 +1381,7 @@ fn flatten_and_exprs(expr: &Expr) -> Vec<&Expr> {
 
 fn apply_range_constraint(
     expr: &Expr,
-    spec: &crate::backend::parser::LoweredPartitionSpec,
+    spec: &LoweredPartitionSpec,
     constraints: &mut [KeyConstraint],
 ) -> ConstraintApplyResult {
     if let Some((key_index, value)) = partition_key_bool_equality_predicate(expr, spec) {
@@ -1462,7 +1440,7 @@ fn apply_range_constraint(
 
 fn add_comparison_constraint(
     constraints: &mut [KeyConstraint],
-    spec: &crate::backend::parser::LoweredPartitionSpec,
+    spec: &LoweredPartitionSpec,
     key_index: usize,
     op: OpExprKind,
     value: Value,
@@ -1613,7 +1591,7 @@ fn equality_satisfies_bounds(constraint: &KeyConstraint, collation_oid: Option<u
 }
 
 fn range_bound_may_overlap_constraints(
-    spec: &crate::backend::parser::LoweredPartitionSpec,
+    spec: &LoweredPartitionSpec,
     bound: &PartitionBoundSpec,
     sibling_bounds: &[PartitionBoundSpec],
     constraints: &[KeyConstraint],

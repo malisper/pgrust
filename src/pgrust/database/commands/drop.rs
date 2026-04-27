@@ -6,12 +6,17 @@ use super::dependency_drop::{CatalogDependencyGraph, DropBehavior, ObjectAddress
 use crate::backend::executor::expr_reg::{format_regprocedure_oid_optional, format_type_text};
 use crate::backend::parser::{parse_type_name, resolve_raw_type_name};
 use crate::backend::utils::cache::catcache::CatCache;
+use crate::backend::utils::cache::syscache::{
+    SysCacheId, SysCacheTuple, search_sys_cache_list1_db, search_sys_cache_list2_db,
+    search_sys_cache1_db,
+};
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
     PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PgCastRow, PgConstraintRow, PgProcRow,
     PgRewriteRow,
 };
+use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
     DropAggregateStatement, DropFunctionStatement, DropIndexStatement, DropProcedureStatement,
     DropSchemaStatement,
@@ -304,7 +309,7 @@ struct DropTablePlan {
 }
 
 struct DropTableDependencyContext<'a> {
-    catcache: &'a CatCache,
+    catalog: &'a dyn CatalogLookup,
     graph: &'a CatalogDependencyGraph,
     constraints_by_oid: BTreeMap<u32, PgConstraintRow>,
     rewrites_by_oid: BTreeMap<u32, PgRewriteRow>,
@@ -342,25 +347,185 @@ fn drop_schema_relation_drop_priority(relkind: char) -> u8 {
 }
 
 fn drop_table_display_relation_name(
-    catcache: &CatCache,
+    catalog: &dyn CatalogLookup,
     relation_oid: u32,
     search_path: &[String],
 ) -> String {
-    let Some(class) = catcache.class_by_oid(relation_oid) else {
+    let Some(class) = catalog.class_row_by_oid(relation_oid) else {
         return relation_oid.to_string();
     };
-    let schema_name = catcache
-        .namespace_by_oid(class.relnamespace)
+    let schema_name = catalog
+        .namespace_row_by_oid(class.relnamespace)
         .map(|row| row.nspname.clone())
         .unwrap_or_else(|| "public".to_string());
     match schema_name.as_str() {
         "public" | "pg_catalog" => class.relname.clone(),
         schema_name if schema_name.starts_with("pg_temp_") => class.relname.clone(),
-        schema_name if search_path.iter().any(|entry| entry == schema_name) => {
-            class.relname.clone()
-        }
+        schema_name if search_path.iter().any(|entry| entry == schema_name) => class.relname,
         _ => format!("{schema_name}.{}", class.relname),
     }
+}
+
+fn drop_oid_key(oid: u32) -> Value {
+    Value::Int64(i64::from(oid))
+}
+
+fn drop_dependents_for_reference(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    referenced: ObjectAddress,
+) -> Vec<crate::include::catalog::PgDependRow> {
+    search_sys_cache_list2_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::DependReference,
+        drop_oid_key(referenced.classid),
+        drop_oid_key(referenced.objid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Depend(row) if row.refobjsubid == referenced.objsubid => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn drop_inheritance_children(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    parent_oid: u32,
+) -> Vec<crate::include::catalog::PgInheritsRow> {
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::InheritsParent,
+        drop_oid_key(parent_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Inherits(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn drop_constraint_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    oid: u32,
+) -> Option<PgConstraintRow> {
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::ConstraintOid,
+        drop_oid_key(oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Constraint(row) => Some(row),
+        _ => None,
+    })
+}
+
+fn drop_rewrite_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    oid: u32,
+) -> Option<PgRewriteRow> {
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::RewriteOid,
+        drop_oid_key(oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Rewrite(row) => Some(row),
+        _ => None,
+    })
+}
+
+fn build_drop_table_dependency_graph(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    relation_oids: &BTreeSet<u32>,
+) -> (
+    CatalogDependencyGraph,
+    BTreeMap<u32, PgConstraintRow>,
+    BTreeMap<u32, PgRewriteRow>,
+) {
+    let mut queue = relation_oids
+        .iter()
+        .copied()
+        .map(ObjectAddress::relation)
+        .collect::<Vec<_>>();
+    let mut visited = BTreeSet::new();
+    let mut depend_rows = Vec::new();
+    let mut inherit_rows = Vec::new();
+    let mut constraints_by_oid = BTreeMap::new();
+    let mut rewrites_by_oid = BTreeMap::new();
+
+    while let Some(address) = queue.pop() {
+        if !visited.insert(address) {
+            continue;
+        }
+
+        for row in drop_dependents_for_reference(db, client_id, txn_ctx, address) {
+            if row.objsubid == 0 && row.classid == PG_CLASS_RELATION_OID {
+                queue.push(ObjectAddress::relation(row.objid));
+            } else if row.classid == PG_CONSTRAINT_RELATION_OID {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    constraints_by_oid.entry(row.objid)
+                    && let Some(constraint) =
+                        drop_constraint_row_by_oid(db, client_id, txn_ctx, row.objid)
+                {
+                    entry.insert(constraint);
+                }
+            } else if row.classid == PG_REWRITE_RELATION_OID {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    rewrites_by_oid.entry(row.objid)
+                    && let Some(rewrite) =
+                        drop_rewrite_row_by_oid(db, client_id, txn_ctx, row.objid)
+                {
+                    queue.push(ObjectAddress::relation(rewrite.ev_class));
+                    entry.insert(rewrite);
+                }
+            }
+            depend_rows.push(row);
+        }
+
+        if address.classid == PG_CLASS_RELATION_OID && address.objsubid == 0 {
+            for row in drop_inheritance_children(db, client_id, txn_ctx, address.objid) {
+                queue.push(ObjectAddress::relation(row.inhrelid));
+                inherit_rows.push(row);
+            }
+        }
+    }
+
+    (
+        CatalogDependencyGraph::from_rows(depend_rows, inherit_rows),
+        constraints_by_oid,
+        rewrites_by_oid,
+    )
 }
 
 fn drop_schema_visible_namespace_oids(
@@ -580,7 +745,7 @@ fn drop_table_direct_dependencies(
                 if !relation_oids.insert(row.objid) {
                     continue;
                 }
-                let Some(class) = ctx.catcache.class_by_oid(row.objid) else {
+                let Some(class) = ctx.catalog.class_row_by_oid(row.objid) else {
                     continue;
                 };
                 if !matches!(class.relkind, 'r' | 'p' | 'S' | 'v' | 'm') {
@@ -591,7 +756,7 @@ fn drop_table_direct_dependencies(
                     relkind: class.relkind,
                     is_partition: class.relispartition,
                     display_name: drop_table_display_relation_name(
-                        ctx.catcache,
+                        ctx.catalog,
                         row.objid,
                         ctx.search_path,
                     ),
@@ -609,7 +774,7 @@ fn drop_table_direct_dependencies(
                 deps.push(DropTableDependency::ForeignKey {
                     relation_oid: constraint.conrelid,
                     relation_display_name: drop_table_display_relation_name(
-                        ctx.catcache,
+                        ctx.catalog,
                         constraint.conrelid,
                         ctx.search_path,
                     ),
@@ -624,7 +789,7 @@ fn drop_table_direct_dependencies(
                 let Some(rewrite) = ctx.rewrites_by_oid.get(&row.objid) else {
                     continue;
                 };
-                let Some(owner) = ctx.catcache.class_by_oid(rewrite.ev_class) else {
+                let Some(owner) = ctx.catalog.class_row_by_oid(rewrite.ev_class) else {
                     continue;
                 };
                 if matches!(owner.relkind, 'v' | 'm') {
@@ -636,7 +801,7 @@ fn drop_table_direct_dependencies(
                         relkind: owner.relkind,
                         is_partition: owner.relispartition,
                         display_name: drop_table_display_relation_name(
-                            ctx.catcache,
+                            ctx.catalog,
                             owner.oid,
                             ctx.search_path,
                         ),
@@ -646,7 +811,7 @@ fn drop_table_direct_dependencies(
                         relation_oid: owner.oid,
                         relation_kind: owner.relkind,
                         relation_display_name: drop_table_display_relation_name(
-                            ctx.catcache,
+                            ctx.catalog,
                             owner.oid,
                             ctx.search_path,
                         ),
@@ -665,7 +830,7 @@ fn drop_table_direct_dependencies(
         if !relation_oids.insert(inherit.inhrelid) {
             continue;
         }
-        let Some(class) = ctx.catcache.class_by_oid(inherit.inhrelid) else {
+        let Some(class) = ctx.catalog.class_row_by_oid(inherit.inhrelid) else {
             continue;
         };
         if !matches!(class.relkind, 'r' | 'p') {
@@ -676,7 +841,7 @@ fn drop_table_direct_dependencies(
             relkind: class.relkind,
             is_partition: class.relispartition,
             display_name: drop_table_display_relation_name(
-                ctx.catcache,
+                ctx.catalog,
                 inherit.inhrelid,
                 ctx.search_path,
             ),
@@ -712,11 +877,11 @@ fn collect_drop_table_restrict_blockers(
         return;
     }
 
-    let Some(class) = ctx.catcache.class_by_oid(relation_oid) else {
+    let Some(class) = ctx.catalog.class_row_by_oid(relation_oid) else {
         return;
     };
     let source_relkind = class.relkind;
-    let source_name = drop_table_display_relation_name(ctx.catcache, relation_oid, ctx.search_path);
+    let source_name = drop_table_display_relation_name(ctx.catalog, relation_oid, ctx.search_path);
     let referenced_kind = drop_table_relation_kind_name(source_relkind);
 
     for dep in drop_table_direct_dependencies(ctx, relation_oid) {
@@ -783,11 +948,11 @@ fn plan_drop_table_relation(
         return;
     }
 
-    let Some(class) = ctx.catcache.class_by_oid(relation_oid) else {
+    let Some(class) = ctx.catalog.class_row_by_oid(relation_oid) else {
         return;
     };
     let source_relkind = class.relkind;
-    let source_name = drop_table_display_relation_name(ctx.catcache, relation_oid, ctx.search_path);
+    let source_name = drop_table_display_relation_name(ctx.catalog, relation_oid, ctx.search_path);
     let referenced_kind = drop_table_relation_kind_name(source_relkind);
 
     for dep in drop_table_direct_dependencies(ctx, relation_oid) {
@@ -1690,9 +1855,6 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         self.refresh_catalog_store_dynamic_type_rows(client_id, configured_search_path);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let catcache = self
-            .backend_catcache(client_id, Some((xid, cid)))
-            .map_err(map_catalog_error)?;
         let search_path = self.effective_search_path(client_id, configured_search_path);
         let mut dynamic_type_rows = self.domain_type_rows_for_search_path(&search_path);
         dynamic_type_rows.extend(self.enum_type_rows_for_search_path(&search_path));
@@ -1736,6 +1898,10 @@ impl Database {
             dropped += 1;
         }
 
+        if rels.is_empty() {
+            return Ok(StatementResult::AffectedRows(0));
+        }
+
         lock_tables_interruptible(
             &self.table_locks,
             client_id,
@@ -1745,21 +1911,18 @@ impl Database {
         )?;
 
         let result = (|| {
-            let graph = CatalogDependencyGraph::new(&catcache);
+            let (graph, constraints_by_oid, rewrites_by_oid) = build_drop_table_dependency_graph(
+                self,
+                client_id,
+                Some((xid, cid)),
+                &explicit_relation_oids,
+            );
             let behavior = DropBehavior::from_cascade(drop_stmt.cascade);
             let dependency_ctx = DropTableDependencyContext {
-                catcache: &catcache,
+                catalog: &catalog,
                 graph: &graph,
-                constraints_by_oid: catcache
-                    .constraint_rows()
-                    .into_iter()
-                    .map(|row| (row.oid, row))
-                    .collect(),
-                rewrites_by_oid: catcache
-                    .rewrite_rows()
-                    .into_iter()
-                    .map(|row| (row.oid, row))
-                    .collect(),
+                constraints_by_oid,
+                rewrites_by_oid,
                 search_path: &search_path,
             };
             let mut plan = DropTablePlan::default();
@@ -1839,8 +2002,8 @@ impl Database {
             }
 
             for relation_oid in &plan.relation_drop_order {
-                let (relkind, relpersistence) = catcache
-                    .class_by_oid(*relation_oid)
+                let (relkind, relpersistence) = catalog
+                    .class_row_by_oid(*relation_oid)
                     .map(|row| (row.relkind, row.relpersistence))
                     .unwrap_or(('r', 'p'));
                 if relpersistence == 't' {
@@ -2758,7 +2921,7 @@ impl Database {
         let result = (|| {
             let graph = CatalogDependencyGraph::new(&catcache);
             let dependency_ctx = DropTableDependencyContext {
-                catcache: &catcache,
+                catalog: &catalog,
                 graph: &graph,
                 constraints_by_oid: catcache
                     .constraint_rows()

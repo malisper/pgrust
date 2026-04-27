@@ -1791,6 +1791,7 @@ mod tests {
                 columns: Vec::new(),
             },
             partitioned_table: None,
+            partition_spec: None,
         };
 
         let temp_err =
@@ -1832,6 +1833,7 @@ mod tests {
                 columns: Vec::new(),
             },
             partitioned_table: None,
+            partition_spec: None,
         };
 
         let unlogged_err =

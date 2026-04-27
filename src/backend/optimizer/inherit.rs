@@ -3,18 +3,19 @@ use std::cmp::Ordering;
 use crate::backend::executor::compare_order_values;
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::{
-    PartitionBoundSpec, PartitionRangeDatumValue, PartitionStrategy, deserialize_partition_bound,
-    partition_value_to_value, relation_partition_spec,
+    PartitionBoundSpec, PartitionRangeDatumValue, PartitionStrategy, partition_value_to_value,
 };
 use crate::include::catalog::PgInheritsRow;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{RangeTblEntry, RangeTblEntryKind, RangeTblEref};
 use crate::include::nodes::pathnodes::{
-    AppendRelInfo, PartitionInfo, PartitionMember, PlannerInfo, RelOptInfo, RelOptKind,
+    AppendRelInfo, PartitionInfo, PartitionMember, PlannerInfo, PlannerPartitionChildBound,
+    RelOptInfo, RelOptKind,
 };
 use crate::include::nodes::primnodes::{Expr, ExprArraySubscript, RelationDesc, Var, user_attrno};
 
 use super::joininfo;
+use super::partition_cache;
 
 pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) {
     let mut parent_rtindex = 1;
@@ -38,7 +39,7 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
         }
 
         let child_rows = if relkind == 'p' {
-            ordered_partition_children(catalog, relation_oid)
+            ordered_partition_children(root, catalog, relation_oid)
         } else {
             catalog
                 .find_all_inheritors(relation_oid)
@@ -50,6 +51,7 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
                     inhseqno: 1,
                     inhdetachpending: false,
                 })
+                .map(|row| PlannerPartitionChildBound { row, bound: None })
                 .collect()
         };
         if child_rows.is_empty() {
@@ -75,7 +77,7 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
         let mut child_alias_index = 1usize;
 
         for child_row in child_rows {
-            let child_oid = child_row.inhrelid;
+            let child_oid = child_row.row.inhrelid;
             let Some(child) = catalog.relation_by_oid(child_oid) else {
                 continue;
             };
@@ -146,15 +148,13 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
             if relkind == 'p' {
                 partition_members.push(PartitionMember {
                     relids: vec![child_rtindex],
-                    bound: child
-                        .relpartbound
-                        .as_deref()
-                        .and_then(|text| deserialize_partition_bound(text).ok()),
+                    bound: child_row.bound.clone(),
                 });
             }
         }
         if relkind == 'p'
             && let Some(partition_info) = partition_info_for_parent(
+                root,
                 catalog,
                 relation_oid,
                 parent_rtindex,
@@ -173,40 +173,28 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
     }
 }
 
-fn ordered_partition_children(catalog: &dyn CatalogLookup, parent_oid: u32) -> Vec<PgInheritsRow> {
-    let parent = catalog.relation_by_oid(parent_oid);
-    let strategy = parent
-        .as_ref()
-        .and_then(|parent| relation_partition_spec(parent).ok())
-        .map(|spec| spec.strategy);
-    let mut children = catalog
-        .inheritance_children(parent_oid)
-        .into_iter()
-        .filter(|row| !row.inhdetachpending)
-        .collect::<Vec<_>>();
+fn ordered_partition_children(
+    root: &PlannerInfo,
+    catalog: &dyn CatalogLookup,
+    parent_oid: u32,
+) -> Vec<PlannerPartitionChildBound> {
+    let strategy =
+        partition_cache::partition_spec(root, catalog, parent_oid).map(|spec| spec.strategy);
+    let mut children = partition_cache::partition_child_bounds(root, catalog, parent_oid);
     children.sort_by(|left, right| {
-        compare_partition_children(catalog, strategy, left, right)
-            .then_with(|| left.inhseqno.cmp(&right.inhseqno))
-            .then_with(|| left.inhrelid.cmp(&right.inhrelid))
+        compare_partition_children(strategy, left, right)
+            .then_with(|| left.row.inhseqno.cmp(&right.row.inhseqno))
+            .then_with(|| left.row.inhrelid.cmp(&right.row.inhrelid))
     });
     children
 }
 
 fn compare_partition_children(
-    catalog: &dyn CatalogLookup,
     strategy: Option<PartitionStrategy>,
-    left: &PgInheritsRow,
-    right: &PgInheritsRow,
+    left: &PlannerPartitionChildBound,
+    right: &PlannerPartitionChildBound,
 ) -> Ordering {
-    let left_bound = catalog
-        .relation_by_oid(left.inhrelid)
-        .and_then(|rel| rel.relpartbound)
-        .and_then(|text| deserialize_partition_bound(&text).ok());
-    let right_bound = catalog
-        .relation_by_oid(right.inhrelid)
-        .and_then(|rel| rel.relpartbound)
-        .and_then(|text| deserialize_partition_bound(&text).ok());
-    match (strategy, left_bound.as_ref(), right_bound.as_ref()) {
+    match (strategy, left.bound.as_ref(), right.bound.as_ref()) {
         (_, Some(left), Some(right)) if left.is_default() || right.is_default() => {
             left.is_default().cmp(&right.is_default())
         }
@@ -346,14 +334,14 @@ fn compare_hash_bounds(left: &PartitionBoundSpec, right: &PartitionBoundSpec) ->
 }
 
 fn partition_info_for_parent(
+    root: &PlannerInfo,
     catalog: &dyn CatalogLookup,
     relation_oid: u32,
     parent_rtindex: usize,
     parent_rte: &RangeTblEntry,
     members: Vec<PartitionMember>,
 ) -> Option<PartitionInfo> {
-    let parent = catalog.relation_by_oid(relation_oid)?;
-    let spec = relation_partition_spec(&parent).ok()?;
+    let spec = partition_cache::partition_spec(root, catalog, relation_oid)?;
     let key_exprs = spec
         .partattrs
         .iter()

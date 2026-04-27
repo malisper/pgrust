@@ -1,4 +1,5 @@
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
@@ -34,6 +35,7 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::SqlType;
+use crate::include::nodes::pathnodes::PlannerIndexExprCacheEntry;
 use crate::pgrust::database::{
     Database, DatabaseStatsStore, TempNamespace, default_pg_stat_io_keys,
 };
@@ -444,10 +446,13 @@ fn type_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<PgTypeRow> {
-    super::syscache::backend_catcache(db, client_id, txn_ctx)
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::TypeOid, oid_key(oid))
         .ok()?
-        .type_by_oid(oid)
-        .cloned()
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Type(row) => Some(row),
+            _ => None,
+        })
 }
 
 fn type_row_by_name_namespace(
@@ -457,15 +462,25 @@ fn type_row_by_name_namespace(
     name: &str,
     namespace_oid: u32,
 ) -> Option<PgTypeRow> {
-    super::syscache::backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .type_rows()
-        .into_iter()
-        .find(|row| {
-            row.typnamespace == namespace_oid
-                && row.typname.eq_ignore_ascii_case(name)
-                && !db.other_session_temp_namespace_oid(client_id, row.typnamespace)
-        })
+    search_sys_cache2_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::TypeNameNsp,
+        catalog_name_key(name),
+        oid_key(namespace_oid),
+    )
+    .ok()?
+    .into_iter()
+    .filter_map(|tuple| match tuple {
+        SysCacheTuple::Type(row) => Some(row),
+        _ => None,
+    })
+    .find(|row| {
+        row.typnamespace == namespace_oid
+            && row.typname.eq_ignore_ascii_case(name)
+            && !db.other_session_temp_namespace_oid(client_id, row.typnamespace)
+    })
 }
 
 pub(crate) fn dynamic_type_rows_for_search_path(
@@ -1407,6 +1422,7 @@ fn bound_relation_from_entry(
         relispartition: entry.relispartition,
         relpartbound: entry.relpartbound.clone(),
         partitioned_table: entry.partitioned_table.clone(),
+        partition_spec: entry.partition_spec.clone(),
     }
 }
 
@@ -1613,6 +1629,7 @@ impl CatalogLookup for LazyCatalogLookup {
             relispartition: entry.relispartition,
             relpartbound: entry.relpartbound.clone(),
             partitioned_table: entry.partitioned_table.clone(),
+            partition_spec: entry.partition_spec.clone(),
         })
     }
 
@@ -1663,10 +1680,20 @@ impl CatalogLookup for LazyCatalogLookup {
         source_type_oid: u32,
         target_type_oid: u32,
     ) -> Option<PgCastRow> {
-        backend_catcache(&self.db, self.client_id, self.txn_ctx)
-            .ok()?
-            .cast_by_source_target(source_type_oid, target_type_oid)
-            .cloned()
+        search_sys_cache2_db(
+            &self.db,
+            self.client_id,
+            self.txn_ctx,
+            SysCacheId::CastSourceTarget,
+            oid_key(source_type_oid),
+            oid_key(target_type_oid),
+        )
+        .ok()?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Cast(row) => Some(row),
+            _ => None,
+        })
     }
 
     fn cast_rows(&self) -> Vec<PgCastRow> {
@@ -2279,6 +2306,14 @@ impl CatalogLookup for LazyCatalogLookup {
         &self,
         relation_oid: u32,
     ) -> Vec<crate::backend::parser::BoundIndexRelation> {
+        self.index_relations_for_heap_with_cache(relation_oid, &RefCell::new(BTreeMap::new()))
+    }
+
+    fn index_relations_for_heap_with_cache(
+        &self,
+        relation_oid: u32,
+        index_expr_cache: &RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>,
+    ) -> Vec<crate::backend::parser::BoundIndexRelation> {
         let heap_relation = self.relation_by_oid(relation_oid);
         relation_get_index_list(&self.db, self.client_id, self.txn_ctx, relation_oid)
             .into_iter()
@@ -2286,11 +2321,12 @@ impl CatalogLookup for LazyCatalogLookup {
                 let entry =
                     relation_entry_by_oid(&self.db, self.client_id, self.txn_ctx, index_oid)?;
                 let class = class_row_by_oid(&self.db, self.client_id, self.txn_ctx, index_oid)?;
-                crate::backend::parser::bound_index_relation_from_relcache_entry_with_heap(
+                crate::backend::parser::bound_index_relation_from_relcache_entry_with_heap_and_cache(
                     class.relname,
                     &entry,
                     self,
                     heap_relation.as_ref(),
+                    Some(index_expr_cache),
                 )
             })
             .collect()

@@ -7,7 +7,7 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, column_desc};
 use crate::backend::executor::RelationDesc;
-use crate::backend::parser::SqlType;
+use crate::backend::parser::{LoweredPartitionSpec, SqlType};
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
 use crate::include::access::brin::BrinOptions;
@@ -400,6 +400,7 @@ pub struct RelCacheEntry {
     pub relforcerowsecurity: bool,
     pub desc: RelationDesc,
     pub partitioned_table: Option<PgPartitionedTableRow>,
+    pub partition_spec: Option<LoweredPartitionSpec>,
     pub index: Option<IndexRelCacheEntry>,
 }
 
@@ -584,6 +585,7 @@ impl RelCache {
                 relforcerowsecurity: class.relforcerowsecurity,
                 desc: RelationDesc { columns },
                 partitioned_table: catcache.partitioned_table_row(class.oid).cloned(),
+                partition_spec: None,
                 index: matches!(class.relkind, 'i' | 'I').then(|| {
                     let Some(index) = index_rows.iter().find(|row| row.indexrelid == class.oid)
                     else {
@@ -817,6 +819,7 @@ fn from_catalog_entry(entry: &CatalogEntry, support_lookup: &IndexSupportLookup)
         relforcerowsecurity: entry.relforcerowsecurity,
         desc: entry.desc.clone(),
         partitioned_table: entry.partitioned_table.clone(),
+        partition_spec: None,
         index: entry.index_meta.as_ref().map(|index| {
             let support = support_lookup.resolve(&index.indclass);
             IndexRelCacheEntry {
