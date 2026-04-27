@@ -32135,6 +32135,20 @@ fn foreign_data_usage_grant_revoke_updates_acl_views() {
             ],
         ]
     );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select has_foreign_data_wrapper_privilege('fdw_acl_role', 'fdw_acl', 'USAGE'), \
+                    has_server_privilege('fdw_acl_role', 'fdw_acl_srv', 'USAGE'), \
+                    has_server_privilege('fdw_acl_srv', 'USAGE')",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true)
+        ]]
+    );
 
     db.execute(
         1,
@@ -32156,6 +32170,70 @@ fn foreign_data_usage_grant_revoke_updates_acl_views() {
         ),
         vec![vec![Value::Int64(0)]]
     );
+}
+
+#[test]
+fn foreign_data_usage_controls_server_mapping_and_table_creation() {
+    let base = temp_dir("foreign_data_usage_checks");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create role fdw_usage_role").unwrap();
+    db.execute(1, "create foreign data wrapper fdw_usage")
+        .unwrap();
+
+    db.execute(1, "set role fdw_usage_role").unwrap();
+    match db.execute(1, "create server denied_srv foreign data wrapper fdw_usage") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "42501");
+            assert_eq!(
+                message,
+                "permission denied for foreign-data wrapper fdw_usage"
+            );
+        }
+        other => panic!("expected FDW usage error, got {other:?}"),
+    }
+    db.execute(1, "reset role").unwrap();
+
+    db.execute(
+        1,
+        "grant usage on foreign data wrapper fdw_usage to fdw_usage_role",
+    )
+    .unwrap();
+    db.execute(1, "set role fdw_usage_role").unwrap();
+    db.execute(
+        1,
+        "create server allowed_srv foreign data wrapper fdw_usage",
+    )
+    .unwrap();
+    db.execute(1, "reset role").unwrap();
+
+    db.execute(1, "create server owner_srv foreign data wrapper fdw_usage")
+        .unwrap();
+    db.execute(
+        1,
+        "grant usage on foreign server owner_srv to fdw_usage_role",
+    )
+    .unwrap();
+    db.execute(1, "set role fdw_usage_role").unwrap();
+    match db.execute(1, "create user mapping for public server owner_srv") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "42501");
+            assert_eq!(message, "must be owner of foreign server owner_srv");
+        }
+        other => panic!("expected server owner error, got {other:?}"),
+    }
+    db.execute(1, "create user mapping for current_user server owner_srv")
+        .unwrap();
+    db.execute(
+        1,
+        "create foreign table fdw_usage_table (a int4) server owner_srv",
+    )
+    .unwrap();
+    db.execute(1, "reset role").unwrap();
 }
 
 #[test]

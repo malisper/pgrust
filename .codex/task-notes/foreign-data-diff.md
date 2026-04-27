@@ -46,12 +46,15 @@ Tests run:
 - `scripts/cargo_isolated.sh test --lib --quiet parse_grant_usage_on_foreign`
 - `scripts/cargo_isolated.sh test --lib --quiet parse_revoke_all_on_foreign_data_wrapper_statement`
 - `scripts/run_regression.sh --skip-build --port 55436 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-fdw-acl`
+- `scripts/cargo_isolated.sh test --lib --quiet concat_right_and_quote_functions_are_available_to_sql`
+- `scripts/cargo_isolated.sh test --lib --quiet foreign_data_usage_controls_server_mapping_and_table_creation`
+- `scripts/run_regression.sh --skip-build --port 55439 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-priv-funcs`
 
 Remaining:
-`foreign_data` still fails, but improved to 260/539 matching queries. Biggest
+`foreign_data` still fails, but improved to 278/539 matching queries. Biggest
 remaining groups:
-- `pg_catalog.quote_ident` for psql `\dew+`, `\des+`, `\deu+` descriptions
-- `has_foreign_data_wrapper_privilege` and `has_server_privilege`
+- `pg_roles` synthetic view for OID-subquery privilege checks
+- `pg_catalog.pg_table_is_visible` and `pg_catalog.pg_get_partkeydef`
 - FDW dependency reporting for handler functions and owners
 - `IMPORT FOREIGN SCHEMA`
 - foreign table DDL/partition forms and psql helper functions

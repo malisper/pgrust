@@ -1635,6 +1635,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::ToBin
             | BuiltinScalarFunction::ToOct
             | BuiltinScalarFunction::ToHex
+            | BuiltinScalarFunction::QuoteIdent
             | BuiltinScalarFunction::QuoteLiteral
             | BuiltinScalarFunction::BitcastIntegerToFloat4
             | BuiltinScalarFunction::BitcastBigintToFloat8
@@ -1711,6 +1712,8 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::HashMacAddr8Extended
             | BuiltinScalarFunction::Div
             | BuiltinScalarFunction::Mod => args.len() == 2,
+            BuiltinScalarFunction::HasForeignDataWrapperPrivilege
+            | BuiltinScalarFunction::HasServerPrivilege => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::Float8Accum | BuiltinScalarFunction::Float8Combine => {
                 args.len() == 2
             }
@@ -3473,6 +3476,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("unistr", BuiltinScalarFunction::Unistr),
         ("ascii", BuiltinScalarFunction::Ascii),
         ("chr", BuiltinScalarFunction::Chr),
+        ("quote_ident", BuiltinScalarFunction::QuoteIdent),
         ("quote_literal", BuiltinScalarFunction::QuoteLiteral),
         ("replace", BuiltinScalarFunction::Replace),
         ("split_part", BuiltinScalarFunction::SplitPart),
@@ -3505,6 +3509,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("to_regnamespace", BuiltinScalarFunction::ToRegNamespace),
         ("to_regcollation", BuiltinScalarFunction::ToRegCollation),
         ("format_type", BuiltinScalarFunction::FormatType),
+        (
+            "has_foreign_data_wrapper_privilege",
+            BuiltinScalarFunction::HasForeignDataWrapperPrivilege,
+        ),
+        (
+            "has_server_privilege",
+            BuiltinScalarFunction::HasServerPrivilege,
+        ),
         ("regproc_to_text", BuiltinScalarFunction::RegProcToText),
         ("regprocout", BuiltinScalarFunction::RegProcToText),
         ("regclass_to_text", BuiltinScalarFunction::RegClassToText),

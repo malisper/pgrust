@@ -20902,14 +20902,14 @@ fn left_and_repeat_follow_postgres_text_semantics() {
 }
 
 #[test]
-fn concat_right_and_quote_literal_are_available_to_sql() {
+fn concat_right_and_quote_functions_are_available_to_sql() {
     let base = temp_dir("text_builtins");
     let txns = TransactionManager::new_durable(&base).unwrap();
     match run_sql(
         &base,
         &txns,
         INVALID_TRANSACTION_ID,
-        "select concat('one', 2, true), concat_ws('#', 'one', 2, null, false), right('ahoj', 2), quote_literal(E'\\\\')",
+        "select concat('one', 2, true), concat_ws('#', 'one', 2, null, false), right('ahoj', 2), quote_literal(E'\\\\'), quote_ident('needs space'), quote_ident('plain_name')",
     )
     .unwrap()
     {
@@ -20921,6 +20921,8 @@ fn concat_right_and_quote_literal_are_available_to_sql() {
                     Value::Text("one#2#f".into()),
                     Value::Text("oj".into()),
                     Value::Text("E'\\\\'".into()),
+                    Value::Text("\"needs space\"".into()),
+                    Value::Text("plain_name".into()),
                 ]]
             );
         }
