@@ -3424,6 +3424,7 @@ pub struct GrantRoleMembershipStatement {
     pub role_names: Vec<String>,
     pub grantee_names: Vec<String>,
     pub admin_option: bool,
+    pub admin_option_specified: bool,
     pub inherit_option: Option<bool>,
     pub set_option: Option<bool>,
     pub granted_by: Option<RoleGrantorSpec>,

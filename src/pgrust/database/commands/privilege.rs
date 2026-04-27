@@ -6,6 +6,7 @@ use crate::backend::parser::{
     ParseError, RevokeObjectStatement, RevokeRoleMembershipStatement, RoleGrantorSpec, RoutineKind,
     parse_type_name, resolve_raw_type_name,
 };
+use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::pg_proc::{is_bootstrap_proc_oid, set_bootstrap_proc_execute_acl};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_NAME, CURRENT_DATABASE_OID, PgAuthIdRow,
@@ -2194,6 +2195,7 @@ impl Database {
                 if stmt.admin_option {
                     reject_circular_admin_grant(&auth_catalog, role.oid, grantor_oid, grantee.oid)?;
                 }
+                let grant_options = GrantRoleMembershipOptions::from(stmt);
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -2209,9 +2211,8 @@ impl Database {
                     role.oid,
                     grantee.oid,
                     grantor_oid,
-                    stmt.admin_option,
-                    stmt.inherit_option.unwrap_or(true),
-                    stmt.set_option.unwrap_or(true),
+                    grantee.rolinherit,
+                    grant_options,
                     &ctx,
                     catalog_effects,
                 )?;
@@ -2275,15 +2276,18 @@ impl Database {
                     .cloned()
                     .collect::<Vec<_>>();
                 let grantee = lookup_membership_grantee(&auth_catalog, grantee_name)?;
-                let existing_index = role_rows
+                let Some(existing_index) = role_rows
                     .iter()
                     .position(|row| row.member == grantee.oid && row.grantor == grantor_oid)
-                    .ok_or_else(|| {
-                        ExecError::Parse(role_management_error(format!(
-                            "role grant does not exist: \"{}\" to \"{}\"",
-                            role.rolname, grantee.rolname
-                        )))
-                    })?;
+                else {
+                    push_warning(format!(
+                        "role \"{}\" has not been granted membership in role \"{}\" by role \"{}\"",
+                        grantee.rolname,
+                        role.rolname,
+                        role_name_for_oid(self, &auth_catalog, grantor_oid)
+                    ));
+                    continue;
+                };
                 let planned_actions =
                     plan_role_membership_revoke(&role_rows, existing_index, stmt)?;
                 for (row, action) in role_rows.iter().zip(planned_actions.iter()) {
@@ -2583,17 +2587,30 @@ fn upsert_role_membership_in_transaction(
     roleid: u32,
     member: u32,
     grantor: u32,
-    admin_option: bool,
-    inherit_option: bool,
-    set_option: bool,
+    member_inherit_default: bool,
+    options: GrantRoleMembershipOptions,
     ctx: &CatalogWriteContext,
     catalog_effects: &mut Vec<CatalogMutationEffect>,
 ) -> Result<(), ExecError> {
-    if auth_catalog
+    if let Some(existing) = auth_catalog
         .memberships()
         .iter()
-        .any(|row| row.roleid == roleid && row.member == member && row.grantor == grantor)
+        .find(|row| row.roleid == roleid && row.member == member && row.grantor == grantor)
     {
+        let admin_option = if options.admin_option_specified {
+            options.admin_option
+        } else {
+            existing.admin_option
+        };
+        let inherit_option = options.inherit_option.unwrap_or(existing.inherit_option);
+        let set_option = options.set_option.unwrap_or(existing.set_option);
+        if admin_option == existing.admin_option
+            && inherit_option == existing.inherit_option
+            && set_option == existing.set_option
+        {
+            push_role_membership_duplicate_notice(db, auth_catalog, roleid, member, grantor);
+            return Ok(());
+        }
         let (_, effect) = db
             .shared_catalog
             .write()
@@ -2609,6 +2626,13 @@ fn upsert_role_membership_in_transaction(
             .map_err(map_role_grant_error)?;
         catalog_effects.push(effect);
     } else {
+        let admin_option = if options.admin_option_specified {
+            options.admin_option
+        } else {
+            false
+        };
+        let inherit_option = options.inherit_option.unwrap_or(member_inherit_default);
+        let set_option = options.set_option.unwrap_or(true);
         let (_, effect) = db
             .shared_catalog
             .write()
@@ -2629,12 +2653,46 @@ fn upsert_role_membership_in_transaction(
                     member,
                     &member_name(db, auth_catalog, member),
                     roleid,
-                    &role_name(db, auth_catalog, roleid),
+                    &role_name_for_oid(db, auth_catalog, roleid),
                 )
             })?;
         catalog_effects.push(effect);
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct GrantRoleMembershipOptions {
+    admin_option: bool,
+    admin_option_specified: bool,
+    inherit_option: Option<bool>,
+    set_option: Option<bool>,
+}
+
+impl From<&GrantRoleMembershipStatement> for GrantRoleMembershipOptions {
+    fn from(stmt: &GrantRoleMembershipStatement) -> Self {
+        Self {
+            admin_option: stmt.admin_option,
+            admin_option_specified: stmt.admin_option_specified,
+            inherit_option: stmt.inherit_option,
+            set_option: stmt.set_option,
+        }
+    }
+}
+
+fn push_role_membership_duplicate_notice(
+    db: &Database,
+    auth_catalog: &AuthCatalog,
+    roleid: u32,
+    member: u32,
+    grantor: u32,
+) {
+    push_notice(format!(
+        "role \"{}\" has already been granted membership in role \"{}\" by role \"{}\"",
+        member_name(db, auth_catalog, member),
+        role_name_for_oid(db, auth_catalog, roleid),
+        role_name_for_oid(db, auth_catalog, grantor)
+    ));
 }
 
 fn lookup_membership_grantee(
@@ -2705,7 +2763,6 @@ fn resolve_role_grantor(
             });
         }
         if grantor.oid != BOOTSTRAP_SUPERUSER_OID
-            && grantor.oid != role.oid
             && !catalog
                 .memberships()
                 .iter()
@@ -3025,7 +3082,7 @@ fn map_named_role_membership_error(
     }
 }
 
-fn role_name(_db: &Database, auth_catalog: &AuthCatalog, role_oid: u32) -> String {
+fn role_name_for_oid(_db: &Database, auth_catalog: &AuthCatalog, role_oid: u32) -> String {
     auth_catalog
         .role_by_oid(role_oid)
         .map(|row| row.rolname.clone())
@@ -3033,7 +3090,7 @@ fn role_name(_db: &Database, auth_catalog: &AuthCatalog, role_oid: u32) -> Strin
 }
 
 fn member_name(db: &Database, auth_catalog: &AuthCatalog, member_oid: u32) -> String {
-    role_name(db, auth_catalog, member_oid)
+    role_name_for_oid(db, auth_catalog, member_oid)
 }
 
 fn type_namespace_visible(namespace_oid: u32, search_path: &[String]) -> bool {
@@ -3187,6 +3244,43 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_grant_role_membership_emits_notice_without_clearing_options() {
+        let base = temp_dir("grant_role_duplicate_notice");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        crate::backend::utils::misc::notices::take_notices();
+        session.execute(&db, "create role parent").unwrap();
+        session.execute(&db, "create role grantee").unwrap();
+        session
+            .execute(&db, "grant parent to grantee with admin option")
+            .unwrap();
+        crate::backend::utils::misc::notices::take_notices();
+
+        session.execute(&db, "grant parent to grantee").unwrap();
+
+        let notices = crate::backend::utils::misc::notices::take_notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].severity, "NOTICE");
+        assert_eq!(
+            notices[0].message,
+            "role \"grantee\" has already been granted membership in role \"parent\" by role \"postgres\""
+        );
+
+        let parent_oid = role_oid(&db, "parent");
+        let grantee_oid = role_oid(&db, "grantee");
+        let membership = db
+            .catalog
+            .read()
+            .catcache()
+            .unwrap()
+            .auth_members_rows()
+            .into_iter()
+            .find(|row| row.roleid == parent_oid && row.member == grantee_oid)
+            .unwrap();
+        assert!(membership.admin_option);
+    }
+
+    #[test]
     fn grant_role_membership_records_explicit_grantor() {
         let base = temp_dir("grant_role_grantor");
         let db = Database::open(&base, 16).unwrap();
@@ -3278,6 +3372,64 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn explicit_role_grantor_cannot_be_target_role_without_admin_option() {
+        let base = temp_dir("grant_role_self_grantor_admin");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role parent").unwrap();
+        session.execute(&db, "create role member").unwrap();
+
+        let err = session
+            .execute(
+                &db,
+                "grant parent to member with admin option granted by parent",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message, detail, ..
+            } => {
+                assert_eq!(
+                    message,
+                    "permission denied to grant privileges as role \"parent\""
+                );
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("The grantor must have the ADMIN option on role \"parent\".")
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn revoke_missing_role_membership_emits_warning() {
+        let base = temp_dir("revoke_role_missing_warning");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        crate::backend::utils::misc::notices::take_notices();
+        session.execute(&db, "create role parent").unwrap();
+        session.execute(&db, "create role grantor").unwrap();
+        session.execute(&db, "create role grantee").unwrap();
+        session
+            .execute(&db, "grant parent to grantor with admin option")
+            .unwrap();
+        crate::backend::utils::misc::notices::take_notices();
+
+        session
+            .execute(&db, "revoke parent from grantee granted by grantor")
+            .unwrap();
+
+        let notices = crate::backend::utils::misc::notices::take_notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].severity, "WARNING");
+        assert_eq!(
+            notices[0].message,
+            "role \"grantee\" has not been granted membership in role \"parent\" by role \"grantor\""
+        );
     }
 
     #[test]

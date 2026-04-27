@@ -6899,6 +6899,7 @@ fn build_grant_role_membership(sql: &str) -> Result<GrantRoleMembershipStatement
         role_names: parse_identifier_list(role_names)?,
         grantee_names: parse_identifier_list(grantee_names_text)?,
         admin_option: false,
+        admin_option_specified: false,
         inherit_option: None,
         set_option: None,
         granted_by: granted_by_clause.map(parse_role_grantor_spec).transpose()?,
@@ -6908,6 +6909,7 @@ fn build_grant_role_membership(sql: &str) -> Result<GrantRoleMembershipStatement
         let lowered = with_clause.to_ascii_lowercase();
         if lowered == "admin option" {
             stmt.admin_option = true;
+            stmt.admin_option_specified = true;
         } else {
             for option in with_clause.split(',') {
                 let option = option.trim();
@@ -6921,7 +6923,10 @@ fn build_grant_role_membership(sql: &str) -> Result<GrantRoleMembershipStatement
                     });
                 }
                 match name.to_ascii_lowercase().as_str() {
-                    "admin" => stmt.admin_option = parse_grant_bool(value)?,
+                    "admin" => {
+                        stmt.admin_option = parse_grant_bool(value)?;
+                        stmt.admin_option_specified = true;
+                    }
                     "inherit" => stmt.inherit_option = Some(parse_grant_bool(value)?),
                     "set" => stmt.set_option = Some(parse_grant_bool(value)?),
                     _ => {
@@ -14853,6 +14858,7 @@ fn build_alter_group(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                 role_names: vec![role_name],
                 grantee_names,
                 admin_option: false,
+                admin_option_specified: false,
                 inherit_option: None,
                 set_option: None,
                 granted_by: None,
