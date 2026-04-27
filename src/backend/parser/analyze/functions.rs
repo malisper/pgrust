@@ -1,4 +1,5 @@
 use super::*;
+use crate::backend::parser::gram::{SQL_JSON_ARRAYAGG_FUNC, SQL_JSON_OBJECTAGG_FUNC};
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
@@ -1447,6 +1448,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgRustTestInt44Out => args.len() == 1,
             BuiltinScalarFunction::PgRustTestPtInWidget => args.len() == 2,
             BuiltinScalarFunction::CurrentSetting => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgSettingsGetFlags => args.len() == 1,
             BuiltinScalarFunction::AmValidate | BuiltinScalarFunction::BtEqualImage => {
                 args.len() == 1
             }
@@ -1784,6 +1786,13 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ArrayToJson | BuiltinScalarFunction::RowToJson => {
                 matches!(args.len(), 1 | 2)
             }
+            BuiltinScalarFunction::SqlJsonConstructor
+            | BuiltinScalarFunction::SqlJsonScalar
+            | BuiltinScalarFunction::SqlJsonSerialize => args.len() == 1,
+            BuiltinScalarFunction::SqlJsonObject | BuiltinScalarFunction::SqlJsonArray => {
+                !args.is_empty()
+            }
+            BuiltinScalarFunction::SqlJsonIsJson => args.len() == 2,
             BuiltinScalarFunction::JsonBuildArray | BuiltinScalarFunction::JsonBuildObject => true,
             BuiltinScalarFunction::JsonObject => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::JsonPopulateRecord
@@ -4605,8 +4614,10 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         "max" => Some(AggFunc::Max),
         "string_agg" => Some(AggFunc::StringAgg),
         "array_agg" => Some(AggFunc::ArrayAgg),
+        SQL_JSON_ARRAYAGG_FUNC | "json_arrayagg" => Some(AggFunc::JsonAgg),
         "json_agg" => Some(AggFunc::JsonAgg),
         "jsonb_agg" => Some(AggFunc::JsonbAgg),
+        SQL_JSON_OBJECTAGG_FUNC | "json_objectagg" => Some(AggFunc::JsonObjectAgg),
         "json_object_agg" => Some(AggFunc::JsonObjectAgg),
         "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
         "range_agg" => Some(AggFunc::RangeAgg),

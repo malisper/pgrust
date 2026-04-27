@@ -1481,11 +1481,17 @@ impl Database {
                 database_oid: self.database_oid,
                 state: SessionActivityState::Idle,
                 query: String::new(),
+                query_id: None,
             },
         );
     }
 
-    pub(crate) fn set_session_query_active(&self, client_id: ClientId, query: &str) {
+    pub(crate) fn set_session_query_active(
+        &self,
+        client_id: ClientId,
+        query: &str,
+        query_id: Option<i64>,
+    ) {
         let mut activity = self.cluster.session_activity.write();
         let entry = activity
             .entry(client_id)
@@ -1494,10 +1500,12 @@ impl Database {
                 database_oid: self.database_oid,
                 state: SessionActivityState::Idle,
                 query: String::new(),
+                query_id: None,
             });
         entry.database_oid = self.database_oid;
         entry.state = SessionActivityState::Active;
         entry.query = query.to_string();
+        entry.query_id = query_id;
     }
 
     pub(crate) fn set_session_query_idle(&self, client_id: ClientId) {
@@ -1505,6 +1513,7 @@ impl Database {
             entry.database_oid = self.database_oid;
             entry.state = SessionActivityState::Idle;
             entry.query.clear();
+            entry.query_id = None;
         }
     }
 
@@ -1685,6 +1694,7 @@ impl Database {
                     ),
                     Value::Text(usename.into()),
                     Value::Text(entry.state.as_str().into()),
+                    entry.query_id.map(Value::Int64).unwrap_or(Value::Null),
                     Value::Text(entry.query.into()),
                     Value::Text("client backend".into()),
                 ]
@@ -1695,6 +1705,7 @@ impl Database {
             Value::Text(self.current_database_name().into()),
             Value::Text("postgres".into()),
             Value::Text("".into()),
+            Value::Null,
             Value::Text("".into()),
             Value::Text("checkpointer".into()),
         ]);

@@ -877,6 +877,7 @@ fn range_proc_row(
         prosrc: prosrc.into(),
         probin: None,
         prosqlbody: None,
+        proconfig: None,
     }
 }
 
