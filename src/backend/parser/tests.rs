@@ -2487,6 +2487,28 @@ fn parse_create_statistics_without_explicit_name() {
 }
 
 #[test]
+fn parse_create_statistics_function_call_targets() {
+    let stmt = parse_statement(
+        "create statistics s on date_trunc('day', d), public.upper(b), (a + b) from items",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateStatistics(CreateStatisticsStatement {
+            if_not_exists: false,
+            statistics_name: Some("s".into()),
+            kinds: vec![],
+            targets: vec![
+                "date_trunc('day', d)".into(),
+                "public.upper(b)".into(),
+                "(a + b)".into(),
+            ],
+            from_clause: "items".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_statistics_ddl_statements() {
     assert!(matches!(
         parse_statement("alter statistics if exists public.tst rename to public.tst2").unwrap(),
@@ -6103,6 +6125,21 @@ fn parse_drop_function_statement_with_signature() {
             function_name: "p2text".into(),
             arg_types: vec!["p2".into()],
             cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_drop_function_statement_without_signature() {
+    let stmt = parse_statement("drop function if exists public.p2text cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropFunction(DropFunctionStatement {
+            if_exists: true,
+            schema_name: Some("public".into()),
+            function_name: "p2text".into(),
+            arg_types: vec![],
+            cascade: true,
         })
     );
 }

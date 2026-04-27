@@ -30251,6 +30251,27 @@ fn drop_function_uses_search_path_and_signature() {
 }
 
 #[test]
+fn drop_function_without_signature_drops_unique_match() {
+    let base = temp_dir("drop_function_without_signature");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function tftest(x int4) returns int4 language sql as $$ select x $$",
+        )
+        .unwrap();
+    session.execute(&db, "drop function tftest").unwrap();
+
+    let visible = db.backend_catcache(1, None).unwrap();
+    assert!(
+        visible.proc_rows_by_name("tftest").is_empty(),
+        "expected bare DROP FUNCTION to drop the unique matching function"
+    );
+}
+
+#[test]
 fn create_and_drop_procedure_uses_pg_proc_procedure_kind() {
     let base = temp_dir("create_drop_procedure_catalog");
     let db = Database::open(&base, 16).unwrap();
