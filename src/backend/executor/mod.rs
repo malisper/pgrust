@@ -82,6 +82,7 @@ pub(crate) use expr_casts::render_interval_text;
 pub(crate) use expr_casts::render_interval_text_with_config;
 pub(crate) use expr_casts::render_pg_lsn_text;
 pub(crate) use expr_casts::{cast_value, cast_value_with_config};
+pub(crate) use expr_datetime::current_timestamp_value;
 pub use expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 pub(crate) use expr_geometry::eval_geometry_function;
 pub(crate) use expr_geometry::geometry_input_error_message;
@@ -110,6 +111,7 @@ pub(crate) use expr_range::{
     parse_range_text,
 };
 pub use expr_range::{render_range_text, render_range_text_with_config};
+pub(crate) use expr_string::eval_to_char_function;
 pub(crate) use expr_txid::{
     cast_text_to_txid_snapshot, eval_txid_builtin_function, is_txid_snapshot_type_oid,
 };
@@ -117,6 +119,7 @@ pub(crate) use expr_xml::validate_xml_input;
 pub(crate) use nodes::{
     render_explain_expr, render_explain_join_expr, render_explain_projection_expr_with_qualifier,
     render_index_order_by, render_index_scan_condition_with_key_names,
+    render_index_scan_condition_with_key_names_and_runtime_renderer,
     render_verbose_range_support_expr,
 };
 pub use random::PgPrngState;
@@ -387,6 +390,7 @@ pub enum SessionReplicationRole {
 
 pub struct ExecutorContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
+    pub data_dir: Option<std::path::PathBuf>,
     pub txns: std::sync::Arc<parking_lot::RwLock<TransactionManager>>,
     pub txn_waiter: Option<std::sync::Arc<TransactionWaiter>>,
     pub lock_status_provider: Option<std::sync::Arc<dyn LockStatusProvider>>,

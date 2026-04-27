@@ -24,7 +24,10 @@ use crate::backend::libpq::pqformat::{
 };
 use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
-use crate::backend::parser::{CatalogLookup, SelectStatement, Statement};
+use crate::backend::parser::{
+    CatalogLookup, PartitionBoundSpec, PartitionRangeDatumValue, SelectStatement,
+    SerializedPartitionValue, Statement, deserialize_partition_bound, partition_value_to_value,
+};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
 use crate::backend::rewrite::format_view_definition;
 use crate::backend::utils::cache::syscache::backend_catcache;
@@ -41,7 +44,7 @@ use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
 };
 use crate::include::nodes::parsenodes::{CopyFormat, CopyToStatement};
-use crate::include::nodes::primnodes::RelationDesc;
+use crate::include::nodes::primnodes::{RelationDesc, user_attrno};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices};
@@ -339,6 +342,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         {
             return find_last_case_insensitive_token_position(sql, "ON");
         }
+        ExecError::Parse(crate::backend::parser::ParseError::InvalidInsertTargetCount {
+            expected,
+            actual,
+        }) => {
+            return find_insert_arity_error_position(sql, *expected, *actual);
+        }
         ExecError::Parse(crate::backend::parser::ParseError::UngroupedColumn {
             token,
             clause,
@@ -416,6 +425,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(position) = routine_definition_error_position(sql, message) {
                 return Some(position);
             }
+            if let Some(position) = create_table_error_position(sql, message) {
+                return Some(position);
+            }
             if message.starts_with("column \"") && message.contains("WITHOUT OVERLAPS") {
                 return find_without_overlaps_constraint_position(sql);
             }
@@ -462,6 +474,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         )) => {
             if matches!(
                 message.as_str(),
+                "cannot set an array element to DEFAULT" | "cannot set a subfield to DEFAULT"
+            ) {
+                return find_insert_default_indirection_position(sql);
+            }
+            if matches!(
+                message.as_str(),
                 "a column list with SET NULL is only supported for ON DELETE actions"
                     | "a column list with SET DEFAULT is only supported for ON DELETE actions"
             ) {
@@ -474,6 +492,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             name,
         )) => {
             return find_case_insensitive_token_position(sql, name);
+        }
+        ExecError::Parse(crate::backend::parser::ParseError::TempTableInNonTempSchema(schema))
+        | ExecError::Parse(
+            crate::backend::parser::ParseError::OnlyTemporaryRelationsInTemporarySchemas(schema),
+        ) => {
+            return find_case_insensitive_token_position(sql, schema);
         }
         ExecError::Parse(crate::backend::parser::ParseError::ConflictingOrRedundantOptions {
             option,
@@ -563,6 +587,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(position) = routine_definition_error_position(sql, message) {
                 return Some(position);
             }
+            if let Some(position) = create_table_error_position(sql, message) {
+                return Some(position);
+            }
             if message.starts_with("column \"") && message.contains("WITHOUT OVERLAPS") {
                 return find_without_overlaps_constraint_position(sql);
             }
@@ -621,10 +648,185 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             return find_json_literal_position(sql, raw_input)
                 .or_else(|| sql.find(raw_input).map(|index| index + 1));
         }
-        ExecError::XmlInput { raw_input, .. } => raw_input.as_str(),
+        ExecError::XmlInput {
+            raw_input, message, ..
+        } => {
+            if message == "unsupported XML feature" {
+                return None;
+            }
+            raw_input.as_str()
+        }
         _ => return None,
     };
     find_error_value_position(sql, value)
+}
+
+fn create_table_error_position(sql: &str, message: &str) -> Option<usize> {
+    match message {
+        "only temporary relations may be created in temporary schemas" => {
+            find_case_insensitive_token_position(sql, "pg_temp")
+        }
+        "cannot use column reference in DEFAULT expression" => {
+            find_default_expr_column_ref_position(sql)
+        }
+        "aggregate functions are not allowed in DEFAULT expressions" => {
+            find_default_expr_function_call_position(sql)
+        }
+        "window functions are not allowed in DEFAULT expressions" => {
+            find_default_expr_function_call_position(sql)
+        }
+        "cannot use subquery in DEFAULT expression" => {
+            find_default_expr_keyword_position(sql, "select")
+        }
+        "set-returning functions are not allowed in DEFAULT expressions" => {
+            find_default_expr_function_call_position(sql)
+        }
+        "cannot use column reference in partition bound expression" => {
+            find_partition_bound_identifier_position(sql, false)
+        }
+        "aggregate functions are not allowed in partition bound"
+        | "window functions are not allowed in partition bound"
+        | "set-returning functions are not allowed in partition bound" => {
+            find_partition_bound_identifier_position(sql, true)
+        }
+        "cannot use subquery in partition bound" => {
+            find_partition_bound_keyword_position(sql, "select")
+        }
+        "invalid bound specification for a list partition"
+        | "invalid bound specification for a range partition"
+        | "invalid bound specification for a hash partition" => {
+            find_partition_bound_kind_position(sql)
+        }
+        "FROM must specify exactly one value per partitioning column" => {
+            find_partition_bound_keyword_position(sql, "FROM")
+        }
+        "TO must specify exactly one value per partitioning column" => {
+            find_partition_bound_keyword_position(sql, "TO")
+        }
+        "cannot specify NULL in range bound" => find_partition_bound_keyword_position(sql, "null"),
+        "modulus for hash partition must be an integer value greater than zero"
+        | "remainder for hash partition must be a non-negative integer"
+        | "remainder for hash partition must be less than modulus" => {
+            find_partition_bound_keyword_position(sql, "MODULUS")
+        }
+        _ => None,
+    }
+    .or_else(|| {
+        if message.starts_with("column \"") && message.contains("named in partition key") {
+            find_partition_key_expr_position(sql)
+        } else if message.starts_with("cannot use system column ") {
+            find_partition_key_expr_position(sql)
+        } else if message.starts_with("specified value cannot be cast to type ") {
+            find_partition_bound_value_position(sql)
+        } else {
+            None
+        }
+    })
+}
+
+fn find_default_expr_start(sql: &str) -> Option<usize> {
+    let default_position = find_case_insensitive_token_position(sql, "DEFAULT")?;
+    Some(default_position - 1 + "DEFAULT".len())
+}
+
+fn find_default_expr_keyword_position(sql: &str, keyword: &str) -> Option<usize> {
+    let start = find_default_expr_start(sql)?;
+    let relative = find_case_insensitive_token_position(&sql[start..], keyword)?;
+    Some(start + relative)
+}
+
+fn find_default_expr_column_ref_position(sql: &str) -> Option<usize> {
+    let start = find_default_expr_start(sql)?;
+    find_default_expr_identifier_position(sql, start, false)
+}
+
+fn find_default_expr_function_call_position(sql: &str) -> Option<usize> {
+    let start = find_default_expr_start(sql)?;
+    find_default_expr_identifier_position(sql, start, true)
+}
+
+fn find_default_expr_identifier_position(
+    sql: &str,
+    mut index: usize,
+    want_function_call: bool,
+) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'"' {
+            return (!want_function_call).then_some(index + 1);
+        }
+        if !is_sql_identifier_start_byte(byte) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < bytes.len() && is_sql_identifier_continue_byte(bytes[index]) {
+            index += 1;
+        }
+        let mut next = index;
+        while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+            next += 1;
+        }
+        let is_function_call = bytes.get(next) == Some(&b'(');
+        if is_function_call == want_function_call {
+            return Some(start + 1);
+        }
+    }
+    None
+}
+
+fn find_partition_key_expr_position(sql: &str) -> Option<usize> {
+    let start = find_case_insensitive_token_position(sql, "PARTITION BY")?;
+    let open = sql[start - 1..].find('(')? + start;
+    find_default_expr_identifier_position(sql, open, false)
+        .or_else(|| find_default_expr_identifier_position(sql, open, true))
+}
+
+fn find_partition_bound_start(sql: &str) -> Option<usize> {
+    let start = find_case_insensitive_token_position(sql, "FOR VALUES")?;
+    Some(start - 1 + "FOR VALUES".len())
+}
+
+fn find_partition_bound_keyword_position(sql: &str, keyword: &str) -> Option<usize> {
+    let start = find_partition_bound_start(sql)?;
+    let relative = find_case_insensitive_token_position(&sql[start..], keyword)?;
+    Some(start + relative)
+}
+
+fn find_partition_bound_kind_position(sql: &str) -> Option<usize> {
+    find_partition_bound_keyword_position(sql, "FROM")
+        .or_else(|| find_partition_bound_keyword_position(sql, "IN"))
+        .or_else(|| find_partition_bound_keyword_position(sql, "WITH"))
+        .or_else(|| find_partition_bound_keyword_position(sql, "DEFAULT"))
+}
+
+fn find_partition_bound_identifier_position(sql: &str, want_function_call: bool) -> Option<usize> {
+    let start = find_partition_bound_start(sql)?;
+    find_default_expr_identifier_position(sql, start, want_function_call)
+}
+
+fn find_partition_bound_value_position(sql: &str) -> Option<usize> {
+    let start = find_partition_bound_start(sql)?;
+    let bytes = sql.as_bytes();
+    let mut index = start;
+    while index < bytes.len() {
+        if matches!(bytes[index], b'(' | b',') || bytes[index].is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        return Some(index + 1);
+    }
+    None
+}
+
+fn is_sql_identifier_start_byte(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphabetic()
+}
+
+fn is_sql_identifier_continue_byte(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphanumeric()
 }
 
 fn suppress_missing_function_position(sql: &str) -> bool {
@@ -1097,6 +1299,214 @@ fn find_subscripted_assignment_position(sql: &str, target: &str) -> Option<usize
         }
     }
     None
+}
+
+fn find_insert_arity_error_position(sql: &str, expected: usize, actual: usize) -> Option<usize> {
+    if expected > actual {
+        find_insert_target_item_position(sql, actual + 1)
+    } else if actual > expected {
+        find_insert_values_item_position(sql, expected + 1)
+    } else {
+        None
+    }
+}
+
+fn find_insert_default_indirection_position(sql: &str) -> Option<usize> {
+    let ordinal = find_insert_values_default_ordinal(sql)?;
+    find_insert_target_item_position(sql, ordinal)
+}
+
+fn find_insert_target_item_position(sql: &str, ordinal: usize) -> Option<usize> {
+    let source_index = find_ascii_keyword(sql, "values", 0)
+        .or_else(|| find_ascii_keyword(sql, "select", 0))
+        .or_else(|| find_ascii_keyword(sql, "default", 0))?;
+    let open = sql[..source_index].rfind('(')?;
+    let close = find_matching_delimiter(sql, open, b'(', b')')?;
+    if close > source_index {
+        return None;
+    }
+    find_top_level_item_start(sql, open + 1, close, ordinal)
+}
+
+fn find_insert_values_item_position(sql: &str, ordinal: usize) -> Option<usize> {
+    let values_index = find_ascii_keyword(sql, "values", 0)?;
+    let open = sql[values_index..].find('(')? + values_index;
+    let close = find_matching_delimiter(sql, open, b'(', b')')?;
+    find_top_level_item_start(sql, open + 1, close, ordinal)
+}
+
+fn find_insert_values_default_ordinal(sql: &str) -> Option<usize> {
+    let values_index = find_ascii_keyword(sql, "values", 0)?;
+    let open = sql[values_index..].find('(')? + values_index;
+    let close = find_matching_delimiter(sql, open, b'(', b')')?;
+    let mut ordinal = 1;
+    let mut item_start = open + 1;
+    for comma in top_level_commas(sql, open + 1, close) {
+        if sql[item_start..comma]
+            .trim()
+            .eq_ignore_ascii_case("default")
+        {
+            return Some(ordinal);
+        }
+        ordinal += 1;
+        item_start = comma + 1;
+    }
+    sql[item_start..close]
+        .trim()
+        .eq_ignore_ascii_case("default")
+        .then_some(ordinal)
+}
+
+fn find_top_level_item_start(
+    sql: &str,
+    list_start: usize,
+    list_end: usize,
+    ordinal: usize,
+) -> Option<usize> {
+    if ordinal == 0 {
+        return None;
+    }
+    let mut current_ordinal = 1;
+    let mut item_start = list_start;
+    for comma in top_level_commas(sql, list_start, list_end) {
+        if current_ordinal == ordinal {
+            return Some(skip_ascii_whitespace(sql, item_start, comma) + 1);
+        }
+        current_ordinal += 1;
+        item_start = comma + 1;
+    }
+    if current_ordinal == ordinal {
+        return Some(skip_ascii_whitespace(sql, item_start, list_end) + 1);
+    }
+    None
+}
+
+fn top_level_commas(sql: &str, start: usize, end: usize) -> Vec<usize> {
+    let bytes = sql.as_bytes();
+    let mut commas = Vec::new();
+    let mut index = start;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    while index < end {
+        match bytes[index] {
+            b'\'' => index = skip_single_quoted_sql_string(bytes, index, end),
+            b'"' => index = skip_double_quoted_sql_identifier(bytes, index, end),
+            b'(' => {
+                paren_depth += 1;
+                index += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                index += 1;
+            }
+            b'[' => {
+                bracket_depth += 1;
+                index += 1;
+            }
+            b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                index += 1;
+            }
+            b',' if paren_depth == 0 && bracket_depth == 0 => {
+                commas.push(index);
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    commas
+}
+
+fn find_matching_delimiter(sql: &str, open: usize, open_byte: u8, close_byte: u8) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    if bytes.get(open) != Some(&open_byte) {
+        return None;
+    }
+    let mut depth = 1usize;
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => index = skip_single_quoted_sql_string(bytes, index, bytes.len()),
+            b'"' => index = skip_double_quoted_sql_identifier(bytes, index, bytes.len()),
+            byte if byte == open_byte => {
+                depth += 1;
+                index += 1;
+            }
+            byte if byte == close_byte => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn skip_single_quoted_sql_string(bytes: &[u8], mut index: usize, end: usize) -> usize {
+    index += 1;
+    while index < end {
+        if bytes[index] == b'\'' {
+            index += 1;
+            if index < end && bytes[index] == b'\'' {
+                index += 1;
+                continue;
+            }
+            return index;
+        }
+        index += 1;
+    }
+    end
+}
+
+fn skip_double_quoted_sql_identifier(bytes: &[u8], mut index: usize, end: usize) -> usize {
+    index += 1;
+    while index < end {
+        if bytes[index] == b'"' {
+            index += 1;
+            if index < end && bytes[index] == b'"' {
+                index += 1;
+                continue;
+            }
+            return index;
+        }
+        index += 1;
+    }
+    end
+}
+
+fn find_ascii_keyword(sql: &str, keyword: &str, start: usize) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let keyword = keyword.as_bytes();
+    let mut index = start;
+    while index + keyword.len() <= bytes.len() {
+        if &bytes[index..index + keyword.len()] == keyword
+            && is_ascii_keyword_start_boundary(bytes, index)
+            && is_ascii_keyword_end_boundary(bytes, index + keyword.len())
+        {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_ascii_keyword_start_boundary(bytes: &[u8], index: usize) -> bool {
+    index == 0 || !matches!(bytes[index - 1], b'a'..=b'z' | b'0'..=b'9' | b'_')
+}
+
+fn is_ascii_keyword_end_boundary(bytes: &[u8], index: usize) -> bool {
+    index == bytes.len() || !matches!(bytes[index], b'a'..=b'z' | b'0'..=b'9' | b'_')
+}
+
+fn skip_ascii_whitespace(sql: &str, mut start: usize, end: usize) -> usize {
+    while start < end && sql.as_bytes()[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    start
 }
 
 fn find_subscript_expression_position(sql: &str) -> Option<usize> {
@@ -2498,6 +2908,7 @@ fn execute_query_statement(
     }
     if let Ok(Statement::Select(ref select_stmt)) = parsed
         && !raw_select_contains_pg_notify(select_stmt)
+        && !raw_select_contains_writable_cte(select_stmt)
         && !select_sql_requires_command_end_xid_handling(&sql)
     {
         let max_stack_depth_kb = state.session.datetime_config().max_stack_depth_kb;
@@ -3171,7 +3582,8 @@ fn execute_psql_describe_query(
     if lower.contains("from pg_catalog.pg_class c, pg_catalog.pg_inherits i")
         && lower.contains("::pg_catalog.regclass")
     {
-        let columns = if lower.contains("c.relkind") {
+        let include_relkind = psql_describe_inherits_query_includes_relkind(&lower);
+        let columns = if include_relkind {
             vec![
                 QueryColumn::text("regclass"),
                 QueryColumn::text("relkind"),
@@ -3183,7 +3595,21 @@ fn execute_psql_describe_query(
         };
         return Some((
             columns,
-            psql_describe_inherits_query_rows(db, session, sql, lower.contains("c.relkind")),
+            psql_describe_inherits_query_rows(db, session, sql, include_relkind),
+        ));
+    }
+    if lower.contains("from pg_catalog.pg_class c")
+        && lower.contains("join pg_catalog.pg_inherits i")
+        && lower.contains("pg_get_expr(c.relpartbound")
+    {
+        return Some((
+            vec![
+                QueryColumn::text("regclass"),
+                QueryColumn::text("pg_get_expr"),
+                QueryColumn::text("inhdetachpending"),
+                QueryColumn::text("pg_get_partition_constraintdef"),
+            ],
+            psql_describe_partition_of_query_rows(db, session, sql),
         ));
     }
     None
@@ -3359,6 +3785,11 @@ fn format_policy_column_value(
     }
 }
 
+fn psql_describe_inherits_query_includes_relkind(lower_sql: &str) -> bool {
+    lower_sql.contains("select c.oid::pg_catalog.regclass, c.relkind")
+        || lower_sql.contains("select c.oid::regclass, c.relkind")
+}
+
 fn psql_describe_types_query(
     db: &Database,
     session: &Session,
@@ -3459,7 +3890,27 @@ fn psql_describe_inherits_query_rows(
     };
 
     let mut inherits = inherits;
-    inherits.sort_by_key(|row| (row.inhseqno, row.inhrelid));
+    if include_relkind {
+        inherits.sort_by_key(|row| {
+            let name = db
+                .relation_display_name(
+                    session.client_id,
+                    txn_ctx,
+                    search_path.as_deref(),
+                    row.inhrelid,
+                )
+                .unwrap_or_else(|| row.inhrelid.to_string());
+            let is_default = catalog
+                .relation_by_oid(row.inhrelid)
+                .and_then(|child| child.relpartbound)
+                .and_then(|text| deserialize_partition_bound(&text).ok())
+                .map(|bound| psql_partition_bound_is_default(&bound))
+                .unwrap_or(false);
+            (is_default, name)
+        });
+    } else {
+        inherits.sort_by_key(|row| (row.inhseqno, row.inhrelid));
+    }
     inherits
         .into_iter()
         .filter_map(|row| {
@@ -3469,21 +3920,194 @@ fn psql_describe_inherits_query_rows(
                 row.inhrelid
             };
             let relation = db.describe_relation_by_oid(session.client_id, txn_ctx, oid)?;
+            if !include_relkind
+                && lower.contains("c.relkind !=")
+                && matches!(relation.relkind, 'p' | 'I')
+            {
+                return None;
+            }
             let name = db
                 .relation_display_name(session.client_id, txn_ctx, search_path.as_deref(), oid)
                 .unwrap_or_else(|| oid.to_string());
             if include_relkind {
+                let bound = catalog
+                    .relation_by_oid(row.inhrelid)
+                    .and_then(|child| child.relpartbound)
+                    .and_then(|text| deserialize_partition_bound(&text).ok())
+                    .map(|bound| psql_partition_bound_text(&bound))
+                    .unwrap_or_default();
                 Some(vec![
                     Value::Text(name.into()),
                     Value::InternalChar(relation.relkind as u8),
                     Value::Bool(row.inhdetachpending),
-                    Value::Text(String::new().into()),
+                    Value::Text(bound.into()),
                 ])
             } else {
                 Some(vec![Value::Text(name.into())])
             }
         })
         .collect()
+}
+
+fn psql_describe_partition_of_query_rows(
+    db: &Database,
+    session: &Session,
+    sql: &str,
+) -> Vec<Vec<Value>> {
+    let Some(oid) = extract_single_quoted_literal_after(sql, "c.oid =")
+        .and_then(|value| value.parse::<u32>().ok())
+        .or_else(|| extract_quoted_oid(sql))
+    else {
+        return Vec::new();
+    };
+    let txn_ctx = session.catalog_txn_ctx();
+    let search_path = session.configured_search_path();
+    let catalog = session.catalog_lookup(db);
+    let Some(inherits) = catalog.inheritance_parents(oid).into_iter().next() else {
+        return Vec::new();
+    };
+    let parent_name = db
+        .relation_display_name(
+            session.client_id,
+            txn_ctx,
+            search_path.as_deref(),
+            inherits.inhparent,
+        )
+        .unwrap_or_else(|| inherits.inhparent.to_string());
+    let bound = db
+        .describe_relation_by_oid(session.client_id, txn_ctx, oid)
+        .and_then(|relation| relation.relpartbound)
+        .and_then(|text| crate::backend::parser::deserialize_partition_bound(&text).ok())
+        .map(|bound| psql_partition_bound_text(&bound))
+        .unwrap_or_default();
+    vec![vec![
+        Value::Text(parent_name.into()),
+        Value::Text(bound.into()),
+        Value::Bool(inherits.inhdetachpending),
+        Value::Null,
+    ]]
+}
+
+fn psql_partition_bound_text(bound: &PartitionBoundSpec) -> String {
+    match bound {
+        PartitionBoundSpec::List {
+            is_default: true, ..
+        }
+        | PartitionBoundSpec::Range {
+            is_default: true, ..
+        } => "DEFAULT".into(),
+        PartitionBoundSpec::List { values, .. } => format!(
+            "FOR VALUES IN ({})",
+            values
+                .iter()
+                .map(psql_partition_value_text)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        PartitionBoundSpec::Range { from, to, .. } => format!(
+            "FOR VALUES FROM ({}) TO ({})",
+            from.iter()
+                .map(psql_partition_range_datum_text)
+                .collect::<Vec<_>>()
+                .join(", "),
+            to.iter()
+                .map(psql_partition_range_datum_text)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        PartitionBoundSpec::Hash { modulus, remainder } => {
+            format!("FOR VALUES WITH (MODULUS {modulus}, REMAINDER {remainder})")
+        }
+    }
+}
+
+fn psql_partition_bound_is_default(bound: &PartitionBoundSpec) -> bool {
+    matches!(
+        bound,
+        PartitionBoundSpec::List {
+            is_default: true,
+            ..
+        } | PartitionBoundSpec::Range {
+            is_default: true,
+            ..
+        }
+    )
+}
+
+fn psql_partition_range_datum_text(value: &PartitionRangeDatumValue) -> String {
+    match value {
+        PartitionRangeDatumValue::MinValue => "MINVALUE".into(),
+        PartitionRangeDatumValue::MaxValue => "MAXVALUE".into(),
+        PartitionRangeDatumValue::Value(value) => psql_partition_value_text(value),
+    }
+}
+
+fn psql_partition_value_text(value: &SerializedPartitionValue) -> String {
+    match value {
+        SerializedPartitionValue::Null => "NULL".into(),
+        SerializedPartitionValue::Text(text)
+        | SerializedPartitionValue::Json(text)
+        | SerializedPartitionValue::JsonPath(text)
+        | SerializedPartitionValue::Xml(text)
+        | SerializedPartitionValue::Numeric(text)
+        | SerializedPartitionValue::Float64(text) => quote_sql_literal_for_describe(text),
+        SerializedPartitionValue::Int16(value) if *value < 0 => {
+            quote_sql_literal_for_describe(&value.to_string())
+        }
+        SerializedPartitionValue::Int32(value) if *value < 0 => {
+            quote_sql_literal_for_describe(&value.to_string())
+        }
+        SerializedPartitionValue::Int64(value) if *value < 0 => {
+            quote_sql_literal_for_describe(&value.to_string())
+        }
+        SerializedPartitionValue::Int16(value) => value.to_string(),
+        SerializedPartitionValue::Int32(value) => value.to_string(),
+        SerializedPartitionValue::Int64(value) => value.to_string(),
+        SerializedPartitionValue::Money(value) => value.to_string(),
+        SerializedPartitionValue::Bool(value) => value.to_string(),
+        SerializedPartitionValue::Date(_)
+        | SerializedPartitionValue::Time(_)
+        | SerializedPartitionValue::TimeTz { .. }
+        | SerializedPartitionValue::Timestamp(_)
+        | SerializedPartitionValue::TimestampTz(_)
+        | SerializedPartitionValue::Array(_)
+        | SerializedPartitionValue::Range(_)
+        | SerializedPartitionValue::Multirange(_) => {
+            let value = partition_value_to_value(value);
+            let rendered = render_value_for_describe_bound(&value);
+            quote_sql_literal_for_describe(&rendered)
+        }
+        SerializedPartitionValue::Bytea(bytes) | SerializedPartitionValue::Jsonb(bytes) => {
+            let mut out = String::from("'\\\\x");
+            for byte in bytes {
+                out.push_str(&format!("{byte:02x}"));
+            }
+            out.push('\'');
+            out
+        }
+        SerializedPartitionValue::InternalChar(byte) => {
+            quote_sql_literal_for_describe(&(*byte as char).to_string())
+        }
+    }
+}
+
+fn render_value_for_describe_bound(value: &Value) -> String {
+    match value {
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => {
+            crate::backend::executor::render_datetime_value_text(value).unwrap_or_default()
+        }
+        Value::Array(values) => crate::backend::executor::value_io::format_array_text(values),
+        Value::PgArray(array) => crate::backend::executor::value_io::format_array_value_text(array),
+        _ => value.as_text().unwrap_or_default().to_string(),
+    }
+}
+
+fn quote_sql_literal_for_describe(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn psql_describe_statistics_query(
@@ -3857,10 +4481,10 @@ fn psql_describe_tableinfo_query(
             Value::Bool(relhasindex),
             Value::Bool(false),
             Value::Bool(entry.relhastriggers),
+            Value::Bool(entry.relispartition),
             Value::Bool(false),
             Value::Bool(false),
-            Value::Bool(false),
-            Value::Bool(false),
+            Value::Bool(entry.relispartition),
             Value::Text("".into()),
             Value::Int32(0),
             Value::Text(reloftype.into()),
@@ -4062,7 +4686,13 @@ fn psql_describe_columns_query(
                 });
             }
             if include_attdescr {
-                row.push(Value::Null);
+                row.push(catalog_description_value(
+                    db,
+                    session,
+                    oid,
+                    crate::include::catalog::PG_CLASS_RELATION_OID,
+                    i32::from(user_attrno(index)),
+                ));
             }
             row
         })
@@ -5919,6 +6549,38 @@ fn raw_cte_contains_pg_notify(cte: &crate::backend::parser::CommonTableExpr) -> 
     raw_cte_body_contains_pg_notify(&cte.body)
 }
 
+fn raw_select_contains_writable_cte(select_stmt: &crate::backend::parser::SelectStatement) -> bool {
+    select_stmt
+        .with
+        .iter()
+        .any(|cte| raw_cte_body_is_writable(&cte.body))
+        || select_stmt
+            .set_operation
+            .as_ref()
+            .is_some_and(|set_operation| {
+                set_operation
+                    .inputs
+                    .iter()
+                    .any(raw_select_contains_writable_cte)
+            })
+}
+
+fn raw_cte_body_is_writable(body: &crate::backend::parser::CteBody) -> bool {
+    match body {
+        crate::backend::parser::CteBody::Insert(_) => true,
+        crate::backend::parser::CteBody::Select(select_stmt) => {
+            raw_select_contains_writable_cte(select_stmt)
+        }
+        crate::backend::parser::CteBody::Values(values_stmt) => values_stmt
+            .with
+            .iter()
+            .any(|cte| raw_cte_body_is_writable(&cte.body)),
+        crate::backend::parser::CteBody::RecursiveUnion {
+            anchor, recursive, ..
+        } => raw_cte_body_is_writable(anchor) || raw_select_contains_writable_cte(recursive),
+    }
+}
+
 fn raw_cte_body_contains_pg_notify(body: &crate::backend::parser::CteBody) -> bool {
     match body {
         crate::backend::parser::CteBody::Select(select_stmt) => {
@@ -5927,10 +6589,54 @@ fn raw_cte_body_contains_pg_notify(body: &crate::backend::parser::CteBody) -> bo
         crate::backend::parser::CteBody::Values(values_stmt) => {
             raw_values_statement_contains_pg_notify(values_stmt)
         }
+        crate::backend::parser::CteBody::Insert(insert_stmt) => {
+            raw_insert_statement_contains_pg_notify(insert_stmt)
+        }
         crate::backend::parser::CteBody::RecursiveUnion {
             anchor, recursive, ..
         } => raw_cte_body_contains_pg_notify(anchor) || raw_select_contains_pg_notify(recursive),
     }
+}
+
+fn raw_insert_statement_contains_pg_notify(
+    insert_stmt: &crate::backend::parser::InsertStatement,
+) -> bool {
+    insert_stmt.with.iter().any(raw_cte_contains_pg_notify)
+        || match &insert_stmt.source {
+            crate::backend::parser::InsertSource::Values(rows) => {
+                rows.iter().flatten().any(raw_expr_contains_pg_notify)
+            }
+            crate::backend::parser::InsertSource::DefaultValues => false,
+            crate::backend::parser::InsertSource::Select(select_stmt) => {
+                raw_select_contains_pg_notify(select_stmt)
+            }
+        }
+        || insert_stmt.on_conflict.as_ref().is_some_and(|on_conflict| {
+            on_conflict
+                .assignments
+                .iter()
+                .any(|assignment| raw_expr_contains_pg_notify(&assignment.expr))
+                || on_conflict
+                    .where_clause
+                    .as_ref()
+                    .is_some_and(raw_expr_contains_pg_notify)
+                || match &on_conflict.target {
+                    Some(crate::backend::parser::OnConflictTarget::Inference(spec)) => {
+                        spec.elements
+                            .iter()
+                            .any(|elem| raw_expr_contains_pg_notify(&elem.expr))
+                            || spec
+                                .predicate
+                                .as_ref()
+                                .is_some_and(raw_expr_contains_pg_notify)
+                    }
+                    Some(crate::backend::parser::OnConflictTarget::Constraint(_)) | None => false,
+                }
+        })
+        || insert_stmt
+            .returning
+            .iter()
+            .any(|item| raw_expr_contains_pg_notify(&item.expr))
 }
 
 fn raw_values_statement_contains_pg_notify(
@@ -9331,6 +10037,62 @@ ORDER BY 1, 2;";
     }
 
     #[test]
+    fn psql_describe_tableinfo_query_reports_partition_without_rules() {
+        let db = Database::open(temp_dir("describe_tableinfo_partition"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table parted (a int4) partition by list (a)")
+            .unwrap();
+        db.execute(
+            1,
+            "create table parted_1 partition of parted for values in (1)",
+        )
+        .unwrap();
+        let partition = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("parted_1")
+            .unwrap();
+
+        let sql = format!(
+            "select c.relchecks, c.relkind, c.relhasindex, c.relhasrules, \
+                    c.relhastriggers, c.relrowsecurity, c.relforcerowsecurity, \
+                    false as relhasoids, c.relispartition \
+             from pg_catalog.pg_class c where c.oid = '{}'",
+            partition.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(rows[0][3], Value::Bool(false));
+        assert_eq!(rows[0][8], Value::Bool(true));
+    }
+
+    #[test]
+    fn psql_describe_inherits_query_excludes_partitioned_parent() {
+        let db = Database::open(temp_dir("describe_partition_inherits"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table parted (a int4) partition by list (a)")
+            .unwrap();
+        db.execute(
+            1,
+            "create table parted_1 partition of parted for values in (1)",
+        )
+        .unwrap();
+        let partition = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("parted_1")
+            .unwrap();
+
+        let sql = format!(
+            "SELECT c.oid::pg_catalog.regclass \
+             FROM pg_catalog.pg_class c, pg_catalog.pg_inherits i \
+             WHERE c.oid = i.inhparent AND i.inhrelid = '{}' \
+               AND c.relkind != 'p' AND c.relkind != 'I' \
+             ORDER BY inhseqno;",
+            partition.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
     fn psql_describe_statistics_query_returns_statistics_objects_for_relation() {
         let db = Database::open(temp_dir("describe_statistics_objects"), 16).unwrap();
         let session = Session::new(1);
@@ -9705,6 +10467,83 @@ ORDER BY 1, 2;";
     }
 
     #[test]
+    fn exec_error_position_points_at_create_table_schema_name() {
+        let sql = "CREATE TEMP TABLE public.temp_to_perm (a int primary key);";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::TempTableInNonTempSchema("public".into()),
+        );
+
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("public").map(|i| i + 1)
+        );
+
+        let sql = "CREATE UNLOGGED TABLE pg_temp.unlogged3 (a int primary key);";
+        let err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "only temporary relations may be created in temporary schemas".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("pg_temp").map(|i| i + 1)
+        );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_create_table_default_expression_node() {
+        let cases = [
+            (
+                "CREATE TABLE default_expr_column (id int DEFAULT (id));",
+                "cannot use column reference in DEFAULT expression",
+                "id));",
+            ),
+            (
+                "CREATE TABLE default_expr_column (id int DEFAULT (bar.id));",
+                "cannot use column reference in DEFAULT expression",
+                "bar.id",
+            ),
+            (
+                "CREATE TABLE default_expr_agg_column (id int DEFAULT (avg(id)));",
+                "cannot use column reference in DEFAULT expression",
+                "id)));",
+            ),
+            (
+                "CREATE TABLE default_expr_agg (a int DEFAULT (avg(1)));",
+                "aggregate functions are not allowed in DEFAULT expressions",
+                "avg(1)",
+            ),
+            (
+                "CREATE TABLE default_expr_agg (a int DEFAULT (select 1));",
+                "cannot use subquery in DEFAULT expression",
+                "select 1",
+            ),
+            (
+                "CREATE TABLE default_expr_agg (a int DEFAULT (generate_series(1,3)));",
+                "set-returning functions are not allowed in DEFAULT expressions",
+                "generate_series",
+            ),
+        ];
+
+        for (sql, message, token) in cases {
+            let err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+                message: message.into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+
+            assert_eq!(
+                exec_error_position(sql, &err),
+                sql.find(token).map(|i| i + 1),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
     fn exec_error_position_omits_empty_jsonb_tsvector_flag() {
         let sql = "select jsonb_to_tsvector('english', '{\"a\": \"aaa\"}'::jsonb, '\"\"');";
         let err = ExecError::DetailedError {
@@ -9808,6 +10647,50 @@ ORDER BY 1, 2;";
     }
 
     #[test]
+    fn exec_error_position_points_at_insert_arity_mismatch() {
+        let too_few_values = "insert into inserttest (col1, col2, col3) values (DEFAULT, DEFAULT)";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::InvalidInsertTargetCount {
+                expected: 3,
+                actual: 2,
+            },
+        );
+
+        assert_eq!(
+            exec_error_position(too_few_values, &err),
+            too_few_values.find("col3").map(|index| index + 1)
+        );
+
+        let too_many_values = "insert into inserttest (col1) values (1, 2)";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::InvalidInsertTargetCount {
+                expected: 1,
+                actual: 2,
+            },
+        );
+
+        assert_eq!(
+            exec_error_position(too_many_values, &err),
+            too_many_values.rfind('2').map(|index| index + 1)
+        );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_default_indirection_target() {
+        let sql = "insert into inserttest (f3.if1, f3.if2) values (1, default)";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::FeatureNotSupportedMessage(
+                "cannot set a subfield to DEFAULT".into(),
+            ),
+        );
+
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("f3.if2").map(|index| index + 1)
+        );
+    }
+
+    #[test]
     fn exec_error_position_points_at_single_quoted_json_literal_start() {
         let sql = "SELECT '\"abc'::jsonb;";
         let err = ExecError::JsonInput {
@@ -9843,6 +10726,22 @@ ORDER BY 1, 2;";
             detail: None,
             hint: None,
             sqlstate: "22P02",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), None);
+    }
+
+    #[test]
+    fn exec_error_position_omits_unsupported_xml_feature() {
+        let sql = "SELECT table_to_xml('testxmlschema.test1', false, false, '');";
+        let err = ExecError::XmlInput {
+            raw_input: String::new(),
+            message: "unsupported XML feature".into(),
+            detail: Some(
+                "This functionality requires the server to be built with libxml support.".into(),
+            ),
+            context: None,
+            sqlstate: "0A000",
         };
 
         assert_eq!(exec_error_position(sql, &err), None);
@@ -9949,6 +10848,49 @@ ORDER BY 1, 2;";
         .unwrap();
 
         assert_eq!(first_error_response_position(&output), Some(22));
+    }
+
+    #[test]
+    fn simple_query_reports_position_for_insert_arity_error() {
+        let db = Database::open(temp_dir("insert_arity_error_position"), 16).unwrap();
+        db.execute(1, "create table inserttest (col1 int, col2 int, col3 int)")
+            .unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+        let sql = "insert into inserttest (col1, col2, col3) values (DEFAULT, DEFAULT)";
+
+        handle_query(&mut output, &db, &mut state, sql).unwrap();
+
+        assert_eq!(
+            first_error_response_position(&output),
+            sql.find("col3").map(|index| index + 1)
+        );
+    }
+
+    #[test]
+    fn simple_query_reports_position_for_default_indirection_error() {
+        let db = Database::open(temp_dir("insert_default_indirection_position"), 16).unwrap();
+        db.execute(1, "create table inserttest (f2 int[])").unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+        let sql = "insert into inserttest (f2[1], f2[2]) values (1, default)";
+
+        handle_query(&mut output, &db, &mut state, sql).unwrap();
+
+        assert_eq!(
+            first_error_response_position(&output),
+            sql.find("f2[2]").map(|index| index + 1)
+        );
     }
 
     #[test]

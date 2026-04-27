@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::executor::{
     executor_start, render_explain_expr, render_index_order_by,
-    render_index_scan_condition_with_key_names, render_verbose_range_support_expr,
-    set_returning_call_label,
+    render_index_scan_condition_with_key_names,
+    render_index_scan_condition_with_key_names_and_runtime_renderer,
+    render_verbose_range_support_expr, set_returning_call_label,
 };
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
@@ -30,16 +31,27 @@ pub(crate) fn format_explain_lines_with_costs(
     indent: usize,
     analyze: bool,
     show_costs: bool,
-    timing: bool,
+    show_timing: bool,
+    lines: &mut Vec<String>,
+) {
+    format_explain_lines_with_options(state, indent, analyze, show_costs, show_timing, lines);
+}
+
+pub(crate) fn format_explain_lines_with_options(
+    state: &dyn PlanNode,
+    indent: usize,
+    analyze: bool,
+    show_costs: bool,
+    show_timing: bool,
     lines: &mut Vec<String>,
 ) {
     if let Some(child) = state.explain_passthrough() {
-        format_explain_lines_with_costs(child, indent, analyze, show_costs, timing, lines);
+        format_explain_lines_with_options(child, indent, analyze, show_costs, show_timing, lines);
         return;
     }
-    push_explain_state_line(state, indent, analyze, show_costs, timing, lines);
+    push_explain_state_line(state, indent, analyze, show_costs, show_timing, lines);
     state.explain_details(indent, analyze, show_costs, lines);
-    state.explain_children(indent, analyze, show_costs, timing, lines);
+    state.explain_children(indent, analyze, show_costs, show_timing, lines);
 }
 
 pub(crate) fn push_explain_line(
@@ -243,28 +255,21 @@ fn push_explain_state_line(
     indent: usize,
     analyze: bool,
     show_costs: bool,
-    timing: bool,
+    show_timing: bool,
     lines: &mut Vec<String>,
 ) {
     let prefix = explain_node_prefix(indent, false);
     let label = state.node_label();
     let plan_info = state.plan_info();
-    if analyze && show_costs {
+    if analyze && show_costs && show_timing {
         let stats = state.node_stats();
-        let actual = if timing {
-            format!(
-                " (actual time={:.3}..{:.3} rows={:.2} loops={})",
-                stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
-                stats.total_time.as_secs_f64() * 1000.0,
-                stats.rows as f64,
-                stats.loops,
-            )
-        } else {
-            format!(
-                " (actual rows={:.2} loops={})",
-                stats.rows as f64, stats.loops
-            )
-        };
+        let actual = format!(
+            " (actual time={:.3}..{:.3} rows={:.2} loops={})",
+            stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
+            stats.total_time.as_secs_f64() * 1000.0,
+            stats.rows as f64,
+            stats.loops,
+        );
         lines.push(format!(
             "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={}){actual}",
             plan_info.startup_cost.as_f64(),
@@ -272,19 +277,32 @@ fn push_explain_state_line(
             plan_info.plan_rows.as_f64().round() as u64,
             plan_info.plan_width,
         ));
+    } else if analyze && show_costs {
+        let stats = state.node_stats();
+        lines.push(format!(
+            "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={}) (actual rows={:.2} loops={})",
+            plan_info.startup_cost.as_f64(),
+            plan_info.total_cost.as_f64(),
+            plan_info.plan_rows.as_f64().round() as u64,
+            plan_info.plan_width,
+            stats.rows as f64,
+            stats.loops,
+        ));
+    } else if analyze && !show_timing {
+        let stats = state.node_stats();
+        lines.push(format!(
+            "{prefix}{label}  (actual rows={:.2} loops={})",
+            stats.rows as f64, stats.loops,
+        ));
     } else if analyze {
         let stats = state.node_stats();
-        let actual = if timing {
-            format!(
-                "actual time={:.3}..{:.3} rows={:.2} loops={}",
-                stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
-                stats.total_time.as_secs_f64() * 1000.0,
-                stats.rows as f64,
-                stats.loops,
-            )
-        } else {
-            format!("actual rows={:.2} loops={}", stats.rows as f64, stats.loops)
-        };
+        let actual = format!(
+            "actual time={:.3}..{:.3} rows={:.2} loops={}",
+            stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
+            stats.total_time.as_secs_f64() * 1000.0,
+            stats.rows as f64,
+            stats.loops,
+        );
         lines.push(format!("{prefix}{label} ({actual})"));
     } else if show_costs {
         lines.push(format!(
@@ -423,6 +441,7 @@ fn push_nonverbose_plan_details(
         Plan::HashJoin {
             left,
             right,
+            hash_keys,
             hash_clauses,
             join_qual,
             qual,
@@ -431,11 +450,17 @@ fn push_nonverbose_plan_details(
             let left_names = plan_join_output_exprs(left, ctx, true);
             let right_names = plan_join_output_exprs(right, ctx, true);
             if !hash_clauses.is_empty() {
-                let rendered = hash_clauses
-                    .iter()
-                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
-                    .collect::<Vec<_>>()
-                    .join(" AND ");
+                let rendered =
+                    render_hash_join_condition(hash_keys, right, &left_names, &right_names, ctx)
+                        .unwrap_or_else(|| {
+                            hash_clauses
+                                .iter()
+                                .map(|expr| {
+                                    render_verbose_join_expr(expr, &left_names, &right_names, ctx)
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" AND ")
+                        });
                 lines.push(format!("{prefix}Hash Cond: {rendered}"));
             }
             if !join_qual.is_empty() {
@@ -461,8 +486,69 @@ fn push_nonverbose_plan_details(
             lines.push(format!("{prefix}Window: w1 AS ({rendered})"));
             true
         }
+        Plan::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            desc,
+            index_meta,
+            ..
+        }
+        | Plan::IndexScan {
+            keys,
+            order_by_keys,
+            desc,
+            index_meta,
+            ..
+        } => {
+            if let Some(detail) = render_index_scan_condition_with_key_names_and_runtime_renderer(
+                keys,
+                desc,
+                index_meta,
+                None,
+                Some(&|expr| render_verbose_expr(expr, &[], ctx)),
+            ) {
+                lines.push(format!("{prefix}Index Cond: ({detail})"));
+            }
+            if let Some(detail) = render_index_order_by(order_by_keys, desc, index_meta) {
+                lines.push(format!("{prefix}Order By: ({detail})"));
+            }
+            true
+        }
         _ => false,
     }
+}
+
+fn render_hash_join_condition(
+    outer_hash_keys: &[Expr],
+    right: &Plan,
+    left_names: &[String],
+    right_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    let Plan::Hash {
+        hash_keys: inner_hash_keys,
+        ..
+    } = right
+    else {
+        return None;
+    };
+    if outer_hash_keys.len() != inner_hash_keys.len() || outer_hash_keys.is_empty() {
+        return None;
+    }
+    Some(
+        outer_hash_keys
+            .iter()
+            .zip(inner_hash_keys.iter())
+            .map(|(outer, inner)| {
+                format!(
+                    "({} = {})",
+                    render_verbose_expr(outer, left_names, ctx),
+                    render_verbose_expr(inner, right_names, ctx)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND "),
+    )
 }
 
 fn render_window_clause_for_explain(
@@ -1155,6 +1241,7 @@ fn push_verbose_plan_details(
         Plan::HashJoin {
             left,
             right,
+            hash_keys,
             hash_clauses,
             join_qual,
             qual,
@@ -1163,11 +1250,17 @@ fn push_verbose_plan_details(
             let left_names = plan_join_output_exprs(left, ctx, true);
             let right_names = plan_join_output_exprs(right, ctx, true);
             if !hash_clauses.is_empty() {
-                let rendered = hash_clauses
-                    .iter()
-                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
-                    .collect::<Vec<_>>()
-                    .join(" AND ");
+                let rendered =
+                    render_hash_join_condition(hash_keys, right, &left_names, &right_names, ctx)
+                        .unwrap_or_else(|| {
+                            hash_clauses
+                                .iter()
+                                .map(|expr| {
+                                    render_verbose_join_expr(expr, &left_names, &right_names, ctx)
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" AND ")
+                        });
                 lines.push(format!("{prefix}Hash Cond: {rendered}"));
             }
             if !join_qual.is_empty() {
@@ -1253,7 +1346,11 @@ fn explain_plan_children_with_context(
                 lines,
             );
             let mut right_ctx = ctx.clone();
-            let left_names = verbose_plan_output_exprs(left, ctx, true);
+            let left_names = if verbose {
+                verbose_plan_output_exprs(left, ctx, true)
+            } else {
+                plan_join_output_exprs(left, ctx, true)
+            };
             right_ctx
                 .exec_params
                 .extend(nest_params.iter().map(|source| VerboseExecParam {
@@ -1276,6 +1373,19 @@ fn explain_plan_children_with_context(
             let child_indent = indent + 1;
             format_explain_plan_with_subplans_inner(
                 bitmapqual,
+                subplans,
+                child_indent,
+                show_costs,
+                verbose,
+                true,
+                ctx,
+                lines,
+            );
+        }
+        Plan::Hash { input, .. } => {
+            let child_indent = if indent == 0 { 1 } else { indent + 3 };
+            format_explain_plan_with_subplans_inner(
+                input,
                 subplans,
                 child_indent,
                 show_costs,

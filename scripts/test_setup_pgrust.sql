@@ -137,6 +137,7 @@ CREATE TABLE tenk1 (
 );
 \set filename :abs_srcdir '/data/tenk.data'
 COPY tenk1 FROM :'filename';
+CREATE INDEX tenk1_unique1 ON tenk1 USING btree(unique1 int4_ops);
 VACUUM ANALYZE tenk1;
 
 CREATE TABLE tenk2 AS SELECT * FROM tenk1;

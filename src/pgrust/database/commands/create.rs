@@ -7,10 +7,11 @@ use crate::backend::parser::analyze::{
 use crate::backend::parser::{
     AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
     AlterAggregateRenameStatement, CreateAggregateStatement, CreateFunctionArg,
-    CreateFunctionReturnSpec, CreateFunctionStatement, CreateProcedureStatement, FunctionArgMode,
-    FunctionParallel, FunctionVolatility, OwnedSequenceSpec, PartitionBoundSpec, RawTypeName,
-    RelOption, SqlType, SqlTypeKind, Statement, analyze_select_query_with_outer, parse_statement,
-    pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
+    CreateFunctionReturnSpec, CreateFunctionStatement, CreateProcedureStatement,
+    CreateTableAsQuery, FunctionArgMode, FunctionParallel, FunctionVolatility, OwnedSequenceSpec,
+    PartitionBoundSpec, RawTypeName, RelOption, RoutineSignature, SqlType, SqlTypeKind, Statement,
+    analyze_select_query_with_outer, parse_statement, pg_partitioned_table_row,
+    resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::backend::rewrite::render_view_query_sql;
 use crate::backend::utils::cache::syscache::{
@@ -996,6 +997,42 @@ fn aggregate_support_signature(proc_name: &str, arg_types: &[SqlType]) -> String
     format!("{proc_name}({args})")
 }
 
+fn support_signature_name(signature: &RoutineSignature) -> String {
+    match &signature.schema_name {
+        Some(schema_name) => format!("{schema_name}.{}", signature.routine_name),
+        None => signature.routine_name.clone(),
+    }
+}
+
+fn resolve_support_proc_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    catalog: &dyn CatalogLookup,
+    signature: &RoutineSignature,
+) -> Result<u32, ExecError> {
+    let name = support_signature_name(signature);
+    let arg_oids = if signature.arg_types.is_empty() {
+        vec![INTERNAL_TYPE_OID]
+    } else {
+        signature
+            .arg_types
+            .iter()
+            .map(|arg| routine_support_arg_oid(catalog, arg))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    resolve_exact_proc_row(db, client_id, txn_ctx, catalog, &name, &arg_oids, 'f')
+        .map(|row| row.oid)
+}
+
+fn routine_support_arg_oid(catalog: &dyn CatalogLookup, arg: &str) -> Result<u32, ExecError> {
+    let raw_type = crate::backend::parser::parse_type_name(arg).map_err(ExecError::Parse)?;
+    let sql_type = resolve_raw_type_name(&raw_type, catalog).map_err(ExecError::Parse)?;
+    catalog
+        .type_oid_for_sql_type(sql_type)
+        .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(arg.into())))
+}
+
 fn exact_proc_signature(catalog: &dyn CatalogLookup, proc_name: &str, arg_oids: &[u32]) -> String {
     let args = arg_oids
         .iter()
@@ -1730,7 +1767,7 @@ impl Database {
         };
 
         let sequence_oid = match persistence {
-            TablePersistence::Permanent => {
+            TablePersistence::Permanent | TablePersistence::Unlogged => {
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -1990,23 +2027,16 @@ impl Database {
         };
         let (normalized, object_name, namespace_oid) = self
             .normalize_domain_name_for_create(&create_stmt.domain_name, configured_search_path)?;
-        let mut domains = self.domains.write();
+        let domains = self.domains.write();
         if domains.contains_key(&normalized) {
             return Err(ExecError::Parse(ParseError::UnsupportedType(
                 create_stmt.domain_name.clone(),
             )));
         }
-        let (oid, array_oid) = {
-            let next_catalog_oid = self.catalog.read().next_oid();
-            let oid = domains
-                .values()
-                .flat_map(|domain| [domain.oid, domain.array_oid])
-                .map(|oid| oid.saturating_add(1))
-                .max()
-                .unwrap_or(next_catalog_oid)
-                .max(next_catalog_oid);
-            (oid, oid.saturating_add(1))
-        };
+        drop(domains);
+        let oid = self.allocate_dynamic_type_oids(2, None, None)?;
+        let array_oid = oid.saturating_add(1);
+        let mut domains = self.domains.write();
         domains.insert(
             normalized,
             DomainEntry {
@@ -2111,6 +2141,7 @@ impl Database {
             function_name: create_stmt.procedure_name.clone(),
             replace_existing: create_stmt.replace_existing,
             cost: None,
+            support: None,
             args: create_stmt.args.clone(),
             return_spec: if create_stmt
                 .args
@@ -2437,6 +2468,19 @@ impl Database {
         } else {
             create_stmt.body.clone()
         };
+        let probin = if language_row.oid == PG_LANGUAGE_C_OID {
+            Some(create_stmt.body.clone())
+        } else {
+            None
+        };
+        let prosupport = create_stmt
+            .support
+            .as_ref()
+            .map(|signature| {
+                resolve_support_proc_oid(self, client_id, Some((xid, cid)), &catalog, signature)
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         let proc_row = PgProcRow {
             oid: 0,
@@ -2455,7 +2499,7 @@ impl Database {
                 .unwrap_or(100.0),
             prorows: if proretset { 1000.0 } else { 0.0 },
             provariadic,
-            prosupport: 0,
+            prosupport,
             prokind: proc_kind,
             prosecdef: false,
             proleakproof: create_stmt.leakproof,
@@ -2483,7 +2527,7 @@ impl Database {
             proargnames,
             proargdefaults: encode_proc_arg_defaults(&callable_arg_defaults),
             prosrc,
-            probin: None,
+            probin,
             prosqlbody: None,
         };
 
@@ -3179,8 +3223,21 @@ impl Database {
         let table_cid = cid;
         let relation_relkind = created_relkind(&lowered);
         let reloptions = create_table_reloptions(&create_stmt.options)?;
+        if relation_relkind == 'p' && persistence == TablePersistence::Unlogged {
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: "partitioned tables cannot be unlogged".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            }));
+        }
+        let relpersistence = match persistence {
+            TablePersistence::Permanent => 'p',
+            TablePersistence::Unlogged => 'u',
+            TablePersistence::Temporary => 't',
+        };
         match persistence {
-            TablePersistence::Permanent => {
+            TablePersistence::Permanent | TablePersistence::Unlogged => {
                 let mut catalog_guard = self.catalog.write();
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
@@ -3197,7 +3254,7 @@ impl Database {
                         desc.clone(),
                         namespace_oid,
                         self.database_oid,
-                        'p',
+                        relpersistence,
                         crate::include::catalog::PG_TOAST_NAMESPACE_OID,
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),
@@ -3212,7 +3269,7 @@ impl Database {
                             desc.clone(),
                             namespace_oid,
                             self.database_oid,
-                            'p',
+                            relpersistence,
                             relation_relkind,
                             self.auth_state(client_id).current_user_oid(),
                             reloptions.clone(),
@@ -3230,6 +3287,9 @@ impl Database {
                 };
                 match result {
                     Err(CatalogError::TableAlreadyExists(_name)) if create_stmt.if_not_exists => {
+                        push_notice(format!(
+                            "relation \"{table_name}\" already exists, skipping"
+                        ));
                         Ok(StatementResult::AffectedRows(0))
                     }
                     Err(err) => Err(map_catalog_error(err)),
@@ -3807,6 +3867,11 @@ impl Database {
                     catalog_effects.push(create_effect);
                     entry.relation_oid
                 }
+                TablePersistence::Unlogged => {
+                    return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                        "unlogged views are not supported".into(),
+                    )));
+                }
                 TablePersistence::Temporary => {
                     let created = self.create_temp_relation_with_relkind_in_transaction(
                         client_id,
@@ -3911,8 +3976,36 @@ impl Database {
                 configured_search_path,
             )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        if catalog
+            .lookup_any_relation(&table_name)
+            .is_some_and(|relation| relation.namespace_oid == namespace_oid)
+        {
+            if create_stmt.if_not_exists {
+                push_notice(format!(
+                    "relation \"{table_name}\" already exists, skipping"
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: format!("relation \"{table_name}\" already exists"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P07",
+            }));
+        }
+        let select_query = match &create_stmt.query {
+            CreateTableAsQuery::Select(query) => query,
+            CreateTableAsQuery::Execute(name) => {
+                return Err(ExecError::Parse(ParseError::DetailedError {
+                    message: format!("prepared statement \"{name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "26000",
+                }));
+            }
+        };
         let planned_stmt = crate::backend::parser::pg_plan_query_with_config(
-            &create_stmt.query,
+            select_query,
             &catalog,
             planner_config,
         )?;
@@ -3922,6 +4015,7 @@ impl Database {
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),
@@ -3971,7 +4065,7 @@ impl Database {
             trigger_depth: 0,
         };
         let query_result = crate::backend::executor::execute_readonly_statement_with_config(
-            Statement::Select(create_stmt.query.clone()),
+            Statement::Select(select_query.clone()),
             &catalog,
             &mut ctx,
             planner_config,
@@ -4001,7 +4095,12 @@ impl Database {
         };
 
         let (relation_oid, rel, toast, toast_index) = match persistence {
-            TablePersistence::Permanent => {
+            TablePersistence::Permanent | TablePersistence::Unlogged => {
+                let relpersistence = if persistence == TablePersistence::Unlogged {
+                    'u'
+                } else {
+                    'p'
+                };
                 let stmt = CreateTableStatement {
                     schema_name: None,
                     table_name: table_name.clone(),
@@ -4052,7 +4151,7 @@ impl Database {
                         create_relation_desc(&stmt, &catalog)?,
                         namespace_oid,
                         self.database_oid,
-                        'p',
+                        relpersistence,
                         crate::include::catalog::PG_TOAST_NAMESPACE_OID,
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),
@@ -4100,6 +4199,7 @@ impl Database {
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let mut insert_ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),

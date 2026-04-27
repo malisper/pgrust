@@ -2194,7 +2194,7 @@ fn parse_comment_on_type_and_column_statements() {
     assert_eq!(
         parse_statement("comment on column default_test_row.f1 is null").unwrap(),
         Statement::CommentOnColumn(CommentOnColumnStatement {
-            relation_name: "default_test_row".into(),
+            table_name: "default_test_row".into(),
             column_name: "f1".into(),
             comment: None,
         })
@@ -2735,6 +2735,43 @@ fn parse_alter_table_add_column_statement() {
 }
 
 #[test]
+fn parse_alter_table_multi_add_column_statement() {
+    let stmt = parse_statement("alter table mlparted add d int, add e text").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddColumns(AlterTableAddColumnsStatement {
+            if_exists: false,
+            only: false,
+            table_name: "mlparted".into(),
+            columns: vec![
+                ColumnDef {
+                    name: "d".into(),
+                    ty: builtin_type(SqlType::new(SqlTypeKind::Int4)),
+                    collation: None,
+                    default_expr: None,
+                    generated: None,
+                    identity: None,
+                    storage: None,
+                    compression: None,
+                    constraints: vec![],
+                },
+                ColumnDef {
+                    name: "e".into(),
+                    ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
+                    collation: None,
+                    default_expr: None,
+                    generated: None,
+                    identity: None,
+                    storage: None,
+                    compression: None,
+                    constraints: vec![],
+                },
+            ],
+        })
+    );
+}
+
+#[test]
 fn parse_alter_table_constraint_statements() {
     let stmt =
         parse_statement("alter table items add constraint items_id_check check (id > 0) not valid")
@@ -3212,6 +3249,28 @@ fn parse_not_null_constraint_no_inherit() {
 
 #[test]
 fn parse_alter_table_set_statement() {
+    let stmt = parse_statement("alter table unlogged1 set logged").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableSetPersistence(AlterTableSetPersistenceStatement {
+            if_exists: false,
+            only: false,
+            table_name: "unlogged1".into(),
+            persistence: TablePersistence::Permanent,
+        })
+    );
+
+    let stmt = parse_statement("alter table unlogged1 set unlogged").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableSetPersistence(AlterTableSetPersistenceStatement {
+            if_exists: false,
+            only: false,
+            table_name: "unlogged1".into(),
+            persistence: TablePersistence::Unlogged,
+        })
+    );
+
     let stmt = parse_statement("alter table num_variance set (parallel_workers = 4)").unwrap();
     assert_eq!(
         stmt,
@@ -4218,6 +4277,7 @@ fn parse_grant_create_on_database_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::CreateOnDatabase,
+            columns: Vec::new(),
             object_names: vec!["regression".into()],
             grantee_names: vec!["regress_role_admin".into()],
             with_grant_option: true,
@@ -4232,6 +4292,7 @@ fn parse_grant_all_on_schema_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
+            columns: Vec::new(),
             object_names: vec!["public".into()],
             grantee_names: vec!["public".into()],
             with_grant_option: false,
@@ -4246,6 +4307,7 @@ fn parse_grant_all_on_multiple_schemas_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
+            columns: Vec::new(),
             object_names: vec!["alt_nsp1".into(), "alt_nsp2".into()],
             grantee_names: vec!["public".into()],
             with_grant_option: false,
@@ -4260,6 +4322,7 @@ fn parse_grant_usage_on_schema_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnSchema,
+            columns: Vec::new(),
             object_names: vec!["public".into()],
             grantee_names: vec!["public".into()],
             with_grant_option: false,
@@ -4274,6 +4337,7 @@ fn parse_grant_usage_on_type_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnType,
+            columns: Vec::new(),
             object_names: vec!["custom_t".into()],
             grantee_names: vec!["public".into()],
             with_grant_option: false,
@@ -4288,8 +4352,37 @@ fn parse_grant_select_on_table_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::SelectOnTable,
+            columns: Vec::new(),
             object_names: vec!["uaccount".into()],
             grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_column_select_and_insert_on_table_statements() {
+    let stmt =
+        parse_statement("grant select (a) on key_desc_1 to regress_insert_other_user").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::SelectOnTable,
+            columns: vec!["a".into()],
+            object_names: vec!["key_desc_1".into()],
+            grantee_names: vec!["regress_insert_other_user".into()],
+            with_grant_option: false,
+        })
+    );
+
+    let stmt = parse_statement("grant insert on key_desc to regress_insert_other_user").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::InsertOnTable,
+            columns: Vec::new(),
+            object_names: vec!["key_desc".into()],
+            grantee_names: vec!["regress_insert_other_user".into()],
             with_grant_option: false,
         })
     );
@@ -4302,6 +4395,7 @@ fn parse_grant_all_on_table_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
+            columns: Vec::new(),
             object_names: vec!["uaccount".into()],
             grantee_names: vec!["public".into()],
             with_grant_option: false,
@@ -4316,6 +4410,7 @@ fn parse_grant_update_on_table_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::UpdateOnTable,
+            columns: Vec::new(),
             object_names: vec!["atest2".into()],
             grantee_names: vec!["regress_priv_user3".into()],
             with_grant_option: false,
@@ -4331,9 +4426,37 @@ fn parse_grant_multiple_table_privileges_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::TablePrivileges("rw".into()),
+            columns: Vec::new(),
             object_names: vec!["grantor_test3".into()],
             grantee_names: vec!["regress_grantor3".into()],
             with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_all_on_table_statement() {
+    let stmt = parse_statement("revoke all on key_desc from regress_insert_other_user").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
+            columns: Vec::new(),
+            object_names: vec!["key_desc".into()],
+            grantee_names: vec!["regress_insert_other_user".into()],
+            cascade: false,
+        })
+    );
+
+    let stmt = parse_statement("revoke select on brtrigpartcon from regress_coldesc_role").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::SelectOnTable,
+            columns: Vec::new(),
+            object_names: vec!["brtrigpartcon".into()],
+            grantee_names: vec!["regress_coldesc_role".into()],
+            cascade: false,
         })
     );
 }
@@ -4345,6 +4468,7 @@ fn parse_grant_execute_on_function_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::ExecuteOnFunction,
+            columns: Vec::new(),
             object_names: vec!["f_leak(text)".into()],
             grantee_names: vec!["public".into()],
             with_grant_option: false,
@@ -4360,6 +4484,7 @@ fn parse_grant_execute_on_procedure_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::ExecuteOnProcedure,
+            columns: Vec::new(),
             object_names: vec!["ptest1(text)".into()],
             grantee_names: vec!["regress_cp_user1".into()],
             with_grant_option: false,
@@ -4386,6 +4511,7 @@ fn parse_revoke_all_privileges_on_table_from_public_statement() {
         stmt,
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
+            columns: Vec::new(),
             object_names: vec!["tenant_table".into()],
             grantee_names: vec!["public".into()],
             cascade: false,
@@ -4400,6 +4526,7 @@ fn parse_revoke_delete_on_table_statement() {
         stmt,
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::DeleteOnTable,
+            columns: Vec::new(),
             object_names: vec!["atest3".into()],
             grantee_names: vec!["regress_priv_group2".into()],
             cascade: false,
@@ -4414,6 +4541,7 @@ fn parse_revoke_usage_on_schema_statement() {
         stmt,
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnSchema,
+            columns: Vec::new(),
             object_names: vec!["public".into()],
             grantee_names: vec!["public".into()],
             cascade: false,
@@ -4428,6 +4556,7 @@ fn parse_revoke_usage_on_type_statement() {
         stmt,
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnType,
+            columns: Vec::new(),
             object_names: vec!["custom_t".into()],
             grantee_names: vec!["public".into()],
             cascade: false,
@@ -4442,6 +4571,7 @@ fn parse_revoke_execute_on_function_statement() {
         stmt,
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::ExecuteOnFunction,
+            columns: Vec::new(),
             object_names: vec!["f_leak(text)".into()],
             grantee_names: vec!["public".into()],
             cascade: false,
@@ -4658,6 +4788,26 @@ fn parse_named_array_type_name() {
 }
 
 #[test]
+fn parse_create_table_preserves_named_array_column_type() {
+    let Statement::CreateTable(create) =
+        parse_statement("create table darray (f3 insert_test_domain, f4 insert_test_domain[])")
+            .unwrap()
+    else {
+        panic!("expected create table");
+    };
+    let CreateTableElement::Column(column) = &create.elements[1] else {
+        panic!("expected column");
+    };
+    assert_eq!(
+        column.ty,
+        RawTypeName::Named {
+            name: "insert_test_domain".into(),
+            array_bounds: 1,
+        }
+    );
+}
+
+#[test]
 fn parse_do_statement_defaults_to_plpgsql() {
     let stmt = parse_statement("do $$ begin null; end $$").unwrap();
     assert_eq!(
@@ -4770,6 +4920,7 @@ fn parse_create_function_statement_with_returns_table() {
             function_name: "pair_rows".into(),
             replace_existing: false,
             cost: None,
+            support: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
@@ -4812,6 +4963,7 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
             function_name: "pair_rows".into(),
             replace_existing: true,
             cost: None,
+            support: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
@@ -5163,6 +5315,7 @@ fn parse_create_function_statement_with_unnamed_args() {
             function_name: "binary_coercible".into(),
             replace_existing: false,
             cost: None,
+            support: None,
             args: vec![
                 CreateFunctionArg {
                     mode: FunctionArgMode::In,
@@ -5209,6 +5362,7 @@ fn parse_create_function_statement_with_variadic_arg() {
             function_name: "least_accum".into(),
             replace_existing: false,
             cost: None,
+            support: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: Some("items".into()),
@@ -5251,6 +5405,7 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
             function_name: "binary_coercible".into(),
             replace_existing: false,
             cost: None,
+            support: None,
             args: vec![
                 CreateFunctionArg {
                     mode: FunctionArgMode::In,
@@ -5297,6 +5452,7 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
             function_name: "fipshash".into(),
             replace_existing: false,
             cost: None,
+            support: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: None,
@@ -5333,6 +5489,7 @@ fn parse_create_function_statement_with_cost_clause() {
             function_name: "f_leak".into(),
             replace_existing: true,
             cost: Some("0.0000001".into()),
+            support: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: None,
@@ -5354,6 +5511,29 @@ fn parse_create_function_statement_with_cost_clause() {
             link_symbol: None,
         })
     );
+}
+
+#[test]
+fn parse_create_function_statement_with_support_clause() {
+    let stmt = parse_statement(
+        "create function my_gen_series(int, int) returns setof integer language internal strict immutable parallel safe as $$generate_series_int4$$ support pg_catalog.test_support_func",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            function_name,
+            support: Some(RoutineSignature {
+                schema_name: Some(schema_name),
+                routine_name,
+                arg_types,
+            }),
+            ..
+        }) if function_name == "my_gen_series"
+            && schema_name == "pg_catalog"
+            && routine_name == "test_support_func"
+            && arg_types.is_empty()
+    ));
 }
 
 #[test]
@@ -5470,6 +5650,24 @@ fn parse_drop_and_alter_procedure_statements() {
                 arg_types: vec!["text".into()],
             },
             action: AlterRoutineAction::Options(vec![AlterRoutineOption::Strict(true)]),
+        })
+    );
+    assert_eq!(
+        parse_statement("alter function my_int_eq(int, int) support test_support_func").unwrap(),
+        Statement::AlterRoutine(AlterRoutineStatement {
+            kind: RoutineKind::Function,
+            signature: RoutineSignature {
+                schema_name: None,
+                routine_name: "my_int_eq".into(),
+                arg_types: vec!["int".into(), "int".into()],
+            },
+            action: AlterRoutineAction::Options(vec![AlterRoutineOption::Support(
+                RoutineSignature {
+                    schema_name: None,
+                    routine_name: "test_support_func".into(),
+                    arg_types: Vec::new(),
+                }
+            )]),
         })
     );
     assert_eq!(
@@ -5975,6 +6173,45 @@ fn parse_with_select_and_values_ctes() {
     assert!(matches!(stmt.with[0].body, CteBody::Values(_)));
     assert!(matches!(stmt.with[1].body, CteBody::Select(_)));
     assert!(matches!(stmt.from, Some(FromItem::Join { .. })));
+}
+
+#[test]
+fn parse_insert_with_writable_insert_cte() {
+    let stmt = parse_statement(
+        "with moved as (insert into src values (1) returning id) insert into dst select id from moved",
+    )
+    .unwrap();
+    match stmt {
+        Statement::Insert(insert) => {
+            assert_eq!(insert.with.len(), 1);
+            assert!(matches!(insert.with[0].body, CteBody::Insert(_)));
+            assert!(matches!(insert.source, InsertSource::Select(_)));
+        }
+        other => panic!("expected insert statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_select_with_writable_insert_cte_returning_tableoid_and_star() {
+    let stmt = parse_statement(
+        "with ins (a, b, c) as \
+         (insert into mlparted (b, a) select s.a, 1 from generate_series(2, 39) s(a) returning tableoid::regclass, *) \
+         select a, b, min(c), max(c) from ins group by a, b order by 1",
+    )
+    .unwrap();
+    match stmt {
+        Statement::Select(select) => {
+            assert_eq!(select.with.len(), 1);
+            match &select.with[0].body {
+                CteBody::Insert(insert) => {
+                    assert_eq!(insert.returning.len(), 2);
+                    assert!(matches!(insert.source, InsertSource::Select(_)));
+                }
+                other => panic!("expected writable insert CTE, got {other:?}"),
+            }
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
 }
 
 #[test]
@@ -7183,9 +7420,11 @@ fn parse_array_subscript_expressions_and_targets() {
             assert_eq!(assignments[0].target.column, "a");
             assert_eq!(assignments[0].target.subscripts.len(), 1);
             assert!(assignments[0].target.field_path.is_empty());
+            assert_eq!(assignments[0].target.indirection.len(), 1);
             assert_eq!(assignments[1].target.column, "b");
             assert_eq!(assignments[1].target.subscripts.len(), 1);
             assert!(assignments[1].target.field_path.is_empty());
+            assert_eq!(assignments[1].target.indirection.len(), 1);
         }
         other => panic!("expected update, got {:?}", other),
     }
@@ -7195,6 +7434,7 @@ fn parse_array_subscript_expressions_and_targets() {
             assert_eq!(assignments[0].target.column, "a");
             assert_eq!(assignments[0].target.subscripts.len(), 1);
             assert_eq!(assignments[0].target.field_path, vec!["q1".to_string()]);
+            assert_eq!(assignments[0].target.indirection.len(), 2);
         }
         other => panic!("expected update, got {:?}", other),
     }
@@ -7207,9 +7447,11 @@ fn parse_array_subscript_expressions_and_targets() {
             assert_eq!(columns[0].column, "a");
             assert_eq!(columns[0].subscripts.len(), 1);
             assert!(columns[0].field_path.is_empty());
+            assert_eq!(columns[0].indirection.len(), 1);
             assert_eq!(columns[1].column, "b");
             assert_eq!(columns[1].subscripts.len(), 1);
             assert!(columns[1].field_path.is_empty());
+            assert_eq!(columns[1].indirection.len(), 1);
         }
         other => panic!("expected insert, got {:?}", other),
     }
@@ -7222,6 +7464,46 @@ fn parse_array_subscript_expressions_and_targets() {
             assert_eq!(columns[0].column, "a");
             assert_eq!(columns[0].subscripts.len(), 1);
             assert_eq!(columns[0].field_path, vec!["q1".to_string()]);
+            assert_eq!(columns[0].indirection.len(), 2);
+        }
+        other => panic!("expected insert, got {:?}", other),
+    }
+
+    match parse_statement("insert into widgets (f3.if2[1]) values ('foo')").unwrap() {
+        Statement::Insert(InsertStatement {
+            columns: Some(columns),
+            ..
+        }) => {
+            assert_eq!(columns[0].column, "f3");
+            assert_eq!(columns[0].field_path, vec!["if2".to_string()]);
+            assert_eq!(columns[0].subscripts.len(), 1);
+            assert_eq!(columns[0].indirection.len(), 2);
+        }
+        other => panic!("expected insert, got {:?}", other),
+    }
+
+    match parse_statement("insert into widgets (f4[1].if2[1]) values ('foo')").unwrap() {
+        Statement::Insert(InsertStatement {
+            columns: Some(columns),
+            ..
+        }) => {
+            assert_eq!(columns[0].column, "f4");
+            assert_eq!(columns[0].field_path, vec!["if2".to_string()]);
+            assert_eq!(columns[0].subscripts.len(), 2);
+            assert_eq!(columns[0].indirection.len(), 3);
+            assert!(matches!(
+                columns[0].indirection[0],
+                crate::include::nodes::parsenodes::AssignmentTargetIndirection::Subscript(_)
+            ));
+            assert!(matches!(
+                columns[0].indirection[1],
+                crate::include::nodes::parsenodes::AssignmentTargetIndirection::Field(ref field)
+                    if field == "if2"
+            ));
+            assert!(matches!(
+                columns[0].indirection[2],
+                crate::include::nodes::parsenodes::AssignmentTargetIndirection::Subscript(_)
+            ));
         }
         other => panic!("expected insert, got {:?}", other),
     }
@@ -8742,6 +9024,11 @@ fn parse_insert_update_delete() {
             if table_name == "people" && values.len() == 2
     ));
     assert!(matches!(
+        parse_statement("insert into people (select 1, 'alice')").unwrap(),
+        Statement::Insert(InsertStatement { table_name, source: InsertSource::Select(_), .. })
+            if table_name == "people"
+    ));
+    assert!(matches!(
         parse_statement("insert into people (id, name) values (1, 'alice') on conflict do nothing")
             .unwrap(),
         Statement::Insert(InsertStatement {
@@ -8894,6 +9181,11 @@ fn parse_insert_update_delete() {
         parse_statement("create table withoid() with (oids = true)"),
         Err(ParseError::TablesDeclaredWithOidsNotSupported)
     ));
+    assert!(matches!(
+        parse_statement("create table withoid() with oids"),
+        Err(ParseError::UnexpectedToken { actual, .. })
+            if actual == "syntax error at or near \"OIDS\""
+    ));
     assert!(
         matches!(parse_statement("create table pg_temp.tempy (id int4)").unwrap(), Statement::CreateTable(CreateTableStatement { schema_name: Some(schema), table_name, persistence: TablePersistence::Permanent, .. }) if schema == "pg_temp" && table_name == "tempy")
     );
@@ -8915,6 +9207,12 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create temp table tempy(id) as select 1").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, column_names, persistence: TablePersistence::Temporary, .. }) if table_name == "tempy" && column_names == vec!["id"])
     );
     assert!(
+        matches!(parse_statement("create unlogged table unlogged_items(id int4)").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, persistence: TablePersistence::Unlogged, .. }) if table_name == "unlogged_items")
+    );
+    assert!(
+        matches!(parse_statement("create table ctas_opts with (fillfactor=70) as select 1").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, .. }) if table_name == "ctas_opts")
+    );
+    assert!(
         matches!(
             parse_statement("create materialized view if not exists mv_items(id, name) as select id, name from people with no data").unwrap(),
             Statement::CreateTableAs(CreateTableAsStatement {
@@ -8931,7 +9229,16 @@ fn parse_insert_update_delete() {
         )
     );
     assert!(
-        matches!(parse_statement("select * into cmmove1 from cmdata").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { schema_name: None, table_name, persistence: TablePersistence::Permanent, column_names, query: SelectStatement { from: Some(FromItem::Table { name, .. }), .. }, .. }) if table_name == "cmmove1" && column_names.is_empty() && name == "cmdata")
+        matches!(parse_statement("select * into cmmove1 from cmdata").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { schema_name: None, table_name, persistence: TablePersistence::Permanent, column_names, query: CreateTableAsQuery::Select(SelectStatement { from: Some(FromItem::Table { name, .. }), .. }), .. }) if table_name == "cmmove1" && column_names.is_empty() && name == "cmdata")
+    );
+    assert!(
+        matches!(parse_statement("prepare q as select * from cmdata").unwrap(), Statement::Prepare(PrepareStatement { name, .. }) if name == "q")
+    );
+    assert!(
+        matches!(parse_statement("create table from_prep as execute q").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { query: CreateTableAsQuery::Execute(name), .. }) if name == "q")
+    );
+    assert!(
+        matches!(parse_statement("deallocate prepare q").unwrap(), Statement::Deallocate(DeallocateStatement { name: Some(name) }) if name == "q")
     );
     assert!(
         matches!(parse_statement("select * into temp table tempy from cmdata").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, persistence: TablePersistence::Temporary, .. }) if table_name == "tempy")
@@ -9044,9 +9351,10 @@ fn parse_insert_update_delete() {
         elements[5].as_ref(),
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::SelectOnTable,
+            columns,
             object_names,
             ..
-        }) if object_names == &vec!["tab".to_string()]
+        }) if columns.is_empty() && object_names == &vec!["tab".to_string()]
     ));
     assert!(
         matches!(
@@ -9608,11 +9916,13 @@ fn people_insert_with_on_conflict(
                 column: "id".into(),
                 subscripts: vec![],
                 field_path: vec![],
+                indirection: vec![],
             },
             crate::include::nodes::parsenodes::AssignmentTarget {
                 column: "name".into(),
                 subscripts: vec![],
                 field_path: vec![],
+                indirection: vec![],
             },
         ]),
         overriding: None,
@@ -9648,6 +9958,26 @@ fn bind_insert_matches_on_conflict_columns_order_insensitively() {
 }
 
 #[test]
+fn bind_insert_returning_relation_name_as_whole_row() {
+    let catalog = catalog();
+    let mut stmt = people_insert_with_on_conflict(
+        None,
+        crate::include::nodes::parsenodes::OnConflictAction::Nothing,
+        vec![],
+        None,
+    );
+    stmt.on_conflict = None;
+    stmt.returning = vec![SelectItem {
+        expr: SqlExpr::Column("people".into()),
+        output_name: "people".into(),
+    }];
+
+    let bound =
+        stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || bind_insert(&stmt, &catalog)).unwrap();
+    assert!(matches!(bound.returning[0].expr, Expr::Row { .. }));
+}
+
+#[test]
 fn bind_insert_resolves_on_conflict_constraint_name() {
     let catalog = catalog_with_people_primary_key();
     let stmt = people_insert_with_on_conflict(
@@ -9658,6 +9988,7 @@ fn bind_insert_resolves_on_conflict_constraint_name() {
                 column: "name".into(),
                 subscripts: vec![],
                 field_path: vec![],
+                indirection: vec![],
             },
             expr: parse_expr("excluded.name").unwrap(),
         }],
@@ -9685,6 +10016,7 @@ fn bind_insert_rejects_on_conflict_do_update_without_target() {
                 column: "name".into(),
                 subscripts: vec![],
                 field_path: vec![],
+                indirection: vec![],
             },
             expr: parse_expr("excluded.name").unwrap(),
         }],
@@ -13998,6 +14330,26 @@ fn build_plan_for_select_list_json_each_uses_record_project_set() {
 }
 
 #[test]
+fn build_plan_resolves_field_select_from_select_list_record_srf_alias() {
+    let stmt =
+        parse_select("select (w).size = 16777216 from (select pg_ls_waldir() w) ss").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    assert_eq!(plan.columns()[0].sql_type, SqlType::new(SqlTypeKind::Bool));
+}
+
+#[test]
+fn build_plan_resolves_pg_lsn_arithmetic_record_function_in_from() {
+    let stmt = parse_select(
+        "select segment_number, file_offset from pg_walfile_name_offset('0/0'::pg_lsn + 16777216), pg_split_walfile_name(file_name)",
+    )
+    .unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    let columns = plan.columns();
+    assert_eq!(columns[0].sql_type, SqlType::new(SqlTypeKind::Numeric));
+    assert_eq!(columns[1].sql_type, SqlType::new(SqlTypeKind::Int4));
+}
+
+#[test]
 fn build_plan_for_select_list_jsonb_each_field_select_projects_key_column() {
     let stmt = parse_select("select (jsonb_each('{\"a\":1}'::jsonb)).key").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
@@ -15158,6 +15510,21 @@ fn parse_create_table_column_defaults() {
     let columns = ct.columns().collect::<Vec<_>>();
     assert_eq!(columns[0].default_expr.as_deref(), Some("'1001'"));
     assert_eq!(columns[1].default_expr.as_deref(), Some("B'0101'"));
+}
+
+#[test]
+fn parse_create_table_column_storage() {
+    let stmt =
+        parse_statement("create table test_chunk_id (a text, b text storage external)").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let columns = ct.columns().collect::<Vec<_>>();
+    assert_eq!(columns[0].storage, None);
+    assert_eq!(
+        columns[1].storage,
+        Some(crate::include::access::tupdesc::AttributeStorage::External)
+    );
 }
 
 #[test]

@@ -932,6 +932,9 @@ pub(crate) fn eval_json_builtin_function(
             BuiltinScalarFunction::JsonbPathQueryFirst => {
                 eval_jsonpath_function(values, JsonPathFunctionKind::QueryFirst)
             }
+            BuiltinScalarFunction::JsonExists => eval_sql_json_exists_function(values),
+            BuiltinScalarFunction::JsonValue => eval_sql_json_value_function(values),
+            BuiltinScalarFunction::JsonQuery => eval_sql_json_query_function(values),
             _ => unreachable!(),
         }
     };
@@ -971,7 +974,10 @@ pub(crate) fn eval_json_builtin_function(
         | BuiltinScalarFunction::JsonbPathExists
         | BuiltinScalarFunction::JsonbPathMatch
         | BuiltinScalarFunction::JsonbPathQueryArray
-        | BuiltinScalarFunction::JsonbPathQueryFirst => Some(eval()),
+        | BuiltinScalarFunction::JsonbPathQueryFirst
+        | BuiltinScalarFunction::JsonExists
+        | BuiltinScalarFunction::JsonValue
+        | BuiltinScalarFunction::JsonQuery => Some(eval()),
         _ => None,
     }
 }
@@ -2059,6 +2065,63 @@ fn eval_jsonpath_function(
             Err(_) if silent => Ok(Value::Null),
             Err(err) => Err(err),
         },
+    }
+}
+
+fn eval_sql_json_exists_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(items) = eval_sql_json_query_path(values)? else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::Bool(!items.is_empty()))
+}
+
+fn eval_sql_json_value_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(items) = eval_sql_json_query_path(values)? else {
+        return Ok(Value::Null);
+    };
+    let [item] = items.as_slice() else {
+        return Ok(Value::Null);
+    };
+    Ok(sql_json_value_default_text(item))
+}
+
+fn eval_sql_json_query_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(items) = eval_sql_json_query_path(values)? else {
+        return Ok(Value::Null);
+    };
+    let [item] = items.as_slice() else {
+        return Ok(Value::Null);
+    };
+    Ok(jsonb_to_value(item))
+}
+
+fn eval_sql_json_query_path(values: &[Value]) -> Result<Option<Vec<JsonbValue>>, ExecError> {
+    let target = values.first().unwrap_or(&Value::Null);
+    let path = values.get(1).unwrap_or(&Value::Null);
+    if matches!(target, Value::Null) || matches!(path, Value::Null) {
+        return Ok(None);
+    }
+
+    let target = parse_jsonpath_target_value(target)?;
+    let parsed = parse_jsonpath(parse_jsonpath_value_text(path)?.as_str())?;
+    let eval_ctx = JsonPathEvaluationContext {
+        root: &target,
+        vars: None,
+    };
+    // SQL/JSON query functions default to NULL/FALSE ON ERROR. Keep jsonpath
+    // parse and input conversion errors visible, but suppress path evaluation
+    // errors such as strict-mode structural mismatches.
+    Ok(Some(
+        evaluate_jsonpath(&parsed, &eval_ctx).unwrap_or_default(),
+    ))
+}
+
+fn sql_json_value_default_text(value: &JsonbValue) -> Value {
+    match value {
+        JsonbValue::Array(_) | JsonbValue::Object(_) | JsonbValue::Null => Value::Null,
+        JsonbValue::Bool(true) => Value::Text("t".into()),
+        JsonbValue::Bool(false) => Value::Text("f".into()),
+        other => jsonb_to_text_value(other),
     }
 }
 

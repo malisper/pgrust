@@ -8,7 +8,10 @@ pub(crate) use row_security::{
     RlsWriteCheck, RlsWriteCheckSource, build_target_relation_row_security,
     relation_has_row_security,
 };
-pub(crate) use rules::{format_stored_rule_definition, split_stored_rule_action_sql};
+pub(crate) use rules::{
+    format_stored_rule_definition, format_stored_rule_definition_with_catalog,
+    split_stored_rule_action_sql,
+};
 pub(crate) use view_dml::{
     NonUpdatableViewColumnReason, ResolvedAutoViewTarget, ViewDmlEvent, ViewDmlRewriteError,
     resolve_auto_updatable_view_target,
@@ -708,12 +711,14 @@ fn rewrite_set_returning_call(
         },
         SetReturningCall::UserDefined {
             proc_oid,
+            function_name,
             func_variadic,
             args,
             output_columns,
             with_ordinality,
         } => SetReturningCall::UserDefined {
             proc_oid,
+            function_name,
             func_variadic,
             args: args
                 .into_iter()

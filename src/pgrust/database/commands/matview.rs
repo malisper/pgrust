@@ -5,7 +5,8 @@ use crate::backend::rewrite::load_view_return_select;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::nodes::parsenodes::{
-    DropMaterializedViewStatement, RefreshMaterializedViewStatement, TableAsObjectType,
+    CreateTableAsQuery, DropMaterializedViewStatement, RefreshMaterializedViewStatement,
+    TableAsObjectType,
 };
 use crate::include::nodes::primnodes::QueryColumn;
 use std::collections::HashMap;
@@ -65,7 +66,18 @@ impl Database {
                 actual: "missing SELECT text".into(),
             })
         })?;
-        let planned_stmt = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?;
+        let select_query = match &create_stmt.query {
+            CreateTableAsQuery::Select(query) => query,
+            CreateTableAsQuery::Execute(name) => {
+                return Err(ExecError::Parse(ParseError::DetailedError {
+                    message: format!("prepared statement \"{name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "26000",
+                }));
+            }
+        };
+        let planned_stmt = crate::backend::parser::pg_plan_query(select_query, &catalog)?;
         let columns = planned_stmt.columns();
         let column_names = planned_stmt.column_names();
         validate_matview_column_names(create_stmt, columns.len())?;
@@ -81,7 +93,7 @@ impl Database {
                 cid,
                 Arc::clone(&interrupts),
                 &catalog,
-                Statement::Select(create_stmt.query.clone()),
+                Statement::Select(select_query.clone()),
                 false,
             )?
         };
@@ -116,7 +128,7 @@ impl Database {
 
         let mut referenced_relation_oids = std::collections::BTreeSet::new();
         collect_direct_relation_oids_from_select(
-            &create_stmt.query,
+            select_query,
             &catalog,
             &mut Vec::new(),
             &mut referenced_relation_oids,
@@ -396,6 +408,7 @@ impl Database {
     ) -> Result<ExecutorContext, ExecError> {
         Ok(ExecutorContext {
             pool: Arc::clone(&self.pool),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),

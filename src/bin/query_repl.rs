@@ -489,6 +489,9 @@ fn run_statement(
         Statement::Show(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::Set(_)
         | Statement::Reset(_)
+        | Statement::Prepare(_)
+        | Statement::Execute(_)
+        | Statement::Deallocate(_)
         | Statement::Checkpoint(_)
         | Statement::Notify(_)
         | Statement::Listen(_)
@@ -512,11 +515,13 @@ fn run_statement(
         | Statement::AlterTableSet(_)
         | Statement::AlterIndexSet(_)
         | Statement::AlterTableReset(_)
+        | Statement::AlterTableSetPersistence(_)
         | Statement::CreateStatistics(_)
         | Statement::AlterStatistics(_)
         | Statement::DropStatistics(_)
         | Statement::CommentOnStatistics(_)
         | Statement::AlterTableAddColumn(_)
+        | Statement::AlterTableAddColumns(_)
         | Statement::AlterTableAddConstraint(_)
         | Statement::AlterTableMulti(_)
         | Statement::AlterTableReplicaIdentity(_)
@@ -715,6 +720,77 @@ fn run_statement(
                 }
             }
         }
+        Statement::CommentOnColumn(stmt) => {
+            let xid = txns.write().begin();
+            let result = {
+                let ctx = pgrust::backend::catalog::store::CatalogWriteContext {
+                    pool: std::sync::Arc::clone(pool),
+                    txns: txns.clone(),
+                    xid,
+                    cid: 0,
+                    client_id: 21,
+                    waiter: None,
+                    interrupts: Arc::clone(&interrupts),
+                };
+                let relcache = catalog_store.relcache().map_err(|err| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "physical relcache",
+                        actual: format!("{err:?}"),
+                    })
+                })?;
+                let relation =
+                    relcache
+                        .get_by_name(&stmt.table_name)
+                        .cloned()
+                        .ok_or_else(|| {
+                            ExecError::Parse(ParseError::TableDoesNotExist(stmt.table_name.clone()))
+                        })?;
+                let column_index = relation
+                    .desc
+                    .columns
+                    .iter()
+                    .position(|column| {
+                        !column.dropped && column.name.eq_ignore_ascii_case(&stmt.column_name)
+                    })
+                    .ok_or_else(|| {
+                        ExecError::DetailedError {
+                            message: format!(
+                                "column \"{}\" of relation \"{}\" does not exist",
+                                stmt.column_name, stmt.table_name
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42703",
+                        }
+                    })?;
+                catalog_store
+                    .comment_column_mvcc(
+                        relation.relation_oid,
+                        i32::from(pgrust::include::nodes::primnodes::user_attrno(
+                            column_index,
+                        )),
+                        stmt.comment.as_deref(),
+                        &ctx,
+                    )
+                    .map_err(|other| {
+                        ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "column comment update",
+                            actual: format!("{other:?}"),
+                        })
+                    })?;
+                Ok(StatementResult::AffectedRows(0))
+            };
+            match result {
+                Ok(ok) => {
+                    txns.write().commit(xid)?;
+                    Ok(ok)
+                }
+                Err(err) => {
+                    let _ = txns.write().abort(xid);
+                    Err(err)
+                }
+            }
+        }
         Statement::CreateIndex(stmt) => Ok(catalog_store
             .create_index(
                 stmt.index_name,
@@ -741,6 +817,7 @@ fn run_statement(
         Statement::Explain(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                 txns: txns.clone(),
                 txn_waiter: None,
                 lock_status_provider: None,
@@ -798,6 +875,7 @@ fn run_statement(
         Statement::Select(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                 txns: txns.clone(),
                 txn_waiter: None,
                 lock_status_provider: None,
@@ -855,6 +933,7 @@ fn run_statement(
         Statement::Values(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                 txns: txns.clone(),
                 txn_waiter: None,
                 lock_status_provider: None,
@@ -912,6 +991,7 @@ fn run_statement(
         Statement::Analyze(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                 txns: txns.clone(),
                 txn_waiter: None,
                 lock_status_provider: None,
@@ -967,7 +1047,6 @@ fn run_statement(
             execute_readonly_statement(Statement::Analyze(stmt), &relcache, &mut ctx)
         }
         Statement::CommentOnConstraint(_)
-        | Statement::CommentOnColumn(_)
         | Statement::CommentOnDomain(_)
         | Statement::CommentOnType(_)
         | Statement::CommentOnTrigger(_)
@@ -1074,6 +1153,7 @@ fn run_statement(
         Statement::TruncateTable(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                 txns: txns.clone(),
                 txn_waiter: None,
                 lock_status_provider: None,
@@ -1131,6 +1211,7 @@ fn run_statement(
         Statement::Vacuum(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                 txns: txns.clone(),
                 txn_waiter: None,
                 lock_status_provider: None,
@@ -1191,6 +1272,7 @@ fn run_statement(
                 let bound = bind_insert(&stmt, &relcache)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                     txns: txns.clone(),
                     txn_waiter: None,
                     lock_status_provider: None,
@@ -1262,6 +1344,7 @@ fn run_statement(
                 let bound = bind_update(&stmt, &relcache)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                     txns: txns.clone(),
                     txn_waiter: None,
                     lock_status_provider: None,
@@ -1333,6 +1416,7 @@ fn run_statement(
                 let bound = bind_delete(&stmt, &relcache)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                     txns: txns.clone(),
                     txn_waiter: None,
                     lock_status_provider: None,

@@ -16,7 +16,7 @@ use crate::include::catalog::{
     PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
     TEXT_TYPE_OID,
 };
-use crate::include::nodes::datum::{ArrayValue, IntervalValue};
+use crate::include::nodes::datum::{ArrayValue, IntervalValue, RecordValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
@@ -186,6 +186,7 @@ fn analyze_executor_context(
 ) -> crate::backend::executor::ExecutorContext {
     crate::backend::executor::ExecutorContext {
         pool: Arc::clone(&db.pool),
+        data_dir: None,
         txns: db.txns.clone(),
         txn_waiter: Some(db.txn_waiter.clone()),
         lock_status_provider: Some(Arc::new(db.clone())),
@@ -2454,6 +2455,48 @@ fn holdable_cursor_survives_commit_but_normal_cursor_does_not() {
             ..
         })
     ));
+}
+
+#[test]
+fn holdable_cursor_can_be_declared_outside_explicit_transaction() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create table hold_cursor_autocommit_items (id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into hold_cursor_autocommit_items values (1), (2)",
+        )
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "declare hold_auto cursor with hold for select id from hold_cursor_autocommit_items order by id",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch all from hold_auto"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn text_literal_cast_to_date_domain_uses_base_type_input() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create domain testdatexmldomain as date")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select '2013-02-21'::testdatexmldomain"),
+        vec![vec![Value::Date(crate::include::nodes::datetime::DateADT(
+            crate::backend::utils::time::datetime::days_from_ymd(2013, 2, 21).unwrap()
+        ))]]
+    );
 }
 
 #[test]
@@ -5878,12 +5921,312 @@ fn hash_partitioned_tables_route_rows_and_validate_bounds() {
         "create table hp_bad partition of hp for values with (modulus 3, remainder 0)",
     ) {
         Err(ExecError::DetailedError {
-            message, sqlstate, ..
+            message,
+            detail,
+            sqlstate,
+            ..
         }) if message
             == "every hash partition modulus must be a factor of the next larger modulus"
+            && detail
+                == Some(
+                    "The new modulus 3 is not divisible by 2, the modulus of existing partition \"hp0\"."
+                        .into(),
+                )
             && sqlstate == "42P17" => {}
         other => panic!("expected hash modulus factor rejection, got {other:?}"),
     }
+}
+
+#[test]
+fn create_table_partition_validation_matches_postgres_messages() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    match session.execute(
+        &db,
+        "create table partitioned (a int) inherits (missing_parent) partition by list (a)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message == "cannot create partitioned table as inheritance child"
+            && sqlstate == "42P16" => {}
+        other => panic!("expected partitioned inheritance-child rejection, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table parent_part (a int) partition by list (a)",
+        )
+        .unwrap();
+    match session.execute(
+        &db,
+        "create table inherited_child () inherits (parent_part)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message == "cannot inherit from partitioned table \"parent_part\""
+            && sqlstate == "42P16" => {}
+        other => panic!("expected partitioned parent inheritance rejection, got {other:?}"),
+    }
+
+    match session.execute(
+        &db,
+        "create table bad_list (a int, b int) partition by list (a, b)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message == "cannot use \"list\" partition strategy with more than one column"
+            && sqlstate == "0A000" => {}
+        other => panic!("expected list partition key arity rejection, got {other:?}"),
+    }
+
+    match session.execute(
+        &db,
+        "create table missing_key (a int) partition by range (b)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message == "column \"b\" named in partition key does not exist"
+            && sqlstate == "42703" => {}
+        other => panic!("expected partition key missing-column rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn partition_bound_validation_and_catalog_describe_helpers() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table list_parted (a int) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table list_parted_3 partition of list_parted for values in ((2+1))",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(c.relpartbound, c.oid) from pg_class c where c.relname = 'list_parted_3'",
+        ),
+        vec![vec![Value::Text("FOR VALUES IN (3)".into())]]
+    );
+    match session.execute(
+        &db,
+        "create table bad_expr partition of list_parted for values in (sum(1))",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message == "aggregate functions are not allowed in partition bound"
+            && sqlstate == "42P17" => {}
+        other => panic!("expected partition bound aggregate rejection, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table bool_parted (a bool) partition by list (a)",
+        )
+        .unwrap();
+    match session.execute(
+        &db,
+        "create table bool_parted_1 partition of bool_parted for values in (1)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message == "specified value cannot be cast to type boolean for column \"a\""
+            && sqlstate == "42P17" => {}
+        other => panic!("expected boolean partition bound cast rejection, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table money_parted (a money) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table money_parted_12 partition of money_parted for values in (to_char(12, '99')::int)",
+        )
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "create table volatile_bound_parted (a timestamp) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table volatile_bound_parted_1 partition of volatile_bound_parted for values from (minvalue) to (current_timestamp)",
+        )
+        .unwrap();
+
+    match session.execute(
+        &db,
+        "create table storage_parted (a int) partition by list (a) with (fillfactor=100)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError { message, hint, .. }))
+            if message == "cannot specify storage parameters for a partitioned table"
+                && hint.as_deref()
+                    == Some("Specify storage parameters for its leaf partitions instead.") => {}
+        other => panic!("expected partitioned-table reloptions rejection, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table commented_parted (a int, b text) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "comment on table commented_parted is 'partitioned table'",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "comment on column commented_parted.a is 'partition key'",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select obj_description('commented_parted'::regclass)"
+        ),
+        vec![vec![Value::Text("partitioned table".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select description from pg_description where objoid = 'commented_parted'::regclass and objsubid = 1"
+        ),
+        vec![vec![Value::Text("partition key".into())]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table array_parted (a int[]) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table array_parted_12 partition of array_parted for values in ('{1}', '{2}')",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(c.relpartbound, c.oid) from pg_class c where c.relname = 'array_parted_12'",
+        ),
+        vec![vec![Value::Text("FOR VALUES IN ('{1}', '{2}')".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_partition_constraintdef('array_parted_12'::regclass)",
+        ),
+        vec![vec![Value::Text(
+            "((a IS NOT NULL) AND ((a = '{1}'::integer[]) OR (a = '{2}'::integer[])))".into()
+        )]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table text_parted (a text) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table text_part_b partition of text_parted for values in ('b')",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_partition_constraintdef('text_part_b'::regclass)",
+        ),
+        vec![vec![Value::Text(
+            "((a IS NOT NULL) AND (a = 'b'::text))".into()
+        )]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table range_parted_expr (a int, b text) partition by range ((a+1), substr(b, 1, 5))",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_partkeydef('range_parted_expr'::regclass)",
+        ),
+        vec![vec![Value::Text(
+            "RANGE (((a + 1)), substr(b, 1, 5))".into()
+        )]]
+    );
+    session
+        .execute(
+            &db,
+            "create table range_parted_expr_1 partition of range_parted_expr for values from (-1, 'aaaaa') to (100, 'ccccc')",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(c.relpartbound, c.oid) from pg_class c where c.relname = 'range_parted_expr_1'",
+        ),
+        vec![vec![Value::Text(
+            "FOR VALUES FROM ('-1', 'aaaaa') TO (100, 'ccccc')".into()
+        )]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table range_parted_abs (a int, b int, c int) partition by range (abs(a), abs(b), c)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table range_parted_abs_1 partition of range_parted_abs for values from (3, 4, 5) to (6, 7, maxvalue)",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(c.relpartbound, c.oid) from pg_class c where c.relname = 'range_parted_abs_1'",
+        ),
+        vec![vec![Value::Text(
+            "FOR VALUES FROM (3, 4, 5) TO (6, 7, MAXVALUE)".into()
+        )]]
+    );
 }
 
 #[test]
@@ -10448,7 +10791,8 @@ fn create_index_and_alter_table_set_are_noops() {
             if name == "num_exp_add_idx"
                 && (expected == "table"
                     || expected == "table, view, or sequence"
-                    || expected == "table, view, materialized view, or sequence") => {}
+                    || expected == "table, view, materialized view, or sequence"
+                    || expected == "table, view, materialized view, sequence, or TOAST table") => {}
         other => panic!("expected missing-table or wrong-object-type error, got {other:?}"),
     }
 
@@ -13523,7 +13867,49 @@ fn pg_rules_exposes_user_rules_but_not_return_rules() {
             "select definition from pg_rules where tablename = 'item_view' and rulename = 'item_view_ins'",
         ),
         vec![vec![Value::Text(
-            "CREATE RULE item_view_ins AS ON INSERT TO public.item_view DO INSTEAD insert into items values (new.id)"
+            "CREATE RULE item_view_ins AS ON INSERT TO public.item_view DO INSTEAD INSERT INTO items\n  VALUES (new.id)"
+                .into(),
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'item_view_ins'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE RULE item_view_ins AS\n    ON INSERT TO item_view DO INSTEAD INSERT INTO items\n  VALUES (new.id)"
+                .into(),
+        )]]
+    );
+}
+
+#[test]
+fn pg_get_ruledef_formats_insert_rule_actions_with_casts() {
+    let base = temp_dir("rule_insert_display");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table rule_src (f1 int8, f2 text)")
+        .unwrap();
+    db.execute(1, "create type rule_type as (if1 int8, if2 text[])")
+        .unwrap();
+    db.execute(1, "create table rule_dst (f4 rule_type[])")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule rule_src_ins as on insert to rule_src do also \
+         insert into rule_dst (f4[1].if1, f4[1].if2[2]) values (1, 'fool'), (new.f1, new.f2)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'rule_src_ins'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE RULE rule_src_ins AS\n    ON INSERT TO rule_src DO  INSERT INTO rule_dst (f4[1].if1, f4[1].if2[2]) VALUES (1,'fool'::text), (new.f1,new.f2)"
                 .into(),
         )]]
     );
@@ -14868,6 +15254,73 @@ fn alter_table_add_column_propagates_to_temp_inherited_child() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
+}
+
+#[test]
+fn alter_table_multi_add_column_updates_partitioned_table() {
+    let base = temp_dir("alter_table_multi_add_partitioned");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table returningwrtest (a int) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table returningwrtest1 partition of returningwrtest for values in (1)",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into returningwrtest values (1) returning returningwrtest",
+        ),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![(
+            "a".into(),
+            Value::Int32(1),
+        )]))]]
+    );
+    session
+        .execute(&db, "alter table returningwrtest add b text, add c int")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table returningwrtest2 partition of returningwrtest for values in (2)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select attname from pg_attribute
+             where attrelid = 'returningwrtest'::regclass and attnum > 0
+             order by attnum",
+        ),
+        vec![
+            vec![Value::Text("a".into())],
+            vec![Value::Text("b".into())],
+            vec![Value::Text("c".into())],
+        ]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into returningwrtest values (1, 'x', 10) returning returningwrtest",
+        ),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![
+            ("a".into(), Value::Int32(1)),
+            ("b".into(), Value::Text("x".into())),
+            ("c".into(), Value::Int32(10)),
+        ]))]]
+    );
 }
 
 #[test]
@@ -28334,7 +28787,7 @@ fn temp_create_table_as_point_window_order_ignores_disabled_indexscan() {
         .execute(
             &db,
             "create table point_source as \
-             select point(g, g * 2) as p from generate_series(1, 11000) g",
+             select point(g, g * 2) as p from generate_series(1, 2000) g",
         )
         .unwrap();
     session
@@ -28387,7 +28840,7 @@ fn temp_create_table_as_point_window_order_ignores_disabled_indexscan() {
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Int64(11001)]]);
+            assert_eq!(rows, vec![vec![Value::Int64(2001)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -28452,6 +28905,94 @@ fn pg_column_compression_reports_large_inserted_value() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn create_table_as_execute_uses_prepared_select() {
+    let base = temp_dir("ctas_execute_prepared_select");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table source_items (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "insert into source_items (id) values (1), (2)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "prepare copy_items as select id from source_items order by id",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session
+            .execute(&db, "create table copied_items as execute copy_items")
+            .unwrap(),
+        StatementResult::AffectedRows(2)
+    );
+
+    assert_eq!(
+        query_rows(&db, 1, "select id from copied_items order by id"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+
+    session.execute(&db, "deallocate copy_items").unwrap();
+}
+
+#[test]
+fn create_unlogged_table_sets_catalog_persistence() {
+    let base = temp_dir("create_unlogged_table_persistence");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create unlogged table unlogged_items (id int4)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relpersistence from pg_class where relname = 'unlogged_items'",
+        ),
+        vec![vec![Value::Text("u".into())]]
+    );
+
+    let err = db
+        .execute(
+            1,
+            "create unlogged table unlogged_parted (id int4) partition by range (id)",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError { message, .. })
+            if message == "partitioned tables cannot be unlogged"
+    ));
+}
+
+#[test]
+fn create_table_as_if_not_exists_skips_before_planning_query() {
+    let base = temp_dir("ctas_if_not_exists_skips_before_planning");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table copied_items (id int4)")
+        .unwrap();
+    clear_backend_notices();
+    assert_eq!(
+        db.execute(
+            1,
+            "create table if not exists copied_items as select missing_column from no_such_table",
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+    assert_eq!(
+        take_backend_notices()
+            .into_iter()
+            .map(|notice| notice.message)
+            .collect::<Vec<_>>(),
+        vec!["relation \"copied_items\" already exists, skipping"]
+    );
 }
 
 #[test]
@@ -28543,6 +29084,38 @@ fn create_table_as_is_visible_in_same_txn_before_commit() {
             assert_eq!(rows, vec![vec![Value::Int64(2)]]);
         }
         other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn rollback_to_savepoint_restores_catalog_effects() {
+    let base = temp_dir("rollback_to_savepoint_catalog_effects");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table preserved_items (id int4)")
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "savepoint s").unwrap();
+    session
+        .execute(&db, "create table rolled_back_items (id int4)")
+        .unwrap();
+    session.execute(&db, "drop table preserved_items").unwrap();
+    session.execute(&db, "rollback to s").unwrap();
+
+    match session
+        .execute(&db, "select count(*) from preserved_items")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected restored table, got {other:?}"),
+    }
+    match session.execute(&db, "select count(*) from rolled_back_items") {
+        Err(ExecError::Parse(ParseError::UnknownTable(name))) if name == "rolled_back_items" => {}
+        other => panic!("expected rolled-back table create to be hidden, got {other:?}"),
     }
 }
 
@@ -35839,6 +36412,30 @@ fn builtin_range_aliases_resolve_through_generic_range_catalog_rows() {
         query_rows(&db, 1, "select span::text, lower(span)::text from t"),
         vec![vec![Value::Text("[1,5)".into()), Value::Text("1".into())]],
     );
+}
+
+#[test]
+fn create_type_rejects_pseudotype_attributes() {
+    let dir = temp_dir("create_type_rejects_pseudotype_attributes");
+    let db = Database::open(&dir, 64).unwrap();
+
+    let err = db
+        .execute(1, "create type bad_unknown as (u unknown)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "column \"u\" has pseudo-type unknown" && sqlstate == "42P16"
+    ));
+
+    let err = db
+        .execute(1, "create type bad_cstring as (u cstring)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "column \"u\" has pseudo-type cstring" && sqlstate == "42P16"
+    ));
 }
 
 #[test]

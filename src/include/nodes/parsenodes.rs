@@ -167,10 +167,12 @@ impl fmt::Display for ParseError {
             ParseError::UnsupportedQualifiedName(name) => {
                 write!(f, "unsupported qualified name: {name}")
             }
-            ParseError::InvalidInsertTargetCount { expected, actual } => write!(
-                f,
-                "INSERT has {actual} values but target list requires {expected}"
-            ),
+            ParseError::InvalidInsertTargetCount { expected, actual } if expected > actual => {
+                write!(f, "INSERT has more target columns than expressions")
+            }
+            ParseError::InvalidInsertTargetCount { .. } => {
+                write!(f, "INSERT has more expressions than target columns")
+            }
             ParseError::TableAlreadyExists(name) => write!(f, "table already exists: {name}"),
             ParseError::TableDoesNotExist(name) => write!(f, "table \"{name}\" does not exist"),
             ParseError::UnsupportedType(name) => write!(f, "type \"{name}\" does not exist"),
@@ -336,6 +338,9 @@ pub enum Statement {
     CreateTablespace(CreateTablespaceStatement),
     CreateTable(CreateTableStatement),
     CreateTableAs(CreateTableAsStatement),
+    Prepare(PrepareStatement),
+    Execute(ExecuteStatement),
+    Deallocate(DeallocateStatement),
     CreateSequence(CreateSequenceStatement),
     CreateView(CreateViewStatement),
     RefreshMaterializedView(RefreshMaterializedViewStatement),
@@ -359,6 +364,7 @@ pub enum Statement {
     AlterIndexAttachPartition(AlterIndexAttachPartitionStatement),
     AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
+    AlterTableAddColumns(AlterTableAddColumnsStatement),
     AlterTableMulti(Vec<String>),
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
     AlterTableDropColumn(AlterTableDropColumnStatement),
@@ -380,6 +386,7 @@ pub enum Statement {
     AlterViewSetSchema(AlterRelationSetSchemaStatement),
     AlterViewOwner(AlterRelationOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
+    AlterTableSetPersistence(AlterTableSetPersistenceStatement),
     AlterTableSet(AlterTableSetStatement),
     AlterTableReset(AlterTableResetStatement),
     AlterTableReplicaIdentity(AlterTableReplicaIdentityStatement),
@@ -400,10 +407,10 @@ pub enum Statement {
     AlterAggregateRename(AlterAggregateRenameStatement),
     AlterTriggerRename(AlterTriggerRenameStatement),
     CommentOnTable(CommentOnTableStatement),
+    CommentOnColumn(CommentOnColumnStatement),
     CommentOnView(CommentOnViewStatement),
     CommentOnIndex(CommentOnIndexStatement),
     CommentOnType(CommentOnTypeStatement),
-    CommentOnColumn(CommentOnColumnStatement),
     CommentOnConstraint(CommentOnConstraintStatement),
     CommentOnRule(CommentOnRuleStatement),
     CommentOnTrigger(CommentOnTriggerStatement),
@@ -700,6 +707,7 @@ pub struct CreateFunctionStatement {
     pub function_name: String,
     pub replace_existing: bool,
     pub cost: Option<String>,
+    pub support: Option<RoutineSignature>,
     pub args: Vec<CreateFunctionArg>,
     pub return_spec: CreateFunctionReturnSpec,
     pub strict: bool,
@@ -803,7 +811,7 @@ pub enum AlterRoutineOption {
     Parallel(FunctionParallel),
     Cost(String),
     Rows(String),
-    Support(String),
+    Support(RoutineSignature),
     SetConfig { name: String, value: String },
     ResetConfig(String),
     ResetAll,
@@ -1050,6 +1058,7 @@ pub struct CreateRangeTypeStatement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TablePersistence {
     Permanent,
+    Unlogged,
     Temporary,
 }
 
@@ -1473,6 +1482,7 @@ pub struct SqlCaseWhen {
 pub enum CteBody {
     Select(Box<SelectStatement>),
     Values(ValuesStatement),
+    Insert(Box<InsertStatement>),
     RecursiveUnion {
         all: bool,
         anchor: Box<CteBody>,
@@ -1917,17 +1927,40 @@ pub struct CreateTableAsStatement {
     pub persistence: TablePersistence,
     pub on_commit: OnCommitAction,
     pub column_names: Vec<String>,
-    pub query: SelectStatement,
+    pub query: CreateTableAsQuery,
     pub query_sql: Option<String>,
     pub if_not_exists: bool,
     pub object_type: TableAsObjectType,
     pub skip_data: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateTableAsQuery {
+    Select(SelectStatement),
+    Execute(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableAsObjectType {
     Table,
     MaterializedView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrepareStatement {
+    pub name: String,
+    pub query: SelectStatement,
+    pub query_sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecuteStatement {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeallocateStatement {
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2168,6 +2201,14 @@ pub struct AlterTableReplicaIdentityStatement {
     pub index_name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableSetPersistenceStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub persistence: TablePersistence,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlterTableRowSecurityAction {
     Enable,
@@ -2196,6 +2237,14 @@ pub struct AlterTableAddColumnStatement {
     pub only: bool,
     pub table_name: String,
     pub column: ColumnDef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAddColumnsStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub columns: Vec<ColumnDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2534,6 +2583,13 @@ pub struct CommentOnTableStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnColumnStatement {
+    pub table_name: String,
+    pub column_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnViewStatement {
     pub view_name: String,
     pub comment: Option<String>,
@@ -2548,13 +2604,6 @@ pub struct CommentOnIndexStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnTypeStatement {
     pub type_name: String,
-    pub comment: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommentOnColumnStatement {
-    pub relation_name: String,
-    pub column_name: String,
     pub comment: Option<String>,
 }
 
@@ -2919,6 +2968,7 @@ pub enum GrantObjectPrivilege {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantObjectStatement {
     pub privilege: GrantObjectPrivilege,
+    pub columns: Vec<String>,
     pub object_names: Vec<String>,
     pub grantee_names: Vec<String>,
     pub with_grant_option: bool,
@@ -2927,6 +2977,7 @@ pub struct GrantObjectStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevokeObjectStatement {
     pub privilege: GrantObjectPrivilege,
+    pub columns: Vec<String>,
     pub object_names: Vec<String>,
     pub grantee_names: Vec<String>,
     pub cascade: bool,
@@ -3990,6 +4041,13 @@ pub struct AssignmentTarget {
     pub column: String,
     pub subscripts: Vec<ArraySubscript>,
     pub field_path: Vec<String>,
+    pub indirection: Vec<AssignmentTargetIndirection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignmentTargetIndirection {
+    Subscript(ArraySubscript),
+    Field(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -418,6 +418,12 @@ pub(crate) fn fold_query_constants(
     constfold::fold_query_constants(query)
 }
 
+pub(crate) fn fold_expr_constants(
+    expr: crate::include::nodes::primnodes::Expr,
+) -> Result<crate::include::nodes::primnodes::Expr, crate::backend::parser::ParseError> {
+    constfold::fold_expr_constants(expr)
+}
+
 pub(crate) fn planner_with_param_base(
     query: Query,
     catalog: &dyn CatalogLookup,

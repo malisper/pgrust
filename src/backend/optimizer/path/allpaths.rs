@@ -775,6 +775,7 @@ fn collect_relation_access_paths(
             &stats,
             filter.clone(),
             None,
+            catalog,
         )
         .plan,
     ];
@@ -792,6 +793,7 @@ fn collect_relation_access_paths(
                 &stats,
                 filter.clone(),
                 Some(order_items),
+                catalog,
             )
             .plan,
         );
@@ -3348,6 +3350,26 @@ fn add_non_dominated_path(paths: &mut Vec<Path>, candidate: Path) {
 }
 
 fn path_dominates(left: &Path, right: &Path) -> bool {
+    if bestpath::preferred_parameterized_index_nested_loop(right)
+        && !bestpath::preferred_parameterized_index_nested_loop(left)
+    {
+        return false;
+    }
+    if bestpath::preferred_parameterized_index_nested_loop(left)
+        && !bestpath::preferred_parameterized_index_nested_loop(right)
+    {
+        return true;
+    }
+    if bestpath::preferred_function_outer_hash_join(right)
+        && !bestpath::preferred_function_outer_hash_join(left)
+    {
+        return false;
+    }
+    if bestpath::preferred_function_outer_hash_join(left)
+        && !bestpath::preferred_function_outer_hash_join(right)
+    {
+        return true;
+    }
     if bestpath::non_nested_join_nearly_as_cheap(right, left) {
         return false;
     }
@@ -3487,6 +3509,7 @@ fn collect_partitionwise_join_candidate_path(
         let child_output_columns = join_output_columns_for_child(&left_path, &right_path, kind);
         let child_paths = build_join_paths_with_root(
             root,
+            catalog,
             left_path,
             right_path,
             &left_relids,
@@ -3598,6 +3621,7 @@ fn make_join_rel(
         let mut join_restrict_clauses_for_rel = join_restrict_clauses.clone();
         let mut candidate_paths = collect_join_candidate_paths(
             root,
+            catalog,
             logical_left_rel,
             logical_right_rel,
             path_kind,
@@ -3637,6 +3661,7 @@ fn make_join_rel(
             );
             candidate_paths = collect_join_candidate_paths(
                 root,
+                catalog,
                 left_rel,
                 right_rel,
                 fallback_path_kind,
@@ -3762,6 +3787,7 @@ fn prefer_partitionwise_path_cost(path: Path, existing_paths: &[Path]) -> Path {
 
 fn collect_join_candidate_paths(
     root: &PlannerInfo,
+    catalog: &dyn CatalogLookup,
     left_rel: &RelOptInfo,
     right_rel: &RelOptInfo,
     kind: JoinType,
@@ -3774,6 +3800,7 @@ fn collect_join_candidate_paths(
         for right_path in &right_rel.pathlist {
             let paths = build_join_paths_with_root(
                 root,
+                catalog,
                 left_path.clone(),
                 right_path.clone(),
                 &left_rel.relids,

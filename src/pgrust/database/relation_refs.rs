@@ -708,6 +708,9 @@ fn collect_direct_relation_oids_from_cte_body(
         crate::backend::parser::CteBody::Values(values) => {
             collect_direct_relation_oids_from_values(values, catalog, visible_ctes, rels);
         }
+        crate::backend::parser::CteBody::Insert(insert) => {
+            collect_direct_relation_oids_from_insert(insert, catalog, visible_ctes, rels);
+        }
         crate::backend::parser::CteBody::RecursiveUnion {
             anchor, recursive, ..
         } => {
@@ -715,6 +718,59 @@ fn collect_direct_relation_oids_from_cte_body(
             collect_direct_relation_oids_from_select(recursive, catalog, visible_ctes, rels);
         }
     }
+}
+
+fn collect_direct_relation_oids_from_insert(
+    insert: &crate::backend::parser::InsertStatement,
+    catalog: &dyn CatalogLookup,
+    visible_ctes: &mut Vec<String>,
+    rels: &mut BTreeSet<u32>,
+) {
+    let cte_base = visible_ctes.len();
+    for cte in &insert.with {
+        collect_direct_relation_oids_from_cte_body(&cte.body, catalog, visible_ctes, rels);
+        visible_ctes.push(cte.name.to_ascii_lowercase());
+    }
+    if let Some(entry) = catalog.lookup_any_relation(&insert.table_name) {
+        rels.insert(entry.relation_oid);
+    }
+    match &insert.source {
+        crate::backend::parser::InsertSource::Values(rows) => {
+            for expr in rows.iter().flatten() {
+                collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
+            }
+        }
+        crate::backend::parser::InsertSource::DefaultValues => {}
+        crate::backend::parser::InsertSource::Select(select) => {
+            collect_direct_relation_oids_from_select(select, catalog, visible_ctes, rels);
+        }
+    }
+    if let Some(on_conflict) = &insert.on_conflict {
+        if let Some(crate::backend::parser::OnConflictTarget::Inference(spec)) = &on_conflict.target
+        {
+            for elem in &spec.elements {
+                collect_direct_relation_oids_from_sql_expr(&elem.expr, catalog, visible_ctes, rels);
+            }
+            if let Some(predicate) = &spec.predicate {
+                collect_direct_relation_oids_from_sql_expr(predicate, catalog, visible_ctes, rels);
+            }
+        }
+        for assignment in &on_conflict.assignments {
+            collect_direct_relation_oids_from_sql_expr(
+                &assignment.expr,
+                catalog,
+                visible_ctes,
+                rels,
+            );
+        }
+        if let Some(where_clause) = &on_conflict.where_clause {
+            collect_direct_relation_oids_from_sql_expr(where_clause, catalog, visible_ctes, rels);
+        }
+    }
+    for item in &insert.returning {
+        collect_direct_relation_oids_from_sql_expr(&item.expr, catalog, visible_ctes, rels);
+    }
+    visible_ctes.truncate(cte_base);
 }
 
 fn collect_direct_relation_oids_from_from_item(

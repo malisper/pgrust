@@ -81,6 +81,8 @@ const VOID_IN_PROC_OID: u32 = 2298;
 const VOID_OUT_PROC_OID: u32 = 2299;
 const PG_RUST_TYPE_INPUT_PROC_BASE: u32 = 100_000;
 const PG_RUST_TYPE_OUTPUT_PROC_BASE: u32 = 200_000;
+const UNKNOWN_IN_PROC_OID: u32 = 109;
+const UNKNOWN_OUT_PROC_OID: u32 = 110;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgTypeRow {
@@ -177,6 +179,13 @@ fn build_builtin_type_rows() -> Vec<PgTypeRow> {
             "any",
             ANYOID,
             SqlType::new(SqlTypeKind::AnyElement).with_identity(ANYOID, 0),
+        ),
+        fixed_builtin_type_row(
+            "unknown",
+            UNKNOWN_TYPE_OID,
+            SqlType::new(SqlTypeKind::Text).with_identity(UNKNOWN_TYPE_OID, 0),
+            -2,
+            AttributeAlign::Char,
         ),
         builtin_type_row(
             "anyelement",
@@ -1764,6 +1773,7 @@ pub fn annotate_catalog_type_io_procs(rows: &mut [PgTypeRow]) {
             REFCURSOR_TYPE_OID => TEXT_IN_PROC_OID,
             INT2VECTOR_TYPE_OID => INT2VECTOR_IN_PROC_OID,
             OIDVECTOR_TYPE_OID => OIDVECTOR_IN_PROC_OID,
+            UNKNOWN_TYPE_OID => UNKNOWN_IN_PROC_OID,
             TIMESTAMP_TYPE_OID => 1312,
             TIMESTAMPTZ_TYPE_OID => 1150,
             TXID_SNAPSHOT_TYPE_OID => 2939,
@@ -1804,6 +1814,7 @@ pub fn annotate_catalog_type_io_procs(rows: &mut [PgTypeRow]) {
             REFCURSOR_TYPE_OID => TEXT_OUT_PROC_OID,
             INT2VECTOR_TYPE_OID => INT2VECTOR_OUT_PROC_OID,
             OIDVECTOR_TYPE_OID => OIDVECTOR_OUT_PROC_OID,
+            UNKNOWN_TYPE_OID => UNKNOWN_OUT_PROC_OID,
             TXID_SNAPSHOT_TYPE_OID => 2940,
             PG_SNAPSHOT_TYPE_OID => 5056,
             TSVECTOR_TYPE_OID => 3611,
@@ -2170,6 +2181,24 @@ mod tests {
         assert_eq!(
             array_row.sql_type,
             SqlType::array_of(SqlType::new(SqlTypeKind::Cstring))
+        );
+    }
+
+    #[test]
+    fn builtin_types_include_unknown() {
+        let row = builtin_type_rows()
+            .into_iter()
+            .find(|row| row.oid == UNKNOWN_TYPE_OID)
+            .expect("unknown row");
+        assert_eq!(row.typname, "unknown");
+        assert_eq!(row.typlen, -2);
+        assert_eq!(row.typalign, AttributeAlign::Char);
+        assert_eq!(row.typstorage, AttributeStorage::Plain);
+        assert_eq!(row.typinput, UNKNOWN_IN_PROC_OID);
+        assert_eq!(row.typoutput, UNKNOWN_OUT_PROC_OID);
+        assert_eq!(
+            row.sql_type,
+            SqlType::new(SqlTypeKind::Text).with_identity(UNKNOWN_TYPE_OID, 0)
         );
     }
 

@@ -416,6 +416,10 @@ fn match_proc_signature(
     func_variadic: bool,
 ) -> Option<CandidateMatch> {
     let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    if matches!(row.prosrc.as_str(), "pg_num_nulls" | "pg_num_nonnulls") && actual_types.is_empty()
+    {
+        return None;
+    }
     if row.provariadic == 0 {
         if actual_types.len() != declared_oids.len() {
             return None;
@@ -1276,6 +1280,7 @@ pub(super) fn validate_scalar_function_arity(
                 args.len() == 2
             }
             BuiltinScalarFunction::CashWords => args.len() == 1,
+            BuiltinScalarFunction::UnsupportedXmlFeature => true,
             BuiltinScalarFunction::XmlComment
             | BuiltinScalarFunction::XmlIsWellFormed
             | BuiltinScalarFunction::XmlIsWellFormedDocument
@@ -1371,25 +1376,51 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgNotificationQueueUsage => args.is_empty(),
             BuiltinScalarFunction::PgTypeof
             | BuiltinScalarFunction::PgColumnCompression
-            | BuiltinScalarFunction::PgColumnSize
-            | BuiltinScalarFunction::PgRelationSize => args.len() == 1,
+            | BuiltinScalarFunction::PgColumnToastChunkId
+            | BuiltinScalarFunction::PgColumnSize => args.len() == 1,
+            BuiltinScalarFunction::PgRelationSize => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgRelationFilenode => args.len() == 1,
+            BuiltinScalarFunction::PgFilenodeRelation => args.len() == 2,
+            BuiltinScalarFunction::NumNulls | BuiltinScalarFunction::NumNonNulls => {
+                !args.is_empty()
+            }
+            BuiltinScalarFunction::PgLogBackendMemoryContexts => args.len() == 1,
+            BuiltinScalarFunction::HasFunctionPrivilege => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::PgCurrentLogfile => matches!(args.len(), 0 | 1),
+            BuiltinScalarFunction::PgReadFile | BuiltinScalarFunction::PgReadBinaryFile => {
+                matches!(args.len(), 1 | 2 | 3 | 4)
+            }
+            BuiltinScalarFunction::PgStatFile => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgWalfileName
+            | BuiltinScalarFunction::PgWalfileNameOffset
+            | BuiltinScalarFunction::PgSplitWalfileName
+            | BuiltinScalarFunction::PgReplicationOriginCreate
+            | BuiltinScalarFunction::GistTranslateCmpTypeCommon
+            | BuiltinScalarFunction::TestCanonicalizePath => args.len() == 1,
+            BuiltinScalarFunction::PgControlSystem
+            | BuiltinScalarFunction::PgControlCheckpoint
+            | BuiltinScalarFunction::PgControlRecovery
+            | BuiltinScalarFunction::PgControlInit
+            | BuiltinScalarFunction::TestRelpath => args.is_empty(),
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
             BuiltinScalarFunction::PgGetAcl => args.len() == 3,
             BuiltinScalarFunction::MakeAclItem => args.len() == 4,
             BuiltinScalarFunction::PgGetUserById => args.len() == 1,
-            BuiltinScalarFunction::ObjDescription => args.len() == 2,
+            BuiltinScalarFunction::ObjDescription => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgDescribeObject => args.len() == 3,
             BuiltinScalarFunction::PgGetFunctionArguments
             | BuiltinScalarFunction::PgGetFunctionDef
             | BuiltinScalarFunction::PgGetFunctionResult
             | BuiltinScalarFunction::PgFunctionIsVisible => args.len() == 1,
             BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::PgGetPartKeyDef => args.len() == 1,
             BuiltinScalarFunction::PgGetConstraintDef => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgGetPartitionConstraintDef => args.len() == 1,
             BuiltinScalarFunction::PgGetIndexDef => matches!(args.len(), 1 | 3),
-            BuiltinScalarFunction::PgGetViewDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgGetRuleDef => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgGetViewDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgGetStatisticsObjDef
             | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
             | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
@@ -1713,6 +1744,9 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::JsonbPathMatch
             | BuiltinScalarFunction::JsonbPathQueryArray
             | BuiltinScalarFunction::JsonbPathQueryFirst => matches!(args.len(), 2..=4),
+            BuiltinScalarFunction::JsonExists
+            | BuiltinScalarFunction::JsonValue
+            | BuiltinScalarFunction::JsonQuery => args.len() == 2,
             BuiltinScalarFunction::GeoPoint => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::GeoBox => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::GeoLine => matches!(args.len(), 1 | 2),
@@ -1937,6 +1971,15 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::TsQueryIn => {
             return Some(SqlType::new(SqlTypeKind::TsQuery));
         }
+        BuiltinScalarFunction::JsonExists => {
+            return Some(SqlType::new(SqlTypeKind::Bool));
+        }
+        BuiltinScalarFunction::JsonValue => {
+            return Some(SqlType::new(SqlTypeKind::Text));
+        }
+        BuiltinScalarFunction::JsonQuery => {
+            return Some(SqlType::new(SqlTypeKind::Jsonb));
+        }
         BuiltinScalarFunction::TsVectorConcat => {
             return Some(SqlType::new(SqlTypeKind::TsVector));
         }
@@ -2031,6 +2074,10 @@ fn scalar_functions_by_name() -> &'static BTreeMap<String, BuiltinScalarFunction
         for (name, func) in legacy_scalar_function_entries() {
             by_name.insert((*name).into(), *func);
         }
+        by_name.remove("num_nulls");
+        by_name.remove("num_nonnulls");
+        by_name.remove("pg_num_nulls");
+        by_name.remove("pg_num_nonnulls");
         by_name
     })
 }
@@ -2453,6 +2500,44 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),
         ("cash_words", BuiltinScalarFunction::CashWords),
+        ("table_to_xml", BuiltinScalarFunction::UnsupportedXmlFeature),
+        (
+            "table_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "table_to_xml_and_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        ("query_to_xml", BuiltinScalarFunction::UnsupportedXmlFeature),
+        (
+            "query_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "query_to_xml_and_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "cursor_to_xml",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "cursor_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "schema_to_xml",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "schema_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "schema_to_xml_and_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
         (
             "pg_get_constraintdef",
             BuiltinScalarFunction::PgGetConstraintDef,
@@ -2461,8 +2546,13 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_get_constraintdef_ext",
             BuiltinScalarFunction::PgGetConstraintDef,
         ),
+        (
+            "pg_get_partition_constraintdef",
+            BuiltinScalarFunction::PgGetPartitionConstraintDef,
+        ),
         ("pg_get_indexdef", BuiltinScalarFunction::PgGetIndexDef),
         ("pg_get_indexdef_ext", BuiltinScalarFunction::PgGetIndexDef),
+        ("pg_get_partkeydef", BuiltinScalarFunction::PgGetPartKeyDef),
         ("pg_get_triggerdef", BuiltinScalarFunction::PgGetTriggerDef),
         ("pg_trigger_depth", BuiltinScalarFunction::PgTriggerDepth),
         ("now", BuiltinScalarFunction::Now),
@@ -2510,6 +2600,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgEncodingToChar,
         ),
         ("pg_partition_root", BuiltinScalarFunction::PgPartitionRoot),
+        (
+            "pg_relation_filenode",
+            BuiltinScalarFunction::PgRelationFilenode,
+        ),
+        (
+            "pg_filenode_relation",
+            BuiltinScalarFunction::PgFilenodeRelation,
+        ),
         ("pg_my_temp_schema", BuiltinScalarFunction::PgMyTempSchema),
         (
             "pg_rust_internal_binary_coercible",
@@ -2581,8 +2679,116 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_column_compression",
             BuiltinScalarFunction::PgColumnCompression,
         ),
+        (
+            "pg_column_toast_chunk_id",
+            BuiltinScalarFunction::PgColumnToastChunkId,
+        ),
         ("pg_column_size", BuiltinScalarFunction::PgColumnSize),
         ("pg_relation_size", BuiltinScalarFunction::PgRelationSize),
+        ("pg_num_nulls", BuiltinScalarFunction::NumNulls),
+        ("num_nulls", BuiltinScalarFunction::NumNulls),
+        ("pg_num_nonnulls", BuiltinScalarFunction::NumNonNulls),
+        ("num_nonnulls", BuiltinScalarFunction::NumNonNulls),
+        (
+            "pg_log_backend_memory_contexts",
+            BuiltinScalarFunction::PgLogBackendMemoryContexts,
+        ),
+        (
+            "has_function_privilege",
+            BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "has_function_privilege_name_name",
+            BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "has_function_privilege_name_id",
+            BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "has_function_privilege_id_name",
+            BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "has_function_privilege_id_id",
+            BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "has_function_privilege_name",
+            BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "has_function_privilege_id",
+            BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "pg_current_logfile",
+            BuiltinScalarFunction::PgCurrentLogfile,
+        ),
+        (
+            "pg_current_logfile_1arg",
+            BuiltinScalarFunction::PgCurrentLogfile,
+        ),
+        ("pg_read_file_off_len", BuiltinScalarFunction::PgReadFile),
+        (
+            "pg_read_file_off_len_missing",
+            BuiltinScalarFunction::PgReadFile,
+        ),
+        ("pg_read_file_all", BuiltinScalarFunction::PgReadFile),
+        (
+            "pg_read_file_all_missing",
+            BuiltinScalarFunction::PgReadFile,
+        ),
+        (
+            "pg_read_binary_file_off_len",
+            BuiltinScalarFunction::PgReadBinaryFile,
+        ),
+        (
+            "pg_read_binary_file_off_len_missing",
+            BuiltinScalarFunction::PgReadBinaryFile,
+        ),
+        (
+            "pg_read_binary_file_all",
+            BuiltinScalarFunction::PgReadBinaryFile,
+        ),
+        (
+            "pg_read_binary_file_all_missing",
+            BuiltinScalarFunction::PgReadBinaryFile,
+        ),
+        ("pg_stat_file", BuiltinScalarFunction::PgStatFile),
+        ("pg_stat_file_1arg", BuiltinScalarFunction::PgStatFile),
+        ("pg_walfile_name", BuiltinScalarFunction::PgWalfileName),
+        (
+            "pg_walfile_name_offset",
+            BuiltinScalarFunction::PgWalfileNameOffset,
+        ),
+        (
+            "pg_split_walfile_name",
+            BuiltinScalarFunction::PgSplitWalfileName,
+        ),
+        ("pg_control_system", BuiltinScalarFunction::PgControlSystem),
+        (
+            "pg_control_checkpoint",
+            BuiltinScalarFunction::PgControlCheckpoint,
+        ),
+        (
+            "pg_control_recovery",
+            BuiltinScalarFunction::PgControlRecovery,
+        ),
+        ("pg_control_init", BuiltinScalarFunction::PgControlInit),
+        (
+            "pg_replication_origin_create",
+            BuiltinScalarFunction::PgReplicationOriginCreate,
+        ),
+        (
+            "gist_translate_cmptype_common",
+            BuiltinScalarFunction::GistTranslateCmpTypeCommon,
+        ),
+        (
+            "test_canonicalize_path",
+            BuiltinScalarFunction::TestCanonicalizePath,
+        ),
+        ("test_relpath", BuiltinScalarFunction::TestRelpath),
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
         ("setval", BuiltinScalarFunction::SetVal),
@@ -2626,9 +2832,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("pg_get_expr", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_expr_ext", BuiltinScalarFunction::PgGetExpr),
-        ("pg_get_viewdef", BuiltinScalarFunction::PgGetViewDef),
+        ("pg_get_partkeydef", BuiltinScalarFunction::PgGetPartKeyDef),
         ("pg_get_ruledef", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_ruledef_ext", BuiltinScalarFunction::PgGetRuleDef),
+        ("pg_get_viewdef", BuiltinScalarFunction::PgGetViewDef),
         (
             "pg_get_statisticsobjdef",
             BuiltinScalarFunction::PgGetStatisticsObjDef,
@@ -3016,6 +3223,12 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "json_extract_path_text",
             BuiltinScalarFunction::JsonExtractPathText,
         ),
+        // :HACK: PostgreSQL parses these as SQL/JSON expression nodes. Accept
+        // the plain two-argument spelling as scalar builtins until pgrust has
+        // dedicated JsonExpr parser/analyzer nodes.
+        ("json_exists", BuiltinScalarFunction::JsonExists),
+        ("json_value", BuiltinScalarFunction::JsonValue),
+        ("json_query", BuiltinScalarFunction::JsonQuery),
         ("jsonb_typeof", BuiltinScalarFunction::JsonbTypeof),
         (
             "jsonb_array_length",
@@ -3678,10 +3891,12 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             BuiltinScalarFunction::PgGetFunctionDef,
             BuiltinScalarFunction::PgGetFunctionResult,
             BuiltinScalarFunction::PgGetExpr,
+            BuiltinScalarFunction::PgGetPartKeyDef,
             BuiltinScalarFunction::PgGetConstraintDef,
+            BuiltinScalarFunction::PgGetPartitionConstraintDef,
             BuiltinScalarFunction::PgGetIndexDef,
-            BuiltinScalarFunction::PgGetViewDef,
             BuiltinScalarFunction::PgGetRuleDef,
+            BuiltinScalarFunction::PgGetViewDef,
             BuiltinScalarFunction::PgGetStatisticsObjDef,
             BuiltinScalarFunction::PgGetStatisticsObjDefColumns,
         ] {
@@ -3905,10 +4120,12 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetFunctionDef
             | BuiltinScalarFunction::PgGetFunctionResult
             | BuiltinScalarFunction::PgGetExpr
+            | BuiltinScalarFunction::PgGetPartKeyDef
             | BuiltinScalarFunction::PgGetConstraintDef
+            | BuiltinScalarFunction::PgGetPartitionConstraintDef
             | BuiltinScalarFunction::PgGetIndexDef
-            | BuiltinScalarFunction::PgGetViewDef
             | BuiltinScalarFunction::PgGetRuleDef
+            | BuiltinScalarFunction::PgGetViewDef
             | BuiltinScalarFunction::PgGetStatisticsObjDef
             | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
             | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
@@ -4084,6 +4301,7 @@ fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Overlay
             | BuiltinScalarFunction::LPad
             | BuiltinScalarFunction::RPad
+            | BuiltinScalarFunction::ObjDescription
             | BuiltinScalarFunction::BTrim
             | BuiltinScalarFunction::LTrim
             | BuiltinScalarFunction::RTrim
@@ -4341,6 +4559,22 @@ mod tests {
         assert_eq!(
             resolve_scalar_function("pg_clear_attribute_stats"),
             Some(BuiltinScalarFunction::PgClearAttributeStats)
+        );
+        assert_eq!(
+            resolve_scalar_function("pg_relation_filenode"),
+            Some(BuiltinScalarFunction::PgRelationFilenode)
+        );
+        assert_eq!(
+            resolve_scalar_function("pg_catalog.pg_filenode_relation"),
+            Some(BuiltinScalarFunction::PgFilenodeRelation)
+        );
+        assert_eq!(
+            resolve_scalar_function("pg_catalog.pg_get_partkeydef"),
+            Some(BuiltinScalarFunction::PgGetPartKeyDef)
+        );
+        assert_eq!(
+            resolve_scalar_function("pg_catalog.pg_get_partition_constraintdef"),
+            Some(BuiltinScalarFunction::PgGetPartitionConstraintDef)
         );
         assert_eq!(resolve_scalar_function("count"), None);
         assert_eq!(resolve_scalar_function("json_array_elements"), None);

@@ -177,6 +177,12 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_alter_table_trigger_state_statement(&sql)? {
         return Ok(stmt);
     }
+    if create_table_uses_bare_with_oids(&sql) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "statement",
+            actual: "syntax error at or near \"OIDS\"".into(),
+        });
+    }
     if let Some(stmt) = try_parse_index_statement(&sql)? {
         return Ok(stmt);
     }
@@ -261,6 +267,23 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
     }
 
     None
+}
+
+fn create_table_uses_bare_with_oids(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("create table ") {
+        return false;
+    }
+    let Some(with_idx) = find_next_top_level_keyword(trimmed, &["with"]) else {
+        return false;
+    };
+    let after_with = trimmed[with_idx + "with".len()..].trim_start();
+    if !keyword_at_start(after_with, "oids") {
+        return false;
+    }
+    let after_oids = consume_keyword(after_with, "oids").trim();
+    after_oids.is_empty() || after_oids == ";"
 }
 
 fn is_select_with_trailing_operator(sql: &str) -> bool {
@@ -582,14 +605,52 @@ fn try_parse_alter_table_multi_action_statement(
         return Ok(None);
     }
     let mut statements = Vec::with_capacity(actions.len());
+    let mut parsed_statements = Vec::with_capacity(actions.len());
     for action in actions {
         let action = action.trim();
         if action.is_empty() {
             continue;
         }
         let sub_sql = format!("ALTER TABLE {target_sql} {action}");
-        parse_statement_with_options_inner(sub_sql.clone(), options)?;
+        let parsed = parse_statement_with_options_inner(sub_sql.clone(), options)?;
         statements.push(sub_sql);
+        parsed_statements.push(parsed);
+    }
+    if !parsed_statements.is_empty()
+        && parsed_statements
+            .iter()
+            .all(|stmt| matches!(stmt, Statement::AlterTableAddColumn(_)))
+    {
+        let mut if_exists = false;
+        let mut only = false;
+        let mut table_name = None;
+        let mut columns = Vec::with_capacity(parsed_statements.len());
+        for stmt in parsed_statements {
+            let Statement::AlterTableAddColumn(add_column) = stmt else {
+                unreachable!("all parsed statements are ADD COLUMN");
+            };
+            if let Some(table_name) = &table_name {
+                if add_column.if_exists != if_exists
+                    || add_column.only != only
+                    || add_column.table_name != *table_name
+                {
+                    return Ok(Some(Statement::AlterTableMulti(statements)));
+                }
+            } else {
+                if_exists = add_column.if_exists;
+                only = add_column.only;
+                table_name = Some(add_column.table_name.clone());
+            }
+            columns.push(add_column.column);
+        }
+        return Ok(Some(Statement::AlterTableAddColumns(
+            AlterTableAddColumnsStatement {
+                if_exists,
+                only,
+                table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+                columns,
+            },
+        )));
     }
     Ok(Some(Statement::AlterTableMulti(statements)))
 }
@@ -1230,6 +1291,7 @@ fn try_parse_partition_statement(
     let lowered = trimmed.to_ascii_lowercase();
 
     if (lowered.starts_with("create table ")
+        || lowered.starts_with("create unlogged table ")
         || lowered.starts_with("create temp table ")
         || lowered.starts_with("create temporary table "))
         && find_next_top_level_keyword(trimmed, &["partition"]).is_some()
@@ -1287,7 +1349,13 @@ fn build_partition_create_table_statement(
             return Err(PartitionStatementParseError::Unsupported);
         };
         let (partition_spec, rest) = parse_partition_spec_clause(partition_clause)?;
-        if !rest.trim().is_empty() {
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            if partitioned_table_storage_clause_is_unsupported(rest)? {
+                return Err(PartitionStatementParseError::Parse(
+                    partitioned_table_storage_parameter_error(),
+                ));
+            }
             return Err(PartitionStatementParseError::Unsupported);
         }
         create_stmt.partition_spec = Some(partition_spec);
@@ -1370,6 +1438,26 @@ fn parse_partition_of_table_storage_clause(
         .ok_or(PartitionStatementParseError::Unsupported)?;
     build_table_storage_options(pair).map_err(|_| PartitionStatementParseError::Unsupported)?;
     Ok("")
+}
+
+fn partitioned_table_storage_clause_is_unsupported(rest: &str) -> Result<bool, ParseError> {
+    if !keyword_at_start(rest, "with") {
+        return Ok(false);
+    }
+    let after_with = consume_keyword(rest, "with").trim_start();
+    if keyword_at_start(after_with, "oids") {
+        return Err(ParseError::TablesDeclaredWithOidsNotSupported);
+    }
+    Ok(after_with.starts_with('('))
+}
+
+fn partitioned_table_storage_parameter_error() -> ParseError {
+    ParseError::DetailedError {
+        message: "cannot specify storage parameters for a partitioned table".into(),
+        detail: None,
+        hint: Some("Specify storage parameters for its leaf partitions instead.".into()),
+        sqlstate: "0A000",
+    }
 }
 
 fn parse_partition_of_elements(
@@ -1506,7 +1594,19 @@ fn parse_partition_spec_clause(
         rest = consume_keyword(rest, "hash").trim_start();
         PartitionStrategy::Hash
     } else {
-        return Err(PartitionStatementParseError::Unsupported);
+        let strategy_name = rest
+            .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(rest)
+            .to_ascii_lowercase();
+        return Err(ParseError::DetailedError {
+            message: format!("unrecognized partitioning strategy \"{strategy_name}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        }
+        .into());
     };
     let (keys_sql, rest) = take_parenthesized_segment(rest)?;
     let mut keys = Vec::new();
@@ -4656,6 +4756,11 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant execute on routine ") {
         return Ok(Statement::GrantObject(build_grant_routine_execute(sql)?));
     }
+    if lowered.starts_with("grant select (") {
+        return Ok(Statement::GrantObject(build_grant_table_column_select(
+            sql,
+        )?));
+    }
     if let Some(stmt) = try_build_grant_table_acl_statement(sql)? {
         return Ok(Statement::GrantObject(stmt));
     }
@@ -4686,6 +4791,11 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("revoke execute on routine ") {
         return Ok(Statement::RevokeObject(build_revoke_routine_execute(sql)?));
     }
+    if lowered.starts_with("revoke select (") {
+        return Ok(Statement::RevokeObject(build_revoke_table_column_select(
+            sql,
+        )?));
+    }
     if let Some(stmt) = try_build_revoke_table_acl_statement(sql)? {
         return Ok(Statement::RevokeObject(stmt));
     }
@@ -4712,6 +4822,7 @@ fn try_build_grant_table_acl_statement(
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(Some(GrantObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -4737,6 +4848,7 @@ fn try_build_revoke_table_acl_statement(
     let (grantee_names, grantee_cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(Some(RevokeObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade: cascade || grantee_cascade,
@@ -4818,6 +4930,68 @@ fn table_privilege_from_chars(chars: String) -> GrantObjectPrivilege {
     }
 }
 
+fn build_grant_table_column_select(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let after_privilege = sql
+        .get("grant select".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let close = after_privilege
+        .find(')')
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "column privilege list",
+            actual: after_privilege.into(),
+        })?;
+    let columns = parse_identifier_list(&after_privilege[1..close])?;
+    let rest = after_privilege[close + 1..].trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "on").trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::SelectOnTable,
+        columns,
+        object_names: vec![normalize_simple_identifier(object_name)?],
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn build_revoke_table_column_select(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let after_privilege = sql
+        .get("revoke select".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let close = after_privilege
+        .find(')')
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "column privilege list",
+            actual: after_privilege.into(),
+        })?;
+    let columns = parse_identifier_list(&after_privilege[1..close])?;
+    let rest = after_privilege[close + 1..].trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "on").trim_start();
+    let (object_name, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege: GrantObjectPrivilege::SelectOnTable,
+        columns,
+        object_names: vec![normalize_simple_identifier(object_name)?],
+        grantee_names,
+        cascade,
+    })
+}
+
 fn build_alter_type_owner_statement(sql: &str) -> Result<AlterTypeOwnerStatement, ParseError> {
     let prefix = "alter type ";
     let rest = sql
@@ -4864,6 +5038,7 @@ fn build_grant_database_create(sql: &str) -> Result<GrantObjectStatement, ParseE
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::CreateOnDatabase,
+        columns: Vec::new(),
         object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         with_grant_option,
@@ -4880,6 +5055,7 @@ fn build_grant_schema_all(sql: &str) -> Result<GrantObjectStatement, ParseError>
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -4896,6 +5072,7 @@ fn build_grant_schema_usage(sql: &str) -> Result<GrantObjectStatement, ParseErro
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnSchema,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -4912,6 +5089,7 @@ fn build_grant_type_usage(sql: &str) -> Result<GrantObjectStatement, ParseError>
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnType,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -4928,6 +5106,7 @@ fn build_grant_function_execute(sql: &str) -> Result<GrantObjectStatement, Parse
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::ExecuteOnFunction,
+        columns: Vec::new(),
         object_names: vec![object_name.trim().to_ascii_lowercase()],
         grantee_names,
         with_grant_option,
@@ -4960,6 +5139,7 @@ fn build_grant_routine_execute_with_prefix(
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: vec![object_name.trim().to_ascii_lowercase()],
         grantee_names,
         with_grant_option,
@@ -4976,6 +5156,7 @@ fn build_revoke_database_create(sql: &str) -> Result<RevokeObjectStatement, Pars
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::CreateOnDatabase,
+        columns: Vec::new(),
         object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         cascade,
@@ -4992,6 +5173,7 @@ fn build_revoke_schema_usage(sql: &str) -> Result<RevokeObjectStatement, ParseEr
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnSchema,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade,
@@ -5008,6 +5190,7 @@ fn build_revoke_type_usage(sql: &str) -> Result<RevokeObjectStatement, ParseErro
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnType,
+        columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade,
@@ -5024,6 +5207,7 @@ fn build_revoke_function_execute(sql: &str) -> Result<RevokeObjectStatement, Par
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::ExecuteOnFunction,
+        columns: Vec::new(),
         object_names: vec![object_name.trim().to_ascii_lowercase()],
         grantee_names,
         cascade,
@@ -5056,6 +5240,7 @@ fn build_revoke_routine_execute_with_prefix(
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege,
+        columns: Vec::new(),
         object_names: vec![object_name.trim().to_ascii_lowercase()],
         grantee_names,
         cascade,
@@ -6221,6 +6406,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     let mut body = None;
     let mut link_symbol = None;
     let mut cost = None;
+    let mut support = None;
     let mut strict = false;
     let mut leakproof = false;
     let mut volatility = crate::backend::parser::FunctionVolatility::Volatile;
@@ -6261,6 +6447,18 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
             }
             let (parsed, next_rest) = parse_create_function_cost(rest)?;
             cost = Some(parsed);
+            rest = next_rest;
+            continue;
+        }
+        if keyword_at_start(rest, "support") {
+            if support.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "single SUPPORT clause",
+                    actual: rest.into(),
+                });
+            }
+            let (parsed, next_rest) = parse_create_function_support(rest)?;
+            support = Some(parsed);
             rest = next_rest;
             continue;
         }
@@ -6354,6 +6552,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         function_name,
         replace_existing,
         cost,
+        support,
         args,
         return_spec,
         strict,
@@ -6364,6 +6563,27 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         body: body.ok_or(ParseError::UnexpectedEof)?,
         link_symbol,
     })
+}
+
+fn parse_support_routine_signature(input: &str) -> Result<RoutineSignature, ParseError> {
+    let ((schema_name, routine_name), rest) = parse_qualified_sql_name(input.trim())?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "support function name",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(RoutineSignature {
+        schema_name,
+        routine_name,
+        arg_types: Vec::new(),
+    })
+}
+
+fn parse_create_function_support(input: &str) -> Result<(RoutineSignature, &str), ParseError> {
+    let rest = consume_keyword(input, "support").trim_start();
+    let (value, rest) = take_next_word(rest)?;
+    Ok((parse_support_routine_signature(&value)?, rest))
 }
 
 fn build_drop_function_statement(sql: &str) -> Result<DropFunctionStatement, ParseError> {
@@ -6886,7 +7106,9 @@ fn parse_alter_routine_options(mut input: &str) -> Result<Vec<AlterRoutineOption
         } else if keyword_at_start(input, "support") {
             let rest = consume_keyword(input, "support").trim_start();
             let (value, rest) = take_next_word(rest)?;
-            options.push(AlterRoutineOption::Support(value));
+            options.push(AlterRoutineOption::Support(
+                parse_support_routine_signature(&value)?,
+            ));
             input = rest;
         } else if keyword_at_start(input, "set") {
             let rest = consume_keyword(input, "set").trim_start();
@@ -7533,14 +7755,14 @@ fn build_comment_on_column_statement(sql: &str) -> Result<CommentOnColumnStateme
         });
     };
     let target = rest[..is_index].trim();
-    let Some((relation_name, column_name)) = target.rsplit_once('.') else {
+    let Some((table_name, column_name)) = target.rsplit_once('.') else {
         return Err(ParseError::UnexpectedToken {
             expected: "relation.column",
             actual: target.into(),
         });
     };
     Ok(CommentOnColumnStatement {
-        relation_name: relation_name.trim().to_string(),
+        table_name: table_name.trim().to_string(),
         column_name: column_name.trim().to_string(),
         comment: parse_comment_value(&rest[is_index..], "end of COMMENT ON COLUMN")?,
     })
@@ -11712,6 +11934,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::fetch_stmt => Ok(Statement::Fetch(build_fetch(inner)?)),
         Rule::move_stmt => Ok(Statement::Move(build_fetch(inner)?)),
         Rule::close_portal_stmt => Ok(Statement::ClosePortal(build_close_portal(inner)?)),
+        Rule::prepare_stmt => Ok(Statement::Prepare(build_prepare_statement(inner)?)),
+        Rule::execute_prepared_stmt => Ok(Statement::Execute(build_execute_statement(inner)?)),
+        Rule::deallocate_stmt => Ok(Statement::Deallocate(build_deallocate_statement(inner)?)),
         Rule::set_session_authorization_stmt => Ok(Statement::SetSessionAuthorization(
             build_set_session_authorization(inner)?,
         )),
@@ -11798,6 +12023,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_schema_owner_stmt => Ok(Statement::AlterSchemaOwner(build_alter_schema_owner(
             inner,
         )?)),
+        Rule::alter_table_set_persistence_stmt => Ok(Statement::AlterTableSetPersistence(
+            build_alter_table_set_persistence(inner)?,
+        )),
         Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
         Rule::alter_table_reset_stmt => {
             Ok(Statement::AlterTableReset(build_alter_table_reset(inner)?))
@@ -12308,6 +12536,51 @@ fn build_close_portal(pair: Pair<'_, Rule>) -> Result<ClosePortalStatement, Pars
         }
     }
     Ok(ClosePortalStatement {
+        name: if all { None } else { name },
+    })
+}
+
+fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, ParseError> {
+    let mut name = None;
+    let mut query = None;
+    let mut query_sql = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::select_stmt => {
+                query_sql = Some(part.as_str().trim().to_string());
+                query = Some(build_select(part)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(PrepareStatement {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        query: query.ok_or(ParseError::UnexpectedEof)?,
+        query_sql: query_sql.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_execute_statement(pair: Pair<'_, Rule>) -> Result<ExecuteStatement, ParseError> {
+    let name = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier)
+        .ok_or(ParseError::UnexpectedEof)?;
+    Ok(ExecuteStatement { name })
+}
+
+fn build_deallocate_statement(pair: Pair<'_, Rule>) -> Result<DeallocateStatement, ParseError> {
+    let mut name = None;
+    let mut all = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::kw_all => all = true,
+            _ => {}
+        }
+    }
+    Ok(DeallocateStatement {
         name: if all { None } else { name },
     })
 }
@@ -13312,7 +13585,7 @@ fn build_select_into(pair: Pair<'_, Rule>) -> Result<CreateTableAsStatement, Par
         persistence,
         on_commit: OnCommitAction::PreserveRows,
         column_names: Vec::new(),
-        query: build_simple_select_statement(query_parts)?,
+        query: CreateTableAsQuery::Select(build_simple_select_statement(query_parts)?),
         query_sql: None,
         if_not_exists: false,
         object_type: TableAsObjectType::Table,
@@ -13617,6 +13890,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
             Ok(CteBody::Select(Box::new(build_select(pair)?)))
         }
         Rule::values_stmt => Ok(CteBody::Values(build_values_statement(pair)?)),
+        Rule::insert_stmt => Ok(CteBody::Insert(Box::new(build_insert(pair)?))),
         Rule::recursive_union_cte_body => {
             let all = contains_union_all(pair.as_str());
             let mut inner = pair.into_inner();
@@ -13640,7 +13914,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
             })
         }
         _ => Err(ParseError::UnexpectedToken {
-            expected: "SELECT or VALUES CTE body",
+            expected: "SELECT, VALUES, or INSERT CTE body",
             actual: pair.as_str().into(),
         }),
     }
@@ -14124,7 +14398,16 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
                 ))
             }
             Rule::insert_default_values_source => source = Some(InsertSource::DefaultValues),
-            Rule::select_stmt => source = Some(InsertSource::Select(Box::new(build_select(part)?))),
+            Rule::insert_select_source | Rule::select_stmt => {
+                let select = match part.as_rule() {
+                    Rule::select_stmt => part,
+                    _ => part
+                        .into_inner()
+                        .find(|inner| inner.as_rule() == Rule::select_stmt)
+                        .ok_or(ParseError::UnexpectedEof)?,
+                };
+                source = Some(InsertSource::Select(Box::new(build_select(select)?)));
+            }
             Rule::on_conflict_clause => on_conflict = Some(build_on_conflict_clause(part)?),
             Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
@@ -14483,6 +14766,14 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             part
         };
         match part.as_rule() {
+            Rule::table_persistence_clause => {
+                let lowered = part.as_str().to_ascii_lowercase();
+                persistence = if lowered.contains("unlogged") {
+                    TablePersistence::Unlogged
+                } else {
+                    TablePersistence::Temporary
+                };
+            }
             Rule::temp_clause => persistence = TablePersistence::Temporary,
             Rule::if_not_exists_clause => if_not_exists = true,
             Rule::identifier if relation_name.is_none() => {
@@ -14527,9 +14818,11 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                                 .unwrap_or_default();
                         }
                         Rule::on_commit_clause => on_commit = build_on_commit_action(inner)?,
-                        Rule::select_stmt => {
-                            query_sql = Some(inner.as_str().trim().to_string());
-                            query = Some(build_select(inner)?);
+                        Rule::table_storage_clause => validate_table_storage_clause(inner)?,
+                        Rule::ctas_query | Rule::select_stmt | Rule::execute_prepared_stmt => {
+                            let (parsed_query, parsed_sql) = build_ctas_query(inner)?;
+                            query = Some(parsed_query);
+                            query_sql = parsed_sql;
                         }
                         _ => {}
                     }
@@ -14582,6 +14875,29 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             partition_bound: None,
             if_not_exists,
         }))
+    }
+}
+
+fn build_ctas_query(
+    pair: Pair<'_, Rule>,
+) -> Result<(CreateTableAsQuery, Option<String>), ParseError> {
+    match pair.as_rule() {
+        Rule::ctas_query => {
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            build_ctas_query(inner)
+        }
+        Rule::select_stmt => {
+            let sql = pair.as_str().trim().to_string();
+            Ok((CreateTableAsQuery::Select(build_select(pair)?), Some(sql)))
+        }
+        Rule::execute_prepared_stmt => {
+            let execute = build_execute_statement(pair)?;
+            Ok((CreateTableAsQuery::Execute(execute.name), None))
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "CREATE TABLE AS query",
+            actual: pair.as_str().to_string(),
+        }),
     }
 }
 
@@ -14650,7 +14966,7 @@ fn build_create_materialized_view(
             }
             Rule::select_stmt => {
                 query_sql = Some(part.as_str().trim().to_string());
-                query = Some(build_select(part)?);
+                query = Some(CreateTableAsQuery::Select(build_select(part)?));
             }
             Rule::matview_data_clause => {
                 skip_data = part.as_str().to_ascii_lowercase().contains("no");
@@ -14965,7 +15281,7 @@ fn build_typed_column_options(pair: Pair<'_, Rule>) -> Result<TypedColumnOptions
     let mut collation = None;
     let mut generated = None;
     let mut identity = None;
-    let storage = None;
+    let mut storage = None;
     let mut compression = None;
     let mut constraints = Vec::new();
     for flag in inner {
@@ -14998,6 +15314,9 @@ fn build_typed_column_options(pair: Pair<'_, Rule>) -> Result<TypedColumnOptions
             }
             Rule::column_compression => {
                 compression = Some(build_column_compression(flag)?);
+            }
+            Rule::column_storage => {
+                storage = Some(build_column_storage(flag)?);
             }
             Rule::nullable => {}
             Rule::named_column_constraint => {
@@ -15960,6 +16279,40 @@ fn build_alter_table_reset(pair: Pair<'_, Rule>) -> Result<AlterTableResetStatem
     })
 }
 
+fn build_alter_table_set_persistence(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableSetPersistenceStatement, ParseError> {
+    let lowered = pair.as_str().trim_end().to_ascii_lowercase();
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            _ => {}
+        }
+    }
+    let persistence = if lowered.ends_with(" set unlogged") {
+        TablePersistence::Unlogged
+    } else if lowered.ends_with(" set logged") {
+        TablePersistence::Permanent
+    } else {
+        return Err(ParseError::UnexpectedEof);
+    };
+    Ok(AlterTableSetPersistenceStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        persistence,
+    })
+}
+
 fn build_alter_table_set_row_security(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableSetRowSecurityStatement, ParseError> {
@@ -16245,6 +16598,10 @@ fn build_table_storage_options(pair: Pair<'_, Rule>) -> Result<Vec<RelOption>, P
             actual: part.as_str().to_string(),
         }),
     }
+}
+
+fn validate_table_storage_clause(pair: Pair<'_, Rule>) -> Result<(), ParseError> {
+    build_table_storage_options(pair).map(|_| ())
 }
 
 fn build_relation_name(pair: Pair<'_, Rule>) -> (Option<String>, String) {
@@ -17086,19 +17443,16 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
     let column = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
     let mut subscripts = Vec::new();
     let mut field_path = Vec::new();
+    let mut indirection = Vec::new();
     for part in inner {
         match part.as_rule() {
             Rule::assignment_target_suffix => {
                 let suffix = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
                 match suffix.as_rule() {
                     Rule::subscript_suffix => {
-                        if !field_path.is_empty() {
-                            return Err(ParseError::UnexpectedToken {
-                                expected: "record field selection at end of assignment target",
-                                actual: suffix.as_str().into(),
-                            });
-                        }
-                        subscripts.push(build_array_subscript(suffix)?);
+                        let subscript = build_array_subscript(suffix)?;
+                        subscripts.push(subscript.clone());
+                        indirection.push(AssignmentTargetIndirection::Subscript(subscript));
                     }
                     Rule::field_select_suffix => {
                         let field = suffix
@@ -17106,19 +17460,16 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
                             .find(|part| part.as_rule() == Rule::identifier)
                             .map(build_identifier)
                             .ok_or(ParseError::UnexpectedEof)?;
-                        field_path.push(field);
+                        field_path.push(field.clone());
+                        indirection.push(AssignmentTargetIndirection::Field(field));
                     }
                     _ => {}
                 }
             }
             Rule::subscript_suffix => {
-                if !field_path.is_empty() {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "record field selection at end of assignment target",
-                        actual: part.as_str().into(),
-                    });
-                }
-                subscripts.push(build_array_subscript(part)?);
+                let subscript = build_array_subscript(part)?;
+                subscripts.push(subscript.clone());
+                indirection.push(AssignmentTargetIndirection::Subscript(subscript));
             }
             Rule::field_select_suffix => {
                 let field = part
@@ -17126,7 +17477,8 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
                     .find(|inner| inner.as_rule() == Rule::identifier)
                     .map(build_identifier)
                     .ok_or(ParseError::UnexpectedEof)?;
-                field_path.push(field);
+                field_path.push(field.clone());
+                indirection.push(AssignmentTargetIndirection::Field(field));
             }
             _ => {}
         }
@@ -17135,6 +17487,7 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
         column,
         subscripts,
         field_path,
+        indirection,
     })
 }
 
@@ -17179,7 +17532,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
     let mut collation = None;
     let mut generated = None;
     let mut identity = None;
-    let storage = None;
+    let mut storage = None;
     let mut compression = None;
     let mut constraints = Vec::new();
     for flag in inner {
@@ -17211,6 +17564,9 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
             }
             Rule::column_compression => {
                 compression = Some(build_column_compression(flag)?);
+            }
+            Rule::column_storage => {
+                storage = Some(build_column_storage(flag)?);
             }
             Rule::nullable => {}
             Rule::named_column_constraint => {
@@ -17352,6 +17708,28 @@ fn build_column_compression(
     }
     Err(ParseError::UnexpectedToken {
         expected: "compression method",
+        actual: pair.as_str().into(),
+    })
+}
+
+fn build_column_storage(
+    pair: Pair<'_, Rule>,
+) -> Result<crate::include::access::tupdesc::AttributeStorage, ParseError> {
+    let raw = pair.as_str().trim().to_ascii_lowercase();
+    if raw.ends_with("plain") {
+        return Ok(crate::include::access::tupdesc::AttributeStorage::Plain);
+    }
+    if raw.ends_with("external") {
+        return Ok(crate::include::access::tupdesc::AttributeStorage::External);
+    }
+    if raw.ends_with("extended") {
+        return Ok(crate::include::access::tupdesc::AttributeStorage::Extended);
+    }
+    if raw.ends_with("main") {
+        return Ok(crate::include::access::tupdesc::AttributeStorage::Main);
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "storage method",
         actual: pair.as_str().into(),
     })
 }

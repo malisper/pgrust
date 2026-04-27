@@ -13,7 +13,8 @@ use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_i
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
 use crate::backend::executor::{ExecutorContext, RelationDesc};
 use crate::backend::parser::{
-    BoundRelation, CatalogLookup, parse_type_name, resolve_raw_type_name,
+    AlterTableSetPersistenceStatement, BoundRelation, CatalogLookup, TablePersistence,
+    parse_type_name, resolve_raw_type_name,
 };
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::{
@@ -22,15 +23,17 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
-    CommentOnAggregateStatement, CommentOnFunctionStatement, CommentOnIndexStatement,
-    CommentOnOperatorStatement, CommentOnViewStatement, MaintenanceTarget, VacuumStatement,
+    CommentOnAggregateStatement, CommentOnColumnStatement, CommentOnFunctionStatement,
+    CommentOnIndexStatement, CommentOnOperatorStatement, CommentOnViewStatement, MaintenanceTarget,
+    VacuumStatement,
 };
+use crate::include::nodes::primnodes::user_attrno;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::autovacuum::{AutovacuumRelationInput, relation_needs_vacanalyze};
 use crate::pgrust::database::ddl::{
     dependent_view_rewrites_for_relation, lookup_analyzable_relation_for_ddl,
-    lookup_heap_relation_for_alter_table, lookup_heap_relation_for_ddl,
-    lookup_index_relation_for_alter_index,
+    lookup_heap_relation_for_ddl, lookup_index_relation_for_alter_index,
+    lookup_table_or_partitioned_table_for_alter_table,
 };
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
@@ -250,6 +253,22 @@ fn vacuum_exec_options(
         process_toast,
         only_database_stats: stmt.only_database_stats,
     })
+}
+
+fn lookup_table_or_partitioned_relation_for_comment(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+) -> Result<crate::backend::parser::BoundRelation, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'r' | 'p') => Ok(entry),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table",
+        })),
+        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
+            name.to_string(),
+        ))),
+    }
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
@@ -839,6 +858,11 @@ fn collect_add_column_targets(
         } else {
             catalog
                 .lookup_relation_by_oid(*relation_oid)
+                .or_else(|| {
+                    catalog
+                        .class_row_by_oid(*relation_oid)
+                        .and_then(|row| catalog.lookup_any_relation(&row.relname))
+                })
                 .ok_or_else(|| {
                     ExecError::Parse(ParseError::UnknownTable(relation_oid.to_string()))
                 })?
@@ -885,6 +909,45 @@ fn collect_add_column_targets(
 }
 
 impl Database {
+    pub(crate) fn execute_alter_table_set_persistence_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterTableSetPersistenceStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let table_name = alter_stmt.table_name.to_ascii_lowercase();
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let Some(relation) = catalog.lookup_any_relation(&table_name) else {
+            if alter_stmt.if_exists {
+                push_notice(format!(
+                    r#"relation "{table_name}" does not exist, skipping"#
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            return Err(ExecError::Parse(ParseError::TableDoesNotExist(table_name)));
+        };
+        if relation.relkind == 'p' {
+            let action = match alter_stmt.persistence {
+                TablePersistence::Permanent => "SET LOGGED",
+                TablePersistence::Unlogged => "SET UNLOGGED",
+                TablePersistence::Temporary => "SET",
+            };
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "ALTER action {action} cannot be performed on relation \"{}\"",
+                    table_name
+                ),
+                detail: Some("This operation is not supported for partitioned tables.".into()),
+                hint: None,
+                sqlstate: "42809",
+            });
+        }
+        Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+            "ALTER TABLE SET LOGGED/UNLOGGED is only supported for partitioned-table diagnostics"
+                .into(),
+        )))
+    }
+
     pub(crate) fn effective_analyze_targets_with_search_path(
         &self,
         client_id: ClientId,
@@ -1078,6 +1141,7 @@ impl Database {
         let relations = [relation];
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),
@@ -1344,28 +1408,6 @@ impl Database {
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
         let result = self.execute_comment_on_type_stmt_in_transaction_with_search_path(
-            client_id,
-            comment_stmt,
-            xid,
-            0,
-            configured_search_path,
-            &mut catalog_effects,
-        );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
-        guard.disarm();
-        result
-    }
-
-    pub(crate) fn execute_comment_on_column_stmt_with_search_path(
-        &self,
-        client_id: ClientId,
-        comment_stmt: &CommentOnColumnStatement,
-        configured_search_path: Option<&[String]>,
-    ) -> Result<StatementResult, ExecError> {
-        let xid = self.txns.write().begin();
-        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
-        let mut catalog_effects = Vec::new();
-        let result = self.execute_comment_on_column_stmt_in_transaction_with_search_path(
             client_id,
             comment_stmt,
             xid,
@@ -1657,7 +1699,7 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let relation = match catalog.lookup_any_relation(&comment_stmt.table_name) {
-            Some(entry) if entry.relkind == 'r' => entry,
+            Some(entry) if matches!(entry.relkind, 'r' | 'p') => entry,
             Some(_) => {
                 return Err(ExecError::Parse(ParseError::WrongObjectType {
                     name: comment_stmt.table_name.clone(),
@@ -1683,6 +1725,39 @@ impl Database {
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
         let result = self.execute_comment_on_table_stmt_in_transaction_with_search_path(
+            client_id,
+            comment_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
+    pub(crate) fn execute_comment_on_column_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnColumnStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let relation =
+            lookup_table_or_partitioned_relation_for_comment(&catalog, &comment_stmt.table_name)?;
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_comment_on_column_stmt_in_transaction_with_search_path(
             client_id,
             comment_stmt,
             xid,
@@ -1784,7 +1859,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -1961,6 +2036,7 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),
@@ -2074,6 +2150,7 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),
@@ -2332,67 +2409,6 @@ impl Database {
         Ok(StatementResult::AffectedRows(0))
     }
 
-    pub(crate) fn execute_comment_on_column_stmt_in_transaction_with_search_path(
-        &self,
-        client_id: ClientId,
-        comment_stmt: &CommentOnColumnStatement,
-        xid: TransactionId,
-        cid: CommandId,
-        configured_search_path: Option<&[String]>,
-        catalog_effects: &mut Vec<CatalogMutationEffect>,
-    ) -> Result<StatementResult, ExecError> {
-        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = catalog
-            .lookup_any_relation(&comment_stmt.relation_name)
-            .ok_or_else(|| ExecError::DetailedError {
-                message: format!("relation \"{}\" does not exist", comment_stmt.relation_name),
-                detail: None,
-                hint: None,
-                sqlstate: "42P01",
-            })?;
-        let Some((column_index, _)) =
-            relation
-                .desc
-                .columns
-                .iter()
-                .enumerate()
-                .find(|(_, column)| {
-                    !column.dropped && column.name.eq_ignore_ascii_case(&comment_stmt.column_name)
-                })
-        else {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "column \"{}\" of relation \"{}\" does not exist",
-                    comment_stmt.column_name, comment_stmt.relation_name
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42703",
-            });
-        };
-        let ctx = CatalogWriteContext {
-            pool: self.pool.clone(),
-            txns: self.txns.clone(),
-            xid,
-            cid,
-            client_id,
-            waiter: None,
-            interrupts: self.interrupt_state(client_id),
-        };
-        let effect = self
-            .catalog
-            .write()
-            .comment_column_mvcc(
-                relation.relation_oid,
-                (column_index + 1) as i32,
-                comment_stmt.comment.as_deref(),
-                &ctx,
-            )
-            .map_err(map_catalog_error)?;
-        catalog_effects.push(effect);
-        Ok(StatementResult::AffectedRows(0))
-    }
-
     pub(crate) fn execute_comment_on_table_stmt_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
@@ -2404,7 +2420,8 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &comment_stmt.table_name)?;
+        let relation =
+            lookup_table_or_partitioned_relation_for_comment(&catalog, &comment_stmt.table_name)?;
         if relation.relpersistence == 't' {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "permanent table for COMMENT ON TABLE",
@@ -2426,6 +2443,66 @@ impl Database {
             .catalog
             .write()
             .comment_relation_mvcc(relation.relation_oid, comment_stmt.comment.as_deref(), &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_comment_on_column_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnColumnStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation =
+            lookup_table_or_partitioned_relation_for_comment(&catalog, &comment_stmt.table_name)?;
+        if relation.relpersistence == 't' {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "permanent table for COMMENT ON COLUMN",
+                actual: "temporary table".into(),
+            }));
+        }
+        ensure_relation_owner(self, client_id, &relation, &comment_stmt.table_name)?;
+        let column_index = relation
+            .desc
+            .columns
+            .iter()
+            .position(|column| {
+                !column.dropped && column.name.eq_ignore_ascii_case(&comment_stmt.column_name)
+            })
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!(
+                    "column \"{}\" of relation \"{}\" does not exist",
+                    comment_stmt.column_name, comment_stmt.table_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42703",
+            })?;
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&interrupts),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .comment_column_mvcc(
+                relation.relation_oid,
+                i32::from(user_attrno(column_index)),
+                comment_stmt.comment.as_deref(),
+                &ctx,
+            )
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
@@ -2553,7 +2630,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -2590,10 +2667,10 @@ impl Database {
                 client_id,
                 &alter_stmt.table_name,
                 relation.namespace_oid,
-                if relation.relpersistence == 't' {
-                    TablePersistence::Temporary
-                } else {
-                    TablePersistence::Permanent
+                match relation.relpersistence {
+                    't' => TablePersistence::Temporary,
+                    'u' => TablePersistence::Unlogged,
+                    _ => TablePersistence::Permanent,
                 },
                 serial_column,
                 xid,
@@ -2623,6 +2700,7 @@ impl Database {
             let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
             let mut ctx = ExecutorContext {
                 pool: Arc::clone(&self.pool),
+                data_dir: None,
                 txns: self.txns.clone(),
                 txn_waiter: Some(self.txn_waiter.clone()),
                 lock_status_provider: Some(Arc::new(self.clone())),
@@ -2730,19 +2808,21 @@ impl Database {
                 waiter: ctx.waiter.clone(),
                 interrupts: ctx.interrupts.clone(),
             };
-            if let Some(effect) = self
-                .catalog
-                .write()
-                .ensure_relation_toast_table_mvcc(
-                    target.relation.relation_oid,
-                    toast_namespace_oid,
-                    &toast_namespace_name,
-                    &toast_ctx,
-                )
-                .map_err(map_catalog_error)?
-            {
-                self.apply_catalog_mutation_effect_immediate(&effect)?;
-                catalog_effects.push(effect);
+            if target.relation.relkind == 'r' {
+                if let Some(effect) = self
+                    .catalog
+                    .write()
+                    .ensure_relation_toast_table_mvcc(
+                        target.relation.relation_oid,
+                        toast_namespace_oid,
+                        &toast_namespace_name,
+                        &toast_ctx,
+                    )
+                    .map_err(map_catalog_error)?
+                {
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                }
             }
             if target.relation.relpersistence == 't' {
                 self.replace_temp_entry_desc(

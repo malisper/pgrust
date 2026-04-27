@@ -185,7 +185,7 @@ impl Database {
         };
 
         match persistence {
-            TablePersistence::Permanent => {
+            TablePersistence::Permanent | TablePersistence::Unlogged => {
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),

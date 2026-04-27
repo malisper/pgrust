@@ -84,3 +84,19 @@ PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh test --lib --quiet bind_delete_ig
 PGRUST_TARGET_SLOT=5 scripts/cargo_isolated.sh test --lib --quiet sql_set_returning_function_accepts_values_body
 PGRUST_TARGET_SLOT=6 scripts/cargo_isolated.sh test --lib --quiet inherited_minmax_explain_uses_desc_and_partial_child_indexes
 PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh check
+
+Merge queue bump:
+Merged origin/perf-optimization again after PR #237 was ejected from the merge
+queue as DIRTY/CONFLICTING. Resolved conflicts in EXPLAIN timing propagation,
+table EXPLAIN ANALYZE formatting, and seqscan selectivity by preserving both
+the select.diff compatibility changes and the new base catalog-aware costing.
+Updated new parameterized index-path code to pass retain_partial_index_filters.
+
+Merge queue bump tests run:
+PGRUST_TARGET_SLOT=7 scripts/cargo_isolated.sh check
+PGRUST_TARGET_SLOT=5 scripts/cargo_isolated.sh test --lib --quiet index_predicates
+PGRUST_TARGET_SLOT=6 scripts/cargo_isolated.sh test --lib --quiet inherited_minmax_explain_uses_desc_and_partial_child_indexes
+PGRUST_TARGET_SLOT=4 scripts/cargo_isolated.sh test --lib --quiet explain_analyze_timing_off_still_reports_nonzero_actual_rows
+PGRUST_TARGET_SLOT=5 scripts/cargo_isolated.sh test --lib --quiet bind_insert_rejects_partial_index_when_inference_predicate_is_missing_or_weaker
+PGRUST_TARGET_SLOT=6 scripts/cargo_isolated.sh test --lib --quiet bind_delete_ignores_partial_index_when_filter_does_not_imply_predicate
+PGRUST_TARGET_SLOT=4 scripts/cargo_isolated.sh test --lib --quiet sql_set_returning_function_accepts_values_body

@@ -1,10 +1,18 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use parking_lot::RwLock;
 
 use crate::BufferPool;
 use crate::backend::access::transam::xact::{CommandId, TransactionId, TransactionManager};
+use crate::backend::catalog::bootstrap::bootstrap_catalog_kinds;
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError};
+use crate::backend::catalog::persistence::{
+    delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
+};
+use crate::backend::catalog::rows::{
+    PhysicalCatalogRows, extend_physical_catalog_rows, physical_catalog_rows_for_catalog_entry,
+};
 use crate::backend::catalog::toasting::ToastCatalogChanges;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::TransactionWaiter;
@@ -44,6 +52,13 @@ pub struct CatalogStore {
     mode: CatalogStoreMode,
     scope: CatalogScope,
     oid_control_path: Option<PathBuf>,
+    catalog: Catalog,
+    control: CatalogControl,
+    extra_type_rows: Vec<PgTypeRow>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CatalogStoreSnapshot {
     catalog: Catalog,
     control: CatalogControl,
     extra_type_rows: Vec<PgTypeRow>,
@@ -93,6 +108,94 @@ struct CatalogControl {
     next_oid: u32,
     next_rel_number: u32,
     bootstrap_complete: bool,
+}
+
+impl CatalogStore {
+    pub(crate) fn snapshot(&self) -> CatalogStoreSnapshot {
+        CatalogStoreSnapshot {
+            catalog: self.catalog.clone(),
+            control: self.control.clone(),
+            extra_type_rows: self.extra_type_rows.clone(),
+        }
+    }
+
+    pub(crate) fn snapshot_for_command(
+        &self,
+        ctx: Option<&CatalogWriteContext>,
+    ) -> Result<CatalogStoreSnapshot, CatalogError> {
+        let catalog = match ctx {
+            Some(ctx) => self.catalog_snapshot_with_control_for_snapshot(ctx)?,
+            None => self.catalog_snapshot_with_control()?,
+        };
+        Ok(CatalogStoreSnapshot {
+            catalog,
+            control: self.control_state()?,
+            extra_type_rows: self.extra_type_rows.clone(),
+        })
+    }
+
+    pub(crate) fn restore_snapshot(&mut self, snapshot: CatalogStoreSnapshot) {
+        self.catalog = snapshot.catalog;
+        self.control = snapshot.control;
+        self.extra_type_rows = snapshot.extra_type_rows;
+    }
+
+    pub(crate) fn restore_snapshot_for_savepoint_rollback(
+        &mut self,
+        snapshot: CatalogStoreSnapshot,
+        aborted_effects: &[CatalogMutationEffect],
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let current_catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let target_catalog = snapshot.catalog.clone();
+        let mut relation_oids = BTreeSet::new();
+        for effect in aborted_effects {
+            relation_oids.extend(effect.relation_oids.iter().copied());
+        }
+
+        let mut rows_to_delete = PhysicalCatalogRows::default();
+        let mut rows_to_insert = PhysicalCatalogRows::default();
+        let mut changed_relation_oids = Vec::new();
+        for relation_oid in relation_oids {
+            let current_entry = current_catalog.get_by_oid(relation_oid);
+            let target_entry = target_catalog.get_by_oid(relation_oid);
+            if current_entry == target_entry {
+                continue;
+            }
+            if let Some(entry) = current_entry
+                && let Some(name) = current_catalog.relation_name_by_oid(relation_oid)
+            {
+                extend_physical_catalog_rows(
+                    &mut rows_to_delete,
+                    physical_catalog_rows_for_catalog_entry(&current_catalog, name, entry),
+                );
+            }
+            if let Some(entry) = target_entry
+                && let Some(name) = target_catalog.relation_name_by_oid(relation_oid)
+            {
+                extend_physical_catalog_rows(
+                    &mut rows_to_insert,
+                    physical_catalog_rows_for_catalog_entry(&target_catalog, name, entry),
+                );
+            }
+            changed_relation_oids.push(relation_oid);
+        }
+
+        let mut effect = CatalogMutationEffect::default();
+        if !changed_relation_oids.is_empty() {
+            let kinds = bootstrap_catalog_kinds();
+            delete_catalog_rows_subset_mvcc(ctx, &rows_to_delete, self.scope_db_oid(), &kinds)?;
+            insert_catalog_rows_subset_mvcc(ctx, &rows_to_insert, self.scope_db_oid(), &kinds)?;
+            effect.touched_catalogs = kinds.to_vec();
+            effect.relation_oids = changed_relation_oids;
+            effect.full_reset = true;
+        }
+
+        self.catalog = snapshot.catalog;
+        self.control = snapshot.control;
+        self.extra_type_rows = snapshot.extra_type_rows;
+        Ok(effect)
+    }
 }
 
 #[cfg(test)]
@@ -250,6 +353,7 @@ mod tests {
         let snapshot = txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap();
         let mut ctx = crate::backend::executor::ExecutorContext {
             pool,
+            data_dir: None,
             txns,
             txn_waiter: None,
             lock_status_provider: None,
