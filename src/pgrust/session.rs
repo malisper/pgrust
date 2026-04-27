@@ -28,11 +28,12 @@ use crate::backend::executor::{
 };
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{
-    CallStatement, CatalogLookup, CopyFormat as ParserCopyFormat, CopyFromStatement,
-    CopyOptions as ParserCopyOptions, CopySource, CopyToDestination, CopyToSource, CopyToStatement,
-    DetachPartitionMode, ParseError, ParseOptions, PreparedInsert, SelectStatement, Statement,
-    bind_delete, bind_insert, bind_insert_prepared, bind_update, pg_plan_query_with_config,
-    plan_merge,
+    AlterTableAddColumnStatement, CallStatement, CatalogLookup, CopyFormat as ParserCopyFormat,
+    CopyFromStatement, CopyOptions as ParserCopyOptions, CopySource, CopyToDestination,
+    CopyToSource, CopyToStatement, CteBody, DetachPartitionMode, ParseError, ParseOptions,
+    PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared,
+    bind_insert_with_outer_scopes_and_ctes, bind_update, bound_cte_from_query_rows,
+    pg_plan_query_with_config, pg_plan_query_with_outer_scopes_and_ctes, plan_merge,
 };
 use crate::backend::rewrite::relation_has_row_security;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
@@ -1746,6 +1747,7 @@ impl Session {
 
         ExecutorContext {
             pool: Arc::clone(&db.pool),
+            data_dir: Some(db.cluster.base_dir.clone()),
             txns: db.txns.clone(),
             txn_waiter: Some(db.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(db.clone())),
@@ -1967,7 +1969,40 @@ impl Session {
         self.active_txn.as_ref().map(|txn| txn.advisory_scope_id)
     }
 
+    fn cte_body_has_writable_insert(body: &CteBody) -> bool {
+        match body {
+            CteBody::Insert(_) => true,
+            CteBody::Select(select) => Self::select_has_writable_ctes(select),
+            CteBody::Values(values) => values
+                .with
+                .iter()
+                .any(|cte| Self::cte_body_has_writable_insert(&cte.body)),
+            CteBody::RecursiveUnion {
+                anchor, recursive, ..
+            } => {
+                Self::cte_body_has_writable_insert(anchor)
+                    || Self::select_has_writable_ctes(recursive)
+            }
+        }
+    }
+
+    fn select_has_writable_ctes(select: &SelectStatement) -> bool {
+        select
+            .with
+            .iter()
+            .any(|cte| Self::cte_body_has_writable_insert(&cte.body))
+            || select
+                .set_operation
+                .as_ref()
+                .is_some_and(|setop| setop.inputs.iter().any(Self::select_has_writable_ctes))
+    }
+
     fn statement_requires_xid_in_transaction(stmt: &Statement) -> bool {
+        if let Statement::Select(select) = stmt
+            && Self::select_has_writable_ctes(select)
+        {
+            return true;
+        }
         !matches!(
             stmt,
             Statement::Do(_)
@@ -2247,7 +2282,9 @@ impl Session {
             .len()
             .saturating_sub(effect_start)
             .max(1);
-        let next_cid = base_cid.saturating_add(consumed_catalog_cids as u32);
+        let next_cid = base_cid
+            .saturating_add(consumed_catalog_cids as u32)
+            .saturating_add(1);
         txn.next_command_id = txn.next_command_id.max(next_cid);
     }
 
@@ -2361,6 +2398,9 @@ impl Session {
         }
 
         match stmt {
+            Statement::Select(ref select) if Self::select_has_writable_ctes(select) => {
+                self.execute_call_stmt_autocommit(db, stmt, statement_lock_scope_id)
+            }
             Statement::Do(ref do_stmt) => execute_do_with_gucs(do_stmt, &self.gucs),
             Statement::Show(ref show_stmt) => self.apply_show(db, show_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(db, set_stmt),
@@ -3096,6 +3136,35 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterTableAddColumns(ref alter_stmt) => {
+                let mut result = Ok(StatementResult::AffectedRows(0));
+                for column in &alter_stmt.columns {
+                    let single_stmt = AlterTableAddColumnStatement {
+                        if_exists: alter_stmt.if_exists,
+                        only: alter_stmt.only,
+                        table_name: alter_stmt.table_name.clone(),
+                        column: column.clone(),
+                    };
+                    result = if self.active_txn.is_some() {
+                        self.execute_in_transaction(
+                            db,
+                            Statement::AlterTableAddColumn(single_stmt),
+                            statement_lock_scope_id,
+                        )
+                    } else {
+                        let search_path = self.configured_search_path();
+                        db.execute_alter_table_add_column_stmt_with_search_path(
+                            self.client_id,
+                            &single_stmt,
+                            search_path.as_deref(),
+                        )
+                    };
+                    if result.is_err() {
+                        break;
+                    }
+                }
+                result
+            }
             Statement::AlterTableDropColumn(ref drop_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -3720,6 +3789,24 @@ impl Session {
                 } else {
                     self.auth = db.execute_reset_role_stmt(self.client_id, reset_stmt)?;
                     Ok(StatementResult::AffectedRows(0))
+                }
+            }
+            Statement::AlterTableReset(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_reset_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
                 }
             }
             Statement::AlterTableSet(ref alter_stmt) => self.apply_alter_table_set(db, alter_stmt),
@@ -4401,6 +4488,24 @@ impl Session {
         options: CursorOptions,
     ) -> Result<(), ExecError> {
         if self.active_txn.is_none() {
+            if options.holdable {
+                // :HACK: PostgreSQL permits DECLARE CURSOR WITH HOLD outside
+                // an explicit transaction by materializing the cursor across
+                // the implicit transaction boundary. Model that case here
+                // until portal commands share the normal autocommit path.
+                self.active_txn = Some(self.active_transaction_without_xid(db));
+                self.stats_state.write().begin_top_level_xact();
+                let result =
+                    self.declare_cursor_in_active_txn(db, name, source_text, query, options);
+                let result = result.and_then(|_| {
+                    self.validate_constraints_for_active_txn(db, false)?;
+                    Ok(StatementResult::AffectedRows(0))
+                });
+                let txn = self.active_txn.take().unwrap();
+                let result = self.finalize_taken_transaction(db, txn, result);
+                self.portals.drop_transaction_portals(result.is_ok());
+                return result.map(|_| ());
+            }
             return Err(ExecError::Parse(ParseError::DetailedError {
                 message: "DECLARE CURSOR can only be used in transaction blocks".into(),
                 detail: None,
@@ -4408,6 +4513,17 @@ impl Session {
                 sqlstate: "25P01",
             }));
         }
+        self.declare_cursor_in_active_txn(db, name, source_text, query, options)
+    }
+
+    fn declare_cursor_in_active_txn(
+        &mut self,
+        db: &Database,
+        name: &str,
+        source_text: String,
+        query: &SelectStatement,
+        options: CursorOptions,
+    ) -> Result<(), ExecError> {
         let guard = self.execute_streaming(db, query)?;
         let mut portal = Portal::streaming_select(
             name.to_string(),
@@ -4540,6 +4656,29 @@ impl Session {
 
     pub(crate) fn cursor_view_rows(&self) -> Vec<CursorViewRow> {
         self.portals.cursor_view_rows()
+    }
+
+    fn apply_writable_cte_column_aliases(
+        cte: &crate::backend::parser::CommonTableExpr,
+        mut columns: Vec<QueryColumn>,
+    ) -> Result<Vec<QueryColumn>, ExecError> {
+        if cte.column_names.is_empty() {
+            return Ok(columns);
+        }
+        if cte.column_names.len() != columns.len() {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "CTE column alias count matching query width",
+                actual: format!(
+                    "CTE query has {} columns but {} column aliases were specified",
+                    columns.len(),
+                    cte.column_names.len()
+                ),
+            }));
+        }
+        for (column, name) in columns.iter_mut().zip(cte.column_names.iter()) {
+            column.name = name.clone();
+        }
+        Ok(columns)
     }
 
     fn take_portal(&mut self, name: &str) -> Result<Portal, ExecError> {
@@ -5280,14 +5419,13 @@ impl Session {
             }
             Statement::AlterTableAddColumn(ref alter_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                let relation =
-                    catalog
-                        .lookup_relation(&alter_stmt.table_name)
-                        .ok_or_else(|| {
-                            ExecError::Parse(ParseError::TableDoesNotExist(
-                                alter_stmt.table_name.clone(),
-                            ))
-                        })?;
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.table_name.clone(),
+                        ))
+                    })?;
                 self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
@@ -5301,6 +5439,25 @@ impl Session {
                     &mut txn.temp_effects,
                     &mut txn.sequence_effects,
                 )
+            }
+            Statement::AlterTableAddColumns(ref alter_stmt) => {
+                let mut result = Ok(StatementResult::AffectedRows(0));
+                for column in &alter_stmt.columns {
+                    result = self.execute_in_transaction(
+                        db,
+                        Statement::AlterTableAddColumn(AlterTableAddColumnStatement {
+                            if_exists: alter_stmt.if_exists,
+                            only: alter_stmt.only,
+                            table_name: alter_stmt.table_name.clone(),
+                            column: column.clone(),
+                        }),
+                        _statement_lock_scope_id,
+                    );
+                    if result.is_err() {
+                        break;
+                    }
+                }
+                result
             }
             Statement::AlterTableDropColumn(ref drop_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
@@ -5917,6 +6074,27 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::AlterTableReset(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.table_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_reset_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::AlterTableSet(ref alter_stmt) => self.apply_alter_table_set(db, alter_stmt),
             Statement::AlterIndexSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CreateRole(ref create_stmt) => {
@@ -6412,6 +6590,97 @@ impl Session {
                     None,
                 );
                 let result = match stmt {
+                    Statement::Select(select) if Self::select_has_writable_ctes(&select) => {
+                        if select.with_recursive {
+                            Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                                "WITH RECURSIVE containing data-modifying statements is not supported"
+                                    .into(),
+                            )))
+                        } else {
+                            let mut materialized_ctes = Vec::new();
+                            let mut outer_select = select.clone();
+                            outer_select.with.clear();
+
+                            let result = (|| {
+                                for cte in &select.with {
+                                    let CteBody::Insert(cte_insert) = &cte.body else {
+                                        outer_select.with.push(cte.clone());
+                                        continue;
+                                    };
+                                    if cte_insert.with_recursive
+                                        || cte_insert.with.iter().any(|nested| {
+                                            Self::cte_body_has_writable_insert(&nested.body)
+                                        })
+                                    {
+                                        return Err(ExecError::Parse(
+                                            ParseError::FeatureNotSupported(
+                                                "nested writable CTEs are not supported".into(),
+                                            ),
+                                        ));
+                                    }
+                                    if cte_insert.returning.is_empty() {
+                                        return Err(ExecError::Parse(
+                                            ParseError::FeatureNotSupported(
+                                                "writable CTE without RETURNING is not supported"
+                                                    .into(),
+                                            ),
+                                        ));
+                                    }
+
+                                    let bound = bind_insert_with_outer_scopes_and_ctes(
+                                        cte_insert,
+                                        &catalog,
+                                        &[],
+                                        &materialized_ctes,
+                                    )?;
+                                    let prepared =
+                                        crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
+                                            bound, &catalog,
+                                        )?;
+                                    let lock_requests = merge_table_lock_requests(
+                                        &insert_foreign_key_lock_requests(&prepared.stmt),
+                                        &prepared.extra_lock_requests,
+                                    );
+                                    self.lock_table_requests_if_needed(db, &lock_requests)?;
+                                    let result =
+                                        crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
+                                            prepared.stmt,
+                                            &catalog,
+                                            &mut ctx,
+                                            xid,
+                                            cid,
+                                        )?;
+                                    let StatementResult::Query { columns, rows, .. } = result
+                                    else {
+                                        return Err(ExecError::Parse(
+                                            ParseError::FeatureNotSupported(
+                                                "writable CTE without RETURNING is not supported"
+                                                    .into(),
+                                            ),
+                                        ));
+                                    };
+                                    let columns =
+                                        Self::apply_writable_cte_column_aliases(cte, columns)?;
+                                    materialized_ctes.push(bound_cte_from_query_rows(
+                                        cte.name.clone(),
+                                        columns,
+                                        &rows,
+                                    ));
+                                }
+
+                                execute_planned_stmt(
+                                    pg_plan_query_with_outer_scopes_and_ctes(
+                                        &outer_select,
+                                        &catalog,
+                                        &[],
+                                        &materialized_ctes,
+                                    )?,
+                                    &mut ctx,
+                                )
+                            })();
+                            result
+                        }
+                    }
                     Statement::Select(select) if select.locking_clause.is_some() => {
                         execute_planned_stmt(
                             pg_plan_query_with_config(&select, &catalog, self.planner_config())?,
@@ -6448,16 +6717,6 @@ impl Session {
             Statement::Insert(ref insert_stmt) => {
                 let snapshot = self.snapshot_for_command(db, xid, cid)?;
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                let bound = bind_insert(insert_stmt, &catalog)?;
-                let prepared =
-                    crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
-                        bound, &catalog,
-                    )?;
-                let lock_requests = merge_table_lock_requests(
-                    &insert_foreign_key_lock_requests(&prepared.stmt),
-                    &prepared.extra_lock_requests,
-                );
-                self.lock_table_requests_if_needed(db, &lock_requests)?;
                 let deferred_foreign_keys = self
                     .active_txn
                     .as_ref()
@@ -6472,14 +6731,122 @@ impl Session {
                     Some(deferred_foreign_keys),
                     None,
                 );
-                let result =
+                let result = (|| {
+                    let has_writable_ctes = insert_stmt
+                        .with
+                        .iter()
+                        .any(|cte| matches!(cte.body, CteBody::Insert(_)));
+                    if !has_writable_ctes {
+                        let bound = bind_insert(insert_stmt, &catalog)?;
+                        let prepared =
+                            crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
+                                bound, &catalog,
+                            )?;
+                        let lock_requests = merge_table_lock_requests(
+                            &insert_foreign_key_lock_requests(&prepared.stmt),
+                            &prepared.extra_lock_requests,
+                        );
+                        self.lock_table_requests_if_needed(db, &lock_requests)?;
+                        return crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
+                            prepared.stmt,
+                            &catalog,
+                            &mut ctx,
+                            xid,
+                            cid,
+                        );
+                    }
+
+                    if insert_stmt.with_recursive {
+                        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                            "WITH RECURSIVE containing data-modifying statements is not supported"
+                                .into(),
+                        )));
+                    }
+
+                    let mut materialized_ctes = Vec::new();
+                    let mut outer_insert = insert_stmt.clone();
+                    outer_insert.with.clear();
+
+                    for cte in &insert_stmt.with {
+                        let CteBody::Insert(cte_insert) = &cte.body else {
+                            outer_insert.with.push(cte.clone());
+                            continue;
+                        };
+                        if cte_insert.with_recursive
+                            || cte_insert
+                                .with
+                                .iter()
+                                .any(|nested| matches!(nested.body, CteBody::Insert(_)))
+                        {
+                            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                                "nested writable CTEs are not supported".into(),
+                            )));
+                        }
+                        if cte_insert.returning.is_empty() {
+                            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                                "writable CTE without RETURNING is not supported".into(),
+                            )));
+                        }
+
+                        let bound = bind_insert_with_outer_scopes_and_ctes(
+                            cte_insert,
+                            &catalog,
+                            &[],
+                            &materialized_ctes,
+                        )?;
+                        let prepared =
+                            crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
+                                bound, &catalog,
+                            )?;
+                        let lock_requests = merge_table_lock_requests(
+                            &insert_foreign_key_lock_requests(&prepared.stmt),
+                            &prepared.extra_lock_requests,
+                        );
+                        self.lock_table_requests_if_needed(db, &lock_requests)?;
+                        let result =
+                            crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
+                                prepared.stmt,
+                                &catalog,
+                                &mut ctx,
+                                xid,
+                                cid,
+                            )?;
+                        let StatementResult::Query { columns, rows, .. } = result else {
+                            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                                "writable CTE without RETURNING is not supported".into(),
+                            )));
+                        };
+                        let columns = Self::apply_writable_cte_column_aliases(cte, columns)?;
+                        materialized_ctes.push(bound_cte_from_query_rows(
+                            cte.name.clone(),
+                            columns,
+                            &rows,
+                        ));
+                    }
+
+                    let bound = bind_insert_with_outer_scopes_and_ctes(
+                        &outer_insert,
+                        &catalog,
+                        &[],
+                        &materialized_ctes,
+                    )?;
+                    let prepared =
+                        crate::pgrust::database::commands::rules::prepare_bound_insert_for_execution(
+                            bound, &catalog,
+                        )?;
+                    let lock_requests = merge_table_lock_requests(
+                        &insert_foreign_key_lock_requests(&prepared.stmt),
+                        &prepared.extra_lock_requests,
+                    );
+                    self.lock_table_requests_if_needed(db, &lock_requests)?;
                     crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
                         prepared.stmt,
                         &catalog,
                         &mut ctx,
                         xid,
                         cid,
-                    );
+                    )
+                })();
                 self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
                 result
             }
@@ -9583,6 +9950,9 @@ fn parse_copy_endpoint(input: &str, from: bool) -> Result<(CopyEndpoint, &str), 
     if from && lower.starts_with("stdin") && copy_keyword_boundary(input, 5) {
         return Ok((CopyEndpoint::Stdin, &input[5..]));
     }
+    if from && lower.starts_with("stdout") && copy_keyword_boundary(input, 6) {
+        return Ok((CopyEndpoint::Stdin, &input[6..]));
+    }
     if !from && lower.starts_with("stdout") && copy_keyword_boundary(input, 6) {
         return Ok((CopyEndpoint::Stdout, &input[6..]));
     }
@@ -10488,15 +10858,28 @@ fn unquote_identifier(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Session, parse_bool_guc, parse_default_toast_compression_guc_value, parse_max_stack_depth,
-        parse_startup_options, parse_statement_timeout, validate_max_stack_depth,
+        CopyDirection, CopyEndpoint, Session, parse_bool_guc,
+        parse_default_toast_compression_guc_value, parse_max_stack_depth, parse_startup_options,
+        parse_statement_timeout, validate_max_stack_depth,
     };
-    use crate::backend::executor::ExecError;
+    use crate::backend::executor::{ExecError, StatementResult, Value};
     use crate::backend::parser::ParseError;
     use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat};
     use crate::backend::utils::misc::stack_depth::max_stack_depth_limit_kb;
+    use crate::pgrust::database::Database;
     use std::collections::HashMap;
     use std::time::Duration;
+
+    #[test]
+    fn parse_copy_from_stdout_as_copy_in_source() {
+        let copy = super::parse_copy_command("copy donothingbrtrig_test from stdout")
+            .expect("copy statement")
+            .unwrap();
+        assert!(matches!(
+            copy.direction,
+            CopyDirection::From(CopyEndpoint::Stdin)
+        ));
+    }
 
     #[test]
     fn parse_statement_timeout_accepts_postgres_units() {
@@ -10651,6 +11034,243 @@ mod tests {
             DateStyleFormat::Postgres
         );
         assert_eq!(session.datetime_config.date_order, DateOrder::Mdy);
+    }
+
+    #[test]
+    fn insert_with_writable_cte_materializes_returning_rows() {
+        let base = crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_insert");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        session.execute(&db, "create table dst (id int4)").unwrap();
+        let result = session
+            .execute(
+                &db,
+                "with moved as (insert into src values (1) returning id) \
+                 insert into dst select id from moved",
+            )
+            .unwrap();
+        assert!(matches!(result, StatementResult::AffectedRows(1)));
+
+        match session
+            .execute(
+                &db,
+                "select id from src union all select id from dst order by id",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_with_writable_cte_materializes_returning_rows() {
+        let base = crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_select");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table src (id int4)").unwrap();
+        match session
+            .execute(
+                &db,
+                "with ins(id) as (insert into src values (1), (2) returning id) \
+                 select min(id), max(id) from ins",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1), Value::Int32(2)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn domain_composite_array_insert_assignments_navigate_base_type() {
+        let base =
+            crate::pgrust::test_support::seeded_temp_dir("session", "domain_composite_assign");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(
+                &db,
+                "create type insert_test_type as (if1 int4, if2 text[])",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create domain insert_test_domain as insert_test_type \
+                 check ((value).if2 is not null and (value).if2[1] is not null)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create table inserttestb (f3 insert_test_domain, f4 insert_test_domain[])",
+            )
+            .unwrap();
+
+        session
+            .execute(
+                &db,
+                "insert into inserttestb (f3.if1, f3.if2) values (1, array['foo'])",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "insert into inserttestb (f3.if2[1], f3.if2[2]) values ('bar', 'baz')",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "insert into inserttestb (f3, f4[1].if2[1], f4[1].if2[2]) \
+                 values (row(2, '{x}')::insert_test_domain, 'bear', 'beer')",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "insert into inserttestb (f3, f4[1].if2[1], f4[1].if2[2]) \
+                 values (row(3, '{z}'), 'foo', 'bar')",
+            )
+            .unwrap();
+
+        match session
+            .execute(
+                &db,
+                "select (f3).if1, (f3).if2[1] from inserttestb order by (f3).if1 nulls last",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(1), Value::Text("foo".into())],
+                        vec![Value::Int32(2), Value::Text("x".into())],
+                        vec![Value::Int32(3), Value::Text("z".into())],
+                        vec![Value::Null, Value::Text("bar".into())],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+
+        let err = session
+            .execute(
+                &db,
+                "insert into inserttestb (f3.if1, f3.if2) values (1, array[null])",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError { message, .. } => assert_eq!(
+                message,
+                "value for domain insert_test_domain violates check constraint \"insert_test_domain_check\""
+            ),
+            other => panic!("expected domain violation, got {other:?}"),
+        }
+
+        session
+            .execute(
+                &db,
+                "create domain insert_nnarray as int4[] \
+                 check (value[1] is not null and value[2] is not null)",
+            )
+            .unwrap();
+        session
+            .execute(&db, "create table inserttesta (f1 insert_nnarray)")
+            .unwrap();
+        let err = session
+            .execute(&db, "insert into inserttesta (f1[1]) values (1)")
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError { message, .. } => assert_eq!(
+                message,
+                "value for domain insert_nnarray violates check constraint \"insert_nnarray_check\""
+            ),
+            other => panic!("expected domain violation, got {other:?}"),
+        }
+        session
+            .execute(&db, "insert into inserttesta (f1[1], f1[2]) values (1, 2)")
+            .unwrap();
+        match session
+            .execute(&db, "select f1[1], f1[2] from inserttesta")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1), Value::Int32(2)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_values_srf_uses_project_set() {
+        let base = crate::pgrust::test_support::seeded_temp_dir("session", "insert_values_srf");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table srf_t (id int4)")
+            .unwrap();
+        session
+            .execute(&db, "insert into srf_t values (generate_series(1, 3))")
+            .unwrap();
+        match session
+            .execute(&db, "select id from srf_t order by id")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(2)],
+                    vec![Value::Int32(3)],
+                ]
+            ),
+            other => panic!("expected query result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_cte_returning_tableoid_regclass_and_star_materializes() {
+        let base = crate::pgrust::test_support::seeded_temp_dir("session", "writable_cte_tableoid");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table cte_tableoid_src (a int4, b int4)")
+            .unwrap();
+        match session
+            .execute(
+                &db,
+                "with ins(rel, a, b) as \
+                 (insert into cte_tableoid_src (a, b) \
+                  select s.a, 1 from generate_series(2, 4) s(a) returning tableoid::regclass, *) \
+                 select rel::text, min(a), max(a), min(b), max(b) from ins group by rel order by 1",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("cte_tableoid_src".into()),
+                    Value::Int32(2),
+                    Value::Int32(4),
+                    Value::Int32(1),
+                    Value::Int32(1),
+                ]]
+            ),
+            other => panic!("expected query result, got {other:?}"),
+        }
     }
 
     #[test]

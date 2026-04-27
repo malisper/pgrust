@@ -182,6 +182,7 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         row_type_oid: 60_000u32.saturating_add(rel.rel_number),
         array_type_oid: 61_000u32.saturating_add(rel.rel_number),
         reltoastrelid: 0,
+        relhasindex: false,
         relpersistence: 'p',
         relkind: 'r',
         relispopulated: true,
@@ -878,6 +879,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
     let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
     ExecutorContext {
         pool: test_pool(base),
+        data_dir: None,
         txns: std::sync::Arc::new(parking_lot::RwLock::new(txns)),
         txn_waiter: None,
         lock_status_provider: None,
@@ -953,6 +955,7 @@ fn run_plan(
     let mut state = executor_start(plan);
     let mut ctx = ExecutorContext {
         pool,
+        data_dir: None,
         txns: txns_arc,
         txn_waiter: None,
         lock_status_provider: None,
@@ -1064,6 +1067,7 @@ fn first_tuple_slot_kind_for_sql(
         let planned = planned_select_with_catalog(&sql, &catalog);
         let mut ctx = ExecutorContext {
             pool,
+            data_dir: None,
             txns: txns_arc,
             txn_waiter: None,
             lock_status_provider: None,
@@ -1157,6 +1161,7 @@ fn first_tuple_slot_kind_for_plan(
         let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
         let mut ctx = ExecutorContext {
             pool,
+            data_dir: None,
             txns: txns_arc,
             txn_waiter: None,
             lock_status_provider: None,
@@ -1264,6 +1269,7 @@ fn run_sql_with_catalog(
         let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
         let mut ctx = ExecutorContext {
             pool,
+            data_dir: None,
             txns: txns_arc,
             txn_waiter: None,
             lock_status_provider: None,
@@ -3245,6 +3251,70 @@ fn insert_sql_inserts_multiple_rows() {
                 ]
             );
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn insert_values_generate_series_expands_rows() {
+    let mut harness = SeededSqlHarness::new("insert_values_generate_series", catalog());
+    let xid = harness.txns.begin();
+    assert_eq!(
+        harness
+            .execute(
+                xid,
+                "insert into people (id, name) values (generate_series(1, 3), repeat('x', 2))",
+            )
+            .unwrap(),
+        StatementResult::AffectedRows(3)
+    );
+    harness.txns.commit(xid).unwrap();
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select id, name from people order by id",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => assert_eq!(
+            rows,
+            vec![
+                vec![Value::Int32(1), Value::Text("xx".into())],
+                vec![Value::Int32(2), Value::Text("xx".into())],
+                vec![Value::Int32(3), Value::Text("xx".into())],
+            ]
+        ),
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn insert_values_mixed_project_set_rows_preserve_order() {
+    let mut harness = SeededSqlHarness::new("insert_values_mixed_project_set", catalog());
+    let xid = harness.txns.begin();
+    assert_eq!(
+        harness
+            .execute(
+                xid,
+                "insert into people (id, name) values (1, 'a'), (generate_series(2, 3), 'b'), (4, 'c')",
+            )
+            .unwrap(),
+        StatementResult::AffectedRows(4)
+    );
+    harness.txns.commit(xid).unwrap();
+    match harness
+        .execute(INVALID_TRANSACTION_ID, "select id, name from people")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => assert_eq!(
+            rows,
+            vec![
+                vec![Value::Int32(1), Value::Text("a".into())],
+                vec![Value::Int32(2), Value::Text("b".into())],
+                vec![Value::Int32(3), Value::Text("b".into())],
+                vec![Value::Int32(4), Value::Text("c".into())],
+            ]
+        ),
         other => panic!("expected query result, got {:?}", other),
     }
 }
@@ -7614,6 +7684,47 @@ fn composite_array_field_assignment_and_selection_work() {
 }
 
 #[test]
+fn composite_field_array_assignment_uses_ordered_indirection() {
+    let db = Database::open(temp_dir("composite_field_array_assignment"), 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create type arrpair as (q1 int4, q2 text[])")
+        .unwrap();
+    db.execute(1, "create temp table t1 (f1 arrpair, f2 arrpair[])")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into t1 (f1.q1, f1.q2[1], f2[1].q2[1]) values (7, 'left', 'right')",
+    )
+    .unwrap();
+
+    match session.execute(&db, "select f1, f2 from t1").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            let [row] = rows.as_slice() else {
+                panic!("expected one row, got {rows:?}");
+            };
+            let Value::Record(f1) = &row[0] else {
+                panic!("expected record f1, got {:?}", row[0]);
+            };
+            assert_eq!(f1.fields[0], Value::Int32(7));
+            assert_eq!(f1.fields[1], Value::Array(vec![Value::Text("left".into())]));
+
+            let Value::PgArray(f2) = &row[1] else {
+                panic!("expected array f2, got {:?}", row[1]);
+            };
+            let Value::Record(f2_first) = &f2.elements[0] else {
+                panic!("expected record array element, got {:?}", f2.elements[0]);
+            };
+            assert_eq!(
+                f2_first.fields[1],
+                Value::Array(vec![Value::Text("right".into())])
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn named_composite_array_field_selection_after_row_cast_works() {
     let db = Database::open(temp_dir("named_composite_array_field_selection"), 16).unwrap();
     let mut session = Session::new(1);
@@ -9894,6 +10005,38 @@ fn xml_input_errors_format_primary_message() {
 }
 
 #[test]
+fn xml_mapping_functions_report_unsupported_xml_feature() {
+    let base = temp_dir("xml_mapping_unsupported");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select query_to_xml('select 1', false, false, '')",
+    )
+    .unwrap_err();
+
+    assert_eq!(format_exec_error(&err), "unsupported XML feature");
+}
+
+#[test]
+fn xmlforest_reports_unsupported_xml_feature() {
+    let base = temp_dir("xmlforest_unsupported");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select xmlforest(1 as a)",
+    )
+    .unwrap_err();
+
+    assert_eq!(format_exec_error(&err), "unsupported XML feature");
+}
+
+#[test]
 fn oidvector_text_values_support_array_functions() {
     let base = temp_dir("oidvector_array_functions");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -10913,6 +11056,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
     let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
     let mut ctx = ExecutorContext {
         pool,
+        data_dir: None,
         txns: txns_arc,
         txn_waiter: None,
         lock_status_provider: None,
@@ -22796,6 +22940,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
         let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
         let mut ctx = ExecutorContext {
             pool,
+            data_dir: None,
             txns: txns_arc,
             txn_waiter: None,
             lock_status_provider: None,

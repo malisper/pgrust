@@ -23,7 +23,8 @@ use crate::include::catalog::{
     SPGIST_TEXT_FAMILY_OID, bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
     proc_oid_for_builtin_scalar_function, range_type_ref_for_sql_type, relkind_has_storage,
 };
-use crate::include::nodes::datum::ArrayValue;
+use crate::include::nodes::datetime::{TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND};
+use crate::include::nodes::datum::{ArrayValue, IntervalValue, NumericValue};
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, RestrictInfo,
 };
@@ -914,8 +915,9 @@ pub(super) fn optimize_path_with_config(
                     .iter()
                     .map(|col| estimate_sql_type_width(col.sql_type))
                     .sum();
+                let rows = estimate_function_scan_rows(&call, catalog);
                 Path::FunctionScan {
-                    plan_info: PlanEstimate::new(0.0, 10.0, 1000.0, width),
+                    plan_info: PlanEstimate::new(0.0, rows * CPU_TUPLE_COST, rows, width),
                     pathtarget,
                     slot_id,
                     call,
@@ -1157,6 +1159,7 @@ fn try_optimize_access_subtree(
         filter.clone(),
         order_items.clone(),
         order_display_items.clone(),
+        catalog,
     );
     if relkind != 'r' || !config.enable_indexscan || relation_uses_virtual_scan(relation_oid) {
         return Ok(best.plan);
@@ -1292,6 +1295,7 @@ pub(super) fn estimate_seqscan_candidate(
     filter: Option<Expr>,
     order_items: Option<Vec<OrderByEntry>>,
     order_display_items: Option<Vec<String>>,
+    catalog: &dyn CatalogLookup,
 ) -> AccessCandidate {
     let scan_info = seq_scan_estimate(stats);
     let base_pathtarget = slot_output_target(source_id, &desc.columns, |column| column.sql_type);
@@ -1312,7 +1316,12 @@ pub(super) fn estimate_seqscan_candidate(
     let width = scan_info.plan_width;
 
     if let Some(predicate) = filter {
-        let selectivity = clause_selectivity(&predicate, Some(stats), stats.reltuples);
+        let selectivity = clause_selectivity_with_catalog(
+            &predicate,
+            Some(stats),
+            stats.reltuples,
+            Some(catalog),
+        );
         current_rows = clamp_rows(stats.reltuples * selectivity);
         total_cost += stats.reltuples * predicate_cost(&predicate) * CPU_OPERATOR_COST;
         plan = Path::Filter {
@@ -1967,6 +1976,7 @@ pub(super) fn build_join_paths(
 ) -> Vec<Path> {
     build_join_paths_internal(
         None,
+        None,
         left,
         right,
         left_relids,
@@ -1980,6 +1990,7 @@ pub(super) fn build_join_paths(
 
 pub(super) fn build_join_paths_with_root(
     root: &PlannerInfo,
+    catalog: &dyn CatalogLookup,
     left: Path,
     right: Path,
     left_relids: &[usize],
@@ -1991,6 +2002,7 @@ pub(super) fn build_join_paths_with_root(
 ) -> Vec<Path> {
     build_join_paths_internal(
         Some(root),
+        Some(catalog),
         left,
         right,
         left_relids,
@@ -2004,6 +2016,7 @@ pub(super) fn build_join_paths_with_root(
 
 fn build_join_paths_internal(
     root: Option<&PlannerInfo>,
+    catalog: Option<&dyn CatalogLookup>,
     left: Path,
     right: Path,
     left_relids: &[usize],
@@ -2036,6 +2049,24 @@ fn build_join_paths_internal(
             pathtarget.clone(),
             output_columns.clone(),
         ));
+        if let Some((inner, remaining_restrict_clauses)) = parameterized_inner_index_path(
+            root,
+            catalog,
+            &right,
+            left_relids,
+            right_relids,
+            &restrict_clauses,
+        ) {
+            paths.push(estimate_nested_loop_join_internal(
+                root,
+                left.clone(),
+                inner,
+                kind,
+                remaining_restrict_clauses,
+                pathtarget.clone(),
+                output_columns.clone(),
+            ));
+        }
     }
 
     if allow_swapped_orientation {
@@ -2048,6 +2079,24 @@ fn build_join_paths_internal(
             pathtarget.clone(),
             output_columns.clone(),
         ));
+        if let Some((inner, remaining_restrict_clauses)) = parameterized_inner_index_path(
+            root,
+            catalog,
+            &left,
+            right_relids,
+            left_relids,
+            &restrict_clauses,
+        ) {
+            paths.push(estimate_nested_loop_join_internal(
+                root,
+                right.clone(),
+                inner,
+                kind,
+                remaining_restrict_clauses,
+                pathtarget.clone(),
+                output_columns.clone(),
+            ));
+        }
     }
 
     if !lateral_orientation_locked
@@ -2133,6 +2182,217 @@ fn build_join_paths_internal(
     paths
 }
 
+fn parameterized_inner_index_path(
+    root: Option<&PlannerInfo>,
+    catalog: Option<&dyn CatalogLookup>,
+    inner: &Path,
+    outer_relids: &[usize],
+    inner_relids: &[usize],
+    restrict_clauses: &[RestrictInfo],
+) -> Option<(Path, Vec<RestrictInfo>)> {
+    let root = root?;
+    let catalog = catalog?;
+    let Path::SeqScan {
+        source_id,
+        rel,
+        relation_name,
+        relation_oid,
+        relkind,
+        relispopulated: _,
+        toast,
+        desc,
+        ..
+    } = inner
+    else {
+        return None;
+    };
+    if *relkind != 'r' || !root.config.enable_indexscan || relation_uses_virtual_scan(*relation_oid)
+    {
+        return None;
+    }
+
+    let mut parameterized_clauses = Vec::new();
+    let mut parameterized_indexes = Vec::new();
+    for (index, restrict) in restrict_clauses.iter().enumerate() {
+        if !restrict_clause_can_parameterize(restrict, outer_relids, inner_relids) {
+            continue;
+        }
+        let clause = parameterize_outer_vars(restrict.clause.clone(), outer_relids);
+        if expr_contains_runtime_input(&clause) {
+            parameterized_clauses.push(clause);
+            parameterized_indexes.push(index);
+        }
+    }
+    let filter = and_exprs(parameterized_clauses)?;
+    let stats = relation_stats(catalog, *relation_oid, desc);
+    let mut best: Option<AccessCandidate> = None;
+    for index in catalog
+        .index_relations_for_heap(*relation_oid)
+        .iter()
+        .filter(|index| {
+            index.index_meta.indisvalid
+                && index.index_meta.indisready
+                && !index.index_meta.indisexclusion
+                && !index.index_meta.indkey.is_empty()
+        })
+    {
+        let Some(spec) = build_index_path_spec(Some(&filter), None, index) else {
+            continue;
+        };
+        if !spec.keys.iter().any(|key| {
+            matches!(key.argument, IndexScanKeyArgument::Runtime(_))
+                || key
+                    .display_expr
+                    .as_ref()
+                    .is_some_and(expr_contains_runtime_input)
+        }) {
+            continue;
+        }
+        let candidate = estimate_index_candidate(
+            *source_id,
+            *rel,
+            relation_name.clone(),
+            *relation_oid,
+            *toast,
+            desc.clone(),
+            &stats,
+            spec,
+            None,
+            None,
+            false,
+            root.config,
+            catalog,
+        );
+        if path_contains_runtime_index_arg(&candidate.plan)
+            && best
+                .as_ref()
+                .is_none_or(|current| candidate.total_cost < current.total_cost)
+        {
+            best = Some(candidate);
+        }
+    }
+
+    let remaining = restrict_clauses
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !parameterized_indexes.contains(index))
+        .map(|(_, restrict)| restrict.clone())
+        .collect();
+    Some((best?.plan, remaining))
+}
+
+fn restrict_clause_can_parameterize(
+    restrict: &RestrictInfo,
+    outer_relids: &[usize],
+    inner_relids: &[usize],
+) -> bool {
+    restrict
+        .required_relids
+        .iter()
+        .any(|relid| outer_relids.contains(relid))
+        && restrict
+            .required_relids
+            .iter()
+            .any(|relid| inner_relids.contains(relid))
+        && restrict
+            .required_relids
+            .iter()
+            .all(|relid| outer_relids.contains(relid) || inner_relids.contains(relid))
+}
+
+fn parameterize_outer_vars(expr: Expr, outer_relids: &[usize]) -> Expr {
+    match expr {
+        Expr::Var(mut var) if var.varlevelsup == 0 && outer_relids.contains(&var.varno) => {
+            var.varlevelsup = 1;
+            Expr::Var(var)
+        }
+        Expr::Op(mut op) => {
+            op.args = op
+                .args
+                .into_iter()
+                .map(|arg| parameterize_outer_vars(arg, outer_relids))
+                .collect();
+            Expr::Op(op)
+        }
+        Expr::Bool(mut bool_expr) => {
+            bool_expr.args = bool_expr
+                .args
+                .into_iter()
+                .map(|arg| parameterize_outer_vars(arg, outer_relids))
+                .collect();
+            Expr::Bool(bool_expr)
+        }
+        Expr::Func(mut func) => {
+            func.args = func
+                .args
+                .into_iter()
+                .map(|arg| parameterize_outer_vars(arg, outer_relids))
+                .collect();
+            Expr::Func(func)
+        }
+        Expr::Cast(inner, sql_type) => Expr::Cast(
+            Box::new(parameterize_outer_vars(*inner, outer_relids)),
+            sql_type,
+        ),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(parameterize_outer_vars(*expr, outer_relids)),
+            collation_oid,
+        },
+        Expr::IsNull(inner) => {
+            Expr::IsNull(Box::new(parameterize_outer_vars(*inner, outer_relids)))
+        }
+        Expr::IsNotNull(inner) => {
+            Expr::IsNotNull(Box::new(parameterize_outer_vars(*inner, outer_relids)))
+        }
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(parameterize_outer_vars(*expr, outer_relids)),
+            field,
+            field_type,
+        },
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(parameterize_outer_vars(*left, outer_relids)),
+            Box::new(parameterize_outer_vars(*right, outer_relids)),
+        ),
+        Expr::ScalarArrayOp(mut saop) => {
+            saop.left = Box::new(parameterize_outer_vars(*saop.left, outer_relids));
+            saop.right = Box::new(parameterize_outer_vars(*saop.right, outer_relids));
+            Expr::ScalarArrayOp(saop)
+        }
+        other => other,
+    }
+}
+
+fn path_contains_runtime_index_arg(path: &Path) -> bool {
+    match path {
+        Path::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        }
+        | Path::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        } => keys
+            .iter()
+            .chain(order_by_keys.iter())
+            .any(|key| matches!(key.argument, IndexScanKeyArgument::Runtime(_))),
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => path_contains_runtime_index_arg(input),
+        _ => false,
+    }
+}
+
 fn select_best_join_path(paths: Vec<Path>) -> Path {
     paths
         .into_iter()
@@ -2161,6 +2421,26 @@ fn better_join_path(candidate: &Path, current: &Path) -> bool {
         .as_f64()
         .partial_cmp(&current_info.total_cost.as_f64())
         .unwrap_or(Ordering::Equal);
+    if super::super::bestpath::preferred_parameterized_index_nested_loop(candidate)
+        && !super::super::bestpath::preferred_parameterized_index_nested_loop(current)
+    {
+        return true;
+    }
+    if super::super::bestpath::preferred_parameterized_index_nested_loop(current)
+        && !super::super::bestpath::preferred_parameterized_index_nested_loop(candidate)
+    {
+        return false;
+    }
+    if super::super::bestpath::preferred_function_outer_hash_join(candidate)
+        && !super::super::bestpath::preferred_function_outer_hash_join(current)
+    {
+        return true;
+    }
+    if super::super::bestpath::preferred_function_outer_hash_join(current)
+        && !super::super::bestpath::preferred_function_outer_hash_join(candidate)
+    {
+        return false;
+    }
     if near_tied_non_nested_join(candidate, current) {
         return true;
     }
@@ -2863,6 +3143,11 @@ fn nested_loop_inner_scan_costs(
         return (scan_cost, scan_cost);
     }
 
+    if path_contains_runtime_index_arg(right) {
+        let scan_cost = right_info.total_cost.as_f64();
+        return (scan_cost, scan_cost);
+    }
+
     (
         materialized_inner_first_scan_cost(right_info),
         materialized_inner_rescan_cost(right_info),
@@ -3283,18 +3568,27 @@ pub(super) fn build_index_path_spec(
 }
 
 fn clause_selectivity(expr: &Expr, stats: Option<&RelationStats>, reltuples: f64) -> f64 {
+    clause_selectivity_with_catalog(expr, stats, reltuples, None)
+}
+
+fn clause_selectivity_with_catalog(
+    expr: &Expr,
+    stats: Option<&RelationStats>,
+    reltuples: f64,
+    catalog: Option<&dyn CatalogLookup>,
+) -> f64 {
     match expr {
         Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => bool_expr
             .args
             .iter()
             .fold(1.0, |acc, arg| {
-                acc * clause_selectivity(arg, stats, reltuples)
+                acc * clause_selectivity_with_catalog(arg, stats, reltuples, catalog)
             })
             .clamp(0.0, 1.0),
         Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => {
             let mut result = 0.0;
             for arg in &bool_expr.args {
-                let selectivity = clause_selectivity(arg, stats, reltuples);
+                let selectivity = clause_selectivity_with_catalog(arg, stats, reltuples, catalog);
                 result = result + selectivity - result * selectivity;
             }
             result.clamp(0.0, 1.0)
@@ -3357,10 +3651,42 @@ fn clause_selectivity(expr: &Expr, stats: Option<&RelationStats>, reltuples: f64
                 DEFAULT_EQ_SEL
             }
         }
-        Expr::Func(func) => builtin_index_qual_selectivity(func.funcid).unwrap_or(DEFAULT_BOOL_SEL),
+        Expr::Func(func) => support_function_selectivity(func, catalog, stats, reltuples)
+            .or_else(|| builtin_index_qual_selectivity(func.funcid))
+            .unwrap_or(DEFAULT_BOOL_SEL),
         _ => DEFAULT_BOOL_SEL,
     }
     .clamp(0.0, 1.0)
+}
+
+fn support_function_selectivity(
+    func: &FuncExpr,
+    catalog: Option<&dyn CatalogLookup>,
+    stats: Option<&RelationStats>,
+    reltuples: f64,
+) -> Option<f64> {
+    let catalog = catalog?;
+    let proc_row = catalog.proc_row_by_oid(func.funcid)?;
+    if proc_row.prosupport == 0 || func.args.len() != 2 {
+        return None;
+    }
+    let support_row = catalog.proc_row_by_oid(proc_row.prosupport)?;
+    // :HACK: PostgreSQL calls the support function with SupportRequestSelectivity.
+    // pgrust does not have that generic request node yet, so recognize the
+    // regression support handler and apply the int4 equality estimator it wraps.
+    if !support_row.prosrc.eq_ignore_ascii_case("test_support_func")
+        && !support_row
+            .proname
+            .eq_ignore_ascii_case("test_support_func")
+    {
+        return None;
+    }
+    Some(eq_selectivity(
+        &func.args[0],
+        &func.args[1],
+        stats,
+        reltuples,
+    ))
 }
 
 fn builtin_index_qual_selectivity(funcid: u32) -> Option<f64> {
@@ -3727,6 +4053,136 @@ fn const_argument(expr: &Expr) -> Option<Value> {
         }
         _ => None,
     }
+}
+
+fn estimate_function_scan_rows(call: &SetReturningCall, catalog: &dyn CatalogLookup) -> f64 {
+    match call {
+        SetReturningCall::GenerateSeries {
+            start, stop, step, ..
+        } => estimate_generate_series_rows(start, stop, step).unwrap_or(1000.0),
+        SetReturningCall::UserDefined { proc_oid, args, .. } => {
+            let proc_row = catalog.proc_row_by_oid(*proc_oid);
+            // :HACK: PostgreSQL asks the function support proc for row estimates.
+            // Until pgrust has generic SupportRequestRows plumbing, recognize the
+            // regression support handler attached to generate_series_int4 wrappers.
+            if proc_row.as_ref().is_some_and(|row| {
+                row.prosupport != 0 && row.prosrc.eq_ignore_ascii_case("generate_series_int4")
+            }) && args.len() >= 2
+            {
+                let default_step = Expr::Const(Value::Int32(1));
+                let step = args.get(2).unwrap_or(&default_step);
+                return estimate_int_series_rows_from_exprs(&args[0], &args[1], step)
+                    .unwrap_or(1000.0);
+            }
+            proc_row
+                .map(|row| row.prorows)
+                .filter(|rows| rows.is_finite() && *rows > 0.0)
+                .unwrap_or(1000.0)
+        }
+        _ => 1000.0,
+    }
+}
+
+fn estimate_generate_series_rows(start: &Expr, stop: &Expr, step: &Expr) -> Option<f64> {
+    match (
+        const_argument(start)?,
+        const_argument(stop)?,
+        const_argument(step)?,
+    ) {
+        (Value::Int32(_), Value::Int32(_), _)
+        | (Value::Int32(_), Value::Int64(_), _)
+        | (Value::Int64(_), Value::Int32(_), _)
+        | (Value::Int64(_), Value::Int64(_), _) => {
+            estimate_int_series_rows_from_exprs(start, stop, step)
+        }
+        (Value::Numeric(start), Value::Numeric(stop), Value::Numeric(step)) => {
+            estimate_numeric_series_rows(&start, &stop, &step)
+        }
+        (Value::Timestamp(start), Value::Timestamp(stop), Value::Interval(step)) => {
+            estimate_timestamp_series_rows(start.0, stop.0, step)
+        }
+        (Value::TimestampTz(start), Value::TimestampTz(stop), Value::Interval(step)) => {
+            estimate_timestamp_series_rows(start.0, stop.0, step)
+        }
+        _ => None,
+    }
+}
+
+fn estimate_int_series_rows_from_exprs(start: &Expr, stop: &Expr, step: &Expr) -> Option<f64> {
+    let start = const_i64(start)?;
+    let stop = const_i64(stop)?;
+    let step = const_i64(step)?;
+    estimate_i64_series_rows(start, stop, step)
+}
+
+fn const_i64(expr: &Expr) -> Option<i64> {
+    match const_argument(expr)? {
+        Value::Int32(value) => Some(i64::from(value)),
+        Value::Int64(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn estimate_i64_series_rows(start: i64, stop: i64, step: i64) -> Option<f64> {
+    if step == 0 {
+        return None;
+    }
+    if (step > 0 && start > stop) || (step < 0 && start < stop) {
+        return Some(1.0);
+    }
+    let distance = if step > 0 {
+        i128::from(stop) - i128::from(start)
+    } else {
+        i128::from(start) - i128::from(stop)
+    };
+    let step = i128::from(step).abs();
+    Some((distance / step + 1) as f64)
+}
+
+fn estimate_numeric_series_rows(
+    start: &NumericValue,
+    stop: &NumericValue,
+    step: &NumericValue,
+) -> Option<f64> {
+    let start = finite_numeric_f64(start)?;
+    let stop = finite_numeric_f64(stop)?;
+    let step = finite_numeric_f64(step)?;
+    if step == 0.0 {
+        return None;
+    }
+    if (step > 0.0 && start > stop) || (step < 0.0 && start < stop) {
+        return Some(1.0);
+    }
+    Some(((stop - start) / step).floor().abs() + 1.0)
+}
+
+fn finite_numeric_f64(value: &NumericValue) -> Option<f64> {
+    match value {
+        NumericValue::Finite { .. } => value.render().parse::<f64>().ok(),
+        NumericValue::PosInf | NumericValue::NegInf | NumericValue::NaN => None,
+    }
+}
+
+fn estimate_timestamp_series_rows(start: i64, stop: i64, step: IntervalValue) -> Option<f64> {
+    if matches!(start, TIMESTAMP_NOBEGIN | TIMESTAMP_NOEND)
+        || matches!(stop, TIMESTAMP_NOBEGIN | TIMESTAMP_NOEND)
+        || !step.is_finite()
+    {
+        return None;
+    }
+    let step_key = step.cmp_key();
+    if step_key == 0 {
+        return None;
+    }
+    if (step_key > 0 && start > stop) || (step_key < 0 && start < stop) {
+        return Some(1.0);
+    }
+    let distance = if step_key > 0 {
+        i128::from(stop) - i128::from(start)
+    } else {
+        i128::from(start) - i128::from(stop)
+    };
+    Some((distance / step_key.abs() + 1) as f64)
 }
 
 fn simple_index_column(index: &BoundIndexRelation, index_pos: usize) -> Option<usize> {

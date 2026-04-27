@@ -118,6 +118,7 @@ fn toast_executor_context(
 ) -> ExecutorContext {
     ExecutorContext {
         pool: db.pool.clone(),
+        data_dir: None,
         txns: db.txns.clone(),
         txn_waiter: Some(db.txn_waiter.clone()),
         lock_status_provider: Some(std::sync::Arc::new(db.clone())),
@@ -406,6 +407,10 @@ fn pg_relation_size_reports_empty_and_nonempty_toast_relations() {
 
     assert_eq!(
         query_rows(&db, 1, "select pg_relation_size('docs') > 0"),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select pg_relation_size('docs', 'main') > 0"),
         vec![vec![Value::Bool(true)]]
     );
 

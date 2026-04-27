@@ -117,6 +117,7 @@ pub(crate) use expr_xml::validate_xml_input;
 pub(crate) use nodes::{
     render_explain_expr, render_explain_join_expr, render_explain_projection_expr_with_qualifier,
     render_index_order_by, render_index_scan_condition_with_key_names,
+    render_index_scan_condition_with_key_names_and_runtime_renderer,
     render_verbose_range_support_expr,
 };
 pub use random::PgPrngState;
@@ -175,8 +176,9 @@ pub(crate) use constraints::{enforce_relation_constraints, enforce_row_security_
 pub(crate) use expr_ops::compare_order_values;
 use expr_ops::parse_numeric_text;
 pub(crate) use foreign_keys::{
-    enforce_inbound_foreign_key_reference, enforce_inbound_foreign_keys_on_delete,
-    enforce_inbound_foreign_keys_on_update, enforce_outbound_foreign_keys,
+    InsertForeignKeyCheckPhase, enforce_inbound_foreign_key_reference,
+    enforce_inbound_foreign_keys_on_delete, enforce_inbound_foreign_keys_on_update,
+    enforce_outbound_foreign_keys, enforce_outbound_foreign_keys_for_insert,
     foreign_key_action_trigger_enabled_on_delete, foreign_key_action_trigger_enabled_on_update,
 };
 pub(crate) use permissions::relation_values_visible_for_error_detail;
@@ -386,6 +388,7 @@ pub enum SessionReplicationRole {
 
 pub struct ExecutorContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
+    pub data_dir: Option<std::path::PathBuf>,
     pub txns: std::sync::Arc<parking_lot::RwLock<TransactionManager>>,
     pub txn_waiter: Option<std::sync::Arc<TransactionWaiter>>,
     pub lock_status_provider: Option<std::sync::Arc<dyn LockStatusProvider>>,

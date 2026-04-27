@@ -56,6 +56,7 @@ fn ddl_executor_context(
     let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
     Ok(ExecutorContext {
         pool: std::sync::Arc::clone(&db.pool),
+        data_dir: None,
         txns: db.txns.clone(),
         txn_waiter: Some(db.txn_waiter.clone()),
         lock_status_provider: Some(std::sync::Arc::new(db.clone())),

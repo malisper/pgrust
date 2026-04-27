@@ -5,7 +5,8 @@ use crate::include::catalog::*;
 use crate::include::nodes::primnodes::{
     AggFunc, BuiltinScalarFunction, BuiltinWindowFunction, HashFunctionKind, HypotheticalAggFunc,
 };
-use std::sync::OnceLock;
+use std::collections::BTreeSet;
+use std::sync::{OnceLock, RwLock};
 
 const VOID_TYPE_OID: u32 = 2278;
 const INTERNAL_TYPE_OID: u32 = 2281;
@@ -419,6 +420,34 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
     ROWS.get_or_init(build_bootstrap_pg_proc_rows).clone()
 }
 
+pub fn is_bootstrap_proc_oid(oid: u32) -> bool {
+    bootstrap_pg_proc_rows().iter().any(|row| row.oid == oid)
+}
+
+fn bootstrap_proc_execute_acl_overrides() -> &'static RwLock<BTreeSet<(u32, String)>> {
+    static ACLS: OnceLock<RwLock<BTreeSet<(u32, String)>>> = OnceLock::new();
+    ACLS.get_or_init(|| RwLock::new(BTreeSet::new()))
+}
+
+pub fn set_bootstrap_proc_execute_acl(oid: u32, grantee: &str, granted: bool) {
+    let mut overrides = bootstrap_proc_execute_acl_overrides()
+        .write()
+        .expect("bootstrap proc ACL override lock poisoned");
+    let key = (oid, grantee.to_string());
+    if granted {
+        overrides.insert(key);
+    } else {
+        overrides.remove(&key);
+    }
+}
+
+pub fn bootstrap_proc_execute_acl_has_grantee(oid: u32, grantee: &str) -> bool {
+    bootstrap_proc_execute_acl_overrides()
+        .read()
+        .expect("bootstrap proc ACL override lock poisoned")
+        .contains(&(oid, grantee.to_string()))
+}
+
 fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
     // :HACK: Seed a representative builtin subset before pg_proc becomes the
     // authoritative function lookup source. The current rows cover common
@@ -448,6 +477,120 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             false,
             'f',
             'v',
+        ),
+        xml_mapping_proc_row(
+            2923,
+            "table_to_xml",
+            &[
+                REGCLASS_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+                TEXT_TYPE_OID,
+            ],
+            &["tbl", "nulls", "tableforest", "targetns"],
+            's',
+            'r',
+        ),
+        xml_mapping_proc_row(
+            2924,
+            "query_to_xml",
+            &[TEXT_TYPE_OID, BOOL_TYPE_OID, BOOL_TYPE_OID, TEXT_TYPE_OID],
+            &["query", "nulls", "tableforest", "targetns"],
+            'v',
+            'u',
+        ),
+        xml_mapping_proc_row(
+            2925,
+            "cursor_to_xml",
+            &[
+                REFCURSOR_TYPE_OID,
+                INT4_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+                TEXT_TYPE_OID,
+            ],
+            &["cursor", "count", "nulls", "tableforest", "targetns"],
+            'v',
+            'u',
+        ),
+        xml_mapping_proc_row(
+            2926,
+            "table_to_xmlschema",
+            &[
+                REGCLASS_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+                TEXT_TYPE_OID,
+            ],
+            &["tbl", "nulls", "tableforest", "targetns"],
+            's',
+            'r',
+        ),
+        xml_mapping_proc_row(
+            2927,
+            "query_to_xmlschema",
+            &[TEXT_TYPE_OID, BOOL_TYPE_OID, BOOL_TYPE_OID, TEXT_TYPE_OID],
+            &["query", "nulls", "tableforest", "targetns"],
+            'v',
+            'u',
+        ),
+        xml_mapping_proc_row(
+            2928,
+            "cursor_to_xmlschema",
+            &[
+                REFCURSOR_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+                TEXT_TYPE_OID,
+            ],
+            &["cursor", "nulls", "tableforest", "targetns"],
+            'v',
+            'u',
+        ),
+        xml_mapping_proc_row(
+            2929,
+            "table_to_xml_and_xmlschema",
+            &[
+                REGCLASS_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+                TEXT_TYPE_OID,
+            ],
+            &["tbl", "nulls", "tableforest", "targetns"],
+            's',
+            'r',
+        ),
+        xml_mapping_proc_row(
+            2930,
+            "query_to_xml_and_xmlschema",
+            &[TEXT_TYPE_OID, BOOL_TYPE_OID, BOOL_TYPE_OID, TEXT_TYPE_OID],
+            &["query", "nulls", "tableforest", "targetns"],
+            'v',
+            'u',
+        ),
+        xml_mapping_proc_row(
+            2933,
+            "schema_to_xml",
+            &[NAME_TYPE_OID, BOOL_TYPE_OID, BOOL_TYPE_OID, TEXT_TYPE_OID],
+            &["schema", "nulls", "tableforest", "targetns"],
+            's',
+            'r',
+        ),
+        xml_mapping_proc_row(
+            2934,
+            "schema_to_xmlschema",
+            &[NAME_TYPE_OID, BOOL_TYPE_OID, BOOL_TYPE_OID, TEXT_TYPE_OID],
+            &["schema", "nulls", "tableforest", "targetns"],
+            's',
+            'r',
+        ),
+        xml_mapping_proc_row(
+            2935,
+            "schema_to_xml_and_xmlschema",
+            &[NAME_TYPE_OID, BOOL_TYPE_OID, BOOL_TYPE_OID, TEXT_TYPE_OID],
+            &["schema", "nulls", "tableforest", "targetns"],
+            's',
+            'r',
         ),
         proc_row(
             1599,
@@ -2032,6 +2175,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             's',
         ),
         proc_row(
+            3352,
+            "pg_get_partkeydef",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_get_partkeydef",
+            1,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
             1387,
             "pg_get_constraintdef",
             TEXT_TYPE_OID,
@@ -2846,12 +3001,545 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             's',
         ),
         proc_row(
+            6316,
+            "pg_column_toast_chunk_id",
+            OID_TYPE_OID,
+            &oid_argtypes(&[ANYOID]),
+            "pg_column_toast_chunk_id",
+            1,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        variadic_proc_row(
+            438,
+            "num_nulls",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[ANYOID]),
+            ANYOID,
+            "pg_num_nulls",
+            1,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        variadic_proc_row(
+            440,
+            "num_nonnulls",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[ANYOID]),
+            ANYOID,
+            "pg_num_nonnulls",
+            1,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
             2322,
             "pg_relation_size",
             INT8_TYPE_OID,
             &oid_argtypes(&[REGCLASS_TYPE_OID]),
             "pg_relation_size",
             1,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        {
+            let mut row = proc_row(
+                4543,
+                "pg_log_backend_memory_contexts",
+                BOOL_TYPE_OID,
+                &oid_argtypes(&[INT4_TYPE_OID]),
+                "pg_log_backend_memory_contexts",
+                1,
+                false,
+                true,
+                'f',
+                'v',
+            );
+            row.proacl = Some(vec!["postgres=X/postgres".into()]);
+            row
+        },
+        proc_row(
+            2256,
+            "has_function_privilege",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[NAME_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            "has_function_privilege_name_name",
+            3,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            2257,
+            "has_function_privilege",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[NAME_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID]),
+            "has_function_privilege_name_id",
+            3,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            2258,
+            "has_function_privilege",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            "has_function_privilege_id_name",
+            3,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            2259,
+            "has_function_privilege",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID]),
+            "has_function_privilege_id_id",
+            3,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            2260,
+            "has_function_privilege",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            "has_function_privilege_name",
+            2,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            2261,
+            "has_function_privilege",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID, TEXT_TYPE_OID]),
+            "has_function_privilege_id",
+            2,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        {
+            let mut row = proc_row(
+                3800,
+                "pg_current_logfile",
+                TEXT_TYPE_OID,
+                "",
+                "pg_current_logfile",
+                0,
+                false,
+                false,
+                'f',
+                'v',
+            );
+            row.proacl = Some(vec![
+                "postgres=X/postgres".into(),
+                "pg_monitor=X/postgres".into(),
+            ]);
+            row
+        },
+        {
+            let mut row = proc_row(
+                3801,
+                "pg_current_logfile",
+                TEXT_TYPE_OID,
+                &oid_argtypes(&[TEXT_TYPE_OID]),
+                "pg_current_logfile_1arg",
+                1,
+                false,
+                false,
+                'f',
+                'v',
+            );
+            row.proacl = Some(vec![
+                "postgres=X/postgres".into(),
+                "pg_monitor=X/postgres".into(),
+            ]);
+            row
+        },
+        scalar_record_out_proc_row(
+            2623,
+            "pg_stat_file",
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "pg_stat_file_1arg",
+            1,
+            &[
+                ("size", INT8_TYPE_OID),
+                ("access", TIMESTAMPTZ_TYPE_OID),
+                ("modification", TIMESTAMPTZ_TYPE_OID),
+                ("change", TIMESTAMPTZ_TYPE_OID),
+                ("creation", TIMESTAMPTZ_TYPE_OID),
+                ("isdir", BOOL_TYPE_OID),
+            ],
+        ),
+        scalar_record_out_proc_row(
+            3307,
+            "pg_stat_file",
+            &oid_argtypes(&[TEXT_TYPE_OID, BOOL_TYPE_OID]),
+            "pg_stat_file",
+            2,
+            &[
+                ("size", INT8_TYPE_OID),
+                ("access", TIMESTAMPTZ_TYPE_OID),
+                ("modification", TIMESTAMPTZ_TYPE_OID),
+                ("change", TIMESTAMPTZ_TYPE_OID),
+                ("creation", TIMESTAMPTZ_TYPE_OID),
+                ("isdir", BOOL_TYPE_OID),
+            ],
+        ),
+        proc_row(
+            2624,
+            "pg_read_file",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, INT8_TYPE_OID, INT8_TYPE_OID]),
+            "pg_read_file_off_len",
+            3,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            3293,
+            "pg_read_file",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, INT8_TYPE_OID, INT8_TYPE_OID, BOOL_TYPE_OID]),
+            "pg_read_file_off_len_missing",
+            4,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            3826,
+            "pg_read_file",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "pg_read_file_all",
+            1,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            80008,
+            "pg_read_file",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, BOOL_TYPE_OID]),
+            "pg_read_file_all_missing",
+            2,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            3827,
+            "pg_read_binary_file",
+            BYTEA_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, INT8_TYPE_OID, INT8_TYPE_OID]),
+            "pg_read_binary_file_off_len",
+            3,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            3295,
+            "pg_read_binary_file",
+            BYTEA_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, INT8_TYPE_OID, INT8_TYPE_OID, BOOL_TYPE_OID]),
+            "pg_read_binary_file_off_len_missing",
+            4,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            3828,
+            "pg_read_binary_file",
+            BYTEA_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "pg_read_binary_file_all",
+            1,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            80009,
+            "pg_read_binary_file",
+            BYTEA_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, BOOL_TYPE_OID]),
+            "pg_read_binary_file_all_missing",
+            2,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        set_returning_proc_row(
+            2625,
+            "pg_ls_dir",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "pg_ls_dir_1arg",
+            1,
+        ),
+        set_returning_proc_row(
+            3297,
+            "pg_ls_dir",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, BOOL_TYPE_OID, BOOL_TYPE_OID]),
+            "pg_ls_dir",
+            3,
+        ),
+        record_out_proc_row(
+            3354,
+            "pg_ls_waldir",
+            "",
+            "pg_ls_waldir",
+            0,
+            &[
+                ("name", TEXT_TYPE_OID),
+                ("size", INT8_TYPE_OID),
+                ("modification", TIMESTAMPTZ_TYPE_OID),
+            ],
+        ),
+        record_out_proc_row(
+            80040,
+            "pg_ls_summariesdir",
+            "",
+            "pg_ls_summariesdir",
+            0,
+            &[
+                ("name", TEXT_TYPE_OID),
+                ("size", INT8_TYPE_OID),
+                ("modification", TIMESTAMPTZ_TYPE_OID),
+            ],
+        ),
+        record_out_proc_row(
+            5031,
+            "pg_ls_archive_statusdir",
+            "",
+            "pg_ls_archive_statusdir",
+            0,
+            &[
+                ("name", TEXT_TYPE_OID),
+                ("size", INT8_TYPE_OID),
+                ("modification", TIMESTAMPTZ_TYPE_OID),
+            ],
+        ),
+        pg_monitor_record_out_proc_row(
+            80070,
+            "pg_ls_logicalsnapdir",
+            "",
+            "pg_ls_logicalsnapdir",
+            0,
+            &[
+                ("name", TEXT_TYPE_OID),
+                ("size", INT8_TYPE_OID),
+                ("modification", TIMESTAMPTZ_TYPE_OID),
+            ],
+        ),
+        pg_monitor_record_out_proc_row(
+            80071,
+            "pg_ls_logicalmapdir",
+            "",
+            "pg_ls_logicalmapdir",
+            0,
+            &[
+                ("name", TEXT_TYPE_OID),
+                ("size", INT8_TYPE_OID),
+                ("modification", TIMESTAMPTZ_TYPE_OID),
+            ],
+        ),
+        pg_monitor_record_out_proc_row(
+            80072,
+            "pg_ls_replslotdir",
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "pg_ls_replslotdir",
+            1,
+            &[
+                ("name", TEXT_TYPE_OID),
+                ("size", INT8_TYPE_OID),
+                ("modification", TIMESTAMPTZ_TYPE_OID),
+            ],
+        ),
+        scalar_record_out_proc_row(
+            2850,
+            "pg_walfile_name_offset",
+            &oid_argtypes(&[PG_LSN_TYPE_OID]),
+            "pg_walfile_name_offset",
+            1,
+            &[("file_name", TEXT_TYPE_OID), ("file_offset", INT4_TYPE_OID)],
+        ),
+        proc_row(
+            2851,
+            "pg_walfile_name",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[PG_LSN_TYPE_OID]),
+            "pg_walfile_name",
+            1,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        {
+            let mut row = scalar_record_out_proc_row(
+                80013,
+                "pg_split_walfile_name",
+                &oid_argtypes(&[TEXT_TYPE_OID]),
+                "pg_split_walfile_name",
+                1,
+                &[
+                    ("segment_number", NUMERIC_TYPE_OID),
+                    ("timeline_id", INT8_TYPE_OID),
+                ],
+            );
+            row.proisstrict = false;
+            row
+        },
+        record_out_proc_row(
+            2856,
+            "pg_timezone_names",
+            "",
+            "pg_timezone_names",
+            0,
+            &[
+                ("name", TEXT_TYPE_OID),
+                ("abbrev", TEXT_TYPE_OID),
+                ("utc_offset", INTERVAL_TYPE_OID),
+                ("is_dst", BOOL_TYPE_OID),
+            ],
+        ),
+        set_returning_proc_row(
+            2556,
+            "pg_tablespace_databases",
+            OID_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_tablespace_databases",
+            1,
+        ),
+        scalar_record_out_proc_row(
+            3441,
+            "pg_control_system",
+            "",
+            "pg_control_system",
+            0,
+            &[
+                ("pg_control_version", INT4_TYPE_OID),
+                ("catalog_version_no", INT4_TYPE_OID),
+                ("system_identifier", INT8_TYPE_OID),
+                ("pg_control_last_modified", TIMESTAMPTZ_TYPE_OID),
+            ],
+        ),
+        scalar_record_out_proc_row(
+            3442,
+            "pg_control_checkpoint",
+            "",
+            "pg_control_checkpoint",
+            0,
+            &[
+                ("checkpoint_lsn", PG_LSN_TYPE_OID),
+                ("redo_lsn", PG_LSN_TYPE_OID),
+                ("redo_wal_file", TEXT_TYPE_OID),
+                ("timeline_id", INT4_TYPE_OID),
+                ("prev_timeline_id", INT4_TYPE_OID),
+                ("full_page_writes", BOOL_TYPE_OID),
+                ("next_xid", TEXT_TYPE_OID),
+                ("next_oid", OID_TYPE_OID),
+                ("next_multixact_id", XID_TYPE_OID),
+                ("next_multi_offset", XID_TYPE_OID),
+                ("oldest_xid", XID_TYPE_OID),
+                ("oldest_xid_dbid", OID_TYPE_OID),
+                ("oldest_active_xid", XID_TYPE_OID),
+                ("oldest_multi_xid", XID_TYPE_OID),
+                ("oldest_multi_dbid", OID_TYPE_OID),
+                ("oldest_commit_ts_xid", XID_TYPE_OID),
+                ("newest_commit_ts_xid", XID_TYPE_OID),
+                ("checkpoint_time", TIMESTAMPTZ_TYPE_OID),
+            ],
+        ),
+        scalar_record_out_proc_row(
+            3443,
+            "pg_control_recovery",
+            "",
+            "pg_control_recovery",
+            0,
+            &[
+                ("min_recovery_end_lsn", PG_LSN_TYPE_OID),
+                ("min_recovery_end_timeline", INT4_TYPE_OID),
+                ("backup_start_lsn", PG_LSN_TYPE_OID),
+                ("backup_end_lsn", PG_LSN_TYPE_OID),
+                ("end_of_backup_record_required", BOOL_TYPE_OID),
+            ],
+        ),
+        scalar_record_out_proc_row(
+            3444,
+            "pg_control_init",
+            "",
+            "pg_control_init",
+            0,
+            &[
+                ("max_data_alignment", INT4_TYPE_OID),
+                ("database_block_size", INT4_TYPE_OID),
+                ("blocks_per_segment", INT4_TYPE_OID),
+                ("wal_block_size", INT4_TYPE_OID),
+                ("bytes_per_wal_segment", INT4_TYPE_OID),
+                ("max_identifier_length", INT4_TYPE_OID),
+                ("max_index_columns", INT4_TYPE_OID),
+                ("max_toast_chunk_size", INT4_TYPE_OID),
+                ("large_object_chunk_size", INT4_TYPE_OID),
+                ("float8_pass_by_value", BOOL_TYPE_OID),
+                ("data_page_checksum_version", INT4_TYPE_OID),
+                ("default_char_signedness", BOOL_TYPE_OID),
+            ],
+        ),
+        proc_row(
+            6003,
+            "pg_replication_origin_create",
+            OID_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "pg_replication_origin_create",
+            1,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            2332,
+            "pg_relation_size",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[REGCLASS_TYPE_OID, TEXT_TYPE_OID]),
+            "pg_relation_size",
+            2,
             false,
             false,
             'f',
@@ -8672,6 +9360,44 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),
         ("cash_words", BuiltinScalarFunction::CashWords),
+        ("table_to_xml", BuiltinScalarFunction::UnsupportedXmlFeature),
+        (
+            "table_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "table_to_xml_and_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        ("query_to_xml", BuiltinScalarFunction::UnsupportedXmlFeature),
+        (
+            "query_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "query_to_xml_and_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "cursor_to_xml",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "cursor_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "schema_to_xml",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "schema_to_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
+        (
+            "schema_to_xml_and_xmlschema",
+            BuiltinScalarFunction::UnsupportedXmlFeature,
+        ),
         (
             "pg_get_constraintdef",
             BuiltinScalarFunction::PgGetConstraintDef,
@@ -8680,6 +9406,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_get_constraintdef_ext",
             BuiltinScalarFunction::PgGetConstraintDef,
         ),
+        ("pg_get_partkeydef", BuiltinScalarFunction::PgGetPartKeyDef),
         ("pg_get_indexdef", BuiltinScalarFunction::PgGetIndexDef),
         ("pg_get_indexdef_ext", BuiltinScalarFunction::PgGetIndexDef),
         ("xmlcomment", BuiltinScalarFunction::XmlComment),
@@ -8985,8 +9712,116 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_column_compression",
             BuiltinScalarFunction::PgColumnCompression,
         ),
+        (
+            "pg_column_toast_chunk_id",
+            BuiltinScalarFunction::PgColumnToastChunkId,
+        ),
         ("pg_column_size", BuiltinScalarFunction::PgColumnSize),
         ("pg_relation_size", BuiltinScalarFunction::PgRelationSize),
+        ("pg_num_nulls", BuiltinScalarFunction::NumNulls),
+        ("num_nulls", BuiltinScalarFunction::NumNulls),
+        ("pg_num_nonnulls", BuiltinScalarFunction::NumNonNulls),
+        ("num_nonnulls", BuiltinScalarFunction::NumNonNulls),
+        (
+            "pg_log_backend_memory_contexts",
+            BuiltinScalarFunction::PgLogBackendMemoryContexts,
+        ),
+        (
+            "has_function_privilege",
+            BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "has_function_privilege_name_name",
+            BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "has_function_privilege_name_id",
+            BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "has_function_privilege_id_name",
+            BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "has_function_privilege_id_id",
+            BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "has_function_privilege_name",
+            BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "has_function_privilege_id",
+            BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "pg_current_logfile",
+            BuiltinScalarFunction::PgCurrentLogfile,
+        ),
+        (
+            "pg_current_logfile_1arg",
+            BuiltinScalarFunction::PgCurrentLogfile,
+        ),
+        ("pg_read_file_off_len", BuiltinScalarFunction::PgReadFile),
+        (
+            "pg_read_file_off_len_missing",
+            BuiltinScalarFunction::PgReadFile,
+        ),
+        ("pg_read_file_all", BuiltinScalarFunction::PgReadFile),
+        (
+            "pg_read_file_all_missing",
+            BuiltinScalarFunction::PgReadFile,
+        ),
+        (
+            "pg_read_binary_file_off_len",
+            BuiltinScalarFunction::PgReadBinaryFile,
+        ),
+        (
+            "pg_read_binary_file_off_len_missing",
+            BuiltinScalarFunction::PgReadBinaryFile,
+        ),
+        (
+            "pg_read_binary_file_all",
+            BuiltinScalarFunction::PgReadBinaryFile,
+        ),
+        (
+            "pg_read_binary_file_all_missing",
+            BuiltinScalarFunction::PgReadBinaryFile,
+        ),
+        ("pg_stat_file", BuiltinScalarFunction::PgStatFile),
+        ("pg_stat_file_1arg", BuiltinScalarFunction::PgStatFile),
+        ("pg_walfile_name", BuiltinScalarFunction::PgWalfileName),
+        (
+            "pg_walfile_name_offset",
+            BuiltinScalarFunction::PgWalfileNameOffset,
+        ),
+        (
+            "pg_split_walfile_name",
+            BuiltinScalarFunction::PgSplitWalfileName,
+        ),
+        ("pg_control_system", BuiltinScalarFunction::PgControlSystem),
+        (
+            "pg_control_checkpoint",
+            BuiltinScalarFunction::PgControlCheckpoint,
+        ),
+        (
+            "pg_control_recovery",
+            BuiltinScalarFunction::PgControlRecovery,
+        ),
+        ("pg_control_init", BuiltinScalarFunction::PgControlInit),
+        (
+            "pg_replication_origin_create",
+            BuiltinScalarFunction::PgReplicationOriginCreate,
+        ),
+        (
+            "gist_translate_cmptype_common",
+            BuiltinScalarFunction::GistTranslateCmpTypeCommon,
+        ),
+        (
+            "test_canonicalize_path",
+            BuiltinScalarFunction::TestCanonicalizePath,
+        ),
+        ("test_relpath", BuiltinScalarFunction::TestRelpath),
         (
             "pg_stat_get_checkpointer_num_timed",
             BuiltinScalarFunction::PgStatGetCheckpointerNumTimed,
@@ -9759,6 +10594,9 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("pg_get_indexdef", BuiltinScalarFunction::PgGetIndexDef),
         ("pg_get_indexdef_ext", BuiltinScalarFunction::PgGetIndexDef),
+        ("pg_get_partkeydef", BuiltinScalarFunction::PgGetPartKeyDef),
+        ("pg_get_ruledef", BuiltinScalarFunction::PgGetRuleDef),
+        ("pg_get_ruledef_ext", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_viewdef", BuiltinScalarFunction::PgGetViewDef),
         ("pg_get_ruledef", BuiltinScalarFunction::PgGetRuleDef),
         ("pg_get_ruledef_ext", BuiltinScalarFunction::PgGetRuleDef),
@@ -9797,6 +10635,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("pg_get_expr", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_expr_ext", BuiltinScalarFunction::PgGetExpr),
+        ("pg_get_partkeydef", BuiltinScalarFunction::PgGetPartKeyDef),
         (
             "pg_relation_is_publishable",
             BuiltinScalarFunction::PgRelationIsPublishable,
@@ -14700,6 +15539,32 @@ fn comparison_proc_row(oid: u32, proname: &str, arg_oids: &[u32]) -> PgProcRow {
     comparison_proc_row_with_src(oid, proname, arg_oids, proname)
 }
 
+fn xml_mapping_proc_row(
+    oid: u32,
+    proname: &str,
+    arg_oids: &[u32],
+    arg_names: &[&str],
+    provolatile: char,
+    proparallel: char,
+) -> PgProcRow {
+    let mut row = proc_row_with_parallel(
+        oid,
+        proname,
+        XML_TYPE_OID,
+        &oid_argtypes(arg_oids),
+        proname,
+        arg_oids.len() as i16,
+        false,
+        true,
+        'f',
+        provolatile,
+        proparallel,
+    );
+    row.procost = 100.0;
+    row.proargnames = Some(arg_names.iter().map(|name| (*name).into()).collect());
+    row
+}
+
 fn comparison_proc_row_with_src(
     oid: u32,
     proname: &str,
@@ -14764,6 +15629,22 @@ fn record_out_proc_row(
             .chain(out_args.iter().map(|(name, _)| (*name).to_string()))
             .collect(),
     );
+    row
+}
+
+fn pg_monitor_record_out_proc_row(
+    oid: u32,
+    proname: &str,
+    proargtypes: &str,
+    prosrc: &str,
+    pronargs: i16,
+    out_args: &[(&str, u32)],
+) -> PgProcRow {
+    let mut row = record_out_proc_row(oid, proname, proargtypes, prosrc, pronargs, out_args);
+    row.proacl = Some(vec![
+        "postgres=X/postgres".into(),
+        "pg_monitor=X/postgres".into(),
+    ]);
     row
 }
 
@@ -15020,6 +15901,7 @@ mod tests {
             BuiltinScalarFunction::RegRoleToText,
             BuiltinScalarFunction::PgGetUserById,
             BuiltinScalarFunction::PgDescribeObject,
+            BuiltinScalarFunction::PgGetRuleDef,
             BuiltinScalarFunction::PgGetViewDef,
             BuiltinScalarFunction::PgGetRuleDef,
             BuiltinScalarFunction::PgNotify,

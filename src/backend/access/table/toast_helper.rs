@@ -15,7 +15,6 @@ use crate::include::varatt::{
     is_compressed_inline_datum, is_ondisk_toast_pointer,
 };
 use parking_lot::Mutex;
-use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -124,7 +123,7 @@ fn externalize_largest_column(
         .filter(|(_, column)| column.storage.attlen == -1)
         .filter(|(_, column)| allowed_storage.contains(&column.storage.attstorage))
         .filter_map(|(index, _)| {
-            external_input(&values[index]).map(|input| (index, Reverse(input.data.len()), input))
+            external_input(&values[index]).map(|input| (index, input.data.len(), input))
         })
         .max_by_key(|(_, len, _)| *len);
 

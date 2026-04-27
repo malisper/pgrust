@@ -1,4 +1,5 @@
 use super::exec_expr::eval_builtin_function;
+use super::expr_xml::unsupported_xml_feature_error;
 use super::sqlfunc::execute_user_defined_sql_scalar_function;
 use super::{ExecError, ExecutorContext, TupleSlot, Value};
 use crate::backend::parser::CatalogLookup;
@@ -96,6 +97,12 @@ fn proc_row_for_fmgr_call(funcid: u32, ctx: &ExecutorContext) -> Result<PgProcRo
 }
 
 fn unsupported_internal_function(row: &PgProcRow) -> ExecError {
+    if is_unsupported_xml_mapping_function(row.prosrc.as_str())
+        || is_unsupported_xml_mapping_function(row.proname.as_str())
+    {
+        return unsupported_xml_feature_error();
+    }
+
     // :HACK: pgrust exposes some pg_proc rows for catalog compatibility before
     // implementing their runtime behavior. PostgreSQL still has real fmgr
     // entries for these; fail explicitly instead of silently treating them as
@@ -106,4 +113,21 @@ fn unsupported_internal_function(row: &PgProcRow) -> ExecError {
         hint: None,
         sqlstate: "0A000",
     }
+}
+
+fn is_unsupported_xml_mapping_function(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "table_to_xml"
+            | "table_to_xmlschema"
+            | "table_to_xml_and_xmlschema"
+            | "query_to_xml"
+            | "query_to_xmlschema"
+            | "query_to_xml_and_xmlschema"
+            | "cursor_to_xml"
+            | "cursor_to_xmlschema"
+            | "schema_to_xml"
+            | "schema_to_xmlschema"
+            | "schema_to_xml_and_xmlschema"
+    )
 }

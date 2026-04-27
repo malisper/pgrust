@@ -410,14 +410,17 @@ pub(crate) struct DynamicTypeSnapshot {
 }
 
 fn domain_sql_type(domain: &DomainEntry) -> SqlType {
-    if domain.enum_check.is_some() && matches!(domain.sql_type.kind, SqlTypeKind::Enum) {
-        return domain
-            .sql_type
-            .with_identity(domain.oid, domain.sql_type.type_oid);
-    }
-    domain
-        .sql_type
-        .with_identity(domain.oid, domain.sql_type.type_oid)
+    let identity_arg =
+        if domain.enum_check.is_some() && matches!(domain.sql_type.kind, SqlTypeKind::Enum) {
+            domain.sql_type.type_oid
+        } else {
+            domain.sql_type.typrelid
+        };
+    domain.sql_type.with_identity(domain.oid, identity_arg)
+}
+
+fn domain_array_sql_type(domain: &DomainEntry) -> SqlType {
+    SqlType::array_of(domain_sql_type(domain))
 }
 
 fn dynamic_range_array_type_names(
@@ -1107,6 +1110,24 @@ impl Database {
             .clone()
     }
 
+    pub(crate) fn domain_by_type_oid(
+        &self,
+        domain_oid: u32,
+    ) -> Option<crate::backend::parser::DomainLookup> {
+        self.domains
+            .read()
+            .values()
+            .find(|domain| domain.oid == domain_oid)
+            .map(|domain| crate::backend::parser::DomainLookup {
+                oid: domain.oid,
+                name: domain.name.clone(),
+                sql_type: domain.sql_type,
+                default: domain.default.clone(),
+                check: domain.check.clone(),
+                not_null: domain.not_null,
+            })
+    }
+
     pub(crate) fn domain_checks_for_catalog(&self) -> BTreeMap<u32, (String, Vec<u32>)> {
         self.domains
             .read()
@@ -1118,6 +1139,28 @@ impl Database {
                         (check.name.clone(), check.allowed_enum_label_oids.clone()),
                     )
                 })
+            })
+            .collect()
+    }
+
+    pub(crate) fn domain_lookups_for_catalog(
+        &self,
+    ) -> BTreeMap<u32, crate::backend::parser::DomainLookup> {
+        self.domains
+            .read()
+            .values()
+            .map(|domain| {
+                (
+                    domain.oid,
+                    crate::backend::parser::DomainLookup {
+                        oid: domain.oid,
+                        name: domain.name.clone(),
+                        sql_type: domain.sql_type,
+                        default: domain.default.clone(),
+                        check: domain.check.clone(),
+                        not_null: domain.not_null,
+                    },
+                )
             })
             .collect()
     }
@@ -1644,9 +1687,18 @@ impl Database {
                     Value::Text(usename.into()),
                     Value::Text(entry.state.as_str().into()),
                     Value::Text(entry.query.into()),
+                    Value::Text("client backend".into()),
                 ]
             })
             .collect::<Vec<_>>();
+        rows.push(vec![
+            Value::Int32(0),
+            Value::Text(self.current_database_name().into()),
+            Value::Text("postgres".into()),
+            Value::Text("".into()),
+            Value::Text("".into()),
+            Value::Text("checkpointer".into()),
+        ]);
         rows.sort_by_key(|row| match row.first() {
             Some(Value::Int32(pid)) => *pid,
             _ => i32::MAX,

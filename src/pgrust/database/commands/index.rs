@@ -72,6 +72,7 @@ pub(super) fn catalog_entry_from_bound_relation(
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: relation.toast.map(|toast| toast.relation_oid).unwrap_or(0),
+        relhasindex: false,
         relpersistence: relation.relpersistence,
         relkind: relation.relkind,
         am_oid: crate::include::catalog::relam_for_relkind(relation.relkind),
@@ -110,6 +111,7 @@ pub(super) fn catalog_entry_from_bound_index_relation(
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
+        relhasindex: false,
         relpersistence,
         relkind: 'i',
         am_oid: index.index_meta.am_oid,
@@ -1098,6 +1100,7 @@ impl Database {
                     row_type_oid: index_entry.row_type_oid,
                     array_type_oid: index_entry.array_type_oid,
                     reltoastrelid: index_entry.reltoastrelid,
+                    relhasindex: false,
                     relpersistence: index_entry.relpersistence,
                     relkind: index_entry.relkind,
                     relispopulated: index_entry.relispopulated,
@@ -1168,6 +1171,7 @@ impl Database {
 
             let mut ctx = ExecutorContext {
                 pool: self.pool.clone(),
+                data_dir: None,
                 txns: self.txns.clone(),
                 txn_waiter: Some(self.txn_waiter.clone()),
                 lock_status_provider: Some(Arc::new(self.clone())),
@@ -1669,6 +1673,7 @@ impl Database {
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let mut ctx = ExecutorContext {
             pool: self.pool.clone(),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),

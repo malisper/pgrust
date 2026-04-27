@@ -9,8 +9,8 @@ use crate::backend::parser::{
     AlterAggregateRenameStatement, CreateAggregateStatement, CreateFunctionArg,
     CreateFunctionReturnSpec, CreateFunctionStatement, CreateProcedureStatement, FunctionArgMode,
     FunctionParallel, FunctionVolatility, OwnedSequenceSpec, PartitionBoundSpec, RawTypeName,
-    RelOption, SqlType, SqlTypeKind, Statement, analyze_select_query_with_outer, parse_statement,
-    pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
+    RelOption, RoutineSignature, SqlType, SqlTypeKind, Statement, analyze_select_query_with_outer,
+    parse_statement, pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::backend::rewrite::render_view_query_sql;
 use crate::backend::utils::cache::syscache::{
@@ -342,6 +342,20 @@ fn create_view_reloptions(options: &[RelOption]) -> Result<Option<Vec<String>>, 
             }
         };
         reloptions.push(format!("{name}={value}"));
+    }
+    Ok((!reloptions.is_empty()).then_some(reloptions))
+}
+
+fn create_table_reloptions(options: &[RelOption]) -> Result<Option<Vec<String>>, ExecError> {
+    let mut reloptions = Vec::new();
+    for option in options {
+        let name = option.name.to_ascii_lowercase();
+        if option.name != name {
+            return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                option.name.clone(),
+            )));
+        }
+        reloptions.push(format!("{name}={}", option.value.to_ascii_lowercase()));
     }
     Ok((!reloptions.is_empty()).then_some(reloptions))
 }
@@ -982,6 +996,42 @@ fn aggregate_support_signature(proc_name: &str, arg_types: &[SqlType]) -> String
     format!("{proc_name}({args})")
 }
 
+fn support_signature_name(signature: &RoutineSignature) -> String {
+    match &signature.schema_name {
+        Some(schema_name) => format!("{schema_name}.{}", signature.routine_name),
+        None => signature.routine_name.clone(),
+    }
+}
+
+fn resolve_support_proc_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    catalog: &dyn CatalogLookup,
+    signature: &RoutineSignature,
+) -> Result<u32, ExecError> {
+    let name = support_signature_name(signature);
+    let arg_oids = if signature.arg_types.is_empty() {
+        vec![INTERNAL_TYPE_OID]
+    } else {
+        signature
+            .arg_types
+            .iter()
+            .map(|arg| routine_support_arg_oid(catalog, arg))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    resolve_exact_proc_row(db, client_id, txn_ctx, catalog, &name, &arg_oids, 'f')
+        .map(|row| row.oid)
+}
+
+fn routine_support_arg_oid(catalog: &dyn CatalogLookup, arg: &str) -> Result<u32, ExecError> {
+    let raw_type = crate::backend::parser::parse_type_name(arg).map_err(ExecError::Parse)?;
+    let sql_type = resolve_raw_type_name(&raw_type, catalog).map_err(ExecError::Parse)?;
+    catalog
+        .type_oid_for_sql_type(sql_type)
+        .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(arg.into())))
+}
+
 fn exact_proc_signature(catalog: &dyn CatalogLookup, proc_name: &str, arg_oids: &[u32]) -> String {
     let args = arg_oids
         .iter()
@@ -1244,7 +1294,7 @@ impl Database {
         lowered: &crate::backend::parser::LoweredCreateTable,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
-    ) -> Result<(), ExecError> {
+    ) -> Result<CommandId, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let mut next_cid = table_cid.saturating_add(1);
         if relation.relkind == 'p' || relation.relispartition {
@@ -1371,8 +1421,8 @@ impl Database {
                         &catalog,
                     )?)
                 } else if action.without_overlaps.is_some() {
-                    Some(self.temporal_constraint_operator_oids_for_relation(
-                        relation.relation_oid,
+                    Some(self.temporal_constraint_operator_oids_for_desc(
+                        &relation.desc,
                         &action.columns,
                         action.without_overlaps.as_deref(),
                         &catalog,
@@ -1559,7 +1609,7 @@ impl Database {
             )?;
         }
 
-        Ok(())
+        Ok(next_foreign_key_cid)
     }
 
     pub(super) fn refresh_partitioned_relation_metadata(
@@ -1976,23 +2026,16 @@ impl Database {
         };
         let (normalized, object_name, namespace_oid) = self
             .normalize_domain_name_for_create(&create_stmt.domain_name, configured_search_path)?;
-        let mut domains = self.domains.write();
+        let domains = self.domains.write();
         if domains.contains_key(&normalized) {
             return Err(ExecError::Parse(ParseError::UnsupportedType(
                 create_stmt.domain_name.clone(),
             )));
         }
-        let (oid, array_oid) = {
-            let next_catalog_oid = self.catalog.read().next_oid();
-            let oid = domains
-                .values()
-                .flat_map(|domain| [domain.oid, domain.array_oid])
-                .map(|oid| oid.saturating_add(1))
-                .max()
-                .unwrap_or(next_catalog_oid)
-                .max(next_catalog_oid);
-            (oid, oid.saturating_add(1))
-        };
+        drop(domains);
+        let oid = self.allocate_dynamic_type_oids(2, None, None)?;
+        let array_oid = oid.saturating_add(1);
+        let mut domains = self.domains.write();
         domains.insert(
             normalized,
             DomainEntry {
@@ -2097,6 +2140,7 @@ impl Database {
             function_name: create_stmt.procedure_name.clone(),
             replace_existing: create_stmt.replace_existing,
             cost: None,
+            support: None,
             args: create_stmt.args.clone(),
             return_spec: if create_stmt
                 .args
@@ -2423,6 +2467,19 @@ impl Database {
         } else {
             create_stmt.body.clone()
         };
+        let probin = if language_row.oid == PG_LANGUAGE_C_OID {
+            Some(create_stmt.body.clone())
+        } else {
+            None
+        };
+        let prosupport = create_stmt
+            .support
+            .as_ref()
+            .map(|signature| {
+                resolve_support_proc_oid(self, client_id, Some((xid, cid)), &catalog, signature)
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         let proc_row = PgProcRow {
             oid: 0,
@@ -2441,7 +2498,7 @@ impl Database {
                 .unwrap_or(100.0),
             prorows: if proretset { 1000.0 } else { 0.0 },
             provariadic,
-            prosupport: 0,
+            prosupport,
             prokind: proc_kind,
             prosecdef: false,
             proleakproof: create_stmt.leakproof,
@@ -2469,7 +2526,7 @@ impl Database {
             proargnames,
             proargdefaults: encode_proc_arg_defaults(&callable_arg_defaults),
             prosrc,
-            probin: None,
+            probin,
             prosqlbody: None,
         };
 
@@ -3164,6 +3221,7 @@ impl Database {
 
         let table_cid = cid;
         let relation_relkind = created_relkind(&lowered);
+        let reloptions = create_table_reloptions(&create_stmt.options)?;
         match persistence {
             TablePersistence::Permanent => {
                 let mut catalog_guard = self.catalog.write();
@@ -3187,6 +3245,7 @@ impl Database {
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),
                         lowered.of_type_oid,
+                        reloptions.clone(),
                         &ctx,
                     )
                 } else {
@@ -3199,7 +3258,7 @@ impl Database {
                             'p',
                             relation_relkind,
                             self.auth_state(client_id).current_user_oid(),
-                            None,
+                            reloptions.clone(),
                             &ctx,
                         )
                         .map(|(entry, effect)| {
@@ -3325,7 +3384,7 @@ impl Database {
                             constraint_cid_base =
                                 constraint_cid_base.max(table_cid.saturating_add(4));
                         }
-                        self.install_create_table_constraints_in_transaction(
+                        let next_cid = self.install_create_table_constraints_in_transaction(
                             client_id,
                             xid,
                             constraint_cid_base,
@@ -3340,7 +3399,7 @@ impl Database {
                             &relation,
                             &lowered,
                             xid,
-                            constraint_cid_base.saturating_add(1),
+                            next_cid,
                             catalog_effects,
                         )?;
                         if let Some(parent_oid) = lowered.partition_parent_oid {
@@ -3378,7 +3437,7 @@ impl Database {
                     table_cid,
                     relation_relkind,
                     lowered.of_type_oid,
-                    None,
+                    reloptions.clone(),
                     catalog_effects,
                     temp_effects,
                 )?;
@@ -3480,7 +3539,7 @@ impl Database {
                 {
                     constraint_cid_base = constraint_cid_base.max(table_cid.saturating_add(4));
                 }
-                self.install_create_table_constraints_in_transaction(
+                let next_cid = self.install_create_table_constraints_in_transaction(
                     client_id,
                     xid,
                     constraint_cid_base,
@@ -3496,7 +3555,7 @@ impl Database {
                         .reconcile_partitioned_parent_indexes_for_attached_child_in_transaction(
                             client_id,
                             xid,
-                            constraint_cid_base.saturating_add(1),
+                            next_cid,
                             parent_oid,
                             relation.relation_oid,
                             configured_search_path,
@@ -3906,6 +3965,7 @@ impl Database {
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),
@@ -4013,6 +4073,7 @@ impl Database {
                             )
                         })
                         .collect(),
+                    options: Vec::new(),
                     inherits: Vec::new(),
                     partition_spec: None,
                     partition_of: None,
@@ -4039,6 +4100,7 @@ impl Database {
                         crate::include::catalog::PG_TOAST_NAMESPACE_OID,
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),
+                        None,
                         &write_ctx,
                     )
                     .map_err(map_catalog_error)?;
@@ -4082,6 +4144,7 @@ impl Database {
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let mut insert_ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),

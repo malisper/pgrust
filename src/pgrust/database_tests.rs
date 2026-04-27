@@ -16,7 +16,7 @@ use crate::include::catalog::{
     PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
     TEXT_TYPE_OID,
 };
-use crate::include::nodes::datum::{ArrayValue, IntervalValue};
+use crate::include::nodes::datum::{ArrayValue, IntervalValue, RecordValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
@@ -186,6 +186,7 @@ fn analyze_executor_context(
 ) -> crate::backend::executor::ExecutorContext {
     crate::backend::executor::ExecutorContext {
         pool: Arc::clone(&db.pool),
+        data_dir: None,
         txns: db.txns.clone(),
         txn_waiter: Some(db.txn_waiter.clone()),
         lock_status_provider: Some(Arc::new(db.clone())),
@@ -898,7 +899,14 @@ fn quantified_similar_any_all_array_operators_work() {
 }
 
 fn assert_stack_depth_limit_error(err: ExecError) {
-    match err {
+    fn root_error(err: &ExecError) -> &ExecError {
+        match err {
+            ExecError::WithContext { source, .. } => root_error(source),
+            other => other,
+        }
+    }
+
+    match root_error(&err) {
         ExecError::DetailedError {
             message,
             hint: Some(hint),
@@ -911,7 +919,7 @@ fn assert_stack_depth_limit_error(err: ExecError) {
             sqlstate,
             ..
         }) if message == "stack depth limit exceeded"
-            && sqlstate == "54001"
+            && *sqlstate == "54001"
             && hint.contains("\"max_stack_depth\" (currently 100kB)") => {}
         other => panic!("expected stack depth error, got {other:?}"),
     }
@@ -977,6 +985,85 @@ fn mutually_recursive_sql_functions_respect_max_stack_depth_setting() {
 
     let err = session.execute(&db, "select recurse_a()").unwrap_err();
     assert_stack_depth_limit_error(err);
+}
+
+#[test]
+fn sql_function_from_item_resolves_qualified_utility_function() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function do_analyze() returns void volatile language sql as 'ANALYZE pg_am'",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function wrap_do_analyze(c int4) returns int4 immutable language sql
+             as 'SELECT $1 FROM public.do_analyze()'",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select wrap_do_analyze(7)"),
+        vec![vec![Value::Int32(7)]]
+    );
+}
+
+#[test]
+fn analyze_expression_index_reports_nested_sql_function_context() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table expr_analyze_ctx (i int4 primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function do_analyze() returns void volatile language sql as 'ANALYZE pg_am'",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function wrap_do_analyze(c int4) returns int4 immutable language sql
+             as 'SELECT $1 FROM public.do_analyze()'",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index on expr_analyze_ctx(wrap_do_analyze(i))")
+        .unwrap();
+    session
+        .execute(&db, "insert into expr_analyze_ctx values (1), (2)")
+        .unwrap();
+
+    let err = session
+        .execute(&db, "analyze expr_analyze_ctx")
+        .unwrap_err();
+    let ExecError::WithContext {
+        source,
+        context: outer,
+    } = err
+    else {
+        panic!("expected outer SQL function context");
+    };
+    assert_eq!(outer, "SQL function \"wrap_do_analyze\" statement 1");
+    let ExecError::WithContext {
+        source,
+        context: inner,
+    } = *source
+    else {
+        panic!("expected inner SQL function context");
+    };
+    assert_eq!(inner, "SQL function \"do_analyze\" statement 1");
+    assert!(matches!(
+        *source,
+        ExecError::DetailedError { ref message, .. }
+            if message == "ANALYZE cannot be executed from VACUUM or ANALYZE"
+    ));
 }
 
 #[test]
@@ -2331,6 +2418,48 @@ fn holdable_cursor_survives_commit_but_normal_cursor_does_not() {
             ..
         })
     ));
+}
+
+#[test]
+fn holdable_cursor_can_be_declared_outside_explicit_transaction() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create table hold_cursor_autocommit_items (id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into hold_cursor_autocommit_items values (1), (2)",
+        )
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "declare hold_auto cursor with hold for select id from hold_cursor_autocommit_items order by id",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch all from hold_auto"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn text_literal_cast_to_date_domain_uses_base_type_input() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create domain testdatexmldomain as date")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select '2013-02-21'::testdatexmldomain"),
+        vec![vec![Value::Date(crate::include::nodes::datetime::DateADT(
+            crate::backend::utils::time::datetime::days_from_ymd(2013, 2, 21).unwrap()
+        ))]]
+    );
 }
 
 #[test]
@@ -4405,6 +4534,567 @@ fn vacuum_analyze_updates_visibility_and_analyze_stats() {
          where starelid = (select oid from pg_class where relname = 'vac_analyze_t')",
     );
     assert_eq!(statistic_count, vec![vec![Value::Int64(2)]]);
+}
+
+#[test]
+fn vacuum_full_rewrites_storage_and_preserves_rows() {
+    let dir = temp_dir("vacuum_full_rewrites_storage");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table vf_items(id int4 not null, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into vf_items values (1, 'a'), (2, 'b'), (3, 'c')",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index vf_items_id_idx on vf_items(id)")
+        .unwrap();
+
+    let before = session_query_rows(
+        &mut session,
+        &db,
+        "select relname, relfilenode from pg_class
+         where relname in ('vf_items', 'vf_items_id_idx')
+         order by relname",
+    );
+    assert_eq!(before.len(), 2);
+
+    session.execute(&db, "vacuum full vf_items").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id, note from vf_items order by id"
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Text("a".into())],
+            vec![Value::Int32(2), Value::Text("b".into())],
+            vec![Value::Int32(3), Value::Text("c".into())],
+        ]
+    );
+    let after = session_query_rows(
+        &mut session,
+        &db,
+        "select relname, relfilenode from pg_class
+         where relname in ('vf_items', 'vf_items_id_idx')
+         order by relname",
+    );
+    assert_eq!(after.len(), 2);
+    assert_ne!(int_value(&before[0][1]), int_value(&after[0][1]));
+    assert_ne!(int_value(&before[1][1]), int_value(&after[1][1]));
+}
+
+#[test]
+fn vacuum_full_preserves_empty_table() {
+    let dir = temp_dir("vacuum_full_preserves_empty_table");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table vf_empty(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into vf_empty values (1)")
+        .unwrap();
+    session.execute(&db, "delete from vf_empty").unwrap();
+    session
+        .execute(&db, "vacuum (full, freeze) vf_empty")
+        .unwrap();
+    session
+        .execute(&db, "vacuum (analyze, full) vf_empty")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from vf_empty"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn pg_class_relhasindex_tracks_create_and_drop_index() {
+    let dir = temp_dir("pg_class_relhasindex");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table hasidx_t(id int4)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relhasindex from pg_class where relname = 'hasidx_t'"
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+    session
+        .execute(&db, "create index hasidx_t_id_idx on hasidx_t(id)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relhasindex from pg_class where relname = 'hasidx_t'"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    session.execute(&db, "drop index hasidx_t_id_idx").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relhasindex from pg_class where relname = 'hasidx_t'"
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn pg_stat_all_tables_includes_catalog_relations() {
+    let dir = temp_dir("pg_stat_all_tables");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname from pg_stat_all_tables
+             where schemaname = 'pg_catalog' and relname = 'pg_class'"
+        ),
+        vec![vec![Value::Text("pg_class".into())]]
+    );
+    assert!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname from pg_stat_user_tables
+             where schemaname = 'pg_catalog' and relname = 'pg_class'"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn vacuum_option_validation_and_permission_warnings() {
+    let dir = temp_dir("vacuum_option_permission");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut bootstrap = Session::new(1);
+    let mut owner = Session::new(2);
+    let mut outsider = Session::new(3);
+
+    bootstrap
+        .execute(&db, "create role vac_owner login")
+        .unwrap();
+    bootstrap
+        .execute(&db, "create role vac_outsider login")
+        .unwrap();
+    owner
+        .execute(&db, "set session authorization vac_owner")
+        .unwrap();
+    owner
+        .execute(&db, "create table vacowned(id int4)")
+        .unwrap();
+
+    match bootstrap.execute(&db, "vacuum (parallel) vacowned") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "parallel option requires a value between 0 and 1024"
+            )
+        }
+        other => panic!("expected parallel option error, got {other:?}"),
+    }
+    match bootstrap.execute(&db, "vacuum (parallel -1) vacowned") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "parallel workers for vacuum must be between 0 and 1024"
+            )
+        }
+        other => panic!("expected parallel worker error, got {other:?}"),
+    }
+    match bootstrap.execute(&db, "vacuum (buffer_usage_limit 120) vacowned") {
+        Err(ExecError::DetailedError { message, .. }) => assert_eq!(
+            message,
+            "BUFFER_USAGE_LIMIT option must be 0 or between 128 kB and 16777216 kB"
+        ),
+        other => panic!("expected buffer usage error, got {other:?}"),
+    }
+
+    outsider
+        .execute(&db, "set session authorization vac_outsider")
+        .unwrap();
+    clear_backend_notices();
+    outsider.execute(&db, "vacuum analyze vacowned").unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec!["permission denied to vacuum \"vacowned\", skipping it".to_string()]
+    );
+
+    clear_backend_notices();
+    outsider
+        .execute(&db, "analyze pg_catalog.pg_class")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec!["permission denied to analyze \"pg_class\", skipping it".to_string()]
+    );
+    clear_backend_notices();
+    outsider
+        .execute(&db, "vacuum analyze pg_catalog.pg_class")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec!["permission denied to vacuum \"pg_class\", skipping it".to_string()]
+    );
+}
+
+#[test]
+fn analyze_expands_partitioned_targets_and_validates_columns() {
+    let dir = temp_dir("analyze_partition_expansion");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table only_parted (a int4, b text) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table only_parted1 partition of only_parted for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into only_parted values (1, 'a')")
+        .unwrap();
+
+    session.execute(&db, "analyze only only_parted").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname, last_analyze is not null
+             from pg_stat_user_tables
+             where relname in ('only_parted', 'only_parted1')
+             order by relname"
+        ),
+        vec![
+            vec![Value::Text("only_parted".into()), Value::Bool(true)],
+            vec![Value::Text("only_parted1".into()), Value::Bool(false)],
+        ]
+    );
+
+    session.execute(&db, "analyze only_parted").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname, last_analyze is not null
+             from pg_stat_user_tables
+             where relname in ('only_parted', 'only_parted1')
+             order by relname"
+        ),
+        vec![
+            vec![Value::Text("only_parted".into()), Value::Bool(true)],
+            vec![Value::Text("only_parted1".into()), Value::Bool(true)],
+        ]
+    );
+
+    match session.execute(&db, "analyze only_parted(a,b,a)") {
+        Err(ExecError::DetailedError { message, .. }) => assert_eq!(
+            message,
+            "column \"a\" of relation \"only_parted\" appears more than once"
+        ),
+        other => panic!("expected duplicate analyze column error, got {other:?}"),
+    }
+}
+
+#[test]
+fn partition_ddl_is_visible_inside_transaction_for_maintenance() {
+    let dir = temp_dir("partition_ddl_txn_maintenance");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "create table past_parted (i int4) partition by list (i)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table past_part partition of past_parted for values in (1)",
+        )
+        .unwrap();
+    session.execute(&db, "analyze past_parted").unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname, last_analyze is not null
+             from pg_stat_user_tables
+             where relname in ('past_parted', 'past_part')
+             order by relname"
+        ),
+        vec![
+            vec![Value::Text("past_part".into()), Value::Bool(true)],
+            vec![Value::Text("past_parted".into()), Value::Bool(true)],
+        ]
+    );
+}
+
+#[test]
+fn analyze_clears_stale_relhassubclass_after_child_drop() {
+    let dir = temp_dir("analyze_stale_relhassubclass");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table stale_parent (i int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table stale_child () inherits (stale_parent)")
+        .unwrap();
+    session.execute(&db, "drop table stale_child").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relhassubclass from pg_class where relname = 'stale_parent'"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    session.execute(&db, "analyze stale_parent").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relhassubclass from pg_class where relname = 'stale_parent'"
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table stale_parted (i int4) partition by list (i)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table stale_part partition of stale_parted for values in (1)",
+        )
+        .unwrap();
+    session.execute(&db, "drop table stale_part").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relhassubclass from pg_class where relname = 'stale_parted'"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    session.execute(&db, "analyze stale_parted").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relhassubclass from pg_class where relname = 'stale_parted'"
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn vacuum_counts_toast_and_honors_process_options() {
+    let dir = temp_dir("vacuum_toast_process_options");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table vac_option_tab (a int4, t text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into vac_option_tab values
+             (1, repeat('x', 3000)),
+             (2, repeat('y', 3000))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table vac_option_tab alter column t set storage external",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "vacuum (process_toast true) vac_option_tab")
+        .unwrap();
+    assert_eq!(
+        vacuum_process_counts(&mut session, &db),
+        vec![
+            vec![Value::Text("main".into()), Value::Int64(1)],
+            vec![Value::Text("toast".into()), Value::Int64(1)],
+        ]
+    );
+
+    session
+        .execute(&db, "vacuum (process_toast false) vac_option_tab")
+        .unwrap();
+    assert_eq!(
+        vacuum_process_counts(&mut session, &db),
+        vec![
+            vec![Value::Text("main".into()), Value::Int64(2)],
+            vec![Value::Text("toast".into()), Value::Int64(1)],
+        ]
+    );
+
+    session
+        .execute(&db, "vacuum (process_main false) vac_option_tab")
+        .unwrap();
+    assert_eq!(
+        vacuum_process_counts(&mut session, &db),
+        vec![
+            vec![Value::Text("main".into()), Value::Int64(2)],
+            vec![Value::Text("toast".into()), Value::Int64(2)],
+        ]
+    );
+}
+
+fn vacuum_process_counts(session: &mut Session, db: &Database) -> Vec<Vec<Value>> {
+    session_query_rows(
+        session,
+        db,
+        "select case when c.relname is null then 'main' else 'toast' end, s.vacuum_count
+         from pg_stat_all_tables s
+         left join pg_class c on s.relid = c.reltoastrelid
+         where c.relname = 'vac_option_tab' or s.relname = 'vac_option_tab'
+         order by 1",
+    )
+}
+
+#[test]
+fn vacuum_truncates_empty_tail_and_skips_catalog_full_rewrite() {
+    let dir = temp_dir("vacuum_truncate_and_catalog_full");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "vacuum full pg_class").unwrap();
+    session
+        .execute(&db, "create table vac_truncate_test(a int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into vac_truncate_test values (1), (2), (3)")
+        .unwrap();
+    session
+        .execute(&db, "delete from vac_truncate_test")
+        .unwrap();
+    session.execute(&db, "vacuum vac_truncate_test").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pg_relation_size('vac_truncate_test') = 0"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+
+    session
+        .execute(&db, "create temp table vac_failed_insert(i int4 not null)")
+        .unwrap();
+    assert!(
+        session
+            .execute(&db, "insert into vac_failed_insert values (1), (null)")
+            .is_err()
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from vac_failed_insert"),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pg_relation_size('vac_failed_insert') > 0"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    session.execute(&db, "vacuum vac_failed_insert").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pg_relation_size('vac_failed_insert') = 0"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn alter_table_owner_accepts_partitioned_tables_and_current_user() {
+    let dir = temp_dir("partitioned_owner_current_user");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create role regress_vacuum").unwrap();
+    session
+        .execute(
+            &db,
+            "create table vacowned_parted (a int4) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table vacowned_part1 partition of vacowned_parted for values in (1)",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "alter table vacowned_parted owner to regress_vacuum")
+        .unwrap();
+    session
+        .execute(&db, "alter table vacowned_part1 owner to current_user")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select c.relname, r.rolname
+             from pg_class c join pg_authid r on c.relowner = r.oid
+             where c.relname in ('vacowned_parted', 'vacowned_part1')
+             order by c.relname"
+        ),
+        vec![
+            vec![
+                Value::Text("vacowned_part1".into()),
+                Value::Text("postgres".into()),
+            ],
+            vec![
+                Value::Text("vacowned_parted".into()),
+                Value::Text("regress_vacuum".into()),
+            ],
+        ]
+    );
 }
 
 fn autovacuum_test_config() -> AutovacuumConfig {
@@ -6615,6 +7305,21 @@ fn inheritance_multi_parent_create_and_drop_clean_up_catalog_rows() {
              where relname in ('b', 'c')
              order by relname",
         ),
+        vec![vec![Value::Bool(true)], vec![Value::Bool(true)]]
+    );
+
+    session.execute(&db, "analyze b").unwrap();
+    session.execute(&db, "analyze c").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relhassubclass
+             from pg_class
+             where relname in ('b', 'c')
+             order by relname",
+        ),
         vec![vec![Value::Bool(false)], vec![Value::Bool(false)]]
     );
 }
@@ -6660,6 +7365,21 @@ fn dropping_inherited_child_removes_pg_inherits_rows() {
         ),
         0
     );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relhassubclass
+             from pg_class
+             where relname in ('p1', 'p2')
+             order by relname",
+        ),
+        vec![vec![Value::Bool(true)], vec![Value::Bool(true)]]
+    );
+
+    session.execute(&db, "analyze p1").unwrap();
+    session.execute(&db, "analyze p2").unwrap();
+
     assert_eq!(
         query_rows(
             &db,
@@ -9734,7 +10454,8 @@ fn create_index_and_alter_table_set_are_noops() {
             if name == "num_exp_add_idx"
                 && (expected == "table"
                     || expected == "table, view, or sequence"
-                    || expected == "table, view, materialized view, or sequence") => {}
+                    || expected == "table, view, materialized view, or sequence"
+                    || expected == "table, view, materialized view, sequence, or TOAST table") => {}
         other => panic!("expected missing-table or wrong-object-type error, got {other:?}"),
     }
 
@@ -12809,7 +13530,49 @@ fn pg_rules_exposes_user_rules_but_not_return_rules() {
             "select definition from pg_rules where tablename = 'item_view' and rulename = 'item_view_ins'",
         ),
         vec![vec![Value::Text(
-            "CREATE RULE item_view_ins AS ON INSERT TO public.item_view DO INSTEAD insert into items values (new.id)"
+            "CREATE RULE item_view_ins AS ON INSERT TO public.item_view DO INSTEAD INSERT INTO items\n  VALUES (new.id)"
+                .into(),
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'item_view_ins'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE RULE item_view_ins AS\n    ON INSERT TO item_view DO INSTEAD INSERT INTO items\n  VALUES (new.id)"
+                .into(),
+        )]]
+    );
+}
+
+#[test]
+fn pg_get_ruledef_formats_insert_rule_actions_with_casts() {
+    let base = temp_dir("rule_insert_display");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table rule_src (f1 int8, f2 text)")
+        .unwrap();
+    db.execute(1, "create type rule_type as (if1 int8, if2 text[])")
+        .unwrap();
+    db.execute(1, "create table rule_dst (f4 rule_type[])")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule rule_src_ins as on insert to rule_src do also \
+         insert into rule_dst (f4[1].if1, f4[1].if2[2]) values (1, 'fool'), (new.f1, new.f2)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'rule_src_ins'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE RULE rule_src_ins AS\n    ON INSERT TO rule_src DO  INSERT INTO rule_dst (f4[1].if1, f4[1].if2[2]) VALUES (1,'fool'::text), (new.f1,new.f2)"
                 .into(),
         )]]
     );
@@ -14157,6 +14920,73 @@ fn alter_table_add_column_propagates_to_temp_inherited_child() {
 }
 
 #[test]
+fn alter_table_multi_add_column_updates_partitioned_table() {
+    let base = temp_dir("alter_table_multi_add_partitioned");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table returningwrtest (a int) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table returningwrtest1 partition of returningwrtest for values in (1)",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into returningwrtest values (1) returning returningwrtest",
+        ),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![(
+            "a".into(),
+            Value::Int32(1),
+        )]))]]
+    );
+    session
+        .execute(&db, "alter table returningwrtest add b text, add c int")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table returningwrtest2 partition of returningwrtest for values in (2)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select attname from pg_attribute
+             where attrelid = 'returningwrtest'::regclass and attnum > 0
+             order by attnum",
+        ),
+        vec![
+            vec![Value::Text("a".into())],
+            vec![Value::Text("b".into())],
+            vec![Value::Text("c".into())],
+        ]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into returningwrtest values (1, 'x', 10) returning returningwrtest",
+        ),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![
+            ("a".into(), Value::Int32(1)),
+            ("b".into(), Value::Text("x".into())),
+            ("c".into(), Value::Int32(10)),
+        ]))]]
+    );
+}
+
+#[test]
 fn alter_table_add_column_merges_temp_multi_parent_child_metadata() {
     let base = temp_dir("alter_table_add_column_temp_multi_parent");
     let db = Database::open(&base, 16).unwrap();
@@ -15156,6 +15986,37 @@ fn create_gin_jsonb_index_uses_bitmap_scan_and_rechecks() {
             "select count(*) from docs where j ?& array['a','b']::text[]",
         ),
         vec![vec![Value::Int64(201)]]
+    );
+}
+
+#[test]
+fn create_gin_array_index_builds_and_vacuums() {
+    let base = temp_dir("gin_array_vacuum");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table gin_arrays (id int4, a int4[])")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into gin_arrays
+         select i, array[1,2,3]
+         from generate_series(1, 1000) i",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index gin_arrays_a_idx on gin_arrays using gin (a)",
+    )
+    .unwrap();
+    db.execute(1, "vacuum gin_arrays").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relhasindex from pg_class where relname = 'gin_arrays'",
+        ),
+        vec![vec![Value::Bool(true)]]
     );
 }
 
@@ -19408,6 +20269,116 @@ fn create_table_foreign_keys_are_enforced_and_persisted() {
 }
 
 #[test]
+fn foreign_keys_can_reference_unique_key_columns_out_of_order() {
+    let base = temp_dir("foreign_key_reordered_unique_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parents (
+            a int4,
+            b int4,
+            c int4,
+            unique (a, b, c)
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table children (
+            b_ref int4,
+            a_ref int4,
+            c_ref int4,
+            foreign key (b_ref, a_ref, c_ref) references parents(b, a, c)
+        )",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into parents values (1, 2, 3)")
+        .unwrap();
+    db.execute(1, "insert into children values (2, 1, 3)")
+        .unwrap();
+
+    match db.execute(1, "insert into children values (2, 9, 3)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_b_ref_a_ref_c_ref_fkey");
+        }
+        other => panic!("expected reordered-key foreign-key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn self_referential_foreign_key_can_reference_inserted_row() {
+    let base = temp_dir("foreign_key_self_reference_insert");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table selfref (
+            id int4 primary key,
+            parent_id int4 references selfref(id)
+        )",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into selfref values (1, 1)").unwrap();
+    db.execute(1, "insert into selfref values (3, 4), (4, 4)")
+        .unwrap();
+
+    match db.execute(1, "insert into selfref values (2, 9)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "selfref_parent_id_fkey");
+        }
+        other => panic!("expected self-reference foreign-key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn generated_foreign_key_names_preserve_label_when_truncated_and_suffix_collisions() {
+    let base = temp_dir("foreign_key_generated_name_truncation");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pktable1 (a int primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table pktable2 (a int, b int, primary key (a, b))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fktable2 (
+            a int,
+            b int,
+            very_very_long_column_name_to_exceed_63_characters int,
+            foreign key (very_very_long_column_name_to_exceed_63_characters) references pktable1,
+            foreign key (a, very_very_long_column_name_to_exceed_63_characters) references pktable2,
+            foreign key (a, very_very_long_column_name_to_exceed_63_characters) references pktable2
+        )",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname from pg_constraint where conrelid = 'fktable2'::regclass order by conname",
+        ),
+        vec![
+            vec![Value::Text(
+                "fktable2_a_very_very_long_column_name_to_exceed_63_charac_fkey1".into()
+            )],
+            vec![Value::Text(
+                "fktable2_a_very_very_long_column_name_to_exceed_63_charact_fkey".into()
+            )],
+            vec![Value::Text(
+                "fktable2_very_very_long_column_name_to_exceed_63_character_fkey".into()
+            )],
+        ]
+    );
+}
+
+#[test]
 fn foreign_keys_support_match_full() {
     let base = temp_dir("foreign_keys_match_full");
     let db = Database::open(&base, 16).unwrap();
@@ -19448,6 +20419,73 @@ fn foreign_keys_support_match_full() {
         }
         other => panic!("expected MATCH FULL foreign-key violation, got {other:?}"),
     }
+}
+
+#[test]
+fn pg_get_constraintdef_formats_foreign_key_actions_and_delete_columns() {
+    let base = temp_dir("pg_get_constraintdef_fk_actions");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parents (a int4, b int4, primary key (a, b))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table children (
+            id int4 primary key,
+            a int4,
+            b int4,
+            c int4,
+            d int4,
+            constraint children_cascade_fk
+                foreign key (a, b) references parents(a, b)
+                match full on update cascade on delete set null (a)
+                deferrable initially deferred,
+            constraint children_default_fk
+                foreign key (a, b) references parents(a, b)
+                on update set default on delete set default (a),
+            constraint children_restrict_fk
+                foreign key (c, d) references parents(a, b)
+                on update restrict on delete restrict
+        )",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, pg_get_constraintdef(oid)
+               from pg_constraint
+              where conrelid = 'children'::regclass and contype = 'f'
+              order by conname",
+        ),
+        vec![
+            vec![
+                Value::Text("children_cascade_fk".into()),
+                Value::Text(
+                    "FOREIGN KEY (a, b) REFERENCES parents(a, b) MATCH FULL ON UPDATE CASCADE ON DELETE SET NULL (a) DEFERRABLE INITIALLY DEFERRED"
+                        .into(),
+                ),
+            ],
+            vec![
+                Value::Text("children_default_fk".into()),
+                Value::Text(
+                    "FOREIGN KEY (a, b) REFERENCES parents(a, b) ON UPDATE SET DEFAULT ON DELETE SET DEFAULT (a)"
+                        .into(),
+                ),
+            ],
+            vec![
+                Value::Text("children_restrict_fk".into()),
+                Value::Text(
+                    "FOREIGN KEY (c, d) REFERENCES parents(a, b) ON UPDATE RESTRICT ON DELETE RESTRICT"
+                        .into(),
+                ),
+            ],
+        ]
+    );
 }
 
 #[test]
@@ -27422,7 +28460,7 @@ fn temp_create_table_as_point_window_order_ignores_disabled_indexscan() {
         .execute(
             &db,
             "create table point_source as \
-             select point(g, g * 2) as p from generate_series(1, 11000) g",
+             select point(g, g * 2) as p from generate_series(1, 2000) g",
         )
         .unwrap();
     session
@@ -27475,7 +28513,7 @@ fn temp_create_table_as_point_window_order_ignores_disabled_indexscan() {
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Int64(11001)]]);
+            assert_eq!(rows, vec![vec![Value::Int64(2001)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }

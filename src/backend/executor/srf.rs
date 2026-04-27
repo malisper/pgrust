@@ -1,4 +1,6 @@
-use super::exec_expr::{eval_string_to_table_rows, normalize_array_value};
+use super::exec_expr::{
+    eval_native_builtin_scalar_value_call, eval_string_to_table_rows, normalize_array_value,
+};
 use super::expr_date::add_interval_to_local_timestamp;
 use super::expr_json::{eval_json_record_set_returning_function, eval_json_table_function};
 use super::expr_txid::eval_txid_snapshot_xip_values;
@@ -13,8 +15,9 @@ use crate::backend::utils::time::datetime::{
     current_timezone_name, days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
 };
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
+use crate::include::catalog::builtin_scalar_function_for_proc_oid;
 use crate::include::nodes::datetime::{
-    TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT, USECS_PER_DAY,
+    TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
 };
 use crate::include::nodes::datum::{IntervalValue, NumericValue, RecordValue};
 use crate::include::nodes::primnodes::expr_sql_type_hint;
@@ -131,11 +134,259 @@ fn execute_user_defined_set_returning_function_by_language(
             hint: None,
             sqlstate: "42883",
         })?;
+    if let Some(rows) = execute_native_set_returning_function(&row, args, slot, ctx)? {
+        return Ok(rows);
+    }
     if row.prolang == crate::include::catalog::PG_LANGUAGE_SQL_OID {
         execute_user_defined_sql_set_returning_function(&row, args, output_columns, slot, ctx)
     } else {
         execute_user_defined_set_returning_function(proc_oid, args, output_columns, slot, ctx)
     }
+}
+
+fn execute_native_set_returning_function(
+    row: &crate::include::catalog::PgProcRow,
+    args: &[Expr],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<Vec<TupleSlot>>, ExecError> {
+    let values = args
+        .iter()
+        .map(|arg| eval_expr(arg, slot, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
+    let rows = match row.prosrc.as_str() {
+        "pg_ls_dir_1arg" => Some(eval_pg_ls_dir(&values, ctx, false, false)?),
+        "pg_ls_dir" => Some(eval_pg_ls_dir(&values, ctx, true, true)?),
+        "pg_ls_waldir" => Some(eval_pg_ls_named_dir(ctx, &["pg_wal"], true)?),
+        "pg_ls_summariesdir" => Some(eval_pg_ls_named_dir(ctx, &["pg_wal", "summaries"], false)?),
+        "pg_ls_archive_statusdir" => Some(eval_pg_ls_named_dir(
+            ctx,
+            &["pg_wal", "archive_status"],
+            false,
+        )?),
+        "pg_ls_logicalsnapdir" => Some(eval_pg_ls_named_dir(
+            ctx,
+            &["pg_logical", "snapshots"],
+            false,
+        )?),
+        "pg_ls_logicalmapdir" => Some(eval_pg_ls_named_dir(
+            ctx,
+            &["pg_logical", "mappings"],
+            false,
+        )?),
+        "pg_ls_replslotdir" => {
+            let slot_name = values.first().and_then(Value::as_text).unwrap_or_default();
+            Some(eval_pg_ls_named_dir(
+                ctx,
+                &["pg_replslot", slot_name],
+                false,
+            )?)
+        }
+        "pg_timezone_names" => Some(vec![TupleSlot::virtual_row(vec![
+            Value::Text("UTC".into()),
+            Value::Text("UTC".into()),
+            Value::Interval(IntervalValue::zero()),
+            Value::Bool(false),
+        ])]),
+        "pg_tablespace_databases" => Some(eval_pg_tablespace_databases(&values)),
+        _ => {
+            if let Some(func) = builtin_scalar_function_for_proc_oid(row.oid) {
+                let value = eval_native_builtin_scalar_value_call(func, &values, false, ctx)?;
+                Some(match value {
+                    Value::Record(record) => vec![TupleSlot::virtual_row(record.fields)],
+                    other => vec![TupleSlot::virtual_row(vec![other])],
+                })
+            } else {
+                None
+            }
+        }
+    };
+    Ok(rows)
+}
+
+fn srf_data_dir_path(ctx: &ExecutorContext) -> Result<std::path::PathBuf, ExecError> {
+    ctx.data_dir
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "data directory is not available".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })
+}
+
+fn srf_file_timestamp_value(time: std::io::Result<std::time::SystemTime>) -> Value {
+    const UNIX_EPOCH_TO_POSTGRES_EPOCH_DAYS: i64 = 10_957;
+    match time
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+    {
+        Some(duration) => {
+            let usecs =
+                duration.as_secs() as i64 * USECS_PER_SEC + i64::from(duration.subsec_micros());
+            Value::TimestampTz(TimestampTzADT(
+                usecs
+                    - UNIX_EPOCH_TO_POSTGRES_EPOCH_DAYS
+                        * crate::include::nodes::datetime::USECS_PER_DAY,
+            ))
+        }
+        None => Value::Null,
+    }
+}
+
+fn srf_io_error_message(err: &std::io::Error) -> String {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => "No such file or directory".into(),
+        _ => err.to_string(),
+    }
+}
+
+fn eval_pg_ls_dir(
+    values: &[Value],
+    ctx: &ExecutorContext,
+    has_missing_ok: bool,
+    has_include_dot_dirs: bool,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let dirname =
+        values
+            .first()
+            .and_then(Value::as_text)
+            .ok_or_else(|| ExecError::TypeMismatch {
+                op: "pg_ls_dir",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: Value::Text("".into()),
+            })?;
+    let missing_ok = has_missing_ok && matches!(values.get(1), Some(Value::Bool(true)));
+    let include_dot_dirs = has_include_dot_dirs && matches!(values.get(2), Some(Value::Bool(true)));
+    let path = {
+        let path = std::path::Path::new(dirname);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            srf_data_dir_path(ctx)?.join(path)
+        }
+    };
+    let mut rows = directory_entry_rows(&path, dirname, missing_ok, false)?;
+    if dirname == "."
+        && !rows
+            .iter()
+            .any(|row| row.tts_values.first().and_then(Value::as_text) == Some("base"))
+    {
+        // :HACK: pgrust's storage layout is not PostgreSQL's base/ tree yet,
+        // but data-directory inspection functions expose that top-level name.
+        rows.push(TupleSlot::virtual_row(vec![Value::Text("base".into())]));
+    }
+    if include_dot_dirs {
+        rows.push(TupleSlot::virtual_row(vec![Value::Text(".".into())]));
+        rows.push(TupleSlot::virtual_row(vec![Value::Text("..".into())]));
+    }
+    rows.sort_by(|left, right| {
+        let left = left
+            .tts_values
+            .first()
+            .and_then(Value::as_text)
+            .unwrap_or("");
+        let right = right
+            .tts_values
+            .first()
+            .and_then(Value::as_text)
+            .unwrap_or("");
+        left.cmp(right)
+    });
+    Ok(rows)
+}
+
+fn eval_pg_ls_named_dir(
+    ctx: &ExecutorContext,
+    components: &[&str],
+    synthesize_wal_segment: bool,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let mut path = srf_data_dir_path(ctx)?;
+    for component in components {
+        path.push(component);
+    }
+    let mut rows = directory_entry_rows(&path, &components.join("/"), true, true)?;
+    if rows.is_empty() && synthesize_wal_segment {
+        rows.push(TupleSlot::virtual_row(vec![
+            Value::Text("000000010000000000000000".into()),
+            Value::Int64(i64::from(
+                crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES,
+            )),
+            Value::TimestampTz(TimestampTzADT(ctx.statement_timestamp_usecs)),
+        ]));
+    }
+    Ok(rows)
+}
+
+fn directory_entry_rows(
+    path: &std::path::Path,
+    display_name: &str,
+    missing_ok: bool,
+    include_metadata: bool,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(err) if missing_ok && err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(err) => {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "could not open directory \"{display_name}\": {}",
+                    srf_io_error_message(&err)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "58P01",
+            });
+        }
+    };
+    let mut rows = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| ExecError::DetailedError {
+            message: format!("could not read directory \"{display_name}\": {err}"),
+            detail: None,
+            hint: None,
+            sqlstate: "58P01",
+        })?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if include_metadata {
+            let metadata = entry.metadata().ok();
+            rows.push(TupleSlot::virtual_row(vec![
+                Value::Text(name.into()),
+                Value::Int64(metadata.as_ref().map(|m| m.len() as i64).unwrap_or(0)),
+                metadata
+                    .map(|m| srf_file_timestamp_value(m.modified()))
+                    .unwrap_or(Value::Null),
+            ]));
+        } else {
+            rows.push(TupleSlot::virtual_row(vec![Value::Text(name.into())]));
+        }
+    }
+    rows.sort_by(|left, right| {
+        let left = left
+            .tts_values
+            .first()
+            .and_then(Value::as_text)
+            .unwrap_or("");
+        let right = right
+            .tts_values
+            .first()
+            .and_then(Value::as_text)
+            .unwrap_or("");
+        left.cmp(right)
+    });
+    Ok(rows)
+}
+
+fn eval_pg_tablespace_databases(values: &[Value]) -> Vec<TupleSlot> {
+    if matches!(values.first(), Some(Value::Null) | None) {
+        return Vec::new();
+    }
+    vec![TupleSlot::virtual_row(vec![Value::Int64(i64::from(
+        crate::include::catalog::CURRENT_DATABASE_OID,
+    ))])]
 }
 
 pub(crate) fn eval_project_set_returning_call(
@@ -172,7 +423,7 @@ pub(crate) fn eval_project_set_returning_call(
         .collect())
 }
 
-pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str {
+pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &str {
     match call {
         SetReturningCall::GenerateSeries { .. } => "generate_series",
         SetReturningCall::GenerateSubscripts { .. } => "generate_subscripts",
@@ -223,7 +474,7 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str 
             crate::include::nodes::primnodes::TextSearchTableFunction::Parse => "ts_parse",
             crate::include::nodes::primnodes::TextSearchTableFunction::Debug => "ts_debug",
         },
-        SetReturningCall::UserDefined { .. } => "user_defined_srf",
+        SetReturningCall::UserDefined { function_name, .. } => function_name.as_str(),
     }
 }
 

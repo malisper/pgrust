@@ -166,6 +166,7 @@ fn main() -> Result<(), ExecError> {
             row_type_oid: 16_385,
             array_type_oid: 16_386,
             reltoastrelid: 0,
+            relhasindex: false,
             relpersistence: 'p',
             relkind: 'r',
             relispopulated: true,
@@ -188,6 +189,7 @@ fn main() -> Result<(), ExecError> {
     ));
     let mut ctx = ExecutorContext {
         pool: std::sync::Arc::clone(&pool),
+        data_dir: None,
         txns: txns.clone(),
         txn_waiter: None,
         lock_status_provider: None,

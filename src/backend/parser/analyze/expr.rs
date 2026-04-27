@@ -171,6 +171,17 @@ fn supports_array_subscripts(array_type: SqlType) -> bool {
         )
 }
 
+fn expression_navigation_sql_type(sql_type: SqlType, catalog: &dyn CatalogLookup) -> SqlType {
+    let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid) else {
+        return sql_type;
+    };
+    if sql_type.is_array && !domain.sql_type.is_array {
+        SqlType::array_of(domain.sql_type)
+    } else {
+        domain.sql_type
+    }
+}
+
 fn unsupported_subscript_type_error(sql_type: SqlType) -> ParseError {
     ParseError::DetailedError {
         message: format!(
@@ -2165,7 +2176,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 return Ok(bound_row);
             }
             if !matches!(inner.as_ref(), SqlExpr::Const(Value::Null)) {
-                validate_catalog_backed_explicit_cast(source_type, target_type, catalog)?;
+                validate_catalog_backed_explicit_cast(
+                    source_type,
+                    domain
+                        .as_ref()
+                        .map(|domain| domain.sql_type)
+                        .unwrap_or(target_type),
+                    catalog,
+                )?;
             }
             let cast_expr =
                 bind_explicit_cast_expr(bound_inner, source_type, target_type, catalog)?;
@@ -2982,13 +3000,16 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             })?,
         },
         SqlExpr::ArraySubscript { array, subscripts } => {
-            let array_type = infer_sql_expr_type_with_ctes(
-                array,
-                scope,
+            let array_type = expression_navigation_sql_type(
+                infer_sql_expr_type_with_ctes(
+                    array,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                ),
                 catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
             );
             if array_type.kind == SqlTypeKind::Jsonb && !array_type.is_array {
                 return bind_jsonb_subscript_expr(
@@ -4036,6 +4057,7 @@ pub(crate) fn resolve_bound_field_select_type(
             actual: format!("field selection .{field}"),
         });
     };
+    let row_type = expression_navigation_sql_type(row_type, catalog);
 
     if matches!(row_type.kind, SqlTypeKind::Composite) && row_type.typrelid != 0 {
         let relation = catalog
@@ -4463,7 +4485,11 @@ pub(super) fn catalog_backed_explicit_cast_allowed(
         return true;
     }
     let source_oid = catalog.type_oid_for_sql_type(source_type);
-    let target_oid = catalog.type_oid_for_sql_type(target_type);
+    let target_oid = if target_type.type_oid != 0 {
+        Some(target_type.type_oid)
+    } else {
+        catalog.type_oid_for_sql_type(target_type)
+    };
     if let (Some(source_oid), Some(target_oid)) = (source_oid, target_oid) {
         if source_oid == target_oid
             || catalog
@@ -4471,6 +4497,24 @@ pub(super) fn catalog_backed_explicit_cast_allowed(
                 .is_some()
         {
             return true;
+        }
+        if let Some(base_type) = domain_base_sql_type(target_oid, catalog) {
+            if source_type.element_type() == base_type.element_type() {
+                return true;
+            }
+            if let Some(base_oid) = catalog.type_oid_for_sql_type(base_type)
+                && catalog
+                    .cast_by_source_target(source_oid, base_oid)
+                    .is_some()
+            {
+                return true;
+            }
+            if !source_type.is_array
+                && is_text_like_type(source_type)
+                && explicit_text_input_cast_exists(catalog, base_type)
+            {
+                return true;
+            }
         }
         if is_user_defined_base_type_oid(source_oid, catalog)
             || is_user_defined_base_type_oid(target_oid, catalog)
@@ -4494,6 +4538,16 @@ pub(super) fn catalog_backed_explicit_cast_allowed(
         return true;
     }
     false
+}
+
+fn domain_base_sql_type(type_oid: u32, catalog: &dyn CatalogLookup) -> Option<SqlType> {
+    let row = catalog.type_by_oid(type_oid)?;
+    if row.typtype != 'd' || row.typbasetype == 0 {
+        return None;
+    }
+    catalog
+        .type_by_oid(row.typbasetype)
+        .map(|base| base.sql_type.with_typmod(row.sql_type.typmod))
 }
 
 fn is_user_defined_base_type_oid(type_oid: u32, catalog: &dyn CatalogLookup) -> bool {

@@ -511,11 +511,13 @@ fn run_statement(
         | Statement::DropAggregate(_)
         | Statement::AlterTableSet(_)
         | Statement::AlterIndexSet(_)
+        | Statement::AlterTableReset(_)
         | Statement::CreateStatistics(_)
         | Statement::AlterStatistics(_)
         | Statement::DropStatistics(_)
         | Statement::CommentOnStatistics(_)
         | Statement::AlterTableAddColumn(_)
+        | Statement::AlterTableAddColumns(_)
         | Statement::AlterTableAddConstraint(_)
         | Statement::AlterTableMulti(_)
         | Statement::AlterTableReplicaIdentity(_)
@@ -740,6 +742,7 @@ fn run_statement(
         Statement::Explain(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                 txns: txns.clone(),
                 txn_waiter: None,
                 lock_status_provider: None,
@@ -797,6 +800,7 @@ fn run_statement(
         Statement::Select(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                 txns: txns.clone(),
                 txn_waiter: None,
                 lock_status_provider: None,
@@ -854,6 +858,7 @@ fn run_statement(
         Statement::Values(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                 txns: txns.clone(),
                 txn_waiter: None,
                 lock_status_provider: None,
@@ -911,6 +916,7 @@ fn run_statement(
         Statement::Analyze(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                 txns: txns.clone(),
                 txn_waiter: None,
                 lock_status_provider: None,
@@ -1073,6 +1079,7 @@ fn run_statement(
         Statement::TruncateTable(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                 txns: txns.clone(),
                 txn_waiter: None,
                 lock_status_provider: None,
@@ -1130,6 +1137,7 @@ fn run_statement(
         Statement::Vacuum(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                 txns: txns.clone(),
                 txn_waiter: None,
                 lock_status_provider: None,
@@ -1190,6 +1198,7 @@ fn run_statement(
                 let bound = bind_insert(&stmt, &relcache)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                     txns: txns.clone(),
                     txn_waiter: None,
                     lock_status_provider: None,
@@ -1261,6 +1270,7 @@ fn run_statement(
                 let bound = bind_update(&stmt, &relcache)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                     txns: txns.clone(),
                     txn_waiter: None,
                     lock_status_provider: None,
@@ -1332,6 +1342,7 @@ fn run_statement(
                 let bound = bind_delete(&stmt, &relcache)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(pool),
+            data_dir: None,
                     txns: txns.clone(),
                     txn_waiter: None,
                     lock_status_provider: None,

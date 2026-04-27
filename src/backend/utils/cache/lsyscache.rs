@@ -17,9 +17,9 @@ use crate::backend::utils::cache::syscache::{
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
-    build_pg_rules_rows, build_pg_stat_io_rows, build_pg_stat_user_functions_rows,
-    build_pg_stat_user_tables_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
-    build_pg_views_rows,
+    build_pg_rules_rows, build_pg_stat_all_tables_rows, build_pg_stat_io_rows,
+    build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
+    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::access::brin_page::{
@@ -489,6 +489,7 @@ fn visible_domain_by_name(
     let domains = db.domains.read();
     let domain = domains.values().find(|domain| domain.oid == type_row.oid)?;
     Some(DomainLookup {
+        oid: domain.oid,
         name: domain.name.clone(),
         sql_type: domain.sql_type,
         default: domain.default.clone(),
@@ -1857,6 +1858,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         )
     }
 
+    fn domain_by_type_oid(&self, domain_oid: u32) -> Option<DomainLookup> {
+        self.db.domain_by_type_oid(domain_oid)
+    }
+
     fn type_default_sql(&self, type_oid: u32) -> Option<String> {
         self.db.base_type_default(type_oid)
     }
@@ -1954,6 +1959,21 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {
         class_row_by_oid(self.db, self.client_id, self.txn_ctx, relation_oid)
+    }
+
+    fn attribute_rows_for_relation(
+        &self,
+        relation_oid: u32,
+    ) -> Vec<crate::include::catalog::PgAttributeRow> {
+        self.db
+            .backend_catcache(self.client_id, self.txn_ctx)
+            .ok()
+            .and_then(|catcache| {
+                catcache
+                    .attributes_by_relid(relation_oid)
+                    .map(|attrs| attrs.to_vec())
+            })
+            .unwrap_or_default()
     }
 
     fn partitioned_table_row(
@@ -2094,6 +2114,30 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         self.db.pg_stat_activity_rows()
     }
 
+    fn pg_stat_all_tables_rows(&self) -> Vec<Vec<Value>> {
+        let namespaces = ensure_namespace_rows(self.db, self.client_id, self.txn_ctx);
+        let classes = ensure_class_rows(self.db, self.client_id, self.txn_ctx);
+        let indexes = ensure_index_rows(self.db, self.client_id, self.txn_ctx);
+        let relation_oids = classes
+            .iter()
+            .flat_map(|class| {
+                std::iter::once(class.oid)
+                    .chain((class.reltoastrelid != 0).then_some(class.reltoastrelid))
+            })
+            .chain(indexes.iter().map(|row| row.indexrelid))
+            .collect::<BTreeSet<_>>();
+        let relation_stats = self
+            .db
+            .session_stats_state(self.client_id)
+            .write()
+            .visible_relation_entries(&self.db.stats, relation_oids);
+        let stats = DatabaseStatsStore {
+            relations: relation_stats,
+            ..DatabaseStatsStore::default()
+        };
+        build_pg_stat_all_tables_rows(namespaces, classes, indexes, &stats)
+    }
+
     fn pg_stat_user_tables_rows(&self) -> Vec<Vec<Value>> {
         let namespaces = ensure_namespace_rows(self.db, self.client_id, self.txn_ctx);
         let classes = ensure_class_rows(self.db, self.client_id, self.txn_ctx);
@@ -2219,6 +2263,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             .with_enum_rows(self.db.enum_rows_for_catalog())
             .with_uncommitted_enum_label_oids(self.db.uncommitted_enum_label_oids())
             .with_domain_checks(self.db.domain_checks_for_catalog())
+            .with_domain_lookups(self.db.domain_lookups_for_catalog())
             .with_dynamic_type_rows(dynamic_type_rows)
             .with_dynamic_range_rows(dynamic_range_rows),
         )
