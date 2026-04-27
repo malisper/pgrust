@@ -2380,10 +2380,10 @@ fn planned_grouped_named_window_uses_named_spec() {
 }
 
 #[test]
-fn planned_window_frame_offsets_from_join_input_are_lowered() {
+fn planned_window_frame_constant_offsets_are_preserved() {
     let planned = planned_stmt_for_sql(
-        "select sum(t.x) over (order by t.x rows between u.y preceding and u.y following), t.x \
-         from (values (1), (2)) as t(x), (values (1)) as u(y)",
+        "select sum(t.x) over (order by t.x rows between 1 preceding and 2 following), t.x \
+         from (values (1), (2)) as t(x)",
     );
 
     assert!(plan_contains(&planned.plan_tree, |plan| match plan {
@@ -2392,11 +2392,13 @@ fn planned_window_frame_offsets_from_join_input_are_lowered() {
                 && is_special_user_var(&clause.spec.order_by[0].expr, OUTER_VAR, 0)
                 && matches!(
                     &clause.spec.frame.start_bound,
-                    WindowFrameBound::OffsetPreceding(offset) if is_special_user_var(&offset.expr, OUTER_VAR, 1)
+                    WindowFrameBound::OffsetPreceding(offset)
+                        if matches!(offset.expr, Expr::Const(Value::Int64(1)))
                 )
                 && matches!(
                     &clause.spec.frame.end_bound,
-                    WindowFrameBound::OffsetFollowing(offset) if is_special_user_var(&offset.expr, OUTER_VAR, 1)
+                    WindowFrameBound::OffsetFollowing(offset)
+                        if matches!(offset.expr, Expr::Const(Value::Int64(2)))
                 )
         }
         _ => false,

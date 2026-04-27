@@ -34204,6 +34204,99 @@ fn pg_get_viewdef_renders_sublinks_as_sql() {
 }
 
 #[test]
+fn pg_get_viewdef_renders_window_functions_and_function_rtes() {
+    let dir = temp_dir("pg_get_viewdef_windows");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create view v_window as
+         select i,
+                sum(i) over (order by i rows unbounded preceding exclude current row) as s_current,
+                sum(i) over (order by i rows unbounded preceding exclude group) as s_group,
+                sum(i) over (order by i rows unbounded preceding exclude ties) as s_ties,
+                sum(i) over (order by i rows unbounded preceding exclude no others) as s_all
+         from generate_series(1, 10) i(i)",
+    )
+    .unwrap();
+
+    let def = query_rows(&db, 1, "select pg_get_viewdef('v_window'::regclass)");
+    let Value::Text(sql) = &def[0][0] else {
+        panic!("expected text view definition, got {def:?}");
+    };
+
+    assert!(sql.contains("generate_series(1, 10) i(i)"));
+    assert!(
+        sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW)")
+    );
+    assert!(sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE GROUP)"));
+    assert!(sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING EXCLUDE TIES)"));
+    assert!(sql.contains("sum(i.i) OVER (ORDER BY i.i ROWS UNBOUNDED PRECEDING)"));
+    assert!(!sql.contains("WindowFunc"));
+    assert!(!sql.contains("function_call"));
+}
+
+#[test]
+fn create_or_replace_temp_window_view_keeps_rewrite_rule() {
+    let dir = temp_dir("replace_temp_window_view");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create temp view v_window as
+         select i,
+                sum(i) over (order by i rows between 1 preceding and 1 following) as sum_rows
+         from generate_series(1, 10) i(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create or replace temp view v_window as
+         select i,
+                sum(i) over (
+                    order by i
+                    rows between 1 preceding and 1 following
+                    exclude current row
+                ) as sum_rows
+         from generate_series(1, 10) i(i)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from v_window where i = 1"),
+        vec![vec![Value::Int32(1), Value::Int64(2)]]
+    );
+
+    let def = query_rows(&db, 1, "select pg_get_viewdef('v_window'::regclass)");
+    let Value::Text(sql) = &def[0][0] else {
+        panic!("expected text view definition, got {def:?}");
+    };
+    assert!(sql.contains("EXCLUDE CURRENT ROW"));
+    assert!(!sql.contains("missing rewrite rule"));
+
+    db.execute(1, "drop view v_window").unwrap();
+    db.execute(
+        1,
+        "create temp view v_window as
+         select i,
+                min(i) over (
+                    order by i
+                    range between '1 day' preceding and '10 days' following
+                ) as min_i
+         from generate_series(now(), now() + '100 days'::interval, '1 hour') i",
+    )
+    .unwrap();
+
+    let def = query_rows(&db, 1, "select pg_get_viewdef('v_window'::regclass)");
+    let Value::Text(sql) = &def[0][0] else {
+        panic!("expected text view definition, got {def:?}");
+    };
+    assert!(sql.contains("min(i.i) OVER (ORDER BY i.i RANGE BETWEEN"));
+    assert!(sql.contains("generate_series(now(),"));
+    assert!(!sql.contains("missing rewrite rule"));
+}
+
+#[test]
 fn pg_get_acl_returns_relation_owner_acl() {
     let dir = temp_dir("pg_get_acl");
     let db = Database::open(&dir, 64).unwrap();

@@ -21464,6 +21464,7 @@ fn build_window_frame_clause(pair: Pair<'_, Rule>) -> Result<RawWindowFrame, Par
     let pair_text = pair.as_str().to_string();
     let mut mode = None;
     let mut bounds = Vec::new();
+    let mut exclusion = WindowFrameExclusion::NoOthers;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::kw_rows | Rule::kw_rows_atom => mode = Some(WindowFrameMode::Rows),
@@ -21478,9 +21479,16 @@ fn build_window_frame_clause(pair: Pair<'_, Rule>) -> Result<RawWindowFrame, Par
                 }
             }
             Rule::window_frame_exclusion => {
-                return Err(ParseError::FeatureNotSupported(
-                    "window frame exclusion".into(),
-                ));
+                let lower = part.as_str().to_ascii_lowercase();
+                exclusion = if lower.contains("current") {
+                    WindowFrameExclusion::CurrentRow
+                } else if lower.contains("group") {
+                    WindowFrameExclusion::Group
+                } else if lower.contains("ties") {
+                    WindowFrameExclusion::Ties
+                } else {
+                    WindowFrameExclusion::NoOthers
+                };
             }
             _ => {}
         }
@@ -21499,6 +21507,7 @@ fn build_window_frame_clause(pair: Pair<'_, Rule>) -> Result<RawWindowFrame, Par
         mode: mode.ok_or(ParseError::UnexpectedEof)?,
         start_bound,
         end_bound,
+        exclusion,
     })
 }
 
@@ -23050,6 +23059,15 @@ mod tests {
         SqlParser::parse(
             Rule::statement,
             "select sum(id) over (w rows between 1 preceding and current row) from people window w as (partition by name order by id)",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn pest_parses_window_frame_exclusion_statement() {
+        SqlParser::parse(
+            Rule::statement,
+            "select sum(id) over (rows between unbounded preceding and current row exclude ties) from people",
         )
         .unwrap();
     }

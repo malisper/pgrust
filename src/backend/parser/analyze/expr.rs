@@ -1373,9 +1373,13 @@ fn bind_window_func_call(
     }
     let resolved = resolve_function_call(catalog, name, &resolution_types, func_variadic)?;
     if resolved.proretset || !matches!(resolved.prokind, 'w' | 'a') {
-        return Err(ParseError::UnexpectedToken {
-            expected: "window or aggregate function",
-            actual: name.to_string(),
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "OVER specified, but {name} is not a window function nor an aggregate function"
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
         });
     }
     let spec = bind_window_spec(over, catalog, |expr| {
@@ -3564,6 +3568,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 return Err(not_ordered_set_aggregate_error(name));
             }
             if let Some(func) = resolve_builtin_aggregate(name) {
+                reject_explicit_empty_aggregate_call(name, args)?;
                 if let Some(raw_over) = over {
                     return bind_window_agg_call(
                         func,

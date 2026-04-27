@@ -1294,6 +1294,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 return Err(not_ordered_set_aggregate_error(name));
             }
             if let Some(func) = resolve_builtin_aggregate(name) {
+                reject_explicit_empty_aggregate_call(name, args)?;
                 if let Some(raw_over) = over {
                     return bind_grouped_window_agg_call(
                         func,
@@ -3391,7 +3392,7 @@ fn bind_grouped_generate_series_srf(
         outer_scopes,
         grouped_outer,
     );
-    let step_type = if args.len() >= 3 {
+    let raw_step_type = if args.len() >= 3 {
         Some(grouped_infer_sql_expr_type(
             &args[2].value,
             input_scope,
@@ -3402,6 +3403,24 @@ fn bind_grouped_generate_series_srf(
     } else {
         None
     };
+    let step_type = raw_step_type.map(|inferred| {
+        let has_timestamp_bound = matches!(
+            start_type.kind,
+            SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+        ) || matches!(
+            stop_type.kind,
+            SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+        );
+        if has_timestamp_bound {
+            coerce_unknown_string_literal_type(
+                &args[2].value,
+                inferred,
+                SqlType::new(SqlTypeKind::Interval),
+            )
+        } else {
+            inferred
+        }
+    });
     let timezone_type = if args.len() == 4 {
         Some(grouped_infer_sql_expr_type(
             &args[3].value,
@@ -3458,7 +3477,7 @@ fn bind_grouped_generate_series_srf(
                 agg_list,
                 n_keys,
             )?,
-            step_type.expect("generate_series step type"),
+            raw_step_type.expect("generate_series step type"),
             if matches!(
                 common.kind,
                 SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz

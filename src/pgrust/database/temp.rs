@@ -629,6 +629,34 @@ impl Database {
         Ok(removed.entry)
     }
 
+    pub(super) fn remove_temp_entry_after_catalog_drop(
+        &self,
+        client_id: ClientId,
+        table_name: &str,
+        temp_effects: &mut Vec<TempMutationEffect>,
+    ) -> Result<RelCacheEntry, ExecError> {
+        let temp_backend_id = self.temp_backend_id(client_id);
+        let normalized = normalize_temp_lookup_name(table_name);
+        let removed = {
+            let mut namespaces = self.temp_relations.write();
+            let namespace = namespaces.get_mut(&temp_backend_id).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
+            })?;
+            let removed = namespace.tables.remove(&normalized).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
+            })?;
+            namespace.generation = namespace.generation.saturating_add(1);
+            removed
+        };
+        temp_effects.push(TempMutationEffect::Drop {
+            name: normalized,
+            entry: removed.entry.clone(),
+            on_commit: removed.on_commit,
+        });
+        self.invalidate_backend_cache_state(client_id);
+        Ok(removed.entry)
+    }
+
     pub(crate) fn rename_temp_relation_in_transaction(
         &self,
         client_id: ClientId,
