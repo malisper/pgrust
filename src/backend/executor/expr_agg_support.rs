@@ -1,6 +1,6 @@
 use super::agg::{AccumState, AggregateRuntime, CustomAggregateRuntime};
 use super::expr_casts::cast_value;
-use super::expr_ops::{add_values, div_values};
+use super::expr_ops::{add_values, div_values, sub_values};
 use super::sqlfunc::execute_user_defined_sql_scalar_function_values;
 use super::{ExecError, ExecutorContext};
 use crate::backend::parser::CatalogLookup;
@@ -165,6 +165,10 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
         BuiltinScalarFunction::Int4Pl => match arg_values {
             [left, right] => add_values(left.clone(), right.clone()),
             _ => malformed_aggregate_support_call("int4pl"),
+        },
+        BuiltinScalarFunction::Int4Mi => match arg_values {
+            [left, right] => sub_values(left.clone(), right.clone()),
+            _ => malformed_aggregate_support_call("int4mi"),
         },
         BuiltinScalarFunction::Int8Inc => match arg_values {
             [state] => add_values(state.clone(), Value::Int64(1)),

@@ -356,6 +356,10 @@ fn execute_statement_with_source(
         Statement::CommentOnForeignDataWrapper(_)
         | Statement::CreateForeignDataWrapper(_)
         | Statement::CreateForeignServer(_)
+        | Statement::AlterForeignServerRename(_)
+        | Statement::CreateLanguage(_)
+        | Statement::AlterLanguage(_)
+        | Statement::DropLanguage(_)
         | Statement::CreateForeignTable(_)
         | Statement::AlterForeignDataWrapper(_)
         | Statement::AlterForeignDataWrapperOwner(_)
@@ -440,9 +444,37 @@ fn execute_statement_with_source(
             expected: "CREATE OPERATOR CLASS handled by database/session layer",
             actual: "CREATE OPERATOR CLASS".into(),
         })),
+        Statement::CreateOperatorFamily(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE OPERATOR FAMILY handled by database/session layer",
+            actual: "CREATE OPERATOR FAMILY".into(),
+        })),
+        Statement::AlterOperatorFamily(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER OPERATOR FAMILY handled by database/session layer",
+            actual: "ALTER OPERATOR FAMILY".into(),
+        })),
+        Statement::AlterOperatorClass(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER OPERATOR CLASS handled by database/session layer",
+            actual: "ALTER OPERATOR CLASS".into(),
+        })),
+        Statement::DropOperatorFamily(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP OPERATOR FAMILY handled by database/session layer",
+            actual: "DROP OPERATOR FAMILY".into(),
+        })),
+        Statement::CreateTextSearch(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE TEXT SEARCH handled by database/session layer",
+            actual: "CREATE TEXT SEARCH".into(),
+        })),
+        Statement::AlterTextSearch(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER TEXT SEARCH handled by database/session layer",
+            actual: "ALTER TEXT SEARCH".into(),
+        })),
         Statement::AlterOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ALTER OPERATOR handled by database/session layer",
             actual: "ALTER OPERATOR".into(),
+        })),
+        Statement::AlterConversion(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER CONVERSION handled by database/session layer",
+            actual: "ALTER CONVERSION".into(),
         })),
         Statement::AlterProcedure(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "ALTER PROCEDURE".into(),
@@ -782,9 +814,37 @@ pub fn execute_readonly_statement_with_config(
             expected: "read-only statement",
             actual: "CREATE OPERATOR CLASS".into(),
         })),
+        Statement::CreateOperatorFamily(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE OPERATOR FAMILY".into(),
+        })),
+        Statement::AlterOperatorFamily(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER OPERATOR FAMILY".into(),
+        })),
+        Statement::AlterOperatorClass(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER OPERATOR CLASS".into(),
+        })),
+        Statement::DropOperatorFamily(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP OPERATOR FAMILY".into(),
+        })),
+        Statement::CreateTextSearch(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE TEXT SEARCH".into(),
+        })),
+        Statement::AlterTextSearch(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER TEXT SEARCH".into(),
+        })),
         Statement::AlterOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "ALTER OPERATOR".into(),
+        })),
+        Statement::AlterConversion(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER CONVERSION".into(),
         })),
         Statement::AlterProcedure(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "ALTER PROCEDURE".into(),

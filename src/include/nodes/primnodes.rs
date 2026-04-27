@@ -708,6 +708,7 @@ pub enum BuiltinScalarFunction {
     TrimScale,
     NumericInc,
     Int4Pl,
+    Int4Mi,
     Int8Inc,
     Int8IncAny,
     Int4AvgAccum,

@@ -6354,6 +6354,7 @@ fn eval_plpgsql_builtin_function(
         },
         BuiltinScalarFunction::UnsupportedXmlFeature => Err(unsupported_xml_feature_error()),
         BuiltinScalarFunction::Int4Pl
+        | BuiltinScalarFunction::Int4Mi
         | BuiltinScalarFunction::Int8Inc
         | BuiltinScalarFunction::Int8IncAny
         | BuiltinScalarFunction::Int4AvgAccum
@@ -8145,6 +8146,7 @@ pub(crate) fn eval_builtin_function(
             }),
         },
         BuiltinScalarFunction::Int4Pl
+        | BuiltinScalarFunction::Int4Mi
         | BuiltinScalarFunction::Int8Inc
         | BuiltinScalarFunction::Int8IncAny
         | BuiltinScalarFunction::Int4AvgAccum

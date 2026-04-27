@@ -16,6 +16,7 @@ use crate::include::nodes::parsenodes::{
     DropAggregateStatement, DropFunctionStatement, DropIndexStatement, DropProcedureStatement,
     DropSchemaStatement,
 };
+use crate::pgrust::auth::AuthCatalog;
 use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pgrust::database::save_range_type_entries;
 use std::collections::{BTreeMap, BTreeSet};
@@ -347,24 +348,60 @@ fn drop_table_display_relation_name(
     }
 }
 
-fn drop_schema_display_relation_name(
-    catcache: &CatCache,
-    relation_oid: u32,
-    current_role_name: &str,
-) -> String {
-    let Some(class) = catcache.class_by_oid(relation_oid) else {
-        return relation_oid.to_string();
-    };
-    let schema_name = catcache
-        .namespace_by_oid(class.relnamespace)
-        .map(|row| row.nspname.clone())
-        .unwrap_or_else(|| "public".to_string());
-    match schema_name.as_str() {
-        "public" | "pg_catalog" => class.relname.clone(),
-        schema_name if schema_name.starts_with("pg_temp_") => class.relname.clone(),
-        schema_name if schema_name.eq_ignore_ascii_case(current_role_name) => class.relname.clone(),
-        _ => format!("{schema_name}.{}", class.relname),
+fn drop_schema_visible_namespace_oids(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    configured_search_path: Option<&[String]>,
+    auth_catalog: &AuthCatalog,
+) -> BTreeSet<u32> {
+    let mut search_path = db.effective_search_path(client_id, configured_search_path);
+    let includes_user_schema = configured_search_path
+        .map(|path| {
+            path.iter()
+                .any(|schema| schema.trim().eq_ignore_ascii_case("$user"))
+        })
+        .unwrap_or(true);
+    if includes_user_schema
+        && let Some(current_role) =
+            auth_catalog.role_by_oid(db.auth_state(client_id).current_user_oid())
+    {
+        let current_schema = current_role.rolname.to_ascii_lowercase();
+        if !search_path.iter().any(|schema| schema == &current_schema) {
+            search_path.push(current_schema);
+        }
     }
+    search_path
+        .into_iter()
+        .filter_map(|schema| db.visible_namespace_oid_by_name(client_id, txn_ctx, &schema))
+        .collect()
+}
+
+fn drop_schema_display_object_name(
+    catcache: &CatCache,
+    visible_namespaces: &BTreeSet<u32>,
+    namespace_oid: u32,
+    object_name: &str,
+) -> String {
+    if visible_namespaces.contains(&namespace_oid) {
+        return object_name.to_string();
+    }
+    drop_format_name(catcache, namespace_oid, object_name)
+}
+
+fn drop_schema_display_operator_name(
+    catalog: &dyn CatalogLookup,
+    catcache: &CatCache,
+    visible_namespaces: &BTreeSet<u32>,
+    row: &crate::include::catalog::PgOperatorRow,
+) -> String {
+    let args = [row.oprleft, row.oprright]
+        .into_iter()
+        .map(|oid| format_type_text(oid, None, catalog))
+        .collect::<Vec<_>>()
+        .join(",");
+    let name = format!("{}({args})", row.oprname);
+    drop_schema_display_object_name(catcache, visible_namespaces, row.oprnamespace, &name)
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
@@ -1967,6 +2004,7 @@ impl Database {
         drop_stmt: &DropSchemaStatement,
         xid: TransactionId,
         cid: CommandId,
+        configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catcache = self
@@ -2036,24 +2074,192 @@ impl Database {
                 });
             }
             if drop_stmt.cascade {
-                let current_role_name = auth_catalog
-                    .role_by_oid(auth.current_user_oid())
-                    .map(|row| row.rolname.as_str())
-                    .unwrap_or("");
                 let mut notices = Vec::new();
-                for relation in relation_rows.iter().filter(|row| {
-                    !row.relispartition && matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'S' | 'v')
-                }) {
+                let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), None);
+                let visible_namespaces = drop_schema_visible_namespace_oids(
+                    self,
+                    client_id,
+                    Some((xid, cid)),
+                    configured_search_path,
+                    &auth_catalog,
+                );
+
+                let mut proc_rows = catcache
+                    .proc_rows()
+                    .into_iter()
+                    .filter(|row| row.pronamespace == schema.oid)
+                    .collect::<Vec<_>>();
+                proc_rows.sort_by_key(|row| row.oid);
+                for proc_row in proc_rows {
+                    let signature = drop_proc_signature_text(&proc_row, &catalog);
                     notices.push(format!(
-                        "drop cascades to {} {}",
-                        drop_table_relation_kind_name(relation.relkind),
-                        drop_schema_display_relation_name(
+                        "drop cascades to function {}",
+                        drop_schema_display_object_name(
                             &catcache,
-                            relation.oid,
-                            current_role_name
+                            &visible_namespaces,
+                            proc_row.pronamespace,
+                            &signature
                         )
                     ));
                 }
+
+                let mut conversion_rows = catcache
+                    .conversion_rows()
+                    .into_iter()
+                    .filter(|row| row.connamespace == schema.oid)
+                    .collect::<Vec<_>>();
+                conversion_rows.sort_by_key(|row| row.oid);
+                for row in conversion_rows {
+                    notices.push(format!(
+                        "drop cascades to conversion {}",
+                        drop_schema_display_object_name(
+                            &catcache,
+                            &visible_namespaces,
+                            row.connamespace,
+                            &row.conname
+                        )
+                    ));
+                }
+
+                let mut operator_rows = catcache
+                    .operator_rows()
+                    .into_iter()
+                    .filter(|row| row.oprnamespace == schema.oid)
+                    .collect::<Vec<_>>();
+                operator_rows.sort_by_key(|row| row.oid);
+                for row in operator_rows {
+                    notices.push(format!(
+                        "drop cascades to operator {}",
+                        drop_schema_display_operator_name(
+                            &catalog,
+                            &catcache,
+                            &visible_namespaces,
+                            &row
+                        )
+                    ));
+                }
+
+                let access_method_names = catcache
+                    .am_rows()
+                    .into_iter()
+                    .map(|row| (row.oid, row.amname))
+                    .collect::<BTreeMap<_, _>>();
+                let mut opfamily_rows = catcache
+                    .opfamily_rows()
+                    .into_iter()
+                    .filter(|row| row.opfnamespace == schema.oid)
+                    .collect::<Vec<_>>();
+                opfamily_rows.sort_by_key(|row| row.oid);
+                for row in opfamily_rows {
+                    notices.push(format!(
+                        "drop cascades to operator family {} for access method {}",
+                        drop_schema_display_object_name(
+                            &catcache,
+                            &visible_namespaces,
+                            row.opfnamespace,
+                            &row.opfname
+                        ),
+                        access_method_names
+                            .get(&row.opfmethod)
+                            .map(String::as_str)
+                            .unwrap_or("unknown")
+                    ));
+                }
+
+                let mut relation_notice_rows = relation_rows
+                    .iter()
+                    .filter(|row| {
+                        !row.relispartition
+                            && matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'S' | 'v')
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                relation_notice_rows.sort_by_key(|row| row.oid);
+                for relation in relation_notice_rows {
+                    notices.push(format!(
+                        "drop cascades to {} {}",
+                        drop_table_relation_kind_name(relation.relkind),
+                        drop_schema_display_object_name(
+                            &catcache,
+                            &visible_namespaces,
+                            relation.relnamespace,
+                            &relation.relname
+                        )
+                    ));
+                }
+
+                let mut ts_dict_rows = catcache
+                    .ts_dict_rows()
+                    .into_iter()
+                    .filter(|row| row.dictnamespace == schema.oid)
+                    .collect::<Vec<_>>();
+                ts_dict_rows.sort_by_key(|row| row.oid);
+                for row in ts_dict_rows {
+                    notices.push(format!(
+                        "drop cascades to text search dictionary {}",
+                        drop_schema_display_object_name(
+                            &catcache,
+                            &visible_namespaces,
+                            row.dictnamespace,
+                            &row.dictname
+                        )
+                    ));
+                }
+
+                let mut ts_config_rows = catcache
+                    .ts_config_rows()
+                    .into_iter()
+                    .filter(|row| row.cfgnamespace == schema.oid)
+                    .collect::<Vec<_>>();
+                ts_config_rows.sort_by_key(|row| row.oid);
+                for row in ts_config_rows {
+                    notices.push(format!(
+                        "drop cascades to text search configuration {}",
+                        drop_schema_display_object_name(
+                            &catcache,
+                            &visible_namespaces,
+                            row.cfgnamespace,
+                            &row.cfgname
+                        )
+                    ));
+                }
+
+                let mut ts_template_rows = catcache
+                    .ts_template_rows()
+                    .into_iter()
+                    .filter(|row| row.tmplnamespace == schema.oid)
+                    .collect::<Vec<_>>();
+                ts_template_rows.sort_by_key(|row| row.oid);
+                for row in ts_template_rows {
+                    notices.push(format!(
+                        "drop cascades to text search template {}",
+                        drop_schema_display_object_name(
+                            &catcache,
+                            &visible_namespaces,
+                            row.tmplnamespace,
+                            &row.tmplname
+                        )
+                    ));
+                }
+
+                let mut ts_parser_rows = catcache
+                    .ts_parser_rows()
+                    .into_iter()
+                    .filter(|row| row.prsnamespace == schema.oid)
+                    .collect::<Vec<_>>();
+                ts_parser_rows.sort_by_key(|row| row.oid);
+                for row in ts_parser_rows {
+                    notices.push(format!(
+                        "drop cascades to text search parser {}",
+                        drop_schema_display_object_name(
+                            &catcache,
+                            &visible_namespaces,
+                            row.prsnamespace,
+                            &row.prsname
+                        )
+                    ));
+                }
+
                 match notices.as_slice() {
                     [] => {}
                     [notice] => push_notice(notice.clone()),
@@ -2084,7 +2290,13 @@ impl Database {
             let effect = self
                 .catalog
                 .write()
-                .drop_namespace_mvcc(schema.oid, &schema.nspname, schema.nspowner, &ctx)
+                .drop_namespace_mvcc(
+                    schema.oid,
+                    &schema.nspname,
+                    schema.nspowner,
+                    schema.nspacl.clone(),
+                    &ctx,
+                )
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
             dropped += 1;

@@ -50,8 +50,8 @@ set_operation_stmt = {
     cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ limit_clause? ~ offset_clause? ~ locking_clause?
   | cte_clause? ~ set_operation_term ~ (set_operation_clause ~ set_operation_term)+ ~ window_clause? ~ order_by_clause? ~ locking_clause ~ limit_clause? ~ offset_clause?
 }
-set_operation_term = { parenthesized_select_stmt | parenthesized_values_stmt | parenthesized_set_operation_term | values_stmt | simple_select_core }
-parenthesized_set_operation_term = { "(" ~ (select_stmt | parenthesized_set_operation_term | values_stmt) ~ ")" }
+set_operation_term = { parenthesized_select_stmt | parenthesized_values_stmt | parenthesized_set_operation_term | values_stmt | table_stmt | simple_select_core }
+parenthesized_set_operation_term = { "(" ~ (select_stmt | parenthesized_set_operation_term | values_stmt | table_stmt) ~ ")" }
 parenthesized_values_stmt = { "(" ~ values_stmt ~ ")" }
 set_operation_clause = { (kw_union | kw_intersect | kw_except) ~ kw_all? }
 values_stmt = { cte_clause? ~ kw_values ~ values_row ~ ("," ~ values_row)* ~ order_by_clause? ~ limit_clause? ~ offset_clause? }
@@ -469,7 +469,7 @@ expr = { or_expr }
 or_expr = { and_expr ~ (kw_or ~ and_expr)* }
 and_expr = { not_expr ~ (kw_and ~ not_expr)* }
 not_expr = { kw_not ~ not_expr | cmp_expr }
-cmp_expr = { json_access_expr ~ (is_normalized_suffix | is_document_suffix | null_predicate_suffix | overlaps_suffix | between_suffix | in_expr_list_suffix | in_subquery_suffix | quantified_suffix | quantified_like_suffix | quantified_similar_suffix | like_suffix | similar_suffix | comp_op ~ cmp_expr)? }
+cmp_expr = { json_access_expr ~ (is_normalized_suffix | is_document_suffix | null_predicate_suffix | overlaps_suffix | between_suffix | in_subquery_suffix | in_expr_list_suffix | quantified_suffix | quantified_like_suffix | quantified_similar_suffix | like_suffix | similar_suffix | comp_op ~ cmp_expr)? }
 b_expr = { json_access_expr ~ (is_document_suffix | is_not_distinct_suffix | is_distinct_suffix | comp_op ~ json_access_expr)? }
 json_access_expr = { concat_expr ~ (json_access_op ~ concat_expr)* }
 concat_expr = { add_expr ~ (concat_op ~ add_expr)* }
@@ -507,7 +507,7 @@ is_distinct_suffix = { kw_is ~ kw_distinct ~ kw_from ~ add_expr }
 is_not_distinct_suffix = { kw_is ~ kw_not ~ kw_distinct ~ kw_from ~ add_expr }
 is_normalized_suffix = { kw_is ~ kw_not? ~ unicode_normal_form? ~ kw_normalized }
 in_expr_list_suffix = { kw_not? ~ kw_in ~ "(" ~ expr_list ~ ")" }
-in_subquery_suffix = { kw_not? ~ kw_in ~ "(" ~ select_stmt ~ ")" }
+in_subquery_suffix = { kw_not? ~ kw_in ~ "(" ~ (select_stmt | values_stmt) ~ ")" }
 quantified_suffix = { quantified_comp_op ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
 quantified_comp_op = { "@@" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "!~" | "~" }
 quantified_like_suffix = { kw_not? ~ (kw_ilike | kw_like) ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::nodes::primnodes::{SubLink, SubLinkType};
 
 fn child_outer_scopes(scope: &BoundScope, outer_scopes: &[BoundScope]) -> Vec<BoundScope> {
@@ -286,7 +287,7 @@ pub(super) fn bind_in_subquery_expr(
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
     let child_visible_agg_scope = child_visible_aggregate_scope();
-    let subquery = bind_subquery_query(
+    let mut subquery = bind_subquery_query(
         subquery,
         scope,
         catalog,
@@ -294,25 +295,25 @@ pub(super) fn bind_in_subquery_expr(
         child_visible_agg_scope.as_ref(),
         ctes,
     )?;
-    let row_width = match expr {
-        SqlExpr::Row(items) => Some(items.len()),
-        _ => None,
-    };
-    if let Some(width) = row_width {
-        ensure_row_subquery_width(subquery.columns().len(), width)?;
-    } else {
-        ensure_single_column_subquery(subquery.columns().len())?;
-    }
-    let any_expr = Expr::SubLink(Box::new(SubLink {
-        sublink_type: SubLinkType::AnySubLink(SubqueryComparisonOp::Eq),
-        testexpr: Some(Box::new(bind_expr_with_outer_and_ctes(
+    let subquery_width = subquery.columns().len();
+    let testexpr = if let SqlExpr::Row(items) = expr {
+        ensure_row_subquery_width(subquery_width, items.len())?;
+        bind_row_valued_in_testexpr(
             expr,
+            &mut subquery,
             scope,
             catalog,
             outer_scopes,
             grouped_outer,
             ctes,
-        )?)),
+        )?
+    } else {
+        ensure_single_column_subquery(subquery_width)?;
+        bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?
+    };
+    let any_expr = Expr::SubLink(Box::new(SubLink {
+        sublink_type: SubLinkType::AnySubLink(SubqueryComparisonOp::Eq),
+        testexpr: Some(Box::new(testexpr)),
         subselect: Box::new(subquery),
     }));
     if negated {
@@ -323,6 +324,71 @@ pub(super) fn bind_in_subquery_expr(
     } else {
         Ok(any_expr)
     }
+}
+
+fn bind_row_valued_in_testexpr(
+    expr: &SqlExpr,
+    subquery: &mut Query,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let left =
+        bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let Expr::Row { fields, .. } = left else {
+        ensure_single_column_subquery(subquery.columns().len())?;
+        unreachable!("ensure_single_column_subquery returned for multi-column subquery");
+    };
+    if fields.len() != subquery.target_list.len() {
+        return Err(ParseError::DetailedError {
+            message: "unequal number of entries in row expressions".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+
+    let mut coerced_fields = Vec::with_capacity(fields.len());
+    for ((field_name, field_expr), target) in
+        fields.into_iter().zip(subquery.target_list.iter_mut())
+    {
+        let left_type = expr_sql_type_hint(&field_expr).unwrap_or(SqlType::new(SqlTypeKind::Text));
+        let right_type = target.sql_type;
+        let common = resolve_common_scalar_type(left_type, right_type).ok_or_else(|| {
+            ParseError::UndefinedOperator {
+                op: "=",
+                left_type: sql_type_name(left_type),
+                right_type: sql_type_name(right_type),
+            }
+        })?;
+        if !supports_comparison_operator(catalog, "=", common, common) {
+            return Err(ParseError::UndefinedOperator {
+                op: "=",
+                left_type: sql_type_name(common),
+                right_type: sql_type_name(common),
+            });
+        }
+        coerced_fields.push((field_name, coerce_bound_expr(field_expr, left_type, common)));
+        target.expr = coerce_bound_expr(target.expr.clone(), right_type, common);
+        target.sql_type = common;
+    }
+    let descriptor = assign_anonymous_record_descriptor(
+        coerced_fields
+            .iter()
+            .map(|(field_name, field_expr)| {
+                (
+                    field_name.clone(),
+                    expr_sql_type_hint(field_expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                )
+            })
+            .collect(),
+    );
+    Ok(Expr::Row {
+        descriptor,
+        fields: coerced_fields,
+    })
 }
 
 pub(super) fn bind_quantified_subquery_expr(

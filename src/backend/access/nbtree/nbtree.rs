@@ -11,7 +11,9 @@ use crate::backend::access::index::buildkeys::{
     IndexBuildKeyProjector, materialize_heap_row_values,
 };
 use crate::backend::access::index::unique::{UniqueCandidateResult, classify_unique_candidate};
-use crate::backend::access::nbtree::nbtcompare::{compare_bt_values, compare_item_pointers};
+use crate::backend::access::nbtree::nbtcompare::{
+    BT_DESC_FLAG, compare_bt_values, compare_bt_values_with_options, compare_item_pointers,
+};
 use crate::backend::access::nbtree::nbtpreprocesskeys::preprocess_scan_keys;
 use crate::backend::access::nbtree::nbtsplitloc::choose_split_index;
 use crate::backend::access::nbtree::nbtutils::BtSortTuple;
@@ -74,7 +76,6 @@ fn check_insert_split_interrupts(ctx: &IndexInsertContext) -> Result<(), Catalog
     check_catalog_interrupts(ctx.interrupts.as_ref())
 }
 
-const BT_DESC_FLAG: i16 = 0x0001;
 const TOAST_INDEX_TARGET: usize = MAX_HEAP_TUPLE_SIZE / 16;
 pub(crate) const UNIQUE_BUILD_DETAIL_SEPARATOR: &str = "\nDETAIL: ";
 
@@ -262,27 +263,43 @@ fn compare_bt_values_for_type(
     right: &Value,
     ty: crate::backend::parser::SqlType,
 ) -> Ordering {
+    compare_bt_values_for_type_with_option(left, right, ty, 0)
+}
+
+fn compare_bt_values_for_type_with_option(
+    left: &Value,
+    right: &Value,
+    ty: crate::backend::parser::SqlType,
+    option: i16,
+) -> Ordering {
     if matches!(
         ty.kind,
         crate::backend::parser::SqlTypeKind::Int2Vector
             | crate::backend::parser::SqlTypeKind::OidVector
-    ) {
-        return compare_fixed_vector_values(left, right)
-            .unwrap_or_else(|| compare_bt_values(left, right));
+    ) && let Some(mut ord) = compare_fixed_vector_values(left, right)
+    {
+        if option & crate::backend::access::nbtree::nbtcompare::BT_DESC_FLAG != 0 {
+            ord = ord.reverse();
+        }
+        return ord;
     }
-    compare_bt_values(left, right)
+    compare_bt_values_with_options(left, right, option)
 }
 
-fn compare_key_arrays_with_columns(
+fn compare_key_arrays_with_columns_and_options(
     columns: &[ColumnDesc],
     left: &[Value],
     right: &[Value],
+    indoption: &[i16],
 ) -> Ordering {
     for (idx, (left, right)) in left.iter().zip(right.iter()).enumerate() {
+        let option = indoption.get(idx).copied().unwrap_or_default();
         let ord = columns
             .get(idx)
-            .map(|column| compare_bt_values_for_type(left, right, column.sql_type))
-            .unwrap_or_else(|| compare_bt_values(left, right));
+            .map(|column| {
+                compare_bt_values_for_type_with_option(left, right, column.sql_type, option)
+            })
+            .unwrap_or_else(|| compare_bt_values_with_options(left, right, option));
         if ord != Ordering::Equal {
             return ord;
         }
@@ -300,27 +317,39 @@ fn key_prefix(values: &[Value], key_count: usize) -> &[Value] {
     &values[..values.len().min(key_count)]
 }
 
-fn compare_key_prefixes_with_columns(
+fn compare_key_arrays_with_columns(
+    columns: &[ColumnDesc],
+    left: &[Value],
+    right: &[Value],
+) -> Ordering {
+    compare_key_arrays_with_columns_and_options(columns, left, right, &[])
+}
+
+fn compare_key_prefixes_with_columns_and_options(
     columns: &[ColumnDesc],
     left: &[Value],
     right: &[Value],
     key_count: usize,
+    indoption: &[i16],
 ) -> Ordering {
-    compare_key_arrays_with_columns(
+    compare_key_arrays_with_columns_and_options(
         columns,
         key_prefix(left, key_count),
         key_prefix(right, key_count),
+        indoption,
     )
 }
 
-fn compare_bt_keyspace_with_columns(
+fn compare_bt_keyspace_with_columns_and_options(
     columns: &[ColumnDesc],
     left_keys: &[Value],
     left_tid: &ItemPointerData,
     right_keys: &[Value],
     right_tid: &ItemPointerData,
+    indoption: &[i16],
 ) -> Ordering {
-    let ord = compare_key_arrays_with_columns(columns, left_keys, right_keys);
+    let ord =
+        compare_key_arrays_with_columns_and_options(columns, left_keys, right_keys, indoption);
     if ord != Ordering::Equal {
         return ord;
     }
@@ -409,9 +438,7 @@ fn tuple_matches_scan_keys(
             &key.argument,
             column.sql_type,
             key.strategy,
-            indoption
-                .get(attno)
-                .is_some_and(|opt| opt & BT_DESC_FLAG != 0),
+            indoption.get(attno).copied().unwrap_or_default(),
         ) {
             return Ok(false);
         }
@@ -424,23 +451,17 @@ fn value_matches_scan_key_strategy(
     argument: &Value,
     sql_type: crate::backend::parser::SqlType,
     strategy: u16,
-    descending: bool,
+    option: i16,
 ) -> bool {
     if strategy == 3
         && let Some(array) = argument.as_array_value()
     {
         return array.elements.iter().any(|element| {
-            let mut ord = compare_bt_values_for_type(value, element, sql_type);
-            if descending {
-                ord = ord.reverse();
-            }
+            let ord = compare_bt_values_for_type_with_option(value, element, sql_type, option);
             ord == Ordering::Equal
         });
     }
-    let mut ord = compare_bt_values_for_type(value, argument, sql_type);
-    if descending {
-        ord = ord.reverse();
-    }
+    let ord = compare_bt_values_for_type_with_option(value, argument, sql_type, option);
     strategy_matches_ordering(strategy, ord)
 }
 
@@ -1109,7 +1130,11 @@ fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
         result.index_tuples += 1;
     }
 
-    let tuples = spool.finish(&ctx.index_desc.columns, key_count);
+    let tuples = spool.finish(
+        &ctx.index_desc.columns,
+        key_count,
+        &ctx.index_meta.indoption,
+    );
     if ctx.index_meta.indisunique {
         check_unique_build(
             &ctx.index_name,
@@ -1129,6 +1154,7 @@ fn choose_child_slot(
     target: &[Value],
     direction: ScanDirection,
     key_count: usize,
+    indoption: &[i16],
 ) -> Result<usize, CatalogError> {
     if items.is_empty() {
         return Err(CatalogError::Corrupt("empty internal btree page"));
@@ -1142,8 +1168,13 @@ fn choose_child_slot(
     let mut choice = 0usize;
     for (idx, tuple) in items.iter().enumerate() {
         let key = tuple_key_prefix_values(desc, tuple, key_count)?;
-        if compare_key_prefixes_with_columns(&desc.columns, &key, target, key_count)
-            != Ordering::Greater
+        if compare_key_prefixes_with_columns_and_options(
+            &desc.columns,
+            &key,
+            target,
+            key_count,
+            indoption,
+        ) != Ordering::Greater
         {
             choice = idx;
         } else {
@@ -1240,13 +1271,15 @@ fn tuple_prefix_cmp(
     desc: &RelationDesc,
     tuple: &IndexTupleData,
     target: &[Value],
+    indoption: &[i16],
 ) -> Result<Ordering, CatalogError> {
     let values = tuple_key_values(desc, tuple)?;
     let prefix_len = target.len().min(values.len());
-    Ok(compare_key_arrays_with_columns(
+    Ok(compare_key_arrays_with_columns_and_options(
         &desc.columns,
         &values[..prefix_len],
         target,
+        indoption,
     ))
 }
 
@@ -1263,13 +1296,19 @@ fn empty_leaf_exhausts_exact_equality_scan(
             let last = items
                 .last()
                 .expect("items is not empty when checking equality scan bounds");
-            Ok(tuple_prefix_cmp(&scan.index_desc, last, &target)? != Ordering::Less)
+            Ok(
+                tuple_prefix_cmp(&scan.index_desc, last, &target, &scan.indoption)?
+                    != Ordering::Less,
+            )
         }
         ScanDirection::Backward => {
             let first = items
                 .first()
                 .expect("items is not empty when checking equality scan bounds");
-            Ok(tuple_prefix_cmp(&scan.index_desc, first, &target)? != Ordering::Greater)
+            Ok(
+                tuple_prefix_cmp(&scan.index_desc, first, &target, &scan.indoption)?
+                    != Ordering::Greater,
+            )
         }
     }
 }
@@ -1300,6 +1339,7 @@ fn find_leaf_with_ancestors(
     target: &[Value],
     direction: ScanDirection,
     key_count: usize,
+    indoption: &[i16],
 ) -> Result<(Vec<u32>, u32), CatalogError> {
     let meta_page = read_page(pool, rel, BTREE_METAPAGE)?;
     let meta = bt_page_get_meta(&meta_page)
@@ -1310,7 +1350,7 @@ fn find_leaf_with_ancestors(
     while level > 0 {
         ancestors.push(block);
         let (items, _) = read_page_items(pool, rel, block)?;
-        let slot = choose_child_slot(desc, &items, target, direction, key_count)?;
+        let slot = choose_child_slot(desc, &items, target, direction, key_count, indoption)?;
         block = items[slot].t_tid.block_number;
         level -= 1;
     }
@@ -1435,11 +1475,12 @@ fn left_sibling_may_contain_key(
             "btree leaf missing high key without adjacent sibling bound",
         ));
     };
-    Ok(compare_key_prefixes_with_columns(
+    Ok(compare_key_prefixes_with_columns_and_options(
         &ctx.index_desc.columns,
         key_values,
         &upper_bound,
         btree_key_count(&ctx.index_meta),
+        &ctx.index_meta.indoption,
     ) != Ordering::Greater)
 }
 
@@ -1557,6 +1598,7 @@ fn find_leaf_for_insert(
                 key_values,
                 ScanDirection::Forward,
                 btree_key_count(&ctx.index_meta),
+                &ctx.index_meta.indoption,
             )?;
             parent_stack.push(InsertStackEntry {
                 block,
@@ -1590,11 +1632,12 @@ fn find_leaf_for_insert(
                     parent_stack,
                 });
             };
-            if compare_key_prefixes_with_columns(
+            if compare_key_prefixes_with_columns_and_options(
                 &ctx.index_desc.columns,
                 key_values,
                 &upper_bound,
                 btree_key_count(&ctx.index_meta),
+                &ctx.index_meta.indoption,
             ) != Ordering::Greater
             {
                 return Ok(InsertSearchPath {
@@ -1645,11 +1688,12 @@ fn find_locked_unique_insert_path<'a>(
                 continue 'search;
             }
             if let Some(upper_bound) = leaf_upper_bound(ctx, &page, opaque)?
-                && compare_key_prefixes_with_columns(
+                && compare_key_prefixes_with_columns_and_options(
                     &ctx.index_desc.columns,
                     key_values,
                     &upper_bound,
                     btree_key_count(&ctx.index_meta),
+                    &ctx.index_meta.indoption,
                 ) == Ordering::Greater
             {
                 drop(guard);
@@ -1741,6 +1785,7 @@ fn find_parent_stack_for_key(
                 key_values,
                 ScanDirection::Forward,
                 btree_key_count(&ctx.index_meta),
+                &ctx.index_meta.indoption,
             )?;
             parent_stack.push(InsertStackEntry {
                 block,
@@ -1765,6 +1810,7 @@ fn find_parent_stack_for_key(
             key_values,
             ScanDirection::Forward,
             btree_key_count(&ctx.index_meta),
+            &ctx.index_meta.indoption,
         )?;
         parent_stack.push(InsertStackEntry {
             block,
@@ -1804,6 +1850,7 @@ fn initial_scan_block(scan: &IndexScanDesc) -> Result<Option<u32>, CatalogError>
         &target,
         scan.direction,
         btree_key_count(&scan.index_meta),
+        &scan.indoption,
     )?;
     loop {
         let page = read_page(&scan.pool, scan.index_relation, block)?;
@@ -2294,23 +2341,25 @@ fn insert_tuple_into_locked_page(
         items.partition_point(|item| {
             let existing =
                 tuple_key_prefix_values(&ctx.index_desc, item, key_count).unwrap_or_default();
-            compare_bt_keyspace_with_columns(
+            compare_bt_keyspace_with_columns_and_options(
                 &ctx.index_desc.columns,
                 &existing,
                 &item.t_tid,
                 key_values,
                 &new_tuple.t_tid,
+                &ctx.index_meta.indoption,
             ) != Ordering::Greater
         })
     } else {
         items.partition_point(|item| {
             let existing =
                 tuple_key_prefix_values(&ctx.index_desc, item, key_count).unwrap_or_default();
-            compare_key_prefixes_with_columns(
+            compare_key_prefixes_with_columns_and_options(
                 &ctx.index_desc.columns,
                 &existing,
                 key_values,
                 key_count,
+                &ctx.index_meta.indoption,
             ) != Ordering::Greater
         })
     };
@@ -2611,11 +2660,12 @@ fn bt_check_unique_locked(
         for tuple in items {
             let tuple_keys =
                 tuple_key_prefix_values(&ctx.index_desc, &tuple, btree_key_count(&ctx.index_meta))?;
-            match compare_key_prefixes_with_columns(
+            match compare_key_prefixes_with_columns_and_options(
                 &ctx.index_desc.columns,
                 &tuple_keys,
                 key_values,
                 btree_key_count(&ctx.index_meta),
+                &ctx.index_meta.indoption,
             ) {
                 Ordering::Less => continue,
                 Ordering::Greater => return Ok(LockedUniqueCheckResult::Clear),
@@ -2634,11 +2684,12 @@ fn bt_check_unique_locked(
         let Some(upper_bound) = leaf_upper_bound(ctx, &page, opaque)? else {
             return Ok(LockedUniqueCheckResult::Clear);
         };
-        if compare_key_prefixes_with_columns(
+        if compare_key_prefixes_with_columns_and_options(
             &ctx.index_desc.columns,
             key_values,
             &upper_bound,
             btree_key_count(&ctx.index_meta),
+            &ctx.index_meta.indoption,
         ) != Ordering::Equal
             || opaque.btpo_next == P_NONE
         {

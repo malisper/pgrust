@@ -1,6 +1,8 @@
 use std::cmp::Ordering;
 
-use crate::backend::access::nbtree::nbtcompare::{compare_bt_values, compare_item_pointers};
+use crate::backend::access::nbtree::nbtcompare::{
+    BT_DESC_FLAG, compare_bt_values_with_options, compare_item_pointers,
+};
 use crate::backend::access::nbtree::nbtutils::BtSortTuple;
 use crate::backend::parser::SqlTypeKind;
 use crate::include::access::itemptr::ItemPointerData;
@@ -17,14 +19,20 @@ impl BtSpool {
         self.tuples.push(tuple);
     }
 
-    pub fn finish(mut self, columns: &[ColumnDesc], key_count: usize) -> Vec<BtSortTuple> {
+    pub fn finish(
+        mut self,
+        columns: &[ColumnDesc],
+        key_count: usize,
+        indoption: &[i16],
+    ) -> Vec<BtSortTuple> {
         self.tuples.sort_by(|left, right| {
-            compare_keyspace_with_columns(
+            compare_keyspace_with_columns_and_options(
                 columns,
                 &left.key_values[..left.key_values.len().min(key_count)],
                 &left.tuple.t_tid,
                 &right.key_values[..right.key_values.len().min(key_count)],
                 &right.tuple.t_tid,
+                indoption,
             )
         });
         self.tuples
@@ -60,12 +68,13 @@ fn fixed_vector_items(value: &Value) -> Option<Vec<i64>> {
     }
 }
 
-fn compare_keyspace_with_columns(
+fn compare_keyspace_with_columns_and_options(
     columns: &[ColumnDesc],
     left_keys: &[Value],
     left_tid: &ItemPointerData,
     right_keys: &[Value],
     right_tid: &ItemPointerData,
+    indoption: &[i16],
 ) -> Ordering {
     for (idx, (left, right)) in left_keys.iter().zip(right_keys.iter()).enumerate() {
         if columns.get(idx).is_some_and(|column| {
@@ -76,13 +85,23 @@ fn compare_keyspace_with_columns(
         }) && let (Some(left_items), Some(right_items)) =
             (fixed_vector_items(left), fixed_vector_items(right))
         {
-            let ord = left_items.cmp(&right_items);
+            let mut ord = left_items.cmp(&right_items);
+            if indoption
+                .get(idx)
+                .is_some_and(|option| option & BT_DESC_FLAG != 0)
+            {
+                ord = ord.reverse();
+            }
             if ord != Ordering::Equal {
                 return ord;
             }
             continue;
         }
-        let ord = compare_bt_values(left, right);
+        let ord = compare_bt_values_with_options(
+            left,
+            right,
+            indoption.get(idx).copied().unwrap_or_default(),
+        );
         if ord != Ordering::Equal {
             return ord;
         }
@@ -124,7 +143,7 @@ mod tests {
             ),
             key_values: vec![Value::Int32(5)],
         });
-        let tuples = spool.finish(&[], 1);
+        let tuples = spool.finish(&[], 1, &[]);
         assert_eq!(tuples[0].tuple.t_tid.offset_number, 1);
     }
 }

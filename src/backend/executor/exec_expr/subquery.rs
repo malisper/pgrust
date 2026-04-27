@@ -230,17 +230,7 @@ pub(super) fn eval_quantified_subquery(
             saw_row = true;
             let mut values = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
             Value::materialize_all(&mut values);
-            let right_value = if matches!(left_value, Value::Record(_)) {
-                record_value_from_row(values)
-            } else {
-                if values.len() != 1 {
-                    return Err(ExecError::CardinalityViolation {
-                        message: "subquery must return only one column".into(),
-                        hint: None,
-                    });
-                }
-                values[0].clone()
-            };
+            let right_value = quantified_subquery_right_value(left_value, values)?;
             match compare_subquery_values(left_value, &right_value, op, collation_oid)? {
                 Value::Bool(result) => {
                     if !is_all && result {
@@ -262,6 +252,31 @@ pub(super) fn eval_quantified_subquery(
             Ok(Value::Bool(is_all))
         }
     })
+}
+
+fn quantified_subquery_right_value(
+    left_value: &Value,
+    values: Vec<Value>,
+) -> Result<Value, ExecError> {
+    if let Value::Record(record) = left_value {
+        if values.len() != record.fields.len() {
+            return Err(ExecError::CardinalityViolation {
+                message: "subquery row width does not match left row expression".into(),
+                hint: None,
+            });
+        }
+        return Ok(Value::Record(RecordValue::from_descriptor(
+            record.descriptor.clone(),
+            values,
+        )));
+    }
+    if values.len() != 1 {
+        return Err(ExecError::CardinalityViolation {
+            message: "subquery must return only one column".into(),
+            hint: None,
+        });
+    }
+    Ok(values.into_iter().next().unwrap_or(Value::Null))
 }
 
 fn is_pathological_regress_join_in_subquery(plan: &Plan) -> bool {

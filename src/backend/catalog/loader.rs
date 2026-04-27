@@ -20,8 +20,9 @@ use crate::backend::catalog::rowcodec::{
     pg_amop_row_from_values, pg_amproc_row_from_values, pg_attrdef_row_from_values,
     pg_attribute_row_from_values, pg_auth_members_row_from_values, pg_authid_row_from_values,
     pg_cast_row_from_values, pg_class_row_from_values, pg_collation_row_from_values,
-    pg_constraint_row_from_values, pg_database_row_from_values, pg_depend_row_from_values,
-    pg_description_row_from_values, pg_foreign_data_wrapper_row_from_values,
+    pg_constraint_row_from_values, pg_conversion_row_from_values, pg_database_row_from_values,
+    pg_depend_row_from_values, pg_description_row_from_values,
+    pg_foreign_data_wrapper_row_from_values, pg_foreign_server_row_from_values,
     pg_index_row_from_values, pg_inherits_row_from_values, pg_language_row_from_values,
     pg_opclass_row_from_values, pg_operator_row_from_values, pg_opfamily_row_from_values,
     pg_partitioned_table_row_from_values, pg_policy_row_from_values, pg_proc_row_from_values,
@@ -928,7 +929,12 @@ fn append_catalog_kind_rows(
                 .map(pg_constraint_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
-        BootstrapCatalogKind::PgConversion => {}
+        BootstrapCatalogKind::PgConversion => {
+            rows.conversions = values
+                .into_iter()
+                .map(pg_conversion_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
         BootstrapCatalogKind::PgDepend => {
             rows.depends = values
                 .into_iter()
@@ -946,6 +952,12 @@ fn append_catalog_kind_rows(
             rows.foreign_data_wrappers = values
                 .into_iter()
                 .map(pg_foreign_data_wrapper_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgForeignServer => {
+            rows.foreign_servers = values
+                .into_iter()
+                .map(pg_foreign_server_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
         BootstrapCatalogKind::PgIndex => {
@@ -1676,6 +1688,7 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         inherits: inherit_rows,
         descriptions: description_rows,
         foreign_data_wrappers: Vec::new(),
+        foreign_servers: Vec::new(),
         indexes: index_rows,
         rewrites: rewrite_rows,
         triggers: Vec::new(),
@@ -1704,6 +1717,7 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         procs: proc_rows,
         aggregates: aggregate_rows,
         casts: cast_rows,
+        conversions: Vec::new(),
         collations: collation_rows,
         databases: database_rows,
         tablespaces: tablespace_rows,
@@ -2387,6 +2401,7 @@ fn load_physical_catalog_rows_visible_legacy(
         inherits: inherit_rows,
         descriptions: description_rows,
         foreign_data_wrappers: Vec::new(),
+        foreign_servers: Vec::new(),
         indexes: index_rows,
         rewrites: rewrite_rows,
         triggers: Vec::new(),
@@ -2415,6 +2430,7 @@ fn load_physical_catalog_rows_visible_legacy(
         procs: proc_rows,
         aggregates: aggregate_rows,
         casts: cast_rows,
+        conversions: Vec::new(),
         collations: collation_rows,
         databases: database_rows,
         tablespaces: tablespace_rows,
