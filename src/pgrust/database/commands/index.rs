@@ -1529,6 +1529,7 @@ impl Database {
 
             let mut ctx = ExecutorContext {
                 pool: self.pool.clone(),
+                data_dir: None,
                 txns: self.txns.clone(),
                 txn_waiter: Some(self.txn_waiter.clone()),
                 lock_status_provider: Some(Arc::new(self.clone())),
@@ -2072,6 +2073,7 @@ impl Database {
         }
         let mut ctx = ExecutorContext {
             pool: self.pool.clone(),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),

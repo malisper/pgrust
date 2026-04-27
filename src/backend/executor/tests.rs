@@ -879,6 +879,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
     let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
     ExecutorContext {
         pool: test_pool(base),
+        data_dir: None,
         txns: std::sync::Arc::new(parking_lot::RwLock::new(txns)),
         txn_waiter: None,
         lock_status_provider: None,
@@ -954,6 +955,7 @@ fn run_plan(
     let mut state = executor_start(plan);
     let mut ctx = ExecutorContext {
         pool,
+        data_dir: None,
         txns: txns_arc,
         txn_waiter: None,
         lock_status_provider: None,
@@ -1065,6 +1067,7 @@ fn first_tuple_slot_kind_for_sql(
         let planned = planned_select_with_catalog(&sql, &catalog);
         let mut ctx = ExecutorContext {
             pool,
+            data_dir: None,
             txns: txns_arc,
             txn_waiter: None,
             lock_status_provider: None,
@@ -1158,6 +1161,7 @@ fn first_tuple_slot_kind_for_plan(
         let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
         let mut ctx = ExecutorContext {
             pool,
+            data_dir: None,
             txns: txns_arc,
             txn_waiter: None,
             lock_status_provider: None,
@@ -1265,6 +1269,7 @@ fn run_sql_with_catalog(
         let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
         let mut ctx = ExecutorContext {
             pool,
+            data_dir: None,
             txns: txns_arc,
             txn_waiter: None,
             lock_status_provider: None,
@@ -10004,6 +10009,38 @@ fn xml_input_errors_format_primary_message() {
 }
 
 #[test]
+fn xml_mapping_functions_report_unsupported_xml_feature() {
+    let base = temp_dir("xml_mapping_unsupported");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select query_to_xml('select 1', false, false, '')",
+    )
+    .unwrap_err();
+
+    assert_eq!(format_exec_error(&err), "unsupported XML feature");
+}
+
+#[test]
+fn xmlforest_reports_unsupported_xml_feature() {
+    let base = temp_dir("xmlforest_unsupported");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select xmlforest(1 as a)",
+    )
+    .unwrap_err();
+
+    assert_eq!(format_exec_error(&err), "unsupported XML feature");
+}
+
+#[test]
 fn oidvector_text_values_support_array_functions() {
     let base = temp_dir("oidvector_array_functions");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -11155,6 +11192,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
     let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
     let mut ctx = ExecutorContext {
         pool,
+        data_dir: None,
         txns: txns_arc,
         txn_waiter: None,
         lock_status_provider: None,
@@ -23038,6 +23076,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
         let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
         let mut ctx = ExecutorContext {
             pool,
+            data_dir: None,
             txns: txns_arc,
             txn_waiter: None,
             lock_status_provider: None,

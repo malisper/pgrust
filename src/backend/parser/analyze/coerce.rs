@@ -791,6 +791,21 @@ pub(super) fn infer_arithmetic_sql_type(expr: &SqlExpr, left: SqlType, right: Sq
         };
     }
 
+    if matches!(expr, SqlExpr::Add(_, _) | SqlExpr::Sub(_, _))
+        && matches!(left.kind, PgLsn)
+        && (matches!(right.kind, PgLsn) || is_numeric_family(right))
+    {
+        return if matches!(right.kind, PgLsn) {
+            SqlType::new(Numeric)
+        } else {
+            SqlType::new(PgLsn)
+        };
+    }
+    if matches!(expr, SqlExpr::Add(_, _)) && is_numeric_family(left) && matches!(right.kind, PgLsn)
+    {
+        return SqlType::new(PgLsn);
+    }
+
     let has_float8 = matches!(left.kind, Float8) || matches!(right.kind, Float8);
     let has_float4 = matches!(left.kind, Float4) || matches!(right.kind, Float4);
     if has_float8 {

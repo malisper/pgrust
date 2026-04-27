@@ -1,8 +1,10 @@
-use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(target_os = "macos")]
+use std::ffi::CString;
 
 use crate::backend::access::transam::{ControlFileState, ControlFileStore};
 use crate::pgrust::cluster::Cluster;

@@ -284,7 +284,7 @@ pub(crate) fn render_index_scan_condition_with_key_names(
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     key_column_names: Option<&[String]>,
 ) -> Option<String> {
-    render_index_scan_condition_with_runtime_renderer(
+    render_index_scan_condition_with_key_names_and_runtime_renderer(
         keys,
         desc,
         index_meta,
@@ -293,7 +293,7 @@ pub(crate) fn render_index_scan_condition_with_key_names(
     )
 }
 
-pub(crate) fn render_index_scan_condition_with_runtime_renderer(
+pub(crate) fn render_index_scan_condition_with_key_names_and_runtime_renderer(
     keys: &[IndexScanKey],
     desc: &RelationDesc,
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,

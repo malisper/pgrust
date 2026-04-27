@@ -1778,6 +1778,7 @@ impl Session {
 
         ExecutorContext {
             pool: Arc::clone(&db.pool),
+            data_dir: Some(db.cluster.base_dir.clone()),
             txns: db.txns.clone(),
             txn_waiter: Some(db.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(db.clone())),
@@ -4557,6 +4558,24 @@ impl Session {
         options: CursorOptions,
     ) -> Result<(), ExecError> {
         if self.active_txn.is_none() {
+            if options.holdable {
+                // :HACK: PostgreSQL permits DECLARE CURSOR WITH HOLD outside
+                // an explicit transaction by materializing the cursor across
+                // the implicit transaction boundary. Model that case here
+                // until portal commands share the normal autocommit path.
+                self.active_txn = Some(self.active_transaction_without_xid(db));
+                self.stats_state.write().begin_top_level_xact();
+                let result =
+                    self.declare_cursor_in_active_txn(db, name, source_text, query, options);
+                let result = result.and_then(|_| {
+                    self.validate_constraints_for_active_txn(db, false)?;
+                    Ok(StatementResult::AffectedRows(0))
+                });
+                let txn = self.active_txn.take().unwrap();
+                let result = self.finalize_taken_transaction(db, txn, result);
+                self.portals.drop_transaction_portals(result.is_ok());
+                return result.map(|_| ());
+            }
             return Err(ExecError::Parse(ParseError::DetailedError {
                 message: "DECLARE CURSOR can only be used in transaction blocks".into(),
                 detail: None,
@@ -4564,6 +4583,17 @@ impl Session {
                 sqlstate: "25P01",
             }));
         }
+        self.declare_cursor_in_active_txn(db, name, source_text, query, options)
+    }
+
+    fn declare_cursor_in_active_txn(
+        &mut self,
+        db: &Database,
+        name: &str,
+        source_text: String,
+        query: &SelectStatement,
+        options: CursorOptions,
+    ) -> Result<(), ExecError> {
         let guard = self.execute_streaming(db, query)?;
         let mut portal = Portal::streaming_select(
             name.to_string(),

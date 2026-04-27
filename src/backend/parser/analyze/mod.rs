@@ -813,6 +813,20 @@ fn validate_distinct_aggregate_order_by(
     Ok(())
 }
 
+pub(crate) fn default_pg_settings_rows() -> Vec<Vec<Value>> {
+    vec![
+        vec![
+            Value::Text("wal_segment_size".into()),
+            Value::Text(
+                crate::backend::access::transam::xlog::WAL_SEG_SIZE_BYTES
+                    .to_string()
+                    .into(),
+            ),
+        ],
+        vec![Value::Text("jit".into()), Value::Text("off".into())],
+    ]
+}
+
 pub trait CatalogLookup {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation>;
 
@@ -1291,6 +1305,10 @@ pub trait CatalogLookup {
 
     fn pg_stats_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
+    }
+
+    fn pg_settings_rows(&self) -> Vec<Vec<Value>> {
+        default_pg_settings_rows()
     }
 
     fn pg_stat_activity_rows(&self) -> Vec<Vec<Value>> {
