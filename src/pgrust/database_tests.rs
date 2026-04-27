@@ -9630,6 +9630,127 @@ fn relation_privileges_gate_select_dml_copy_and_locking() {
 }
 
 #[test]
+fn merge_returning_projects_action_old_new_and_source() {
+    let dir = temp_dir("merge_returning_projects_action");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table merge_returning_target(id int4 primary key, name text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into merge_returning_target values (1, 'alice'), (2, 'bob')",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into merge_returning_target t using (values (1, 'alicia')) as s(id, name) on t.id = s.id \
+             when matched then update set name = s.name \
+             returning merge_action(), s.name, old.name, new.name, t.name, \
+             (select old.name), (select (select new.name))",
+        ),
+        vec![vec![
+            Value::Text("UPDATE".into()),
+            Value::Text("alicia".into()),
+            Value::Text("alice".into()),
+            Value::Text("alicia".into()),
+            Value::Text("alicia".into()),
+            Value::Text("alice".into()),
+            Value::Text("alicia".into()),
+        ]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into merge_returning_target t using (values (2)) as s(id) on t.id = s.id \
+             when matched then delete \
+             returning merge_action(), old.id, new.id, t.id",
+        ),
+        vec![vec![
+            Value::Text("DELETE".into()),
+            Value::Int32(2),
+            Value::Null,
+            Value::Int32(2),
+        ]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into merge_returning_target t using (values (3, 'carol')) as s(id, name) on t.id = s.id \
+             when not matched then insert values (s.id, s.name) \
+             returning merge_action(), old.id, new.id, t.id",
+        ),
+        vec![vec![
+            Value::Text("INSERT".into()),
+            Value::Null,
+            Value::Int32(3),
+            Value::Int32(3),
+        ]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table merge_returning_view_base(id int4 primary key, name text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into merge_returning_view_base values (1, 'one')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view merge_returning_view as select id, name from merge_returning_view_base where id > 0",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into merge_returning_view t using (values (1, 'uno')) as s(id, name) on t.id = s.id \
+             when matched then update set name = s.name \
+             returning merge_action(), s.name, old.name, new.name, t.name",
+        ),
+        vec![vec![
+            Value::Text("UPDATE".into()),
+            Value::Text("uno".into()),
+            Value::Text("one".into()),
+            Value::Text("uno".into()),
+            Value::Text("uno".into()),
+        ]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into merge_returning_view t using (values (3, 'three')) as s(id, name) on t.id = s.id \
+             when not matched then insert values (s.id, s.name) \
+             returning merge_action(), old.id, new.id, t.id",
+        ),
+        vec![vec![
+            Value::Text("INSERT".into()),
+            Value::Null,
+            Value::Int32(3),
+            Value::Int32(3),
+        ]]
+    );
+}
+
+#[test]
 fn inherited_update_delete_follow_postgres_targeting_rules() {
     let dir = temp_dir("inheritance_guardrails");
     let db = Database::open(&dir, 128).unwrap();
@@ -10067,6 +10188,69 @@ fn create_view_persists_security_reloptions() {
             "select reloptions from pg_class where relname = 'secure_items'",
         ),
         vec![vec![Value::Null]]
+    );
+}
+
+#[test]
+fn security_barrier_inheritance_view_filters_through_subquery_scan() {
+    let dir = temp_dir("security_barrier_inheritance_view");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table sb_parent(a int4, b float8, c text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into sb_parent values (8, 8, 'parent')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table sb_child(extra text) inherits (sb_parent)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into sb_child values (8, 8, 'child', 'extra'), (9, 8, 'child9', 'extra')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view sb_view with (security_barrier=true) as \
+             select *, (select c from sb_child c2 where c2.a = sb_parent.a limit 1) as child_c \
+             from sb_parent \
+             where a > 5 and exists(select 1 from sb_child c3 where c3.a = sb_parent.a)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select a, b, c, child_c from sb_view where b = 8 order by a, c",
+        ),
+        vec![
+            vec![
+                Value::Int32(8),
+                Value::Float64(8.0),
+                Value::Text("child".into()),
+                Value::Text("child".into()),
+            ],
+            vec![
+                Value::Int32(8),
+                Value::Float64(8.0),
+                Value::Text("parent".into()),
+                Value::Text("child".into()),
+            ],
+            vec![
+                Value::Int32(9),
+                Value::Float64(8.0),
+                Value::Text("child9".into()),
+                Value::Text("child9".into()),
+            ],
+        ]
     );
 }
 

@@ -135,6 +135,7 @@ pub struct BoundMergeStatement {
     pub target_ctid_index: usize,
     pub source_present_index: usize,
     pub when_clauses: Vec<BoundMergeWhenClause>,
+    pub returning: Vec<TargetEntry>,
     pub input_plan: crate::include::nodes::plannodes::PlannedStmt,
 }
 
@@ -716,12 +717,28 @@ fn returning_pseudo_output_exprs(desc: &RelationDesc, varno: usize) -> Vec<Expr>
         .collect()
 }
 
-fn scope_with_returning_pseudo_rows(mut scope: BoundScope, desc: &RelationDesc) -> BoundScope {
+fn scope_with_returning_pseudo_rows(scope: BoundScope, desc: &RelationDesc) -> BoundScope {
+    scope_with_returning_pseudo_row_exprs(
+        scope,
+        desc,
+        returning_pseudo_output_exprs(desc, OUTER_VAR),
+        returning_pseudo_output_exprs(desc, INNER_VAR),
+    )
+}
+
+fn scope_with_returning_pseudo_row_exprs(
+    mut scope: BoundScope,
+    desc: &RelationDesc,
+    old_output_exprs: Vec<Expr>,
+    new_output_exprs: Vec<Expr>,
+) -> BoundScope {
     for (relation_name, varno) in [("old", OUTER_VAR), ("new", INNER_VAR)] {
         scope.desc.columns.extend(desc.columns.iter().cloned());
-        scope
-            .output_exprs
-            .extend(returning_pseudo_output_exprs(desc, varno));
+        scope.output_exprs.extend(if varno == OUTER_VAR {
+            old_output_exprs.clone()
+        } else {
+            new_output_exprs.clone()
+        });
         scope
             .columns
             .extend(desc.columns.iter().map(|column| ScopeColumn {
@@ -743,6 +760,46 @@ fn scope_with_returning_pseudo_rows(mut scope: BoundScope, desc: &RelationDesc) 
             relation_oid: None,
         });
     }
+    scope
+}
+
+fn projected_output_exprs(desc: &RelationDesc, start_index: usize) -> Vec<Expr> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(start_index + index),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+            })
+        })
+        .collect()
+}
+
+fn projected_output_exprs_with_width(
+    desc: &RelationDesc,
+    start_index: usize,
+    width: usize,
+) -> Vec<Expr> {
+    desc.columns
+        .iter()
+        .take(width)
+        .enumerate()
+        .map(|(index, column)| {
+            Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(start_index + index),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+            })
+        })
+        .collect()
+}
+
+fn scope_with_output_exprs(mut scope: BoundScope, output_exprs: Vec<Expr>) -> BoundScope {
+    scope.output_exprs = output_exprs;
     scope
 }
 
@@ -1019,6 +1076,81 @@ fn rewrite_merge_when_clause_auto_view(
     Ok(BoundMergeWhenClause { action, ..clause })
 }
 
+fn is_merge_action_returning_call(expr: &SqlExpr) -> bool {
+    match expr {
+        SqlExpr::FuncCall {
+            name,
+            args,
+            order_by,
+            within_group,
+            distinct,
+            func_variadic,
+            filter,
+            over,
+        } => {
+            name.eq_ignore_ascii_case("merge_action")
+                && matches!(args, SqlCallArgs::Args(args) if args.is_empty())
+                && order_by.is_empty()
+                && within_group.is_none()
+                && !distinct
+                && !func_variadic
+                && filter.is_none()
+                && over.is_none()
+        }
+        _ => false,
+    }
+}
+
+fn bind_merge_returning_targets(
+    targets: &[crate::include::nodes::parsenodes::SelectItem],
+    scope: &BoundScope,
+    merge_action_index: usize,
+    catalog: &dyn CatalogLookup,
+    local_ctes: &[BoundCte],
+) -> Result<Vec<TargetEntry>, ParseError> {
+    let mut entries = Vec::new();
+    for item in targets {
+        if is_merge_action_returning_call(&item.expr) {
+            entries.push(
+                TargetEntry::new(
+                    item.output_name.clone(),
+                    Expr::Var(Var {
+                        varno: 1,
+                        varattno: user_attrno(merge_action_index),
+                        varlevelsup: 0,
+                        vartype: SqlType::new(SqlTypeKind::Text),
+                    }),
+                    SqlType::new(SqlTypeKind::Text),
+                    entries.len() + 1,
+                )
+                .with_input_resno(merge_action_index + 1),
+            );
+            continue;
+        }
+        let BoundSelectTargets::Plain(bound) = bind_select_targets(
+            std::slice::from_ref(item),
+            scope,
+            catalog,
+            &[],
+            None,
+            local_ctes,
+        )?;
+        for mut target in bound {
+            target.resno = entries.len() + 1;
+            entries.push(target);
+        }
+    }
+    if entries
+        .iter()
+        .any(|target| expr_contains_set_returning(&target.expr))
+    {
+        return Err(ParseError::FeatureNotSupported(
+            "set-returning functions are not allowed in RETURNING".into(),
+        ));
+    }
+    Ok(entries)
+}
+
 pub fn plan_merge(
     stmt: &MergeStatement,
     catalog: &dyn CatalogLookup,
@@ -1113,15 +1245,68 @@ pub fn plan_merge(
     )
     .unwrap_or(Expr::Const(Value::Bool(true)));
 
+    let projected_target_output_exprs = projected_output_exprs(&execution_relation.desc, 0);
+    let action_target_output_exprs = if let Some(resolved) = auto_view_target.as_ref() {
+        resolved
+            .visible_output_exprs
+            .iter()
+            .cloned()
+            .map(|expr| {
+                rewrite_local_vars_for_output_exprs(expr, 1, &projected_target_output_exprs)
+            })
+            .collect()
+    } else {
+        projected_target_output_exprs.clone()
+    };
+    let action_target_scope =
+        scope_with_output_exprs(target_scope.clone(), action_target_output_exprs);
+    let action_source_scope = scope_with_output_exprs(
+        source_scope.clone(),
+        projected_output_exprs_with_width(
+            &source_scope.desc,
+            execution_relation.desc.columns.len(),
+            source_visible_count,
+        ),
+    );
+    let action_merged_scope = combine_scopes(&action_target_scope, &action_source_scope);
+
+    let returning_visible_column_count =
+        execution_relation.desc.columns.len() + source_visible_count;
+    let returning_scope = if let Some(resolved) = auto_view_target.as_ref() {
+        scope_with_returning_pseudo_row_exprs(
+            action_merged_scope.clone(),
+            &entry.desc,
+            view_returning_pseudo_output_exprs(
+                &resolved.visible_output_exprs,
+                &resolved.base_relation.desc,
+                OUTER_VAR,
+            ),
+            view_returning_pseudo_output_exprs(
+                &resolved.visible_output_exprs,
+                &resolved.base_relation.desc,
+                INNER_VAR,
+            ),
+        )
+    } else {
+        scope_with_returning_pseudo_rows(action_merged_scope.clone(), &execution_relation.desc)
+    };
+    let returning = bind_merge_returning_targets(
+        &stmt.returning,
+        &returning_scope,
+        returning_visible_column_count,
+        catalog,
+        &local_ctes,
+    )?;
+
     let mut when_clauses = stmt
         .when_clauses
         .iter()
         .map(|clause| {
             bind_merge_when_clause(
                 clause,
-                &target_scope,
-                &source_scope,
-                &merged_scope,
+                &action_target_scope,
+                &action_source_scope,
+                &action_merged_scope,
                 catalog,
                 &local_ctes,
                 &entry.desc,
@@ -1143,7 +1328,7 @@ pub fn plan_merge(
         join_condition,
         None,
     );
-    let visible_column_count = execution_relation.desc.columns.len() + source_visible_count;
+    let visible_column_count = returning_visible_column_count;
     let target_ctid_index = visible_column_count;
     let source_present_index = visible_column_count + 1;
     let joined_target_columns = joined.output_columns.clone();
@@ -1220,6 +1405,7 @@ pub fn plan_merge(
         target_ctid_index,
         source_present_index,
         when_clauses,
+        returning,
         input_plan: crate::backend::optimizer::fold_query_constants(query)
             .map(|query| crate::backend::optimizer::planner(query, catalog))??,
     })
@@ -1594,18 +1780,10 @@ fn rewrite_auto_view_returning_targets(
     output_exprs: &[Expr],
     base_desc: &RelationDesc,
 ) -> Vec<TargetEntry> {
-    let base_old_output_exprs = returning_pseudo_output_exprs(base_desc, OUTER_VAR);
-    let base_new_output_exprs = returning_pseudo_output_exprs(base_desc, INNER_VAR);
-    let old_view_output_exprs = output_exprs
-        .iter()
-        .cloned()
-        .map(|expr| rewrite_local_vars_for_output_exprs(expr, 1, &base_old_output_exprs))
-        .collect::<Vec<_>>();
-    let new_view_output_exprs = output_exprs
-        .iter()
-        .cloned()
-        .map(|expr| rewrite_local_vars_for_output_exprs(expr, 1, &base_new_output_exprs))
-        .collect::<Vec<_>>();
+    let old_view_output_exprs =
+        view_returning_pseudo_output_exprs(output_exprs, base_desc, OUTER_VAR);
+    let new_view_output_exprs =
+        view_returning_pseudo_output_exprs(output_exprs, base_desc, INNER_VAR);
     targets
         .into_iter()
         .map(|target| TargetEntry {
@@ -1620,6 +1798,19 @@ fn rewrite_auto_view_returning_targets(
             ),
             ..target
         })
+        .collect()
+}
+
+fn view_returning_pseudo_output_exprs(
+    output_exprs: &[Expr],
+    base_desc: &RelationDesc,
+    varno: usize,
+) -> Vec<Expr> {
+    let base_output_exprs = returning_pseudo_output_exprs(base_desc, varno);
+    output_exprs
+        .iter()
+        .cloned()
+        .map(|expr| rewrite_local_vars_for_output_exprs(expr, 1, &base_output_exprs))
         .collect()
 }
 
