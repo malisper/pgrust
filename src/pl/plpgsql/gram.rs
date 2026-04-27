@@ -719,13 +719,14 @@ fn build_return_query_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
 }
 
 fn build_perform_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let line = pair.as_span().start_pos().line_col().0;
     let sql = pair
         .into_inner()
         .find(|part| part.as_rule() == Rule::exec_sql_text)
         .map(|part| part.as_str().trim().to_string())
         .filter(|text| !text.is_empty())
         .ok_or(ParseError::UnexpectedEof)?;
-    Ok(Stmt::Perform { sql })
+    Ok(Stmt::Perform { sql, line })
 }
 
 fn build_dynamic_execute_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {

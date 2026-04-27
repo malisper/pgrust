@@ -489,6 +489,8 @@ pub enum Statement {
     Notify(NotifyStatement),
     Listen(ListenStatement),
     Unlisten(UnlistenStatement),
+    Load(LoadStatement),
+    Discard(DiscardStatement),
     DeclareCursor(DeclareCursorStatement),
     Fetch(FetchStatement),
     Move(FetchStatement),
@@ -503,6 +505,23 @@ pub enum Statement {
     Rollback,
     Savepoint(String),
     RollbackTo(String),
+    ReleaseSavepoint(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadStatement {
+    pub filename: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardStatement {
+    pub target: DiscardTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardTarget {
+    All,
+    Temp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -734,6 +753,7 @@ pub struct CreateFunctionStatement {
     pub language: String,
     pub body: String,
     pub link_symbol: Option<String>,
+    pub config: Vec<AlterRoutineOption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

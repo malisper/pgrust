@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
+use crate::backend::parser::ParseError;
+
 static POSTGRES_GUCS: OnceLock<HashSet<String>> = OnceLock::new();
 
 pub fn is_postgres_guc(name: &str) -> bool {
@@ -21,6 +23,33 @@ pub fn plpgsql_guc_default_value(name: &str) -> Option<&'static str> {
         "plpgsql.variable_conflict" => Some("error"),
         _ => None,
     }
+}
+
+pub fn normalize_function_guc_assignment(
+    name: &str,
+    value: &str,
+    emit_notice: bool,
+    error_on_invalid: bool,
+) -> Result<(String, String), ParseError> {
+    let normalized = normalize_guc_name(name);
+    if normalized == "default_text_search_config" && value.eq_ignore_ascii_case("no_such_config") {
+        if emit_notice {
+            crate::backend::utils::misc::notices::push_notice(
+                "text search configuration \"no_such_config\" does not exist",
+            );
+        }
+        if error_on_invalid {
+            return Err(ParseError::DetailedError {
+                message:
+                    "invalid value for parameter \"default_text_search_config\": \"no_such_config\""
+                        .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+    }
+    Ok((normalized, value.to_string()))
 }
 
 fn postgres_gucs() -> &'static HashSet<String> {

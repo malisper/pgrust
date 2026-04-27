@@ -40,6 +40,7 @@ pub(crate) struct CompiledBlock {
 #[derive(Debug, Clone)]
 pub struct CompiledFunction {
     pub(crate) name: String,
+    pub(crate) proconfig: Option<Vec<String>>,
     pub(crate) parameter_slots: Vec<CompiledFunctionSlot>,
     pub(crate) output_slots: Vec<CompiledOutputSlot>,
     pub(crate) body: CompiledBlock,
@@ -239,11 +240,17 @@ pub(crate) enum CompiledStmt {
     },
     Perform {
         plan: PlannedStmt,
+        line: usize,
     },
     DynamicExecute {
         sql_expr: CompiledExpr,
         into_targets: Vec<CompiledSelectIntoTarget>,
         using_exprs: Vec<CompiledExpr>,
+    },
+    SetGuc {
+        name: String,
+        value: Option<String>,
+        is_local: bool,
     },
     GetDiagnostics {
         stacked: bool,
@@ -585,6 +592,7 @@ pub(crate) fn compile_do_function(
     let body = compile_block(block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
         name: "inline_code_block".into(),
+        proconfig: None,
         parameter_slots: Vec::new(),
         output_slots: Vec::new(),
         body,
@@ -697,6 +705,7 @@ pub(crate) fn compile_function_from_proc(
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
         name: row.proname.clone(),
+        proconfig: row.proconfig.clone(),
         parameter_slots,
         output_slots,
         body,
@@ -739,6 +748,7 @@ pub(crate) fn compile_trigger_function_from_proc(
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
         name: row.proname.clone(),
+        proconfig: row.proconfig.clone(),
         parameter_slots: Vec::new(),
         output_slots: Vec::new(),
         body,
@@ -1130,7 +1140,7 @@ fn compile_stmt(
         Stmt::ReturnQuery { sql, kind } => {
             compile_return_query_stmt(sql, *kind, catalog, env, return_contract)?
         }
-        Stmt::Perform { sql } => compile_perform_stmt(sql, catalog, env)?,
+        Stmt::Perform { sql, line } => compile_perform_stmt(sql, *line, catalog, env)?,
         Stmt::DynamicExecute {
             sql_expr,
             into_targets,
@@ -1346,6 +1356,7 @@ fn compile_return_query_stmt(
 
 fn compile_perform_stmt(
     sql: &str,
+    line: usize,
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
@@ -1355,7 +1366,10 @@ fn compile_perform_stmt(
         catalog,
         env,
     )?;
-    Ok(CompiledStmt::Perform { plan: planned })
+    Ok(CompiledStmt::Perform {
+        plan: planned,
+        line,
+    })
 }
 
 fn compile_dynamic_execute_stmt(
@@ -1477,6 +1491,7 @@ fn compile_exec_sql_stmt(
                 &[outer_scope],
                 &env.local_ctes,
             )?,
+            line: 1,
         }),
         Statement::Values(stmt) => Ok(CompiledStmt::Perform {
             plan: pg_plan_values_query_with_outer_scopes_and_ctes(
@@ -1485,6 +1500,7 @@ fn compile_exec_sql_stmt(
                 &[outer_scope],
                 &env.local_ctes,
             )?,
+            line: 1,
         }),
         Statement::Insert(stmt) => Ok(CompiledStmt::ExecInsert {
             stmt: bind_insert_with_outer_scopes(&stmt, catalog, &[outer_scope])?,
@@ -1500,6 +1516,11 @@ fn compile_exec_sql_stmt(
             // use SET LOCAL jit=0 only to stabilize EXPLAIN.
             Ok(CompiledStmt::Null)
         }
+        Statement::Set(stmt) => Ok(CompiledStmt::SetGuc {
+            name: stmt.name,
+            value: stmt.value,
+            is_local: stmt.is_local,
+        }),
         other => Err(ParseError::UnexpectedToken {
             expected: "PL/pgSQL SQL statement",
             actual: format!("{other:?}"),

@@ -168,6 +168,7 @@ fn execute_statement_with_source(
             }
             Ok(StatementResult::AffectedRows(0))
         }
+        Statement::Load(_) | Statement::Discard(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::DeclareCursor(_)
         | Statement::Fetch(_)
         | Statement::Move(_)
@@ -617,6 +618,7 @@ fn execute_statement_with_source(
         | Statement::Commit
         | Statement::Rollback
         | Statement::Savepoint(_)
+        | Statement::ReleaseSavepoint(_)
         | Statement::RollbackTo(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "non-transaction-control statement",

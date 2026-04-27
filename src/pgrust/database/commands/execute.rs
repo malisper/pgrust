@@ -615,6 +615,7 @@ impl Database {
             Statement::Unlisten(ref unlisten_stmt) => {
                 Ok(self.execute_unlisten_stmt(client_id, unlisten_stmt))
             }
+            Statement::Load(_) | Statement::Discard(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Analyze(ref analyze_stmt) => self.execute_analyze_stmt_with_search_path(
                 client_id,
                 analyze_stmt,
@@ -2382,6 +2383,7 @@ impl Database {
             | Statement::Commit
             | Statement::Rollback
             | Statement::Savepoint(_)
+            | Statement::ReleaseSavepoint(_)
             | Statement::RollbackTo(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::DeclareCursor(_)
             | Statement::Fetch(_)
@@ -2446,6 +2448,7 @@ impl Database {
             transaction_lock_scope_id,
             configured_search_path,
             datetime_config,
+            &std::collections::HashMap::new(),
             None,
             PlannerConfig::default(),
         )
@@ -2460,6 +2463,7 @@ impl Database {
         transaction_lock_scope_id: Option<u64>,
         configured_search_path: Option<&[String]>,
         datetime_config: &DateTimeConfig,
+        gucs: &std::collections::HashMap<String, String>,
         snapshot_override: Option<crate::backend::access::transam::xact::Snapshot>,
         planner_config: PlannerConfig,
     ) -> Result<SelectGuard, ExecError> {
@@ -2471,6 +2475,7 @@ impl Database {
             transaction_lock_scope_id,
             configured_search_path,
             datetime_config,
+            gucs,
             snapshot_override,
             planner_config,
             crate::backend::executor::PgPrngState::shared(),
@@ -2486,6 +2491,7 @@ impl Database {
         transaction_lock_scope_id: Option<u64>,
         configured_search_path: Option<&[String]>,
         datetime_config: &DateTimeConfig,
+        gucs: &std::collections::HashMap<String, String>,
         snapshot_override: Option<crate::backend::access::transam::xact::Snapshot>,
         planner_config: PlannerConfig,
         random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
@@ -2540,7 +2546,7 @@ impl Database {
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: datetime_config.clone(),
             statement_timestamp_usecs: statement_timestamp_usecs(datetime_config),
-            gucs: std::collections::HashMap::new(),
+            gucs: gucs.clone(),
             interrupts,
             stats: std::sync::Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),

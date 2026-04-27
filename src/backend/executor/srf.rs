@@ -134,6 +134,9 @@ fn execute_user_defined_set_returning_function_by_language(
     if let Some(rows) = execute_native_set_returning_function(&row, args, slot, ctx)? {
         return Ok(rows);
     }
+    if row.proname.eq_ignore_ascii_case("pg_show_all_settings") {
+        return Ok(eval_pg_show_all_settings(output_columns));
+    }
     if row.prolang == crate::include::catalog::PG_LANGUAGE_SQL_OID {
         execute_user_defined_sql_set_returning_function(&row, args, output_columns, slot, ctx)
     } else if let Some(kind) = text_search_table_function_for_proc_src(&row.prosrc) {
@@ -527,6 +530,35 @@ fn text_array_value(values: Vec<String>) -> Value {
         )
         .with_element_type_oid(TEXT_TYPE_OID),
     )
+}
+
+fn eval_pg_show_all_settings(
+    output_columns: &[crate::include::nodes::primnodes::QueryColumn],
+) -> Vec<TupleSlot> {
+    let row = output_columns
+        .iter()
+        .map(|column| match column.name.as_str() {
+            "name" => Value::Text("default_statistics_target".into()),
+            "setting" => Value::Text("100".into()),
+            "unit" => Value::Null,
+            "category" => Value::Text("Query Tuning / Planner Cost Constants".into()),
+            "short_desc" => Value::Text("Sets the default statistics target.".into()),
+            "extra_desc" => Value::Null,
+            "context" => Value::Text("user".into()),
+            "vartype" => Value::Text("integer".into()),
+            "source" => Value::Text("default".into()),
+            "min_val" => Value::Text("1".into()),
+            "max_val" => Value::Text("10000".into()),
+            "enumvals" => Value::Null,
+            "boot_val" => Value::Text("100".into()),
+            "reset_val" => Value::Text("100".into()),
+            "sourcefile" => Value::Null,
+            "sourceline" => Value::Null,
+            "pending_restart" => Value::Bool(false),
+            _ => Value::Null,
+        })
+        .collect();
+    vec![TupleSlot::virtual_row(row)]
 }
 
 pub(crate) fn eval_project_set_returning_call(

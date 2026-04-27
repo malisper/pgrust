@@ -140,6 +140,7 @@ pub enum Stmt {
     },
     Perform {
         sql: String,
+        line: usize,
     },
     DynamicExecute {
         sql_expr: String,

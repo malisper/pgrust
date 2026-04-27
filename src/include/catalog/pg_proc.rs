@@ -361,6 +361,7 @@ pub struct PgProcRow {
     pub prosrc: String,
     pub probin: Option<String>,
     pub prosqlbody: Option<String>,
+    pub proconfig: Option<Vec<String>>,
 }
 
 impl Eq for PgProcRow {}
@@ -419,6 +420,11 @@ pub fn pg_proc_desc() -> RelationDesc {
             column_desc("prosrc", SqlType::new(SqlTypeKind::Text), false),
             column_desc("probin", SqlType::new(SqlTypeKind::Text), true),
             column_desc("prosqlbody", SqlType::new(SqlTypeKind::PgNodeTree), true),
+            column_desc(
+                "proconfig",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                true,
+            ),
             column_desc(
                 "proacl",
                 SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
@@ -4561,7 +4567,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         variadic_proc_row(
-            6240,
+            3539,
             "format",
             TEXT_TYPE_OID,
             &oid_argtypes(&[TEXT_TYPE_OID, ANYOID]),
@@ -6201,10 +6207,54 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
     rows.extend(hash_extended_proc_rows());
     rows.extend(enum_proc_rows());
     rows.extend(text_search_proc_rows());
+    rows.extend(settings_proc_rows());
     rows.extend(operator_catalog_proc_rows());
     rows.extend(missing_leakproof_proc_rows());
     mark_catalog_leakproof_rows(&mut rows);
     rows
+}
+
+fn settings_proc_rows() -> Vec<PgProcRow> {
+    vec![
+        record_out_proc_row(
+            2084,
+            "pg_show_all_settings",
+            "",
+            "show_all_settings",
+            0,
+            &[
+                ("name", TEXT_TYPE_OID),
+                ("setting", TEXT_TYPE_OID),
+                ("unit", TEXT_TYPE_OID),
+                ("category", TEXT_TYPE_OID),
+                ("short_desc", TEXT_TYPE_OID),
+                ("extra_desc", TEXT_TYPE_OID),
+                ("context", TEXT_TYPE_OID),
+                ("vartype", TEXT_TYPE_OID),
+                ("source", TEXT_TYPE_OID),
+                ("min_val", TEXT_TYPE_OID),
+                ("max_val", TEXT_TYPE_OID),
+                ("enumvals", TEXT_ARRAY_TYPE_OID),
+                ("boot_val", TEXT_TYPE_OID),
+                ("reset_val", TEXT_TYPE_OID),
+                ("sourcefile", TEXT_TYPE_OID),
+                ("sourceline", INT4_TYPE_OID),
+                ("pending_restart", BOOL_TYPE_OID),
+            ],
+        ),
+        proc_row(
+            6240,
+            "pg_settings_get_flags",
+            TEXT_ARRAY_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "pg_settings_get_flags",
+            1,
+            false,
+            true,
+            'f',
+            's',
+        ),
+    ]
 }
 
 fn text_search_proc_rows() -> Vec<PgProcRow> {
@@ -9442,6 +9492,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("setseed", BuiltinScalarFunction::SetSeed),
         ("current_database", BuiltinScalarFunction::CurrentDatabase),
         ("pg_backend_pid", BuiltinScalarFunction::PgBackendPid),
+        (
+            "pg_settings_get_flags",
+            BuiltinScalarFunction::PgSettingsGetFlags,
+        ),
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),
         ("cash_words", BuiltinScalarFunction::CashWords),
@@ -15655,6 +15709,7 @@ fn proc_row_with_parallel(
         prosrc: prosrc.into(),
         probin: None,
         prosqlbody: None,
+        proconfig: None,
     }
 }
 
@@ -16030,6 +16085,7 @@ mod tests {
                 "prosrc",
                 "probin",
                 "prosqlbody",
+                "proconfig",
                 "proacl",
             ]
         );

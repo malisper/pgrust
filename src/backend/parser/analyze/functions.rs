@@ -1426,6 +1426,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgRustTestInt44Out => args.len() == 1,
             BuiltinScalarFunction::PgRustTestPtInWidget => args.len() == 2,
             BuiltinScalarFunction::CurrentSetting => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgSettingsGetFlags => args.len() == 1,
             BuiltinScalarFunction::AmValidate | BuiltinScalarFunction::BtEqualImage => {
                 args.len() == 1
             }

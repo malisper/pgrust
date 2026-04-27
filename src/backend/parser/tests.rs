@@ -5193,6 +5193,7 @@ fn parse_create_function_statement_with_returns_table() {
             language: "plpgsql".into(),
             body: " begin return next; end ".into(),
             link_symbol: None,
+            config: Vec::new(),
         })
     );
 }
@@ -5236,6 +5237,7 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
             language: "plpgsql".into(),
             body: " begin return next; end ".into(),
             link_symbol: None,
+            config: Vec::new(),
         })
     );
 }
@@ -5592,6 +5594,7 @@ fn parse_create_function_statement_with_unnamed_args() {
             language: "plpgsql".into(),
             body: " begin return true; end ".into(),
             link_symbol: None,
+            config: Vec::new(),
         })
     );
 }
@@ -5635,6 +5638,7 @@ fn parse_create_function_statement_with_variadic_arg() {
             language: "sql".into(),
             body: " select $1[1] ".into(),
             link_symbol: None,
+            config: Vec::new(),
         })
     );
 }
@@ -5682,6 +5686,7 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
             language: "c".into(),
             body: "regress".into(),
             link_symbol: Some("binary_coercible".into()),
+            config: Vec::new(),
         })
     );
 }
@@ -5719,6 +5724,7 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
             language: "sql".into(),
             body: "select substr(encode(sha256($1), 'hex'), 1, 32)".into(),
             link_symbol: None,
+            config: Vec::new(),
         })
     );
 }
@@ -5756,6 +5762,7 @@ fn parse_create_function_statement_with_cost_clause() {
             language: "plpgsql".into(),
             body: " begin return true; end ".into(),
             link_symbol: None,
+            config: Vec::new(),
         })
     );
 }
