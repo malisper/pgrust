@@ -5027,6 +5027,7 @@ fn parse_create_function_statement_with_returns_table() {
             function_name: "pair_rows".into(),
             replace_existing: false,
             cost: None,
+            support: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
@@ -5069,6 +5070,7 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
             function_name: "pair_rows".into(),
             replace_existing: true,
             cost: None,
+            support: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
@@ -5420,6 +5422,7 @@ fn parse_create_function_statement_with_unnamed_args() {
             function_name: "binary_coercible".into(),
             replace_existing: false,
             cost: None,
+            support: None,
             args: vec![
                 CreateFunctionArg {
                     mode: FunctionArgMode::In,
@@ -5466,6 +5469,7 @@ fn parse_create_function_statement_with_variadic_arg() {
             function_name: "least_accum".into(),
             replace_existing: false,
             cost: None,
+            support: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: Some("items".into()),
@@ -5508,6 +5512,7 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
             function_name: "binary_coercible".into(),
             replace_existing: false,
             cost: None,
+            support: None,
             args: vec![
                 CreateFunctionArg {
                     mode: FunctionArgMode::In,
@@ -5554,6 +5559,7 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
             function_name: "fipshash".into(),
             replace_existing: false,
             cost: None,
+            support: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: None,
@@ -5590,6 +5596,7 @@ fn parse_create_function_statement_with_cost_clause() {
             function_name: "f_leak".into(),
             replace_existing: true,
             cost: Some("0.0000001".into()),
+            support: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: None,
@@ -5611,6 +5618,29 @@ fn parse_create_function_statement_with_cost_clause() {
             link_symbol: None,
         })
     );
+}
+
+#[test]
+fn parse_create_function_statement_with_support_clause() {
+    let stmt = parse_statement(
+        "create function my_gen_series(int, int) returns setof integer language internal strict immutable parallel safe as $$generate_series_int4$$ support pg_catalog.test_support_func",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            function_name,
+            support: Some(RoutineSignature {
+                schema_name: Some(schema_name),
+                routine_name,
+                arg_types,
+            }),
+            ..
+        }) if function_name == "my_gen_series"
+            && schema_name == "pg_catalog"
+            && routine_name == "test_support_func"
+            && arg_types.is_empty()
+    ));
 }
 
 #[test]
@@ -5741,6 +5771,24 @@ fn parse_drop_and_alter_procedure_statements() {
             action: AlterRoutineAction::OwnerTo {
                 new_owner: "app_owner".into()
             },
+        })
+    );
+    assert_eq!(
+        parse_statement("alter function my_int_eq(int, int) support test_support_func").unwrap(),
+        Statement::AlterRoutine(AlterRoutineStatement {
+            kind: RoutineKind::Function,
+            signature: RoutineSignature {
+                schema_name: None,
+                routine_name: "my_int_eq".into(),
+                arg_types: vec!["int".into(), "int".into()],
+            },
+            action: AlterRoutineAction::Options(vec![AlterRoutineOption::Support(
+                RoutineSignature {
+                    schema_name: None,
+                    routine_name: "test_support_func".into(),
+                    arg_types: Vec::new(),
+                }
+            )]),
         })
     );
     assert_eq!(
@@ -14430,6 +14478,26 @@ fn build_plan_for_select_list_json_each_uses_record_project_set() {
 }
 
 #[test]
+fn build_plan_resolves_field_select_from_select_list_record_srf_alias() {
+    let stmt =
+        parse_select("select (w).size = 16777216 from (select pg_ls_waldir() w) ss").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    assert_eq!(plan.columns()[0].sql_type, SqlType::new(SqlTypeKind::Bool));
+}
+
+#[test]
+fn build_plan_resolves_pg_lsn_arithmetic_record_function_in_from() {
+    let stmt = parse_select(
+        "select segment_number, file_offset from pg_walfile_name_offset('0/0'::pg_lsn + 16777216), pg_split_walfile_name(file_name)",
+    )
+    .unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    let columns = plan.columns();
+    assert_eq!(columns[0].sql_type, SqlType::new(SqlTypeKind::Numeric));
+    assert_eq!(columns[1].sql_type, SqlType::new(SqlTypeKind::Int4));
+}
+
+#[test]
 fn build_plan_for_select_list_jsonb_each_field_select_projects_key_column() {
     let stmt = parse_select("select (jsonb_each('{\"a\":1}'::jsonb)).key").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
@@ -15590,6 +15658,21 @@ fn parse_create_table_column_defaults() {
     let columns = ct.columns().collect::<Vec<_>>();
     assert_eq!(columns[0].default_expr.as_deref(), Some("'1001'"));
     assert_eq!(columns[1].default_expr.as_deref(), Some("B'0101'"));
+}
+
+#[test]
+fn parse_create_table_column_storage() {
+    let stmt =
+        parse_statement("create table test_chunk_id (a text, b text storage external)").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let columns = ct.columns().collect::<Vec<_>>();
+    assert_eq!(columns[0].storage, None);
+    assert_eq!(
+        columns[1].storage,
+        Some(crate::include::access::tupdesc::AttributeStorage::External)
+    );
 }
 
 #[test]

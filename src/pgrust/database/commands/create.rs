@@ -9,8 +9,8 @@ use crate::backend::parser::{
     AlterAggregateRenameStatement, CreateAggregateStatement, CreateFunctionArg,
     CreateFunctionReturnSpec, CreateFunctionStatement, CreateProcedureStatement, FunctionArgMode,
     FunctionParallel, FunctionVolatility, OwnedSequenceSpec, PartitionBoundSpec, RawTypeName,
-    RelOption, SqlType, SqlTypeKind, Statement, analyze_select_query_with_outer, parse_statement,
-    pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
+    RelOption, RoutineSignature, SqlType, SqlTypeKind, Statement, analyze_select_query_with_outer,
+    parse_statement, pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::backend::rewrite::render_view_query_sql;
 use crate::backend::utils::cache::syscache::{
@@ -994,6 +994,42 @@ fn aggregate_support_signature(proc_name: &str, arg_types: &[SqlType]) -> String
         .collect::<Vec<_>>()
         .join(", ");
     format!("{proc_name}({args})")
+}
+
+fn support_signature_name(signature: &RoutineSignature) -> String {
+    match &signature.schema_name {
+        Some(schema_name) => format!("{schema_name}.{}", signature.routine_name),
+        None => signature.routine_name.clone(),
+    }
+}
+
+fn resolve_support_proc_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    catalog: &dyn CatalogLookup,
+    signature: &RoutineSignature,
+) -> Result<u32, ExecError> {
+    let name = support_signature_name(signature);
+    let arg_oids = if signature.arg_types.is_empty() {
+        vec![INTERNAL_TYPE_OID]
+    } else {
+        signature
+            .arg_types
+            .iter()
+            .map(|arg| routine_support_arg_oid(catalog, arg))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    resolve_exact_proc_row(db, client_id, txn_ctx, catalog, &name, &arg_oids, 'f')
+        .map(|row| row.oid)
+}
+
+fn routine_support_arg_oid(catalog: &dyn CatalogLookup, arg: &str) -> Result<u32, ExecError> {
+    let raw_type = crate::backend::parser::parse_type_name(arg).map_err(ExecError::Parse)?;
+    let sql_type = resolve_raw_type_name(&raw_type, catalog).map_err(ExecError::Parse)?;
+    catalog
+        .type_oid_for_sql_type(sql_type)
+        .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(arg.into())))
 }
 
 fn exact_proc_signature(catalog: &dyn CatalogLookup, proc_name: &str, arg_oids: &[u32]) -> String {
@@ -2104,6 +2140,7 @@ impl Database {
             function_name: create_stmt.procedure_name.clone(),
             replace_existing: create_stmt.replace_existing,
             cost: None,
+            support: None,
             args: create_stmt.args.clone(),
             return_spec: if create_stmt
                 .args
@@ -2426,6 +2463,19 @@ impl Database {
         } else {
             create_stmt.body.clone()
         };
+        let probin = if language_row.oid == PG_LANGUAGE_C_OID {
+            Some(create_stmt.body.clone())
+        } else {
+            None
+        };
+        let prosupport = create_stmt
+            .support
+            .as_ref()
+            .map(|signature| {
+                resolve_support_proc_oid(self, client_id, Some((xid, cid)), &catalog, signature)
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         let proc_row = PgProcRow {
             oid: 0,
@@ -2444,7 +2494,7 @@ impl Database {
                 .unwrap_or(100.0),
             prorows: if proretset { 1000.0 } else { 0.0 },
             provariadic,
-            prosupport: 0,
+            prosupport,
             prokind: proc_kind,
             prosecdef: false,
             proleakproof: create_stmt.leakproof,
@@ -2472,7 +2522,7 @@ impl Database {
             proargnames,
             proargdefaults: encode_proc_arg_defaults(&callable_arg_defaults),
             prosrc,
-            probin: None,
+            probin,
             prosqlbody: None,
         };
 
@@ -3911,6 +3961,7 @@ impl Database {
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),
@@ -4089,6 +4140,7 @@ impl Database {
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let mut insert_ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
+            data_dir: None,
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(Arc::new(self.clone())),

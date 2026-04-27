@@ -199,6 +199,7 @@ pub(super) fn bind_builtin_system_view(
         SyntheticSystemViewKind::PgPolicies => catalog.pg_policies_rows(),
         SyntheticSystemViewKind::PgRules => catalog.pg_rules_rows(),
         SyntheticSystemViewKind::PgStats => catalog.pg_stats_rows(),
+        SyntheticSystemViewKind::PgSettings => catalog.pg_settings_rows(),
         SyntheticSystemViewKind::PgStatActivity => catalog.pg_stat_activity_rows(),
         SyntheticSystemViewKind::PgStatAllTables => catalog.pg_stat_all_tables_rows(),
         SyntheticSystemViewKind::PgStatUserTables => catalog.pg_stat_user_tables_rows(),

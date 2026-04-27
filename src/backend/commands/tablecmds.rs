@@ -42,8 +42,9 @@ use crate::pl::plpgsql::TriggerOperation;
 
 use super::copyto::{capture_copy_to_dml_notices, capture_copy_to_dml_returning_row};
 use super::explain::{
-    format_buffer_usage, format_explain_lines_with_costs, format_explain_plan_with_subplans,
-    format_verbose_explain_plan_with_subplans, push_explain_line,
+    format_buffer_usage, format_explain_lines_with_costs, format_explain_lines_with_options,
+    format_explain_plan_with_subplans, format_verbose_explain_plan_with_subplans,
+    push_explain_line,
 };
 use super::partition::{exec_find_partition, exec_setup_partition_tuple_routing};
 use super::trigger::RuntimeTriggers;
@@ -410,6 +411,7 @@ pub(crate) fn execute_explain(
         analyze,
         buffers,
         costs,
+        summary,
         timing,
         verbose,
         statement,
@@ -483,23 +485,27 @@ pub(crate) fn execute_explain(
         ctx.timed = false;
         let execution_buffer_stats = ctx.pool.usage_stats();
         let (state, row_count, elapsed) = exec_result?;
-        format_explain_lines_with_costs(state.as_ref(), 0, true, costs, &mut lines);
+        format_explain_lines_with_options(state.as_ref(), 0, true, costs, timing, &mut lines);
         if buffers {
             lines.push("Planning:".into());
             lines.push(format!("  {}", format_buffer_usage(planning_buffer_stats)));
         }
-        lines.push(format!(
-            "Planning Time: {:.3} ms",
-            planning_elapsed.as_secs_f64() * 1000.0
-        ));
-        lines.push(format!(
-            "Execution Time: {:.3} ms",
-            elapsed.as_secs_f64() * 1000.0
-        ));
+        if summary {
+            lines.push(format!(
+                "Planning Time: {:.3} ms",
+                planning_elapsed.as_secs_f64() * 1000.0
+            ));
+            lines.push(format!(
+                "Execution Time: {:.3} ms",
+                elapsed.as_secs_f64() * 1000.0
+            ));
+        }
         if buffers {
             lines.push(format_buffer_usage(execution_buffer_stats));
         }
-        lines.push(format!("Result Rows: {}", row_count));
+        if summary {
+            lines.push(format!("Result Rows: {}", row_count));
+        }
     } else {
         let plan_tree = query_desc.planned_stmt.plan_tree;
         let subplans = query_desc.planned_stmt.subplans;

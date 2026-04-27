@@ -7,7 +7,7 @@ use crate::backend::parser::{
     FunctionVolatility, ParseError, RoutineKind, RoutineSignature, parse_type_name,
     resolve_raw_type_name,
 };
-use crate::include::catalog::PgProcRow;
+use crate::include::catalog::{INTERNAL_TYPE_OID, PgProcRow};
 use crate::pgrust::database::ddl::ensure_can_set_role;
 
 fn normalize_ident(name: &str) -> String {
@@ -313,7 +313,79 @@ fn ensure_routine_owner(
     })
 }
 
+fn support_signature_name(signature: &RoutineSignature) -> String {
+    match &signature.schema_name {
+        Some(schema_name) => format!("{schema_name}.{}", signature.routine_name),
+        None => signature.routine_name.clone(),
+    }
+}
+
+fn resolve_support_proc_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    catalog: &dyn CatalogLookup,
+    signature: &RoutineSignature,
+) -> Result<u32, ExecError> {
+    let name = support_signature_name(signature);
+    let arg_specs = if signature.arg_types.is_empty() {
+        vec![INTERNAL_TYPE_OID]
+    } else {
+        signature
+            .arg_types
+            .iter()
+            .map(|arg| routine_arg_type_oid(catalog, arg).map(|(_, oid)| oid))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let (schema_name, base_name) = name
+        .rsplit_once('.')
+        .map(|(schema, proc_name)| (Some(schema), proc_name))
+        .unwrap_or((None, name.as_str()));
+    let namespace_oid = match schema_name {
+        Some(schema_name) => Some(
+            db.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("schema \"{schema_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "3F000",
+                })?,
+        ),
+        None => None,
+    };
+    let matches = catalog
+        .proc_rows_by_name(base_name)
+        .into_iter()
+        .filter(|row| {
+            row.prokind == 'f'
+                && parse_proc_argtype_oids(&row.proargtypes) == arg_specs
+                && namespace_oid
+                    .map(|namespace_oid| row.pronamespace == namespace_oid)
+                    .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [row] => Ok(row.oid),
+        [] => Err(ExecError::DetailedError {
+            message: format!("function {name}(internal) does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        }),
+        _ => Err(ExecError::DetailedError {
+            message: format!("function name {name}(internal) is ambiguous"),
+            detail: None,
+            hint: None,
+            sqlstate: "42725",
+        }),
+    }
+}
+
 fn apply_routine_options(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    catalog: &dyn CatalogLookup,
     row: &mut PgProcRow,
     options: &[AlterRoutineOption],
 ) -> Result<(), ExecError> {
@@ -356,8 +428,11 @@ fn apply_routine_options(
                     .parse::<f64>()
                     .map_err(|_| ExecError::Parse(ParseError::InvalidNumeric(rows.clone())))?;
             }
-            AlterRoutineOption::Support(_)
-            | AlterRoutineOption::SetConfig { .. }
+            AlterRoutineOption::Support(signature) => {
+                row.prosupport =
+                    resolve_support_proc_oid(db, client_id, txn_ctx, catalog, signature)?;
+            }
+            AlterRoutineOption::SetConfig { .. }
             | AlterRoutineOption::ResetConfig(_)
             | AlterRoutineOption::ResetAll => {
                 // :HACK: pg_proc.proconfig and dependency-on-extension metadata are not yet
@@ -418,7 +493,14 @@ impl Database {
         )?;
         let mut updated = old_row.clone();
         match &stmt.action {
-            AlterRoutineAction::Options(options) => apply_routine_options(&mut updated, options)?,
+            AlterRoutineAction::Options(options) => apply_routine_options(
+                self,
+                client_id,
+                Some((xid, cid)),
+                &catalog,
+                &mut updated,
+                options,
+            )?,
             AlterRoutineAction::Rename { new_name } => {
                 updated.proname = normalize_ident(new_name);
             }
