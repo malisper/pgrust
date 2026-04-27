@@ -1480,6 +1480,7 @@ impl Session {
                 .get("enable_bitmapscan")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
+            retain_partial_index_filters: false,
             enable_hashagg: self
                 .gucs
                 .get("enable_hashagg")

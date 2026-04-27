@@ -13888,6 +13888,7 @@ fn build_set_operation_term(pair: Pair<'_, Rule>) -> Result<SelectStatement, Par
             match inner.as_rule() {
                 Rule::parenthesized_set_operation_term => build_set_operation_term(inner),
                 Rule::values_stmt => Ok(wrap_values_as_select(build_values_statement(inner)?)),
+                Rule::table_stmt => build_table_select(inner),
                 _ => build_select(inner),
             }
         }
@@ -13904,6 +13905,7 @@ fn build_set_operation_term(pair: Pair<'_, Rule>) -> Result<SelectStatement, Par
             Ok(wrap_values_as_select(build_values_statement(values)?))
         }
         Rule::values_stmt => Ok(wrap_values_as_select(build_values_statement(pair)?)),
+        Rule::table_stmt => build_table_select(pair),
         Rule::simple_select_core
         | Rule::simple_select_stmt
         | Rule::set_operation_stmt
@@ -19732,6 +19734,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             Rule::kw_not => negated = true,
                             Rule::select_stmt => {
                                 subquery = Some(build_select(part)?);
+                            }
+                            Rule::values_stmt => {
+                                subquery =
+                                    Some(wrap_values_as_select(build_values_statement(part)?));
                             }
                             _ => {}
                         }

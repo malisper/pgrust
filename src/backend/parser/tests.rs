@@ -11321,6 +11321,31 @@ fn parse_union_all_select_chain() {
 }
 
 #[test]
+fn parse_values_and_table_as_set_operation_terms() {
+    let stmt = parse_select(
+        "values (1, 2), (3, 4)
+         union all select 5, 6
+         union all table int8_tbl",
+    )
+    .unwrap();
+    let outer = stmt.set_operation.expect("set operation");
+    assert!(matches!(outer.op, SetOperator::Union { all: true }));
+    assert_eq!(outer.inputs.len(), 2);
+    assert!(
+        matches!(outer.inputs[1].from, Some(FromItem::Table { ref name, .. }) if name == "int8_tbl")
+    );
+    let inner = outer.inputs[0]
+        .set_operation
+        .as_ref()
+        .expect("left-nested set operation");
+    assert!(matches!(inner.op, SetOperator::Union { all: true }));
+    assert!(matches!(
+        inner.inputs[0].from,
+        Some(FromItem::Values { .. })
+    ));
+}
+
+#[test]
 fn parse_parenthesized_union_input_with_extra_parens() {
     let stmt = parse_select("((select 2)) union select 2").unwrap();
     let set_operation = stmt.set_operation.expect("set operation");
@@ -11579,6 +11604,7 @@ fn build_plan_for_recursive_mixed_cte_query() {
         match plan {
             Plan::CteScan { .. } => true,
             Plan::Append { children, .. }
+            | Plan::BitmapOr { children, .. }
             | Plan::MergeAppend { children, .. }
             | Plan::SetOp { children, .. } => children.iter().any(plan_contains_cte_scan),
             Plan::Hash { input, .. }

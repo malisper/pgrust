@@ -1,4 +1,4 @@
-use crate::backend::access::nbtree::nbtcompare::compare_bt_keyspace;
+use crate::backend::access::nbtree::nbtcompare::compare_bt_keyspace_with_options;
 use crate::backend::access::nbtree::nbtutils::BtSortTuple;
 
 #[derive(Debug, Default)]
@@ -11,13 +11,14 @@ impl BtSpool {
         self.tuples.push(tuple);
     }
 
-    pub fn finish(mut self, key_count: usize) -> Vec<BtSortTuple> {
+    pub fn finish(mut self, key_count: usize, indoption: &[i16]) -> Vec<BtSortTuple> {
         self.tuples.sort_by(|left, right| {
-            compare_bt_keyspace(
+            compare_bt_keyspace_with_options(
                 &left.key_values[..left.key_values.len().min(key_count)],
                 &left.tuple.t_tid,
                 &right.key_values[..right.key_values.len().min(key_count)],
                 &right.tuple.t_tid,
+                indoption,
             )
         });
         self.tuples
@@ -60,7 +61,7 @@ mod tests {
             ),
             key_values: vec![Value::Int32(5)],
         });
-        let tuples = spool.finish(1);
+        let tuples = spool.finish(1, &[]);
         assert_eq!(tuples[0].tuple.t_tid.offset_number, 1);
     }
 }

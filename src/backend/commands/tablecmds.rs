@@ -517,7 +517,7 @@ pub(crate) fn execute_explain(
                 costs,
                 &mut lines,
             );
-            format_explain_lines_with_costs(state.as_ref(), 1, false, costs, &mut lines);
+            format_explain_lines_with_costs(state.as_ref(), 1, false, costs, true, &mut lines);
         } else {
             if verbose {
                 format_verbose_explain_plan_with_subplans(
@@ -3674,7 +3674,9 @@ fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
         Plan::BitmapIndexScan { relation_oid, .. } => {
             oids.insert(*relation_oid);
         }
-        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. } => {
             for child in children {
                 collect_plan_relation_oids(child, oids);
             }
