@@ -3188,7 +3188,10 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
         Plan::FunctionScan { call, .. } => {
             validate_set_returning_call(call, "FunctionScan", "call", allowed_exec_params);
         }
-        Plan::SubqueryScan { input, .. } => {
+        Plan::SubqueryScan { input, filter, .. } => {
+            if let Some(filter) = filter {
+                validate_executable_expr(filter, "SubqueryScan", "filter", allowed_exec_params);
+            }
             validate_executable_plan_with_params(input, allowed_exec_params);
         }
         Plan::CteScan { cte_plan, .. } => {
@@ -3702,6 +3705,7 @@ fn set_filter_references(
     input: Box<Path>,
     predicate: Expr,
 ) -> Plan {
+    let input = *input;
     let input_tlist = build_path_tlist(ctx.root, &input);
     let predicate = fix_upper_expr_for_input(ctx.root, predicate, &input, &input_tlist);
     let predicate = lower_expr(
@@ -3712,11 +3716,33 @@ fn set_filter_references(
             tlist: &input_tlist,
         },
     );
-    let input_plan = Box::new(set_plan_refs(ctx, *input));
-    Plan::Filter {
-        plan_info,
-        input: input_plan,
-        predicate,
+    match input {
+        Path::SubqueryScan {
+            rtindex,
+            subroot,
+            query,
+            input,
+            output_columns,
+            pathkeys,
+            ..
+        } => {
+            let force_display = subquery_scan_requires_display(&query, &pathkeys);
+            set_subquery_scan_references(
+                ctx,
+                plan_info,
+                rtindex,
+                subroot,
+                input,
+                output_columns,
+                Some(predicate),
+                force_display,
+            )
+        }
+        input => Plan::Filter {
+            plan_info,
+            input: Box::new(set_plan_refs(ctx, input)),
+            predicate,
+        },
     }
 }
 
@@ -4805,16 +4831,18 @@ fn set_subquery_scan_references(
     subroot: PlannerSubroot,
     input: Box<Path>,
     output_columns: Vec<QueryColumn>,
+    filter: Option<Expr>,
     force_display: bool,
 ) -> Plan {
     let input = recurse_with_root(ctx, Some(subroot.as_ref()), *input);
-    if input.columns() == output_columns && !force_display {
+    if input.columns() == output_columns && filter.is_none() && !force_display {
         input
     } else {
         Plan::SubqueryScan {
             plan_info,
             input: Box::new(input),
             scan_name: subquery_scan_name(ctx, rtindex),
+            filter,
             output_columns,
         }
     }
@@ -4824,6 +4852,26 @@ fn subquery_scan_name(ctx: &SetRefsContext<'_>, rtindex: usize) -> Option<String
     ctx.root
         .and_then(|root| root.parse.rtable.get(rtindex.saturating_sub(1)))
         .and_then(|rte| rte.alias.clone())
+}
+
+fn subquery_scan_requires_display(
+    query: &Query,
+    pathkeys: &[crate::include::nodes::pathnodes::PathKey],
+) -> bool {
+    !pathkeys.is_empty()
+        || query.distinct
+        || !query.group_by.is_empty()
+        || !query.accumulators.is_empty()
+        || !query.window_clauses.is_empty()
+        || query.having_qual.is_some()
+        || !query.sort_clause.is_empty()
+        || query.limit_count.is_some()
+        || query.limit_offset != 0
+        || query.locking_clause.is_some()
+        || !query.row_marks.is_empty()
+        || query.has_target_srfs
+        || query.recursive_union.is_some()
+        || query.set_operation.is_some()
 }
 
 fn set_worktable_scan_references(
@@ -5271,7 +5319,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             pathkeys,
             ..
         } => {
-            let _ = query;
+            let force_display = subquery_scan_requires_display(&query, &pathkeys);
             set_subquery_scan_references(
                 ctx,
                 plan_info,
@@ -5279,7 +5327,8 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
                 subroot,
                 input,
                 output_columns,
-                !pathkeys.is_empty(),
+                None,
+                force_display,
             )
         }
         Path::CteScan {

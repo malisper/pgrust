@@ -344,6 +344,7 @@ pub enum Plan {
         plan_info: PlanEstimate,
         input: Box<Plan>,
         scan_name: Option<String>,
+        filter: Option<Expr>,
         output_columns: Vec<QueryColumn>,
     },
     CteScan {

@@ -1234,9 +1234,12 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             input,
             scan_name: _,
+            filter,
             output_columns,
         } => Box::new(SubqueryScanState {
             input: executor_start(*input),
+            compiled_filter: filter.as_ref().map(expr::compile_predicate),
+            filter,
             output_columns: output_columns.into_iter().map(|c| c.name).collect(),
             plan_info,
             stats: NodeExecStats::default(),

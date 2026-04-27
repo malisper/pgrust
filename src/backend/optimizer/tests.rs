@@ -3563,6 +3563,28 @@ fn planner_lowers_outer_aggregate_refs_in_correlated_subqueries() {
 }
 
 #[test]
+fn planner_lowers_outer_aggregate_filter_refs_in_scalar_subqueries() {
+    let planned = planned_stmt_for_sql(
+        "select (select count(*) filter (where outer_c <> 0) \
+         from (values (1)) t0(inner_c)) \
+         from (values (2),(3)) t1(outer_c)",
+    );
+
+    validate_planned_stmt_for_tests(&planned);
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Aggregate { .. }
+        )),
+        "outer FILTER reference should make the parent query aggregate: {planned:#?}"
+    );
+    let debug = format!("{planned:#?}");
+    assert!(debug.contains("paramkind: Exec"), "{debug}");
+    assert!(!debug.contains("Aggref"), "{debug}");
+}
+
+#[test]
 fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
     let catalog = LiteralDefaultCatalog;
     let stmt = parse_select(
@@ -3626,6 +3648,75 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
         }
         _ => unreachable!(),
     }
+}
+
+#[test]
+fn grouped_target_srf_uses_project_set_before_aggregate() {
+    let planned = planned_stmt_for_sql(
+        "select * from \
+         (select generate_series(1, a) as g, count(*) from (values (1), (2)) v(a) group by 1) ss \
+         where ss.g = 1",
+    );
+
+    validate_planned_stmt_for_tests(&planned);
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::SubqueryScan { .. }
+        )),
+        "expected grouped SRF subquery boundary to stay visible: {planned:#?}"
+    );
+
+    fn aggregate_reads_project_set(plan: &Plan) -> bool {
+        match plan {
+            Plan::Aggregate { input, .. } => {
+                plan_contains(input, |child| matches!(child, Plan::ProjectSet { .. }))
+            }
+            Plan::Hash { input, .. }
+            | Plan::Filter { input, .. }
+            | Plan::Projection { input, .. }
+            | Plan::OrderBy { input, .. }
+            | Plan::IncrementalSort { input, .. }
+            | Plan::Limit { input, .. }
+            | Plan::LockRows { input, .. }
+            | Plan::Unique { input, .. }
+            | Plan::WindowAgg { input, .. }
+            | Plan::ProjectSet { input, .. }
+            | Plan::BitmapHeapScan {
+                bitmapqual: input, ..
+            }
+            | Plan::SubqueryScan { input, .. }
+            | Plan::CteScan {
+                cte_plan: input, ..
+            } => aggregate_reads_project_set(input),
+            Plan::Append { children, .. }
+            | Plan::BitmapOr { children, .. }
+            | Plan::MergeAppend { children, .. }
+            | Plan::SetOp { children, .. } => children.iter().any(aggregate_reads_project_set),
+            Plan::NestedLoopJoin { left, right, .. }
+            | Plan::HashJoin { left, right, .. }
+            | Plan::MergeJoin { left, right, .. }
+            | Plan::RecursiveUnion {
+                anchor: left,
+                recursive: right,
+                ..
+            } => aggregate_reads_project_set(left) || aggregate_reads_project_set(right),
+            Plan::Result { .. }
+            | Plan::SeqScan { .. }
+            | Plan::IndexOnlyScan { .. }
+            | Plan::IndexScan { .. }
+            | Plan::BitmapIndexScan { .. }
+            | Plan::Values { .. }
+            | Plan::FunctionScan { .. }
+            | Plan::WorkTableScan { .. } => false,
+        }
+    }
+
+    assert!(
+        aggregate_reads_project_set(&planned.plan_tree),
+        "expected grouped SRF to be projected before aggregation: {planned:#?}"
+    );
 }
 
 #[test]

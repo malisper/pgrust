@@ -855,16 +855,29 @@ fn bind_grouped_visible_outer_aggregate_call(
             resolved.func_variadic,
         )
     };
+    let raise_levels = visible_scope.levelsup;
     Ok(Some(Expr::Aggref(Box::new(
         crate::include::nodes::primnodes::Aggref {
             aggfnoid,
             aggtype,
             aggvariadic,
             aggdistinct: distinct,
-            direct_args: coerced_direct_args,
-            args: coerced_args,
-            aggorder: bound_order_by,
-            aggfilter: bound_filter,
+            direct_args: coerced_direct_args
+                .into_iter()
+                .map(|expr| raise_expr_varlevels(expr, raise_levels))
+                .collect(),
+            args: coerced_args
+                .into_iter()
+                .map(|expr| raise_expr_varlevels(expr, raise_levels))
+                .collect(),
+            aggorder: bound_order_by
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: raise_expr_varlevels(item.expr, raise_levels),
+                    ..item
+                })
+                .collect(),
+            aggfilter: bound_filter.map(|expr| raise_expr_varlevels(expr, raise_levels)),
             agglevelsup: visible_scope.levelsup,
             aggno,
         },

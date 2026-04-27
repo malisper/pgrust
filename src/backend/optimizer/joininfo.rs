@@ -587,84 +587,157 @@ fn strict_relids_union(args: &[Expr]) -> Vec<usize> {
 
 pub(super) fn expr_relids(expr: &Expr) -> Vec<usize> {
     let mut relids = Vec::new();
-    collect_expr_relids(expr, &mut relids);
+    collect_expr_relids_at_level(expr, 0, &mut relids);
     relids.sort_unstable();
     relids.dedup();
     relids
 }
 
-fn collect_expr_relids(expr: &Expr, relids: &mut Vec<usize>) {
+fn collect_query_relids_at_level(query: &Query, levelsup: usize, relids: &mut Vec<usize>) {
+    for target in &query.target_list {
+        collect_expr_relids_at_level(&target.expr, levelsup, relids);
+    }
+    if let Some(where_qual) = query.where_qual.as_ref() {
+        collect_expr_relids_at_level(where_qual, levelsup, relids);
+    }
+    for expr in &query.group_by {
+        collect_expr_relids_at_level(expr, levelsup, relids);
+    }
+    for accum in &query.accumulators {
+        for arg in &accum.args {
+            collect_expr_relids_at_level(arg, levelsup, relids);
+        }
+        if let Some(filter) = accum.filter.as_ref() {
+            collect_expr_relids_at_level(filter, levelsup, relids);
+        }
+    }
+    if let Some(having) = query.having_qual.as_ref() {
+        collect_expr_relids_at_level(having, levelsup, relids);
+    }
+    for clause in &query.sort_clause {
+        collect_expr_relids_at_level(&clause.expr, levelsup, relids);
+    }
+    if let Some(jointree) = query.jointree.as_ref() {
+        collect_jointree_relids_at_level(jointree, levelsup, relids);
+    }
+    for rte in &query.rtable {
+        match &rte.kind {
+            RangeTblEntryKind::Values { rows, .. } => {
+                for row in rows {
+                    for expr in row {
+                        collect_expr_relids_at_level(expr, levelsup, relids);
+                    }
+                }
+            }
+            RangeTblEntryKind::Function { call } => {
+                for expr in set_returning_call_exprs(call) {
+                    collect_expr_relids_at_level(expr, levelsup, relids);
+                }
+            }
+            RangeTblEntryKind::Cte { query, .. } | RangeTblEntryKind::Subquery { query } => {
+                collect_query_relids_at_level(query, levelsup + 1, relids);
+            }
+            RangeTblEntryKind::Result
+            | RangeTblEntryKind::Relation { .. }
+            | RangeTblEntryKind::Join { .. }
+            | RangeTblEntryKind::WorkTable { .. } => {}
+        }
+    }
+}
+
+fn collect_jointree_relids_at_level(
+    jointree: &JoinTreeNode,
+    levelsup: usize,
+    relids: &mut Vec<usize>,
+) {
+    match jointree {
+        JoinTreeNode::RangeTblRef(_) => {}
+        JoinTreeNode::JoinExpr {
+            left, right, quals, ..
+        } => {
+            collect_jointree_relids_at_level(left, levelsup, relids);
+            collect_jointree_relids_at_level(right, levelsup, relids);
+            collect_expr_relids_at_level(quals, levelsup, relids);
+        }
+    }
+}
+
+fn collect_expr_relids_at_level(expr: &Expr, levelsup: usize, relids: &mut Vec<usize>) {
     match expr {
-        Expr::Var(var) if var.varlevelsup == 0 => relids.push(var.varno),
+        Expr::Var(var) if var.varlevelsup == levelsup => relids.push(var.varno),
         Expr::Aggref(aggref) => {
             for arg in &aggref.args {
-                collect_expr_relids(arg, relids);
+                collect_expr_relids_at_level(arg, levelsup, relids);
             }
             if let Some(filter) = aggref.aggfilter.as_ref() {
-                collect_expr_relids(filter, relids);
+                collect_expr_relids_at_level(filter, levelsup, relids);
             }
         }
         Expr::WindowFunc(window_func) => {
             for arg in &window_func.args {
-                collect_expr_relids(arg, relids);
+                collect_expr_relids_at_level(arg, levelsup, relids);
             }
             if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) =
                 &window_func.kind
             {
                 if let Some(filter) = aggref.aggfilter.as_ref() {
-                    collect_expr_relids(filter, relids);
+                    collect_expr_relids_at_level(filter, levelsup, relids);
                 }
             }
         }
         Expr::Op(op) => {
             for arg in &op.args {
-                collect_expr_relids(arg, relids);
+                collect_expr_relids_at_level(arg, levelsup, relids);
             }
         }
         Expr::Bool(bool_expr) => {
             for arg in &bool_expr.args {
-                collect_expr_relids(arg, relids);
+                collect_expr_relids_at_level(arg, levelsup, relids);
             }
         }
         Expr::Case(case_expr) => {
             if let Some(arg) = &case_expr.arg {
-                collect_expr_relids(arg, relids);
+                collect_expr_relids_at_level(arg, levelsup, relids);
             }
             for arm in &case_expr.args {
-                collect_expr_relids(&arm.expr, relids);
-                collect_expr_relids(&arm.result, relids);
+                collect_expr_relids_at_level(&arm.expr, levelsup, relids);
+                collect_expr_relids_at_level(&arm.result, levelsup, relids);
             }
-            collect_expr_relids(&case_expr.defresult, relids);
+            collect_expr_relids_at_level(&case_expr.defresult, levelsup, relids);
         }
         Expr::CaseTest(_) => {}
         Expr::Func(func) => {
             for arg in &func.args {
-                collect_expr_relids(arg, relids);
+                collect_expr_relids_at_level(arg, levelsup, relids);
             }
         }
         Expr::SetReturning(srf) => {
             for arg in set_returning_call_exprs(&srf.call) {
-                collect_expr_relids(arg, relids);
+                collect_expr_relids_at_level(arg, levelsup, relids);
             }
         }
         Expr::SubLink(sublink) => {
             if let Some(testexpr) = &sublink.testexpr {
-                collect_expr_relids(testexpr, relids);
+                collect_expr_relids_at_level(testexpr, levelsup, relids);
             }
+            collect_query_relids_at_level(&sublink.subselect, levelsup + 1, relids);
         }
         Expr::SubPlan(subplan) => {
             if let Some(testexpr) = &subplan.testexpr {
-                collect_expr_relids(testexpr, relids);
+                collect_expr_relids_at_level(testexpr, levelsup, relids);
+            }
+            for arg in &subplan.args {
+                collect_expr_relids_at_level(arg, levelsup, relids);
             }
         }
         Expr::ScalarArrayOp(saop) => {
-            collect_expr_relids(&saop.left, relids);
-            collect_expr_relids(&saop.right, relids);
+            collect_expr_relids_at_level(&saop.left, levelsup, relids);
+            collect_expr_relids_at_level(&saop.right, levelsup, relids);
         }
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => collect_expr_relids(inner, relids),
+        | Expr::IsNotNull(inner) => collect_expr_relids_at_level(inner, levelsup, relids),
         Expr::Like {
             expr,
             pattern,
@@ -677,43 +750,43 @@ fn collect_expr_relids(expr: &Expr, relids: &mut Vec<usize>) {
             escape,
             ..
         } => {
-            collect_expr_relids(expr, relids);
-            collect_expr_relids(pattern, relids);
+            collect_expr_relids_at_level(expr, levelsup, relids);
+            collect_expr_relids_at_level(pattern, levelsup, relids);
             if let Some(escape) = escape {
-                collect_expr_relids(escape, relids);
+                collect_expr_relids_at_level(escape, levelsup, relids);
             }
         }
         Expr::IsDistinctFrom(left, right)
         | Expr::IsNotDistinctFrom(left, right)
         | Expr::Coalesce(left, right) => {
-            collect_expr_relids(left, relids);
-            collect_expr_relids(right, relids);
+            collect_expr_relids_at_level(left, levelsup, relids);
+            collect_expr_relids_at_level(right, levelsup, relids);
         }
         Expr::ArrayLiteral { elements, .. } => {
             for element in elements {
-                collect_expr_relids(element, relids);
+                collect_expr_relids_at_level(element, levelsup, relids);
             }
         }
         Expr::ArraySubscript { array, subscripts } => {
-            collect_expr_relids(array, relids);
+            collect_expr_relids_at_level(array, levelsup, relids);
             for subscript in subscripts {
                 if let Some(lower) = &subscript.lower {
-                    collect_expr_relids(lower, relids);
+                    collect_expr_relids_at_level(lower, levelsup, relids);
                 }
                 if let Some(upper) = &subscript.upper {
-                    collect_expr_relids(upper, relids);
+                    collect_expr_relids_at_level(upper, levelsup, relids);
                 }
             }
         }
         Expr::Row { fields, .. } => {
             for (_, expr) in fields {
-                collect_expr_relids(expr, relids);
+                collect_expr_relids_at_level(expr, levelsup, relids);
             }
         }
-        Expr::FieldSelect { expr, .. } => collect_expr_relids(expr, relids),
+        Expr::FieldSelect { expr, .. } => collect_expr_relids_at_level(expr, levelsup, relids),
         Expr::Xml(xml) => {
             for child in xml.child_exprs() {
-                collect_expr_relids(child, relids);
+                collect_expr_relids_at_level(child, levelsup, relids);
             }
         }
         Expr::Param(_)
@@ -739,11 +812,12 @@ mod tests {
     use crate::backend::parser::SqlType;
     use crate::backend::parser::SqlTypeKind;
     use crate::include::executor::execdesc::CommandType;
+    use crate::include::nodes::datum::Value;
     use crate::include::nodes::parsenodes::{
         JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RangeTblEref,
     };
     use crate::include::nodes::primnodes::{
-        Expr, JoinType, OpExpr, OpExprKind, RelationDesc, TargetEntry, Var,
+        Expr, JoinType, OpExpr, OpExprKind, RelationDesc, SubLink, SubLinkType, TargetEntry, Var,
     };
 
     fn query_for_jointree(jointree: JoinTreeNode, rtable: Vec<RangeTblEntry>) -> Query {
@@ -800,22 +874,73 @@ mod tests {
     }
 
     fn int4_var(varno: usize) -> Expr {
+        int4_var_with_level(varno, 0)
+    }
+
+    fn int4_var_with_level(varno: usize, varlevelsup: usize) -> Expr {
         Expr::Var(Var {
             varno,
             varattno: 1,
-            varlevelsup: 0,
+            varlevelsup,
             vartype: SqlType::new(SqlTypeKind::Int4),
         })
     }
 
-    fn eq_qual(left_varno: usize, right_varno: usize) -> Expr {
+    fn int4_const(value: i32) -> Expr {
+        Expr::Const(Value::Int32(value))
+    }
+
+    fn eq_expr(left: Expr, right: Expr) -> Expr {
         Expr::Op(Box::new(OpExpr {
             opno: 0,
             opfuncid: 0,
             op: OpExprKind::Eq,
             opresulttype: SqlType::new(SqlTypeKind::Bool),
-            args: vec![int4_var(left_varno), int4_var(right_varno)],
+            args: vec![left, right],
             collation_oid: None,
+        }))
+    }
+
+    fn eq_qual(left_varno: usize, right_varno: usize) -> Expr {
+        eq_expr(int4_var(left_varno), int4_var(right_varno))
+    }
+
+    fn expr_sublink(where_qual: Option<Expr>) -> Expr {
+        expr_sublink_with_target(int4_const(1), where_qual)
+    }
+
+    fn expr_sublink_with_target(target: Expr, where_qual: Option<Expr>) -> Expr {
+        Expr::SubLink(Box::new(SubLink {
+            sublink_type: SubLinkType::ExprSubLink,
+            testexpr: None,
+            subselect: Box::new(Query {
+                command_type: CommandType::Select,
+                depends_on_row_security: false,
+                rtable: Vec::new(),
+                jointree: None,
+                target_list: vec![TargetEntry::new(
+                    "?column?",
+                    target,
+                    SqlType::new(SqlTypeKind::Int4),
+                    0,
+                )],
+                distinct: false,
+                distinct_on: Vec::new(),
+                where_qual,
+                group_by: Vec::new(),
+                accumulators: Vec::new(),
+                window_clauses: Vec::new(),
+                having_qual: None,
+                sort_clause: Vec::new(),
+                constraint_deps: Vec::new(),
+                limit_count: None,
+                limit_offset: 0,
+                has_target_srfs: false,
+                recursive_union: None,
+                set_operation: None,
+                locking_clause: None,
+                row_marks: Vec::new(),
+            }),
         }))
     }
 
@@ -906,5 +1031,33 @@ mod tests {
         assert_eq!(joins.len(), 1);
         assert_eq!(joins[0].min_lefthand, vec![1]);
         assert_eq!(joins[0].min_righthand, vec![2]);
+    }
+
+    #[test]
+    fn expr_relids_include_correlated_vars_inside_sublinks() {
+        let expr = expr_sublink(Some(eq_expr(int4_var_with_level(2, 1), int4_const(1))));
+
+        assert_eq!(super::expr_relids(&expr), vec![2]);
+    }
+
+    #[test]
+    fn expr_relids_include_correlated_sublink_target_vars() {
+        let expr = expr_sublink_with_target(int4_var_with_level(1, 1), None);
+
+        assert_eq!(super::expr_relids(&expr), vec![1]);
+    }
+
+    #[test]
+    fn correlated_sublink_binary_op_classifies_as_join_clause() {
+        let clause = eq_expr(
+            int4_var(1),
+            expr_sublink(Some(eq_expr(int4_var_with_level(2, 1), int4_const(1)))),
+        );
+        let restrict = super::make_restrict_info(clause);
+
+        assert!(restrict.can_join);
+        assert_eq!(restrict.required_relids, vec![1, 2]);
+        assert_eq!(restrict.left_relids, vec![1]);
+        assert_eq!(restrict.right_relids, vec![2]);
     }
 }

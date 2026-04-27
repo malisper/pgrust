@@ -6504,13 +6504,30 @@ impl PlanNode for SubqueryScanState {
         } else {
             None
         };
-        let slot = self.input.exec_proc_node(ctx)?;
-        if slot.is_some() {
+        begin_node(&mut self.stats, ctx)?;
+        loop {
+            ctx.check_for_interrupts()?;
+            let slot = match self.input.exec_proc_node(ctx)? {
+                Some(slot) => slot,
+                None => {
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                }
+            };
+            if let Some(filter) = &self.compiled_filter {
+                let outer_values = materialize_slot_values(slot)?;
+                let current_bindings = ctx.system_bindings.clone();
+                set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                clear_inner_expr_bindings(ctx);
+
+                if !filter(slot, ctx)? {
+                    note_filtered_row(&mut self.stats);
+                    continue;
+                }
+            }
             finish_row(&mut self.stats, start);
-        } else {
-            finish_eof(&mut self.stats, start, ctx);
+            return Ok(self.input.current_slot());
         }
-        Ok(slot)
     }
 
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
@@ -6539,6 +6556,28 @@ impl PlanNode for SubqueryScanState {
 
     fn node_label(&self) -> String {
         "Subquery Scan".into()
+    }
+
+    fn explain_details(
+        &self,
+        indent: usize,
+        analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        let prefix = explain_detail_prefix(indent);
+        if let Some(filter) = &self.filter {
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_expr(filter, self.column_names())
+            ));
+        }
+        if analyze && self.stats.rows_removed_by_filter > 0 {
+            lines.push(format!(
+                "{prefix}Rows Removed by Filter: {}",
+                self.stats.rows_removed_by_filter
+            ));
+        }
     }
 
     fn explain_children(

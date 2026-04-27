@@ -761,12 +761,22 @@ pub struct FunctionScanState {
     pub(crate) stats: NodeExecStats,
 }
 
-#[derive(Debug)]
 pub struct SubqueryScanState {
     pub(crate) input: PlanState,
+    pub(crate) filter: Option<Expr>,
+    pub(crate) compiled_filter: Option<crate::backend::executor::expr::CompiledPredicate>,
     pub(crate) output_columns: Vec<String>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
+}
+
+impl std::fmt::Debug for SubqueryScanState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubqueryScanState")
+            .field("filter", &self.filter)
+            .field("output_columns", &self.output_columns)
+            .finish()
+    }
 }
 
 #[derive(Debug, Default)]

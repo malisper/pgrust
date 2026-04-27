@@ -480,6 +480,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupportedMessage(
             message,
         )) => {
+            if message == "set-returning functions must appear at top level of FROM" {
+                return find_nested_from_function_srf_position(sql);
+            }
+            if message == "set-returning functions are not allowed in VALUES" {
+                return find_first_srf_position(sql);
+            }
             if matches!(
                 message.as_str(),
                 "cannot set an array element to DEFAULT" | "cannot set a subfield to DEFAULT"
@@ -1719,6 +1725,40 @@ fn find_token_after_case_insensitive_phrase(sql: &str, phrase: &str) -> Option<u
         index += 1;
     }
     (index < bytes.len()).then_some(index + 1)
+}
+
+fn find_nested_from_function_srf_position(sql: &str) -> Option<usize> {
+    let from_index = find_identifier_in_segment(sql, "from")?;
+    let after_from = from_index + "from".len();
+    let args_start = after_from + sql[after_from..].find('(')? + 1;
+    find_first_srf_position(&sql[args_start..]).map(|position| args_start + position)
+}
+
+fn find_first_srf_position(sql: &str) -> Option<usize> {
+    const SRF_NAMES: &[&str] = &[
+        "generate_series",
+        "generate_subscripts",
+        "unnest",
+        "regexp_matches",
+        "regexp_split_to_table",
+        "string_to_table",
+        "json_each",
+        "json_each_text",
+        "json_object_keys",
+        "json_array_elements",
+        "json_array_elements_text",
+        "jsonb_each",
+        "jsonb_each_text",
+        "jsonb_object_keys",
+        "jsonb_array_elements",
+        "jsonb_array_elements_text",
+        "jsonb_path_query",
+    ];
+
+    SRF_NAMES
+        .iter()
+        .filter_map(|name| find_identifier_in_segment(sql, name).map(|offset| offset + 1))
+        .min()
 }
 
 fn find_last_case_insensitive_token_position(sql: &str, token: &str) -> Option<usize> {
@@ -11768,6 +11808,36 @@ ORDER BY 1, 2;";
         );
 
         assert_eq!(exec_error_position(sql, &err), Some(8));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_nested_from_function_srf() {
+        let sql = "select * from generate_series(1, generate_series(1, 3))";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::FeatureNotSupportedMessage(
+                "set-returning functions must appear at top level of FROM".into(),
+            ),
+        );
+
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.rfind("generate_series").map(|index| index + 1)
+        );
+    }
+
+    #[test]
+    fn exec_error_position_points_at_values_srf() {
+        let sql = "values (1, generate_series(1, 2))";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::FeatureNotSupportedMessage(
+                "set-returning functions are not allowed in VALUES".into(),
+            ),
+        );
+
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find("generate_series").map(|index| index + 1)
+        );
     }
 
     #[test]

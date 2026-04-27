@@ -2055,7 +2055,11 @@ fn make_sort_input_target(
 fn make_group_input_target(parse: &Query, group_by: &[Expr]) -> PathTarget {
     let mut exprs = Vec::new();
     for group_expr in group_by {
-        push_expr(&mut exprs, group_expr.clone());
+        if expr_contains_set_returning(group_expr) {
+            collect_supporting_inputs(group_expr, &mut exprs);
+        } else {
+            push_expr(&mut exprs, group_expr.clone());
+        }
     }
     for target in &parse.target_list {
         collect_group_input_exprs(&target.expr, group_by, &mut exprs);
@@ -2294,7 +2298,11 @@ fn push_expr(exprs: &mut Vec<Expr>, expr: Expr) {
 
 fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Expr>) {
     if group_by.contains(expr) {
-        push_expr(exprs, expr.clone());
+        if expr_contains_set_returning(expr) {
+            collect_supporting_inputs(expr, exprs);
+        } else {
+            push_expr(exprs, expr.clone());
+        }
         return;
     }
     match expr {
