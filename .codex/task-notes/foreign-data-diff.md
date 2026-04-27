@@ -49,6 +49,9 @@ Runtime behavior:
   column comments in psql `\d`/`\d+` describe fast paths
 - reports FDW handler/validator dependencies when `DROP FUNCTION` targets a
   function referenced by `pg_foreign_data_wrapper`
+- checks FDW handler/validator function signatures when resolving support
+  functions, including PostgreSQL-style missing-function messages such as
+  `bar(text[], oid)`
 
 Tests run:
 - `cargo fmt`
@@ -106,9 +109,15 @@ Tests run:
 - `scripts/cargo_isolated.sh check`
 - `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
 - `scripts/run_regression.sh --skip-build --port 55452 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-fdw-function-deps`
+- `scripts/cargo_isolated.sh test --lib --quiet fdw_function_lookup_errors_include_expected_signature`
+- `scripts/cargo_isolated.sh test --lib --quiet drop_function_reports_foreign_data_wrapper_dependency`
+- `scripts/cargo_isolated.sh test --lib --quiet foreign_data_if_exists_notices_and_alter_warnings`
+- `scripts/cargo_isolated.sh check`
+- `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
+- `scripts/run_regression.sh --skip-build --port 55453 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-fdw-proc-signatures`
 
 Remaining:
-`foreign_data` still fails, but improved to 391/539 matching queries and 1516
+`foreign_data` still fails, but improved to 393/539 matching queries and 1506
 diff lines in the latest run. Biggest
 remaining groups:
 - owner dependency reporting beyond the handled FDW function dependencies
