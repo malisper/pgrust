@@ -20,6 +20,15 @@ use crate::include::nodes::datum::BitString;
 #[grammar = "backend/parser/gram.pest"]
 struct SqlParser;
 
+pub(crate) const SQL_JSON_FUNC: &str = "__pgrust_sql_json";
+pub(crate) const SQL_JSON_SCALAR_FUNC: &str = "__pgrust_sql_json_scalar";
+pub(crate) const SQL_JSON_SERIALIZE_FUNC: &str = "__pgrust_sql_json_serialize";
+pub(crate) const SQL_JSON_OBJECT_FUNC: &str = "__pgrust_sql_json_object";
+pub(crate) const SQL_JSON_ARRAY_FUNC: &str = "__pgrust_sql_json_array";
+pub(crate) const SQL_JSON_ARRAYAGG_FUNC: &str = "__pgrust_sql_json_arrayagg";
+pub(crate) const SQL_JSON_OBJECTAGG_FUNC: &str = "__pgrust_sql_json_objectagg";
+pub(crate) const SQL_JSON_IS_JSON_FUNC: &str = "__pgrust_sql_json_is_json";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseOptions {
     pub standard_conforming_strings: bool,
@@ -17551,8 +17560,24 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::SessionUser => "session_user".to_string(),
         SqlExpr::CurrentRole => "current_role".to_string(),
         SqlExpr::AtTimeZone { .. } => "timezone".to_string(),
-        SqlExpr::FuncCall { name, .. } => name.rsplit('.').next().unwrap_or(name).to_string(),
+        SqlExpr::FuncCall { name, .. } => sql_json_public_func_name(name)
+            .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name))
+            .to_string(),
         _ => "?column?".to_string(),
+    }
+}
+
+fn sql_json_public_func_name(name: &str) -> Option<&'static str> {
+    match name {
+        SQL_JSON_FUNC => Some("json"),
+        SQL_JSON_SCALAR_FUNC => Some("json_scalar"),
+        SQL_JSON_SERIALIZE_FUNC => Some("json_serialize"),
+        SQL_JSON_OBJECT_FUNC => Some("json_object"),
+        SQL_JSON_ARRAY_FUNC => Some("json_array"),
+        SQL_JSON_ARRAYAGG_FUNC => Some("json_arrayagg"),
+        SQL_JSON_OBJECTAGG_FUNC => Some("json_objectagg"),
+        SQL_JSON_IS_JSON_FUNC => Some("?column?"),
+        _ => None,
     }
 }
 
@@ -17567,6 +17592,516 @@ fn simple_func_call(name: impl Into<String>, args: Vec<SqlFunctionArg>) -> SqlEx
         filter: None,
         over: None,
     }
+}
+
+fn internal_sql_json_func_call(name: &'static str, args: Vec<SqlFunctionArg>) -> SqlExpr {
+    simple_func_call(name, args)
+}
+
+fn hidden_bool_arg(value: bool) -> SqlFunctionArg {
+    SqlFunctionArg::positional(SqlExpr::Const(Value::Bool(value)))
+}
+
+fn hidden_text_arg(value: impl Into<String>) -> SqlFunctionArg {
+    SqlFunctionArg::positional(SqlExpr::Const(Value::Text(value.into().into())))
+}
+
+fn cast_json_returning(expr: SqlExpr, returning: Option<RawTypeName>) -> SqlExpr {
+    returning
+        .map(|ty| SqlExpr::Cast(Box::new(expr.clone()), ty))
+        .unwrap_or(expr)
+}
+
+fn build_json_value_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut value = None;
+    let mut format_json = false;
+    let mut encoding = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr => value = Some(build_expr(part)?),
+            Rule::json_format_clause => {
+                format_json = true;
+                encoding = json_format_clause_encoding(part);
+            }
+            _ => {}
+        }
+    }
+    let value = value.ok_or(ParseError::UnexpectedEof)?;
+    if format_json {
+        Ok(internal_sql_json_func_call(
+            SQL_JSON_FUNC,
+            vec![
+                SqlFunctionArg::positional(value),
+                hidden_text_arg(encoding.unwrap_or_default()),
+            ],
+        ))
+    } else {
+        Ok(value)
+    }
+}
+
+fn build_json_returning_clause(pair: Pair<'_, Rule>) -> Result<RawTypeName, ParseError> {
+    let mut ty = None;
+    let mut encoding = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::type_name => ty = Some(build_type_name(part)),
+            Rule::json_format_clause => encoding = json_format_clause_encoding(part),
+            _ => {}
+        }
+    }
+    let ty = ty.ok_or(ParseError::UnexpectedEof)?;
+    validate_json_returning_encoding(&ty, encoding.as_deref())?;
+    Ok(ty)
+}
+
+fn json_format_clause_encoding(pair: Pair<'_, Rule>) -> Option<String> {
+    pair.into_inner()
+        .find(|part| part.as_rule() == Rule::json_encoding_clause)
+        .and_then(|part| {
+            part.into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+        })
+}
+
+fn validate_json_encoding_name(encoding: &str) -> Result<(), ParseError> {
+    match encoding.to_ascii_lowercase().as_str() {
+        "" | "utf8" => Ok(()),
+        "utf16" | "utf32" => Err(ParseError::DetailedError {
+            message: "unsupported JSON encoding".into(),
+            detail: None,
+            hint: Some("Only UTF8 JSON encoding is supported.".into()),
+            sqlstate: "0A000",
+        }),
+        other => Err(ParseError::DetailedError {
+            message: format!("unrecognized JSON encoding: {other}"),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        }),
+    }
+}
+
+fn validate_json_returning_encoding(
+    ty: &RawTypeName,
+    encoding: Option<&str>,
+) -> Result<(), ParseError> {
+    let Some(encoding) = encoding else {
+        return Ok(());
+    };
+    validate_json_encoding_name(encoding)?;
+    if !ty
+        .as_builtin()
+        .is_some_and(|ty| ty.kind == SqlTypeKind::Bytea)
+    {
+        return Err(ParseError::DetailedError {
+            message: "cannot set JSON encoding for non-bytea output types".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    Ok(())
+}
+
+fn json_null_clause_is_null_on_null(pair: Pair<'_, Rule>) -> bool {
+    pair.as_str()
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("null")
+}
+
+fn json_key_uniqueness_constraint_is_with_unique(pair: Pair<'_, Rule>) -> bool {
+    pair.as_str()
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("with")
+}
+
+fn build_json_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let value = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::json_value_expr)
+        .ok_or(ParseError::UnexpectedEof)
+        .and_then(build_json_value_expr)?;
+    Ok(internal_sql_json_func_call(
+        SQL_JSON_FUNC,
+        vec![SqlFunctionArg::positional(value)],
+    ))
+}
+
+fn build_json_scalar_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let value = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::expr)
+        .ok_or(ParseError::UnexpectedEof)
+        .and_then(build_expr)?;
+    Ok(internal_sql_json_func_call(
+        SQL_JSON_SCALAR_FUNC,
+        vec![SqlFunctionArg::positional(value)],
+    ))
+}
+
+fn build_json_serialize_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut value = None;
+    let mut returning = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::json_value_expr => value = Some(build_json_value_expr(part)?),
+            Rule::json_returning_clause => returning = Some(build_json_returning_clause(part)?),
+            _ => {}
+        }
+    }
+    let expr = internal_sql_json_func_call(
+        SQL_JSON_SERIALIZE_FUNC,
+        vec![SqlFunctionArg::positional(
+            value.ok_or(ParseError::UnexpectedEof)?,
+        )],
+    );
+    Ok(cast_json_returning(expr, returning))
+}
+
+fn build_json_object_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut args = vec![hidden_bool_arg(false), hidden_bool_arg(false)];
+    let mut returning = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::json_object_value_constructor => {
+                let (mut parsed_args, absent_on_null, unique_keys, parsed_returning) =
+                    build_json_object_value_constructor(part)?;
+                args[0] = hidden_bool_arg(absent_on_null);
+                args[1] = hidden_bool_arg(unique_keys);
+                args.append(&mut parsed_args);
+                returning = parsed_returning;
+            }
+            Rule::json_object_option_constructor => {
+                let (absent_on_null, unique_keys, parsed_returning) =
+                    build_json_object_option_constructor(part)?;
+                args[0] = hidden_bool_arg(absent_on_null);
+                args[1] = hidden_bool_arg(unique_keys);
+                returning = parsed_returning;
+            }
+            _ => {}
+        }
+    }
+    Ok(cast_json_returning(
+        internal_sql_json_func_call(SQL_JSON_OBJECT_FUNC, args),
+        returning,
+    ))
+}
+
+fn build_json_object_value_constructor(
+    pair: Pair<'_, Rule>,
+) -> Result<(Vec<SqlFunctionArg>, bool, bool, Option<RawTypeName>), ParseError> {
+    let mut args = Vec::new();
+    let mut absent_on_null = false;
+    let mut unique_keys = false;
+    let mut returning = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::json_object_arg_list => args = build_json_object_arg_list(part)?,
+            Rule::json_object_constructor_null_clause => {
+                absent_on_null = !json_null_clause_is_null_on_null(part);
+            }
+            Rule::json_key_uniqueness_constraint => {
+                unique_keys = json_key_uniqueness_constraint_is_with_unique(part);
+            }
+            Rule::json_returning_clause => returning = Some(build_json_returning_clause(part)?),
+            _ => {}
+        }
+    }
+    Ok((args, absent_on_null, unique_keys, returning))
+}
+
+fn build_json_object_option_constructor(
+    pair: Pair<'_, Rule>,
+) -> Result<(bool, bool, Option<RawTypeName>), ParseError> {
+    let mut absent_on_null = false;
+    let mut unique_keys = false;
+    let mut returning = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::json_object_constructor_null_clause => {
+                absent_on_null = !json_null_clause_is_null_on_null(part);
+            }
+            Rule::json_key_uniqueness_constraint => {
+                unique_keys = json_key_uniqueness_constraint_is_with_unique(part);
+            }
+            Rule::json_returning_clause => returning = Some(build_json_returning_clause(part)?),
+            _ => {}
+        }
+    }
+    Ok((absent_on_null, unique_keys, returning))
+}
+
+fn build_json_object_arg_list(pair: Pair<'_, Rule>) -> Result<Vec<SqlFunctionArg>, ParseError> {
+    let mut args = Vec::new();
+    for part in pair.into_inner() {
+        if part.as_rule() == Rule::json_object_arg {
+            let (key, value) = build_json_object_arg(part)?;
+            args.push(SqlFunctionArg::positional(key));
+            args.push(SqlFunctionArg::positional(value));
+        }
+    }
+    Ok(args)
+}
+
+fn build_json_object_arg(pair: Pair<'_, Rule>) -> Result<(SqlExpr, SqlExpr), ParseError> {
+    let mut key = None;
+    let mut value = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr if key.is_none() => key = Some(build_expr(part)?),
+            Rule::json_value_expr => value = Some(build_json_value_expr(part)?),
+            _ => {}
+        }
+    }
+    Ok((
+        key.ok_or(ParseError::UnexpectedEof)?,
+        value.ok_or(ParseError::UnexpectedEof)?,
+    ))
+}
+
+fn build_json_array_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut args = vec![hidden_bool_arg(false), hidden_bool_arg(false)];
+    let mut returning = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::json_array_query_constructor => {
+                let (query_expr, parsed_returning) = build_json_array_query_constructor(part)?;
+                args[1] = hidden_bool_arg(true);
+                args.push(SqlFunctionArg::positional(query_expr));
+                returning = parsed_returning;
+            }
+            Rule::json_array_empty_returning_constructor => {
+                returning = part
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::json_returning_clause)
+                    .map(build_json_returning_clause)
+                    .transpose()?;
+            }
+            Rule::json_array_value_constructor => {
+                let (mut values, null_on_null, parsed_returning) =
+                    build_json_array_value_constructor(part)?;
+                args[0] = hidden_bool_arg(null_on_null);
+                args.append(&mut values);
+                returning = parsed_returning;
+            }
+            _ => {}
+        }
+    }
+    Ok(cast_json_returning(
+        internal_sql_json_func_call(SQL_JSON_ARRAY_FUNC, args),
+        returning,
+    ))
+}
+
+fn build_json_array_query_constructor(
+    pair: Pair<'_, Rule>,
+) -> Result<(SqlExpr, Option<RawTypeName>), ParseError> {
+    let mut query = None;
+    let mut returning = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::select_stmt => {
+                query = Some(SqlExpr::ArraySubquery(Box::new(build_select(part)?)))
+            }
+            Rule::values_stmt => {
+                query = Some(SqlExpr::ArraySubquery(Box::new(wrap_values_as_select(
+                    build_values_statement(part)?,
+                ))))
+            }
+            Rule::json_returning_clause => returning = Some(build_json_returning_clause(part)?),
+            _ => {}
+        }
+    }
+    Ok((query.ok_or(ParseError::UnexpectedEof)?, returning))
+}
+
+fn build_json_array_value_constructor(
+    pair: Pair<'_, Rule>,
+) -> Result<(Vec<SqlFunctionArg>, bool, Option<RawTypeName>), ParseError> {
+    let mut args = Vec::new();
+    let mut null_on_null = false;
+    let mut returning = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::json_array_element_list => {
+                args = part
+                    .into_inner()
+                    .filter(|part| part.as_rule() == Rule::json_value_expr)
+                    .map(|part| build_json_value_expr(part).map(SqlFunctionArg::positional))
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            Rule::json_array_constructor_null_clause => {
+                null_on_null = json_null_clause_is_null_on_null(part);
+            }
+            Rule::json_returning_clause => returning = Some(build_json_returning_clause(part)?),
+            _ => {}
+        }
+    }
+    Ok((args, null_on_null, returning))
+}
+
+fn build_json_arrayagg_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut value = None;
+    let mut order_by = Vec::new();
+    let mut returning = None;
+    let mut filter = None;
+    let mut over = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::json_arrayagg_arg => {
+                let (parsed_value, parsed_order_by, parsed_returning) =
+                    build_json_arrayagg_arg(part)?;
+                value = Some(parsed_value);
+                order_by = parsed_order_by;
+                returning = parsed_returning;
+            }
+            Rule::agg_filter_clause => filter = Some(build_agg_filter_clause(part)?),
+            Rule::over_clause => over = Some(build_over_clause(part)?),
+            _ => {}
+        }
+    }
+    let expr = SqlExpr::FuncCall {
+        name: SQL_JSON_ARRAYAGG_FUNC.into(),
+        args: SqlCallArgs::Args(vec![SqlFunctionArg::positional(
+            value.ok_or(ParseError::UnexpectedEof)?,
+        )]),
+        order_by,
+        within_group: None,
+        distinct: false,
+        func_variadic: false,
+        filter: filter.map(Box::new),
+        over,
+    };
+    Ok(cast_json_returning(expr, returning))
+}
+
+fn build_json_arrayagg_arg(
+    pair: Pair<'_, Rule>,
+) -> Result<(SqlExpr, Vec<OrderByItem>, Option<RawTypeName>), ParseError> {
+    let mut value = None;
+    let mut order_by = Vec::new();
+    let mut returning = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::json_value_expr => value = Some(build_json_value_expr(part)?),
+            Rule::agg_order_by_clause => {
+                order_by = part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::order_by_item)
+                    .map(build_order_by_item)
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            Rule::json_returning_clause => returning = Some(build_json_returning_clause(part)?),
+            _ => {}
+        }
+    }
+    Ok((value.ok_or(ParseError::UnexpectedEof)?, order_by, returning))
+}
+
+fn build_json_objectagg_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut key = None;
+    let mut value = None;
+    let mut order_by = Vec::new();
+    let mut returning = None;
+    let mut filter = None;
+    let mut over = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::json_objectagg_arg => {
+                let (parsed_key, parsed_value, parsed_order_by, parsed_returning) =
+                    build_json_objectagg_arg(part)?;
+                key = Some(parsed_key);
+                value = Some(parsed_value);
+                order_by = parsed_order_by;
+                returning = parsed_returning;
+            }
+            Rule::agg_filter_clause => filter = Some(build_agg_filter_clause(part)?),
+            Rule::over_clause => over = Some(build_over_clause(part)?),
+            _ => {}
+        }
+    }
+    let expr = SqlExpr::FuncCall {
+        name: SQL_JSON_OBJECTAGG_FUNC.into(),
+        args: SqlCallArgs::Args(vec![
+            SqlFunctionArg::positional(key.ok_or(ParseError::UnexpectedEof)?),
+            SqlFunctionArg::positional(value.ok_or(ParseError::UnexpectedEof)?),
+        ]),
+        order_by,
+        within_group: None,
+        distinct: false,
+        func_variadic: false,
+        filter: filter.map(Box::new),
+        over,
+    };
+    Ok(cast_json_returning(expr, returning))
+}
+
+fn build_json_objectagg_arg(
+    pair: Pair<'_, Rule>,
+) -> Result<(SqlExpr, SqlExpr, Vec<OrderByItem>, Option<RawTypeName>), ParseError> {
+    let mut key = None;
+    let mut value = None;
+    let mut order_by = Vec::new();
+    let mut returning = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::json_object_arg => {
+                let (parsed_key, parsed_value) = build_json_object_arg(part)?;
+                key = Some(parsed_key);
+                value = Some(parsed_value);
+            }
+            Rule::agg_order_by_clause => {
+                order_by = part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::order_by_item)
+                    .map(build_order_by_item)
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            Rule::json_returning_clause => returning = Some(build_json_returning_clause(part)?),
+            _ => {}
+        }
+    }
+    Ok((
+        key.ok_or(ParseError::UnexpectedEof)?,
+        value.ok_or(ParseError::UnexpectedEof)?,
+        order_by,
+        returning,
+    ))
+}
+
+fn build_json_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut negated = false;
+    let mut predicate_type = "value";
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_not => negated = true,
+            Rule::json_predicate_type => {
+                predicate_type = match part.as_str().trim().to_ascii_lowercase().as_str() {
+                    "scalar" => "scalar",
+                    "array" => "array",
+                    "object" => "object",
+                    _ => "value",
+                };
+            }
+            _ => {}
+        }
+    }
+    let expr = internal_sql_json_func_call(
+        SQL_JSON_IS_JSON_FUNC,
+        vec![
+            SqlFunctionArg::positional(left),
+            SqlFunctionArg::positional(SqlExpr::Const(Value::Text(predicate_type.into()))),
+        ],
+    );
+    Ok(if negated {
+        SqlExpr::Not(Box::new(expr))
+    } else {
+        expr
+    })
 }
 
 fn sql_type_output_name(ty: SqlType) -> &'static str {
@@ -19607,6 +20142,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
 
             match next.as_rule() {
                 Rule::is_normalized_suffix => build_is_normalized_predicate(left, next),
+                Rule::json_predicate_suffix => build_json_predicate(left, next),
                 Rule::null_predicate_suffix => build_null_predicate(left, next),
                 Rule::is_document_suffix => {
                     let negated = next.into_inner().any(|part| part.as_rule() == Rule::kw_not);
@@ -19966,6 +20502,16 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::primary_expr => {
             build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
         }
+        Rule::json_constructor_expr => {
+            build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
+        }
+        Rule::json_constructor => build_json_constructor(pair),
+        Rule::json_scalar_constructor_expr => build_json_scalar_constructor(pair),
+        Rule::json_serialize_constructor_expr => build_json_serialize_constructor(pair),
+        Rule::json_object_constructor_expr => build_json_object_constructor(pair),
+        Rule::json_array_constructor_expr => build_json_array_constructor(pair),
+        Rule::json_arrayagg_constructor_expr => build_json_arrayagg_constructor(pair),
+        Rule::json_objectagg_constructor_expr => build_json_objectagg_constructor(pair),
         Rule::scalar_subquery_expr => Ok(SqlExpr::ScalarSubquery(Box::new(
             build_select_like_subquery(pair)?,
         ))),

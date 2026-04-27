@@ -2,6 +2,10 @@ use super::functions::*;
 use super::infer::*;
 use super::*;
 use crate::backend::catalog::roles::find_role_by_name;
+use crate::backend::parser::gram::{
+    SQL_JSON_ARRAY_FUNC, SQL_JSON_FUNC, SQL_JSON_IS_JSON_FUNC, SQL_JSON_OBJECT_FUNC,
+    SQL_JSON_SCALAR_FUNC, SQL_JSON_SERIALIZE_FUNC,
+};
 use crate::backend::parser::parse_type_name;
 use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
@@ -11,9 +15,10 @@ use crate::include::catalog::{
     builtin_type_name_for_oid, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::primnodes::{
-    BoolExprType, CaseExpr as BoundCaseExpr, CaseTestExpr as BoundCaseTestExpr,
-    CaseWhen as BoundCaseWhen, ExprArraySubscript, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExprKind,
-    ScalarFunctionImpl, WindowFuncKind, expr_contains_set_returning, expr_sql_type_hint,
+    BoolExprType, BuiltinScalarFunction, CaseExpr as BoundCaseExpr,
+    CaseTestExpr as BoundCaseTestExpr, CaseWhen as BoundCaseWhen, ExprArraySubscript, INDEX_VAR,
+    INNER_VAR, OUTER_VAR, OpExprKind, ScalarFunctionImpl, WindowFuncKind,
+    expr_contains_set_returning, expr_sql_type_hint,
 };
 
 mod func;
@@ -1350,6 +1355,261 @@ fn bind_window_func_call(
     )))
 }
 
+fn is_sql_json_scalar_internal_name(name: &str) -> bool {
+    matches!(
+        name,
+        SQL_JSON_FUNC
+            | SQL_JSON_SCALAR_FUNC
+            | SQL_JSON_SERIALIZE_FUNC
+            | SQL_JSON_OBJECT_FUNC
+            | SQL_JSON_ARRAY_FUNC
+            | SQL_JSON_IS_JSON_FUNC
+    )
+}
+
+fn sql_json_default_result_type(name: &str) -> SqlType {
+    match name {
+        SQL_JSON_SERIALIZE_FUNC => SqlType::new(SqlTypeKind::Text),
+        SQL_JSON_IS_JSON_FUNC => SqlType::new(SqlTypeKind::Bool),
+        _ => SqlType::new(SqlTypeKind::Json),
+    }
+}
+
+fn sql_json_builtin_function(name: &str) -> BuiltinScalarFunction {
+    match name {
+        SQL_JSON_FUNC => BuiltinScalarFunction::SqlJsonConstructor,
+        SQL_JSON_SCALAR_FUNC => BuiltinScalarFunction::SqlJsonScalar,
+        SQL_JSON_SERIALIZE_FUNC => BuiltinScalarFunction::SqlJsonSerialize,
+        SQL_JSON_OBJECT_FUNC => BuiltinScalarFunction::SqlJsonObject,
+        SQL_JSON_ARRAY_FUNC => BuiltinScalarFunction::SqlJsonArray,
+        SQL_JSON_IS_JSON_FUNC => BuiltinScalarFunction::SqlJsonIsJson,
+        _ => unreachable!("checked SQL/JSON internal function name"),
+    }
+}
+
+fn bind_sql_json_internal_call(
+    name: &str,
+    args: &[SqlFunctionArg],
+    target_type: Option<SqlType>,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    if args.iter().any(|arg| arg.name.is_some()) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "positional SQL/JSON arguments",
+            actual: "named argument".into(),
+        });
+    }
+    validate_sql_json_result_type(name, target_type.as_ref())?;
+    validate_sql_json_constructor_arg_types(
+        name,
+        args,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let bound_args = args
+        .iter()
+        .map(|arg| {
+            bind_expr_with_outer_and_ctes(
+                &arg.value,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Expr::func_with_impl(
+        0,
+        Some(target_type.unwrap_or_else(|| sql_json_default_result_type(name))),
+        false,
+        ScalarFunctionImpl::Builtin(sql_json_builtin_function(name)),
+        bound_args,
+    ))
+}
+
+fn validate_sql_json_result_type(
+    name: &str,
+    target_type: Option<&SqlType>,
+) -> Result<(), ParseError> {
+    let Some(target_type) = target_type else {
+        return Ok(());
+    };
+    if name == SQL_JSON_SERIALIZE_FUNC
+        && !matches!(
+            target_type.kind,
+            SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char | SqlTypeKind::Bytea
+        )
+    {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "cannot use type {} in RETURNING clause of JSON_SERIALIZE()",
+                sql_type_name(target_type.clone())
+            ),
+            detail: None,
+            hint: Some("Try returning a string type or bytea.".into()),
+            sqlstate: "0A000",
+        });
+    }
+    Ok(())
+}
+
+fn validate_sql_json_constructor_arg_types(
+    name: &str,
+    args: &[SqlFunctionArg],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(), ParseError> {
+    match name {
+        SQL_JSON_FUNC => {
+            let Some(arg) = args.first() else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "JSON constructor argument",
+                    actual: "syntax error at or near \")\"".into(),
+                });
+            };
+            let format_encoding = sql_json_format_encoding_arg(args);
+            let source_type = infer_sql_expr_type_with_ctes(
+                &arg.value,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if let Some(encoding) = format_encoding {
+                validate_sql_json_input_encoding(&source_type, &encoding)?;
+                if !matches!(arg.value, SqlExpr::Const(Value::Null))
+                    && !matches!(
+                        source_type.kind,
+                        SqlTypeKind::Text
+                            | SqlTypeKind::Varchar
+                            | SqlTypeKind::Char
+                            | SqlTypeKind::Json
+                            | SqlTypeKind::Jsonb
+                            | SqlTypeKind::Bytea
+                    )
+                {
+                    return Err(ParseError::DetailedError {
+                        message: "cannot use non-string types with explicit FORMAT JSON clause"
+                            .into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "22023",
+                    });
+                }
+            }
+            if matches!(arg.value, SqlExpr::Const(Value::Null))
+                || matches!(
+                    source_type.kind,
+                    SqlTypeKind::Text
+                        | SqlTypeKind::Varchar
+                        | SqlTypeKind::Char
+                        | SqlTypeKind::Json
+                        | SqlTypeKind::Jsonb
+                        | SqlTypeKind::Bytea
+                )
+            {
+                Ok(())
+            } else {
+                Err(ParseError::DetailedError {
+                    message: format!("cannot cast type {} to json", sql_type_name(source_type)),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42846",
+                })
+            }
+        }
+        SQL_JSON_IS_JSON_FUNC => {
+            let Some(arg) = args.first() else {
+                return Ok(());
+            };
+            let source_type = infer_sql_expr_type_with_ctes(
+                &arg.value,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if matches!(arg.value, SqlExpr::Const(Value::Null))
+                || matches!(
+                    source_type.kind,
+                    SqlTypeKind::Text
+                        | SqlTypeKind::Varchar
+                        | SqlTypeKind::Char
+                        | SqlTypeKind::Json
+                        | SqlTypeKind::Jsonb
+                        | SqlTypeKind::Bytea
+                )
+            {
+                Ok(())
+            } else {
+                Err(ParseError::DetailedError {
+                    message: format!(
+                        "cannot use type {} in IS JSON predicate",
+                        sql_type_name(source_type)
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42846",
+                })
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+fn sql_json_format_encoding_arg(args: &[SqlFunctionArg]) -> Option<String> {
+    let SqlExpr::Const(Value::Text(encoding)) = &args.get(1)?.value else {
+        return None;
+    };
+    Some(encoding.to_string())
+}
+
+fn validate_sql_json_input_encoding(
+    source_type: &SqlType,
+    encoding: &str,
+) -> Result<(), ParseError> {
+    match encoding.to_ascii_lowercase().as_str() {
+        "" => Ok(()),
+        "utf8" => {
+            if source_type.kind == SqlTypeKind::Bytea {
+                Ok(())
+            } else {
+                Err(ParseError::DetailedError {
+                    message: "JSON ENCODING clause is only allowed for bytea input type".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22023",
+                })
+            }
+        }
+        "utf16" | "utf32" => Err(ParseError::DetailedError {
+            message: "unsupported JSON encoding".into(),
+            detail: None,
+            hint: Some("Only UTF8 JSON encoding is supported.".into()),
+            sqlstate: "0A000",
+        }),
+        other => Err(ParseError::DetailedError {
+            message: format!("unrecognized JSON encoding: {other}"),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        }),
+    }
+}
+
 pub(crate) fn bind_expr_with_outer_and_ctes(
     expr: &SqlExpr,
     scope: &BoundScope,
@@ -2057,6 +2317,34 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         }
         SqlExpr::Cast(inner, ty) => {
             let target_type = resolve_raw_type_name(ty, catalog)?;
+            if let SqlExpr::FuncCall {
+                name,
+                args,
+                order_by,
+                within_group,
+                distinct,
+                filter,
+                over,
+                ..
+            } = inner.as_ref()
+                && is_sql_json_scalar_internal_name(name)
+                && order_by.is_empty()
+                && within_group.is_none()
+                && !*distinct
+                && filter.is_none()
+                && over.is_none()
+            {
+                return bind_sql_json_internal_call(
+                    name,
+                    args.args(),
+                    Some(target_type),
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
             let source_type = infer_sql_expr_type_with_ctes(
                 inner,
                 scope,
@@ -3433,6 +3721,24 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             over,
         } => {
             let args_list = args.args();
+            if is_sql_json_scalar_internal_name(name)
+                && order_by.is_empty()
+                && within_group.is_none()
+                && !*distinct
+                && filter.is_none()
+                && over.is_none()
+            {
+                return bind_sql_json_internal_call(
+                    name,
+                    args_list,
+                    None,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
             let (direct_args, aggregate_args, aggregate_order_by) =
                 normalize_aggregate_call(args, order_by, within_group.as_deref());
             if over.is_none()

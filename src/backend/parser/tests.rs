@@ -15306,6 +15306,47 @@ fn parse_json_builder_and_object_agg_functions() {
 }
 
 #[test]
+fn parse_sql_json_special_syntax() {
+    let stmt = parse_select(
+        "select json('123'), json_scalar(123), json_serialize('{\"a\":1}' returning text), json_object('a' value 1), json_array(1, 2), '{\"a\":1}' is json object",
+    )
+    .unwrap();
+
+    let expected = [
+        crate::backend::parser::gram::SQL_JSON_FUNC,
+        crate::backend::parser::gram::SQL_JSON_SCALAR_FUNC,
+        crate::backend::parser::gram::SQL_JSON_SERIALIZE_FUNC,
+        crate::backend::parser::gram::SQL_JSON_OBJECT_FUNC,
+        crate::backend::parser::gram::SQL_JSON_ARRAY_FUNC,
+        crate::backend::parser::gram::SQL_JSON_IS_JSON_FUNC,
+    ];
+
+    assert_eq!(stmt.targets.len(), expected.len());
+    for (target, expected_name) in stmt.targets.iter().zip(expected) {
+        let expr = match &target.expr {
+            SqlExpr::Cast(expr, _)
+                if expected_name == crate::backend::parser::gram::SQL_JSON_SERIALIZE_FUNC =>
+            {
+                expr.as_ref()
+            }
+            expr => expr,
+        };
+        assert!(
+            matches!(
+                expr,
+                SqlExpr::FuncCall { name, .. } if name == expected_name
+            ),
+            "expected {expected_name}, got {:?}",
+            target.expr
+        );
+    }
+
+    assert!(parse_select("select json()").is_err());
+    assert!(parse_select("select json_scalar()").is_err());
+    assert!(parse_select("select json_serialize()").is_err());
+}
+
+#[test]
 fn parse_jsonb_operators_and_functions() {
     let stmt = parse_select(
             "select '{\"a\":1}'::jsonb @> '{\"a\":1}'::jsonb, '{\"a\":1}'::jsonb ? 'a', '{\"a\":[1,2]}'::jsonb -> 0, jsonb_typeof('{\"a\":1}'::jsonb), jsonb_build_object('a', 1)",

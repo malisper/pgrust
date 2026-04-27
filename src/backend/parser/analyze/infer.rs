@@ -2,6 +2,10 @@ use super::functions::{resolve_function_call, resolve_scalar_function};
 use super::multiranges::infer_multirange_special_expr_type_with_ctes;
 use super::ranges::infer_range_special_expr_type_with_ctes;
 use super::*;
+use crate::backend::parser::gram::{
+    SQL_JSON_ARRAY_FUNC, SQL_JSON_FUNC, SQL_JSON_IS_JSON_FUNC, SQL_JSON_OBJECT_FUNC,
+    SQL_JSON_SCALAR_FUNC, SQL_JSON_SERIALIZE_FUNC,
+};
 use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
 };
@@ -822,6 +826,13 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 if let Some(element_type) = unnest_element_type(arg_type) {
                     return element_type;
                 }
+            }
+            match name.as_str() {
+                SQL_JSON_SERIALIZE_FUNC => return SqlType::new(SqlTypeKind::Text),
+                SQL_JSON_IS_JSON_FUNC => return SqlType::new(SqlTypeKind::Bool),
+                SQL_JSON_FUNC | SQL_JSON_SCALAR_FUNC | SQL_JSON_OBJECT_FUNC
+                | SQL_JSON_ARRAY_FUNC => return SqlType::new(SqlTypeKind::Json),
+                _ => {}
             }
             let actual_types = args
                 .args()
