@@ -1703,7 +1703,7 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let relation = match catalog.lookup_any_relation(&comment_stmt.table_name) {
-            Some(entry) if matches!(entry.relkind, 'r' | 'p') => entry,
+            Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'f') => entry,
             Some(_) => {
                 return Err(ExecError::Parse(ParseError::WrongObjectType {
                     name: comment_stmt.table_name.clone(),

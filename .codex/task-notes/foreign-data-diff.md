@@ -41,6 +41,9 @@ Runtime behavior:
 - lets superusers reassign foreign server owners without the target role
   needing FDW usage, and blocks `DROP ROLE` while FDW/server ownership or ACL
   dependencies still reference the role
+- supports `COMMENT ON FOREIGN TABLE` through relation descriptions and emits
+  missing/duplicate FDW, server, and user-mapping notices plus FDW
+  handler/validator change warnings
 
 Tests run:
 - `cargo fmt`
@@ -83,9 +86,15 @@ Tests run:
 - `scripts/cargo_isolated.sh check`
 - `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
 - `scripts/run_regression.sh --skip-build --port 55446 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-role-deps`
+- `scripts/cargo_isolated.sh test --lib --quiet comment_on_foreign_table_uses_relation_description`
+- `scripts/run_regression.sh --skip-build --port 55447 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-comment-ft`
+- `scripts/cargo_isolated.sh test --lib --quiet foreign_data_if_exists_notices_and_alter_warnings`
+- `scripts/cargo_isolated.sh check`
+- `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
+- `scripts/run_regression.sh --skip-build --port 55448 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-notices`
 
 Remaining:
-`foreign_data` still fails, but improved to 379/539 matching queries. Biggest
+`foreign_data` still fails, but improved to 390/539 matching queries. Biggest
 remaining groups:
 - FDW dependency reporting for handler functions and owners
 - full `IMPORT FOREIGN SCHEMA` callback behavior beyond missing-handler errors

@@ -31979,6 +31979,56 @@ fn foreign_tables_reject_unsupported_constraints() {
 }
 
 #[test]
+fn comment_on_foreign_table_uses_relation_description() {
+    let base = temp_dir("comment_on_foreign_table");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create foreign data wrapper fdw_comment")
+        .unwrap();
+    db.execute(
+        1,
+        "create server fdw_comment_srv foreign data wrapper fdw_comment",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create foreign table fdw_comment_ft (a int4) server fdw_comment_srv",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "comment on foreign table fdw_comment_ft is 'remote table'",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_class c on c.oid = d.objoid \
+             where c.relname = 'fdw_comment_ft' and d.classoid = 1259 and d.objsubid = 0",
+        ),
+        vec![vec![Value::Text("remote table".into())]]
+    );
+
+    db.execute(1, "comment on foreign table fdw_comment_ft is null")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) \
+             from pg_description d \
+             join pg_class c on c.oid = d.objoid \
+             where c.relname = 'fdw_comment_ft' and d.classoid = 1259 and d.objsubid = 0",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn alter_foreign_table_if_exists_reports_missing_relation_notice() {
     let base = temp_dir("alter_foreign_table_missing_notice");
     let db = Database::open(&base, 64).unwrap();
@@ -32477,6 +32527,108 @@ fn foreign_data_dependencies_block_role_drop() {
         }
         other => panic!("expected FDW ACL dependency, got {other:?}"),
     }
+}
+
+#[test]
+fn foreign_data_if_exists_notices_and_alter_warnings() {
+    let base = temp_dir("foreign_data_notices");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create foreign data wrapper fdw_notice")
+        .unwrap();
+    db.execute(
+        1,
+        "create server notice_srv foreign data wrapper fdw_notice",
+    )
+    .unwrap();
+    db.execute(1, "create user mapping for current_user server notice_srv")
+        .unwrap();
+
+    let assert_single_backend_message = |expected_severity: &str, expected_message: &str| {
+        let notices = take_backend_notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].severity, expected_severity);
+        assert_eq!(notices[0].message, expected_message);
+    };
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "create server if not exists notice_srv foreign data wrapper fdw_notice",
+    )
+    .unwrap();
+    assert_single_backend_message("NOTICE", r#"server "notice_srv" already exists, skipping"#);
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "create user mapping if not exists for current_user server notice_srv",
+    )
+    .unwrap();
+    assert_single_backend_message(
+        "NOTICE",
+        r#"user mapping for "postgres" already exists for server "notice_srv", skipping"#,
+    );
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "drop user mapping if exists for public server notice_srv",
+    )
+    .unwrap();
+    assert_single_backend_message(
+        "NOTICE",
+        r#"user mapping for "public" does not exist for server "notice_srv", skipping"#,
+    );
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "drop user mapping if exists for missing_notice_role server notice_srv",
+    )
+    .unwrap();
+    assert_single_backend_message(
+        "NOTICE",
+        r#"role "missing_notice_role" does not exist, skipping"#,
+    );
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "drop user mapping if exists for current_user server missing_notice_srv",
+    )
+    .unwrap();
+    assert_single_backend_message(
+        "NOTICE",
+        r#"server "missing_notice_srv" does not exist, skipping"#,
+    );
+
+    clear_backend_notices();
+    db.execute(1, "drop server if exists missing_notice_srv")
+        .unwrap();
+    assert_single_backend_message(
+        "NOTICE",
+        r#"server "missing_notice_srv" does not exist, skipping"#,
+    );
+
+    clear_backend_notices();
+    db.execute(1, "drop foreign data wrapper if exists missing_notice_fdw")
+        .unwrap();
+    assert_single_backend_message(
+        "NOTICE",
+        r#"foreign-data wrapper "missing_notice_fdw" does not exist, skipping"#,
+    );
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "alter foreign data wrapper fdw_notice validator postgresql_fdw_validator",
+    )
+    .unwrap();
+    assert_single_backend_message(
+        "WARNING",
+        "changing the foreign-data wrapper validator can cause the options for dependent objects to become invalid",
+    );
 }
 
 #[test]
