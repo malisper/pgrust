@@ -9,6 +9,7 @@ use crate::backend::parser::{
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::stack_depth::StackDepthGuard;
+use crate::include::nodes::parsenodes::ReplicaIdentityKind;
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::execute_do_with_gucs;
@@ -167,32 +168,40 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        let index = catalog
-            .index_relations_for_heap(relation.relation_oid)
-            .into_iter()
-            .find(|index| index.name.eq_ignore_ascii_case(&stmt.index_name))
-            .ok_or_else(|| {
-                ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
-                    expected: "index on table",
-                    actual: format!(
-                        "index \"{}\" does not exist for table \"{}\"",
-                        stmt.index_name, stmt.table_name
-                    ),
-                })
-            })?;
-        if !index.index_meta.indisunique {
-            return Err(ExecError::Parse(
-                crate::backend::parser::ParseError::DetailedError {
-                    message: format!(
-                        "cannot use non-unique index \"{}\" as replica identity",
-                        stmt.index_name
-                    ),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42809",
-                },
-            ));
-        }
+        let (identity, index_oid) = match &stmt.identity {
+            ReplicaIdentityKind::Default => ('d', None),
+            ReplicaIdentityKind::Full => ('f', None),
+            ReplicaIdentityKind::Nothing => ('n', None),
+            ReplicaIdentityKind::Index(index_name) => {
+                let index = catalog
+                    .index_relations_for_heap(relation.relation_oid)
+                    .into_iter()
+                    .find(|index| index.name.eq_ignore_ascii_case(index_name))
+                    .ok_or_else(|| {
+                        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                            expected: "index on table",
+                            actual: format!(
+                                "index \"{}\" does not exist for table \"{}\"",
+                                index_name, stmt.table_name
+                            ),
+                        })
+                    })?;
+                if !index.index_meta.indisunique {
+                    return Err(ExecError::Parse(
+                        crate::backend::parser::ParseError::DetailedError {
+                            message: format!(
+                                "cannot use non-unique index \"{}\" as replica identity",
+                                index_name
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42809",
+                        },
+                    ));
+                }
+                ('i', Some(index.relation_oid))
+            }
+        };
 
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -209,7 +218,7 @@ impl Database {
         let result = self
             .catalog
             .write()
-            .set_replica_identity_index_mvcc(relation.relation_oid, index.relation_oid, &ctx)
+            .set_replica_identity_mvcc(relation.relation_oid, identity, index_oid, &ctx)
             .map(|effect| {
                 catalog_effects.push(effect);
                 StatementResult::AffectedRows(0)

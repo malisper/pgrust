@@ -7,7 +7,8 @@ use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
     is_system_column_name, lookup_heap_relation_for_alter_table,
-    reject_column_with_rule_dependencies, reject_column_with_trigger_dependencies,
+    reject_column_with_publication_dependencies, reject_column_with_rule_dependencies,
+    reject_column_with_trigger_dependencies,
 };
 
 fn display_relation_name(catalog: &dyn CatalogLookup, relation: &BoundRelation) -> String {
@@ -227,6 +228,12 @@ impl Database {
             "ALTER TABLE DROP COLUMN on column without foreign key dependencies",
         )?;
         reject_column_with_trigger_dependencies(
+            &catalog,
+            relation.relation_oid,
+            &relation.desc.columns[column_index].name,
+            (column_index + 1) as i16,
+        )?;
+        reject_column_with_publication_dependencies(
             &catalog,
             relation.relation_oid,
             &relation.desc.columns[column_index].name,

@@ -9,14 +9,16 @@ use crate::backend::parser::{
     CommentOnPublicationStatement, CreatePublicationStatement, DropPublicationStatement,
     PublicationObjectSpec, PublicationOption, PublicationOptions, PublicationSchemaName,
     PublicationTableSpec, PublicationTargetSpec, PublishGeneratedColumns, RawTypeName, SqlExpr,
-    SqlType, SqlTypeKind, function_arg_values, parse_expr,
+    SqlType, SqlTypeKind, function_arg_values, is_system_column_name, parse_expr,
+    resolve_raw_type_name,
 };
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::include::catalog::{
-    CURRENT_DATABASE_NAME, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID, PUBLISH_GENCOLS_NONE,
-    PUBLISH_GENCOLS_STORED, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow,
+    CURRENT_DATABASE_NAME, INFORMATION_SCHEMA_NAMESPACE_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_TOAST_NAMESPACE_OID, PUBLISH_GENCOLS_NONE, PUBLISH_GENCOLS_STORED,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow,
 };
-use crate::include::nodes::parsenodes::RawXmlExprOp;
+use crate::include::nodes::parsenodes::{ColumnGeneratedKind, RawXmlExprOp};
 use crate::pgrust::database::ddl::{
     ensure_can_set_role, ensure_relation_owner, format_sql_type_name,
 };
@@ -84,6 +86,12 @@ impl Database {
         {
             return Err(duplicate_publication_error(&stmt.publication_name));
         }
+        reject_publication_column_list_schema_conflicts(
+            &stmt.target,
+            &stmt.publication_name,
+            &[],
+            &[],
+        )?;
         if stmt.target.for_all_tables && !current_role.rolsuper {
             return Err(must_be_superuser_error(
                 "must be superuser to create FOR ALL TABLES publication",
@@ -284,6 +292,12 @@ impl Database {
                     catcache.publication_rel_rows_for_publication(publication.oid);
                 let existing_namespace_rows =
                     catcache.publication_namespace_rows_for_publication(publication.oid);
+                reject_publication_column_list_schema_conflicts(
+                    target,
+                    &publication.pubname,
+                    &existing_rel_rows,
+                    &existing_namespace_rows,
+                )?;
                 let existing_rel_oids = existing_rel_rows
                     .iter()
                     .map(|row| row.prrelid)
@@ -487,6 +501,12 @@ impl Database {
                             "must be superuser to set TABLES IN SCHEMA for publication",
                         ));
                     }
+                    reject_publication_column_list_schema_conflicts(
+                        target,
+                        &publication.pubname,
+                        &[],
+                        &[],
+                    )?;
                     self.catalog
                         .write()
                         .replace_publication_memberships_mvcc(
@@ -660,6 +680,12 @@ enum DuplicateHandling {
     Dedup,
 }
 
+#[derive(Clone, Copy)]
+struct SeenPublicationTable {
+    has_filter: bool,
+    has_column_list: bool,
+}
+
 fn resolve_publication_targets(
     db: &Database,
     client_id: ClientId,
@@ -674,6 +700,9 @@ fn resolve_publication_targets(
     let _catcache = db
         .backend_catcache(client_id, Some((xid, cid)))
         .map_err(map_catalog_error)?;
+    if matches!(duplicates, DuplicateHandling::Error) {
+        reject_conflicting_publication_table_duplicates(&catalog, target)?;
+    }
     let mut seen_relations = BTreeMap::new();
     let mut seen_namespaces = BTreeSet::new();
     let mut relation_rows = Vec::new();
@@ -744,6 +773,37 @@ fn resolve_publication_targets(
     })
 }
 
+fn reject_conflicting_publication_table_duplicates(
+    catalog: &dyn CatalogLookup,
+    target: &PublicationTargetSpec,
+) -> Result<(), ExecError> {
+    let mut seen = BTreeMap::<u32, SeenPublicationTable>::new();
+    for object in &target.objects {
+        let PublicationObjectSpec::Table(table) = object else {
+            continue;
+        };
+        let relation = lookup_publication_relation(catalog, &table.relation_name)?;
+        let current = SeenPublicationTable {
+            has_filter: table.where_clause.is_some(),
+            has_column_list: !table.column_names.is_empty(),
+        };
+        if let Some(existing) = seen.insert(relation.relation_oid, current) {
+            if existing.has_filter || current.has_filter {
+                return Err(publication_relation_conflicting_filter_error(
+                    &table.relation_name,
+                ));
+            }
+            if existing.has_column_list || current.has_column_list {
+                return Err(publication_relation_conflicting_column_list_error(
+                    &table.relation_name,
+                ));
+            }
+            return Err(publication_relation_duplicate_error(&table.relation_name));
+        }
+    }
+    Ok(())
+}
+
 fn resolve_publication_except_tables(
     db: &Database,
     client_id: ClientId,
@@ -800,6 +860,39 @@ fn reject_publication_drop_filters(target: &PublicationTargetSpec) -> Result<(),
     Ok(())
 }
 
+fn reject_publication_column_list_schema_conflicts(
+    target: &PublicationTargetSpec,
+    publication_name: &str,
+    existing_rel_rows: &[PgPublicationRelRow],
+    existing_namespace_rows: &[PgPublicationNamespaceRow],
+) -> Result<(), ExecError> {
+    let target_has_schema = target
+        .objects
+        .iter()
+        .any(|object| matches!(object, PublicationObjectSpec::Schema(_)));
+    if target_has_schema || !existing_namespace_rows.is_empty() {
+        if let Some(table) = target.objects.iter().find_map(|object| match object {
+            PublicationObjectSpec::Table(table) if !table.column_names.is_empty() => Some(table),
+            _ => None,
+        }) {
+            return Err(publication_column_list_with_schema_error(
+                &table.relation_name,
+                publication_name,
+            ));
+        }
+    }
+    if target_has_schema
+        && existing_rel_rows
+            .iter()
+            .any(|row| row.prattrs.as_ref().is_some_and(|attrs| !attrs.is_empty()))
+    {
+        return Err(publication_schema_with_existing_column_list_error(
+            publication_name,
+        ));
+    }
+    Ok(())
+}
+
 fn publication_column_numbers(
     relation: &BoundRelation,
     relation_name: &str,
@@ -811,7 +904,17 @@ fn publication_column_numbers(
 
     let mut attrs = Vec::with_capacity(column_names.len());
     for column_name in column_names {
-        let Some((idx, _)) = relation
+        if is_system_column_name(column_name) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot use system column \"{column_name}\" in publication column list"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P10",
+            });
+        }
+        let Some((idx, column)) = relation
             .desc
             .columns
             .iter()
@@ -827,6 +930,16 @@ fn publication_column_numbers(
                 sqlstate: "42703",
             });
         };
+        if column.generated == Some(ColumnGeneratedKind::Virtual) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot use virtual generated column \"{column_name}\" in publication column list"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P10",
+            });
+        }
         let attr_no = i16::try_from(idx + 1).map_err(|_| ExecError::DetailedError {
             message: format!("too many columns in relation \"{relation_name}\""),
             detail: None,
@@ -861,6 +974,7 @@ fn validate_publication_row_filter(
     }
     let expr = parse_expr(filter).map_err(ExecError::Parse)?;
     validate_publication_filter_expr(&expr)?;
+    validate_publication_filter_types(&expr, relation, catalog)?;
     if !publication_filter_returns_bool_by_syntax(&expr)
         && !filter
             .trim_start()
@@ -898,6 +1012,222 @@ fn publication_filter_returns_bool_by_syntax(expr: &SqlExpr) -> bool {
         expr,
         SqlExpr::Xml(xml) if xml.op == RawXmlExprOp::IsDocument
     )
+}
+
+fn validate_publication_filter_types(
+    expr: &SqlExpr,
+    relation: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    use SqlExpr::*;
+
+    match expr {
+        Column(name) => {
+            let column_name = name.rsplit('.').next().unwrap_or(name);
+            if let Some(column) = relation
+                .desc
+                .columns
+                .iter()
+                .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+                && publication_filter_type_is_user_defined(column.sql_type, catalog)
+            {
+                return Err(invalid_publication_where_error(
+                    "User-defined types are not allowed.",
+                ));
+            }
+        }
+        Cast(inner, ty) => {
+            validate_publication_filter_types(inner, relation, catalog)?;
+            let sql_type = resolve_raw_type_name(ty, catalog).map_err(ExecError::Parse)?;
+            if publication_filter_type_is_user_defined(sql_type, catalog) {
+                return Err(invalid_publication_where_error(
+                    "User-defined types are not allowed.",
+                ));
+            }
+        }
+        FuncCall { args, .. } => {
+            for arg in function_arg_values(args) {
+                validate_publication_filter_types(arg, relation, catalog)?;
+            }
+        }
+        BinaryOperator { left, right, .. }
+        | Add(left, right)
+        | Sub(left, right)
+        | BitAnd(left, right)
+        | BitOr(left, right)
+        | BitXor(left, right)
+        | Shl(left, right)
+        | Shr(left, right)
+        | Mul(left, right)
+        | Div(left, right)
+        | Mod(left, right)
+        | Concat(left, right)
+        | Eq(left, right)
+        | NotEq(left, right)
+        | Lt(left, right)
+        | LtEq(left, right)
+        | Gt(left, right)
+        | GtEq(left, right)
+        | RegexMatch(left, right)
+        | And(left, right)
+        | Or(left, right)
+        | IsDistinctFrom(left, right)
+        | IsNotDistinctFrom(left, right)
+        | Overlaps(left, right)
+        | ArrayOverlap(left, right)
+        | ArrayContains(left, right)
+        | ArrayContained(left, right)
+        | JsonbContains(left, right)
+        | JsonbContained(left, right)
+        | JsonbExists(left, right)
+        | JsonbExistsAny(left, right)
+        | JsonbExistsAll(left, right)
+        | JsonbPathExists(left, right)
+        | JsonbPathMatch(left, right)
+        | JsonGet(left, right)
+        | JsonGetText(left, right)
+        | JsonPath(left, right)
+        | JsonPathText(left, right)
+        | AtTimeZone {
+            expr: left,
+            zone: right,
+        } => {
+            validate_publication_filter_types(left, relation, catalog)?;
+            validate_publication_filter_types(right, relation, catalog)?;
+        }
+        UnaryPlus(inner)
+        | Negate(inner)
+        | BitNot(inner)
+        | Collate { expr: inner, .. }
+        | IsNull(inner)
+        | IsNotNull(inner)
+        | Not(inner)
+        | FieldSelect { expr: inner, .. }
+        | Subscript { expr: inner, .. } => {
+            validate_publication_filter_types(inner, relation, catalog)?;
+        }
+        Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            validate_publication_filter_types(expr, relation, catalog)?;
+            validate_publication_filter_types(pattern, relation, catalog)?;
+            if let Some(escape) = escape {
+                validate_publication_filter_types(escape, relation, catalog)?;
+            }
+        }
+        Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            if let Some(arg) = arg {
+                validate_publication_filter_types(arg, relation, catalog)?;
+            }
+            for when in args {
+                validate_publication_filter_types(&when.expr, relation, catalog)?;
+                validate_publication_filter_types(&when.result, relation, catalog)?;
+            }
+            if let Some(defresult) = defresult {
+                validate_publication_filter_types(defresult, relation, catalog)?;
+            }
+        }
+        ArrayLiteral(values) | Row(values) => {
+            for value in values {
+                validate_publication_filter_types(value, relation, catalog)?;
+            }
+        }
+        QuantifiedArray { left, array, .. } => {
+            validate_publication_filter_types(left, relation, catalog)?;
+            validate_publication_filter_types(array, relation, catalog)?;
+        }
+        ArraySubscript { array, subscripts } => {
+            validate_publication_filter_types(array, relation, catalog)?;
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    validate_publication_filter_types(lower, relation, catalog)?;
+                }
+                if let Some(upper) = &subscript.upper {
+                    validate_publication_filter_types(upper, relation, catalog)?;
+                }
+            }
+        }
+        GeometryUnaryOp { expr, .. } | PrefixOperator { expr, .. } => {
+            validate_publication_filter_types(expr, relation, catalog)?;
+        }
+        GeometryBinaryOp { left, right, .. } => {
+            validate_publication_filter_types(left, relation, catalog)?;
+            validate_publication_filter_types(right, relation, catalog)?;
+        }
+        InSubquery { expr, .. } => {
+            validate_publication_filter_types(expr, relation, catalog)?;
+        }
+        QuantifiedSubquery { left, .. } => {
+            validate_publication_filter_types(left, relation, catalog)?;
+        }
+        Xml(xml) => {
+            for child in xml.child_exprs() {
+                validate_publication_filter_types(child, relation, catalog)?;
+            }
+        }
+        Const(Value::EnumOid(_)) => {
+            return Err(invalid_publication_where_error(
+                "User-defined types are not allowed.",
+            ));
+        }
+        ScalarSubquery(_)
+        | ArraySubquery(_)
+        | Exists(_)
+        | Default
+        | Const(_)
+        | IntegerLiteral(_)
+        | NumericLiteral(_)
+        | Random
+        | CurrentDate
+        | CurrentCatalog
+        | CurrentSchema
+        | CurrentUser
+        | SessionUser
+        | CurrentRole
+        | CurrentTime { .. }
+        | CurrentTimestamp { .. }
+        | LocalTime { .. }
+        | LocalTimestamp { .. } => {}
+    }
+    Ok(())
+}
+
+fn publication_filter_type_is_user_defined(sql_type: SqlType, catalog: &dyn CatalogLookup) -> bool {
+    if matches!(
+        sql_type.kind,
+        SqlTypeKind::Composite | SqlTypeKind::Enum | SqlTypeKind::Shell
+    ) {
+        return true;
+    }
+    let Some(type_oid) = (sql_type.type_oid != 0).then_some(sql_type.type_oid) else {
+        return false;
+    };
+    let Some(row) = catalog.type_by_oid(type_oid) else {
+        return false;
+    };
+    if row.typnamespace != PG_CATALOG_NAMESPACE_OID
+        && row.typnamespace != INFORMATION_SCHEMA_NAMESPACE_OID
+    {
+        return true;
+    }
+    row.typelem != 0
+        && catalog.type_by_oid(row.typelem).is_some_and(|elem| {
+            elem.typnamespace != PG_CATALOG_NAMESPACE_OID
+                && elem.typnamespace != INFORMATION_SCHEMA_NAMESPACE_OID
+        })
 }
 
 fn validate_publication_filter_expr(expr: &SqlExpr) -> Result<(), ExecError> {
@@ -1228,11 +1558,7 @@ fn lookup_publication_relation(
     relation_name: &str,
 ) -> Result<BoundRelation, ExecError> {
     match catalog.lookup_any_relation(relation_name) {
-        Some(relation) if matches!(relation.relkind, 'r' | 'p') => Ok(relation),
-        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
-            name: relation_name.to_string(),
-            expected: "table",
-        })),
+        Some(relation) => Ok(relation),
         None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
             relation_name.to_string(),
         ))),
@@ -1273,6 +1599,14 @@ fn validate_publishable_relation(
     relation: &BoundRelation,
     relation_name: &str,
 ) -> Result<(), ExecError> {
+    if relation.relkind == 'v' {
+        return Err(ExecError::DetailedError {
+            message: format!("cannot add relation \"{relation_name}\" to publication"),
+            detail: Some("This operation is not supported for views.".into()),
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
     if !matches!(relation.relkind, 'r' | 'p') {
         return Err(ExecError::DetailedError {
             message: format!("cannot add relation \"{relation_name}\" to publication"),
@@ -1567,6 +1901,44 @@ fn publication_relation_conflicting_filter_error(relation_name: &str) -> ExecErr
         detail: None,
         hint: None,
         sqlstate: "42710",
+    }
+}
+
+fn publication_relation_conflicting_column_list_error(relation_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("conflicting or redundant column lists for table \"{relation_name}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "42710",
+    }
+}
+
+fn publication_column_list_with_schema_error(
+    relation_name: &str,
+    publication_name: &str,
+) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "cannot use column list for relation \"{relation_name}\" in publication \"{publication_name}\""
+        ),
+        detail: Some(
+            "Column lists cannot be specified in publications containing FOR TABLES IN SCHEMA elements."
+                .into(),
+        ),
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn publication_schema_with_existing_column_list_error(publication_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("cannot add schema to publication \"{publication_name}\""),
+        detail: Some(
+            "Schemas cannot be added if any tables that specify a column list are already part of the publication."
+                .into(),
+        ),
+        hint: None,
+        sqlstate: "0A000",
     }
 }
 
@@ -2509,6 +2881,375 @@ mod tests {
     }
 
     #[test]
+    fn publication_column_list_rejects_duplicate_membership_and_system_columns() {
+        let base = temp_dir("column_list_validation");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int4)")
+            .unwrap();
+
+        let duplicate = session
+            .execute(
+                &db,
+                "create publication pub_dup for table widgets(id), widgets with (publish = 'insert')",
+            )
+            .unwrap_err();
+        match duplicate {
+            ExecError::DetailedError { message, .. } => assert_eq!(
+                message,
+                "conflicting or redundant column lists for table \"widgets\""
+            ),
+            other => panic!("expected duplicate column list error, got {other:?}"),
+        }
+
+        session
+            .execute(&db, "create publication pub for table widgets")
+            .unwrap();
+        let system_column = session
+            .execute(&db, "alter publication pub set table widgets(id, ctid)")
+            .unwrap_err();
+        match system_column {
+            ExecError::DetailedError {
+                message, sqlstate, ..
+            } => {
+                assert_eq!(
+                    message,
+                    "cannot use system column \"ctid\" in publication column list"
+                );
+                assert_eq!(sqlstate, "42P10");
+            }
+            other => panic!("expected system column list error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publication_column_list_rejects_virtual_generated_columns() {
+        let base = temp_dir("column_list_virtual_generated");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(
+                &db,
+                "create table widgets (id int4, v int4 generated always as (id + 1) virtual)",
+            )
+            .unwrap();
+
+        let err = session
+            .execute(&db, "create publication pub for table widgets(id, v)")
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError { message, .. } => assert_eq!(
+                message,
+                "cannot use virtual generated column \"v\" in publication column list"
+            ),
+            other => panic!("expected virtual generated column list error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publication_column_list_blocks_drop_column() {
+        let base = temp_dir("column_list_drop_column");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (a int primary key, c int)")
+            .unwrap();
+        session
+            .execute(&db, "create publication pub for table widgets(a, c)")
+            .unwrap();
+
+        let err = session
+            .execute(&db, "alter table widgets drop column c")
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message,
+                detail,
+                hint,
+                sqlstate,
+            } => {
+                assert_eq!(
+                    message,
+                    "cannot drop column c of table widgets because other objects depend on it"
+                );
+                assert_eq!(
+                    detail.as_deref(),
+                    Some(
+                        "publication of table widgets in publication pub depends on column c of table widgets"
+                    )
+                );
+                assert_eq!(
+                    hint.as_deref(),
+                    Some("Use DROP ... CASCADE to drop the dependent objects too.")
+                );
+                assert_eq!(sqlstate, "2BP01");
+            }
+            other => panic!("expected publication dependency error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publication_column_list_rejects_schema_publication_mix() {
+        let base = temp_dir("column_list_schema_mix");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create schema pub_test").unwrap();
+        session
+            .execute(&db, "create table widgets (id int primary key)")
+            .unwrap();
+
+        let create_err = session
+            .execute(
+                &db,
+                "create publication pub_bad for tables in schema pub_test, table public.widgets(id)",
+            )
+            .unwrap_err();
+        match create_err {
+            ExecError::DetailedError {
+                message, detail, ..
+            } => {
+                assert_eq!(
+                    message,
+                    "cannot use column list for relation \"public.widgets\" in publication \"pub_bad\""
+                );
+                assert_eq!(
+                    detail.as_deref(),
+                    Some(
+                        "Column lists cannot be specified in publications containing FOR TABLES IN SCHEMA elements."
+                    )
+                );
+            }
+            other => panic!("expected schema/column-list create error, got {other:?}"),
+        }
+
+        session
+            .execute(
+                &db,
+                "create publication pub_schema for tables in schema pub_test",
+            )
+            .unwrap();
+        let add_table_err = session
+            .execute(
+                &db,
+                "alter publication pub_schema add table public.widgets(id)",
+            )
+            .unwrap_err();
+        match add_table_err {
+            ExecError::DetailedError { message, .. } => assert_eq!(
+                message,
+                "cannot use column list for relation \"public.widgets\" in publication \"pub_schema\""
+            ),
+            other => panic!("expected schema/column-list add table error, got {other:?}"),
+        }
+
+        session
+            .execute(&db, "create publication pub_table for table widgets(id)")
+            .unwrap();
+        let add_schema_err = session
+            .execute(
+                &db,
+                "alter publication pub_table add tables in schema pub_test",
+            )
+            .unwrap_err();
+        match add_schema_err {
+            ExecError::DetailedError {
+                message, detail, ..
+            } => {
+                assert_eq!(message, "cannot add schema to publication \"pub_table\"");
+                assert_eq!(
+                    detail.as_deref(),
+                    Some(
+                        "Schemas cannot be added if any tables that specify a column list are already part of the publication."
+                    )
+                );
+            }
+            other => panic!("expected schema/column-list add schema error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publication_update_requires_replica_identity_even_without_rows() {
+        let base = temp_dir("publication_update_empty_requires_ri");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int)")
+            .unwrap();
+        session
+            .execute(&db, "create publication pub for table widgets")
+            .unwrap();
+
+        session
+            .execute(&db, "update widgets set id = 1 where false")
+            .unwrap();
+        let err = session
+            .execute(&db, "update widgets set id = 1")
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError { message, hint, .. } => {
+                assert_eq!(
+                    message,
+                    "cannot update table \"widgets\" because it does not have a replica identity and publishes updates"
+                );
+                assert_eq!(
+                    hint.as_deref(),
+                    Some("To enable updating the table, set REPLICA IDENTITY using ALTER TABLE.")
+                );
+            }
+            other => panic!("expected missing replica identity update error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn virtual_generated_column_rejects_user_defined_function() {
+        let base = temp_dir("virtual_generated_user_function");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(
+                &db,
+                "create function gen_func() returns integer immutable as $$ begin return 7; end; $$ language plpgsql",
+            )
+            .unwrap();
+
+        let err = session
+            .execute(
+                &db,
+                "create table widgets (id int primary key, x int, y int generated always as (x * gen_func()) virtual)",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::Parse(ParseError::DetailedError {
+                message, detail, ..
+            })
+            | ExecError::DetailedError {
+                message, detail, ..
+            } => {
+                assert_eq!(message, "generation expression uses user-defined function");
+                assert_eq!(
+                    detail.as_deref(),
+                    Some(
+                        "Virtual generated columns that make use of user-defined functions are not yet supported."
+                    )
+                );
+            }
+            other => panic!("expected virtual generated function error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publication_blocks_virtual_generated_set_expression() {
+        let base = temp_dir("publication_virtual_generated_set_expression");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(
+                &db,
+                "create table widgets (id int primary key, x int, y int generated always as (x * 111) virtual)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create publication pub for table widgets where (y > 100)",
+            )
+            .unwrap();
+
+        let err = session
+            .execute(
+                &db,
+                "alter table widgets alter column y set expression as (x * 222)",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message, detail, ..
+            } => {
+                assert_eq!(
+                    message,
+                    "ALTER TABLE / SET EXPRESSION is not supported for virtual generated columns in tables that are part of a publication"
+                );
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("Column \"y\" of relation \"widgets\" is a virtual generated column.")
+                );
+            }
+            other => panic!("expected virtual generated publication error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publication_rejects_views_with_publication_error() {
+        let base = temp_dir("publication_view_error");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int)")
+            .unwrap();
+        session
+            .execute(&db, "create view widgets_view as select * from widgets")
+            .unwrap();
+
+        let err = session
+            .execute(&db, "create publication pub for table widgets_view")
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message, detail, ..
+            } => {
+                assert_eq!(
+                    message,
+                    "cannot add relation \"widgets_view\" to publication"
+                );
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("This operation is not supported for views.")
+                );
+            }
+            other => panic!("expected publication view error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publication_row_filter_rejects_user_defined_column_types() {
+        let base = temp_dir("row_filter_user_type");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create type bug_status as enum ('new', 'open')")
+            .unwrap();
+        session
+            .execute(&db, "create table bugs (status bug_status)")
+            .unwrap();
+
+        let err = session
+            .execute(
+                &db,
+                "create publication pub for table bugs where (status = 'open') with (publish = 'insert')",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message, detail, ..
+            } => {
+                assert_eq!(message, "invalid publication WHERE expression");
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("User-defined types are not allowed.")
+                );
+            }
+            other => panic!("expected user-defined type filter error, got {other:?}"),
+        }
+        assert!(
+            db.backend_catcache(1, None)
+                .unwrap()
+                .publication_row_by_name("pub")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn alter_publication_drop_rejects_where_clause_without_losing_publication() {
         let base = temp_dir("drop_filter_keeps_publication");
         let db = Database::open(&base, 16).unwrap();
@@ -2602,5 +3343,41 @@ mod tests {
             }
             other => panic!("expected aggregate filter error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn alter_publication_drop_after_column_list_update_error_keeps_membership_editable() {
+        let base = temp_dir("drop_after_column_list_update_error");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(
+                &db,
+                "create table widgets (a int primary key, b text, c text)",
+            )
+            .unwrap();
+        session
+            .execute(&db, "alter table widgets alter column b set not null")
+            .unwrap();
+        session
+            .execute(&db, "create unique index widgets_b_key on widgets(b)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "alter table widgets replica identity using index widgets_b_key",
+            )
+            .unwrap();
+        session
+            .execute(&db, "create publication pub for table widgets(a)")
+            .unwrap();
+        let err = session
+            .execute(&db, "update widgets set a = 1")
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("Column list used by the publication"));
+
+        session
+            .execute(&db, "alter publication pub drop table widgets")
+            .unwrap();
     }
 }

@@ -3487,9 +3487,18 @@ fn parse_alter_table_constraint_statements() {
             if_exists: false,
             only: false,
             table_name: "pets".into(),
-            index_name: "pets_pk".into(),
+            identity: crate::include::nodes::parsenodes::ReplicaIdentityKind::Index(
+                "pets_pk".into()
+            ),
         })
     );
+    assert!(matches!(
+        parse_statement("alter table pets replica identity full").unwrap(),
+        Statement::AlterTableReplicaIdentity(AlterTableReplicaIdentityStatement {
+            identity: crate::include::nodes::parsenodes::ReplicaIdentityKind::Full,
+            ..
+        })
+    ));
 
     let stmt =
         parse_statement("alter table items add constraint items_key unique using index items_idx")

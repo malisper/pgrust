@@ -948,13 +948,40 @@ fn try_parse_alter_table_replica_identity_statement(
     if rest.starts_with('*') {
         rest = rest[1..].trim_start();
     }
-    if !consume_keywords(rest, &["replica", "identity", "using", "index"]).is_some() {
+    if !keyword_at_start(rest, "replica") {
         return Ok(None);
     }
-    rest = consume_keywords(rest, &["replica", "identity", "using", "index"])
-        .expect("checked replica identity keywords")
-        .trim_start();
-    let (index_name, rest) = parse_sql_identifier(rest)?;
+    let Some(next) = consume_keywords(rest, &["replica", "identity"]) else {
+        return Ok(None);
+    };
+    rest = next.trim_start();
+    let (identity, rest) = if let Some(next) = consume_keywords(rest, &["using", "index"]) {
+        let (index_name, rest) = parse_sql_identifier(next.trim_start())?;
+        (
+            crate::include::nodes::parsenodes::ReplicaIdentityKind::Index(index_name),
+            rest,
+        )
+    } else if keyword_at_start(rest, "default") {
+        (
+            crate::include::nodes::parsenodes::ReplicaIdentityKind::Default,
+            consume_keyword(rest, "default"),
+        )
+    } else if keyword_at_start(rest, "full") {
+        (
+            crate::include::nodes::parsenodes::ReplicaIdentityKind::Full,
+            consume_keyword(rest, "full"),
+        )
+    } else if keyword_at_start(rest, "nothing") {
+        (
+            crate::include::nodes::parsenodes::ReplicaIdentityKind::Nothing,
+            consume_keyword(rest, "nothing"),
+        )
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "DEFAULT, FULL, NOTHING, or USING INDEX",
+            actual: rest.trim().into(),
+        });
+    };
     if !rest.trim().is_empty() {
         return Err(ParseError::UnexpectedToken {
             expected: "end of ALTER TABLE REPLICA IDENTITY statement",
@@ -970,7 +997,7 @@ fn try_parse_alter_table_replica_identity_statement(
             if_exists,
             only,
             table_name,
-            index_name,
+            identity,
         },
     )))
 }

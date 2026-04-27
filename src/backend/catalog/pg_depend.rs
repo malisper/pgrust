@@ -310,7 +310,7 @@ fn generated_column_attrdef_depend_rows(
     rows
 }
 
-fn collect_sql_expr_column_names(expr: &SqlExpr, out: &mut BTreeSet<String>) {
+pub(crate) fn collect_sql_expr_column_names(expr: &SqlExpr, out: &mut BTreeSet<String>) {
     match expr {
         SqlExpr::Column(name) => {
             out.insert(name.clone());
