@@ -141,12 +141,12 @@ fn role_oid(db: &Database, role_name: &str) -> u32 {
         .unwrap()
 }
 
-struct AnalyzeRelkindOverrideCatalog<'a> {
-    inner: LazyCatalogLookup<'a>,
+struct AnalyzeRelkindOverrideCatalog {
+    inner: LazyCatalogLookup,
     relkind_overrides: HashMap<u32, char>,
 }
 
-impl AnalyzeRelkindOverrideCatalog<'_> {
+impl AnalyzeRelkindOverrideCatalog {
     fn apply_override(&self, mut relation: BoundRelation) -> BoundRelation {
         if let Some(relkind) = self.relkind_overrides.get(&relation.relation_oid) {
             relation.relkind = *relkind;
@@ -155,7 +155,7 @@ impl AnalyzeRelkindOverrideCatalog<'_> {
     }
 }
 
-impl CatalogLookup for AnalyzeRelkindOverrideCatalog<'_> {
+impl CatalogLookup for AnalyzeRelkindOverrideCatalog {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
         self.inner
             .lookup_any_relation(name)
@@ -229,7 +229,8 @@ fn analyze_executor_context(
         database: None,
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
-        catalog: visible_catalog,
+        catalog: visible_catalog.map(crate::backend::executor::executor_catalog),
+        scalar_function_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
         )),
@@ -11369,6 +11370,70 @@ fn client_visible_cache_refreshes_after_create_table() {
 }
 
 #[test]
+fn lookup_any_relation_uses_targeted_relation_cache_without_catcache() {
+    let base = temp_dir("lookup_any_relation_targeted_cache");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table targeted_lookup (id int4 not null)")
+        .unwrap();
+    db.backend_cache_states.write().remove(&1);
+
+    let catalog = db.lazy_catalog_lookup(1, None, None);
+    let unqualified = catalog.lookup_any_relation("targeted_lookup").unwrap();
+    let qualified = catalog
+        .lookup_any_relation("public.targeted_lookup")
+        .unwrap();
+
+    assert_eq!(unqualified.relation_oid, qualified.relation_oid);
+    let states = db.backend_cache_states.read();
+    let state = states.get(&1).unwrap();
+    assert!(state.catcache.is_none());
+    assert_eq!(state.relation_cache.len(), 1);
+    assert!(state.relation_cache.contains_key(&unqualified.relation_oid));
+}
+
+#[test]
+fn relation_descriptor_cache_survives_command_id_changes_and_invalidates() {
+    let base = temp_dir("relation_descriptor_cache_lifetime");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table relcache_lifetime (id int4 not null)")
+        .unwrap();
+    db.backend_cache_states.write().remove(&1);
+
+    let relation = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("relcache_lifetime")
+        .unwrap();
+    let relation_oid = relation.relation_oid;
+    assert!(
+        db.backend_cache_states
+            .read()
+            .get(&1)
+            .unwrap()
+            .relation_cache
+            .contains_key(&relation_oid)
+    );
+
+    let cached_with_later_cid = db
+        .lazy_catalog_lookup(1, Some((999_999, 42)), None)
+        .relation_by_oid(relation_oid)
+        .unwrap();
+    assert_eq!(cached_with_later_cid.relation_oid, relation_oid);
+
+    let mut invalidation = crate::backend::utils::cache::inval::CatalogInvalidation::default();
+    invalidation
+        .touched_catalogs
+        .insert(BootstrapCatalogKind::PgClass);
+    crate::backend::utils::cache::inval::apply_backend_cache_invalidation(&db, 1, &invalidation);
+
+    let states = db.backend_cache_states.read();
+    let state = states.get(&1).unwrap();
+    assert!(state.relation_cache.is_empty());
+    assert!(state.catcache.is_none());
+}
+
+#[test]
 fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
     let base = temp_dir("commit_catalog_invalidation_fanout");
     let db = Database::open(&base, 16).unwrap();
@@ -11389,10 +11454,10 @@ fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
         let states = db.backend_cache_states.read();
         let writer_state = states.get(&1).unwrap();
         let reader_state = states.get(&2).unwrap();
-        assert!(writer_state.catcache.is_some());
-        assert!(writer_state.relcache.is_some());
-        assert!(reader_state.catcache.is_some());
-        assert!(reader_state.relcache.is_some());
+        assert!(writer_state.catcache.is_none());
+        assert!(writer_state.relation_cache.is_empty());
+        assert!(reader_state.catcache.is_none());
+        assert!(reader_state.relation_cache.is_empty());
         assert!(reader_state.pending_invalidations.is_empty());
     }
 
@@ -11415,8 +11480,8 @@ fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
     {
         let states = db.backend_cache_states.read();
         let reader_state = states.get(&2).unwrap();
-        assert!(reader_state.catcache.is_some());
-        assert!(reader_state.relcache.is_some());
+        assert!(reader_state.catcache.is_none());
+        assert!(reader_state.relation_cache.is_empty());
         assert_eq!(reader_state.pending_invalidations.len(), 1);
     }
     match reader

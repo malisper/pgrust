@@ -875,14 +875,13 @@ impl<'a> PartitionedKeyInstaller<'a> {
             }
         } else {
             let index_cid = self.take_cid_span(2);
-            let visible_catalog = self
-                .db
-                .lazy_catalog_lookup(
+            let visible_catalog = Some(crate::backend::executor::executor_catalog(
+                self.db.lazy_catalog_lookup(
                     self.client_id,
                     Some((self.xid, self.visible_cid())),
                     self.configured_search_path,
-                )
-                .materialize_visible_catalog();
+                ),
+            ));
             let index_entry = self.db.build_simple_index_in_transaction(
                 self.client_id,
                 &relation,

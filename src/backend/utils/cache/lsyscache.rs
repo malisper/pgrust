@@ -8,10 +8,10 @@ use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, StorageManager};
 use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
-    SysCacheId, SysCacheTuple, backend_catcache, backend_relcache, ensure_am_rows,
-    ensure_attribute_rows, ensure_class_rows, ensure_constraint_rows, ensure_index_rows,
-    ensure_namespace_rows, ensure_opclass_rows, ensure_proc_rows, ensure_rewrite_rows,
-    ensure_statistic_rows, ensure_type_rows, relation_id_get_relation_db,
+    SysCacheId, SysCacheTuple, backend_catcache, ensure_am_rows, ensure_amop_rows,
+    ensure_amproc_rows, ensure_attribute_rows, ensure_class_rows, ensure_constraint_rows,
+    ensure_index_rows, ensure_namespace_rows, ensure_opclass_rows, ensure_proc_rows,
+    ensure_rewrite_rows, ensure_statistic_rows, ensure_type_rows, relation_id_get_relation_db,
     search_sys_cache_list1_db, search_sys_cache_list2_db, search_sys_cache_list3_db,
     search_sys_cache1_db, search_sys_cache2_db,
 };
@@ -21,17 +21,16 @@ use crate::backend::utils::cache::system_views::{
     build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
     build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
 };
-use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::access::brin_page::{
     BRIN_PAGE_CONTENT_OFFSET, BrinMetaPageData, brin_is_meta_page,
 };
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
     PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
-    PgClassRow, PgCollationRow, PgConstraintRow, PgEnumRow, PgIndexRow, PgInheritsRow,
-    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow,
-    PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow,
-    PgTypeRow,
+    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgEnumRow, PgIndexRow,
+    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgProcRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
+    PgTriggerRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::SqlType;
@@ -963,7 +962,7 @@ fn opclass_row_by_oid(
         })
 }
 
-fn opclass_rows_for_am(
+pub fn opclass_rows_for_am(
     db: &Database,
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
@@ -995,8 +994,9 @@ fn opclass_rows_for_am(
     rows
 }
 
-pub struct LazyCatalogLookup<'a> {
-    pub db: &'a Database,
+#[derive(Clone)]
+pub struct LazyCatalogLookup {
+    pub db: Database,
     pub client_id: ClientId,
     pub txn_ctx: Option<(TransactionId, CommandId)>,
     pub search_path: Vec<String>,
@@ -1341,11 +1341,34 @@ pub fn relation_entry_by_oid(
             .then_some(entry);
     }
 
-    let entry = backend_relcache(db, client_id, txn_ctx)
-        .ok()?
-        .get_by_oid(relation_oid)
-        .cloned()?;
-    (!db.other_session_temp_namespace_oid(client_id, entry.namespace_oid)).then_some(entry)
+    None
+}
+
+fn relation_entry_by_name_namespace(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relname: &str,
+    namespace_oid: u32,
+) -> Option<RelCacheEntry> {
+    let class = class_row_by_name_namespace(db, client_id, txn_ctx, relname, namespace_oid)?;
+    relation_entry_by_oid(db, client_id, txn_ctx, class.oid)
+}
+
+fn temp_relation_entry_by_name(
+    db: &Database,
+    client_id: ClientId,
+    relname: &str,
+) -> Option<RelCacheEntry> {
+    db.temp_relations
+        .read()
+        .get(&db.temp_backend_id(client_id))
+        .and_then(|namespace| {
+            namespace
+                .tables
+                .get(&normalize_catalog_name(relname).to_ascii_lowercase())
+                .map(|entry| entry.entry.clone())
+        })
 }
 
 fn toast_relation_from_entry(
@@ -1364,6 +1387,29 @@ fn toast_relation_from_entry(
         })
 }
 
+fn bound_relation_from_entry(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    entry: RelCacheEntry,
+) -> BoundRelation {
+    BoundRelation {
+        rel: entry.rel,
+        relation_oid: entry.relation_oid,
+        toast: toast_relation_from_entry(db, client_id, txn_ctx, &entry),
+        namespace_oid: entry.namespace_oid,
+        owner_oid: entry.owner_oid,
+        of_type_oid: entry.of_type_oid,
+        relpersistence: entry.relpersistence,
+        relkind: entry.relkind,
+        relispopulated: entry.relispopulated,
+        desc: entry.desc.clone(),
+        relispartition: entry.relispartition,
+        relpartbound: entry.relpartbound.clone(),
+        partitioned_table: entry.partitioned_table.clone(),
+    }
+}
+
 pub fn lookup_any_relation(
     db: &Database,
     client_id: ClientId,
@@ -1373,101 +1419,38 @@ pub fn lookup_any_relation(
 ) -> Option<BoundRelation> {
     let exact = name.to_ascii_lowercase();
     if let Some((schema, relname)) = exact.split_once('.') {
-        let schema_name = if schema == "pg_temp" {
-            owned_temp_namespace(db, client_id)?.name
-        } else {
-            schema.to_string()
-        };
-        let mut relcache = backend_relcache(db, client_id, txn_ctx).ok()?;
-        if let Some(temp_namespace) = owned_temp_namespace(db, client_id) {
-            for (temp_name, entry) in temp_namespace.tables {
-                relcache.insert(temp_name.clone(), entry.entry.clone());
-                relcache.insert(
-                    format!("{}.{}", temp_namespace.name, temp_name),
-                    entry.entry,
-                );
-            }
+        if let Some(temp_namespace) = owned_temp_namespace(db, client_id)
+            && (schema == "pg_temp" || schema == temp_namespace.name)
+        {
+            return temp_namespace
+                .tables
+                .get(&normalize_catalog_name(relname).to_ascii_lowercase())
+                .map(|entry| {
+                    bound_relation_from_entry(db, client_id, txn_ctx, entry.entry.clone())
+                });
         }
-        let entry = relcache
-            .get_by_name_exact(&format!("{schema_name}.{relname}"))
-            .filter(|entry| !db.other_session_temp_namespace_oid(client_id, entry.namespace_oid))?
-            .clone();
-        return Some(BoundRelation {
-            rel: entry.rel,
-            relation_oid: entry.relation_oid,
-            toast: toast_relation_from_entry(db, client_id, txn_ctx, &entry),
-            namespace_oid: entry.namespace_oid,
-            owner_oid: entry.owner_oid,
-            of_type_oid: entry.of_type_oid,
-            relpersistence: entry.relpersistence,
-            relkind: entry.relkind,
-            relispopulated: entry.relispopulated,
-            desc: entry.desc.clone(),
-            relispartition: entry.relispartition,
-            relpartbound: entry.relpartbound.clone(),
-            partitioned_table: entry.partitioned_table.clone(),
-        });
+        let namespace_oid = namespace_row_by_name(db, client_id, txn_ctx, schema)?.oid;
+        let entry =
+            relation_entry_by_name_namespace(db, client_id, txn_ctx, relname, namespace_oid)?;
+        return Some(bound_relation_from_entry(db, client_id, txn_ctx, entry));
     }
 
     let normalized = normalize_catalog_name(name).to_ascii_lowercase();
-    if let Some(temp) = db
-        .temp_relations
-        .read()
-        .get(&db.temp_backend_id(client_id))
-        .and_then(|namespace| {
-            namespace
-                .tables
-                .get(&normalized)
-                .map(|entry| entry.entry.clone())
-        })
-    {
-        return Some(BoundRelation {
-            rel: temp.rel,
-            relation_oid: temp.relation_oid,
-            toast: toast_relation_from_entry(db, client_id, txn_ctx, &temp),
-            namespace_oid: temp.namespace_oid,
-            owner_oid: temp.owner_oid,
-            of_type_oid: temp.of_type_oid,
-            relpersistence: temp.relpersistence,
-            relkind: temp.relkind,
-            relispopulated: temp.relispopulated,
-            desc: temp.desc.clone(),
-            relispartition: temp.relispartition,
-            relpartbound: temp.relpartbound.clone(),
-            partitioned_table: temp.partitioned_table.clone(),
-        });
+    if let Some(temp) = temp_relation_entry_by_name(db, client_id, &normalized) {
+        return Some(bound_relation_from_entry(db, client_id, txn_ctx, temp));
     }
 
-    let mut relcache = backend_relcache(db, client_id, txn_ctx).ok()?;
-    if let Some(temp_namespace) = owned_temp_namespace(db, client_id) {
-        for (temp_name, entry) in temp_namespace.tables {
-            relcache.insert(temp_name.clone(), entry.entry.clone());
-            relcache.insert(
-                format!("{}.{}", temp_namespace.name, temp_name),
-                entry.entry,
-            );
+    for namespace_name in search_path {
+        let Some(namespace_oid) =
+            namespace_row_by_name(db, client_id, txn_ctx, namespace_name).map(|row| row.oid)
+        else {
+            continue;
+        };
+        if let Some(entry) =
+            relation_entry_by_name_namespace(db, client_id, txn_ctx, &normalized, namespace_oid)
+        {
+            return Some(bound_relation_from_entry(db, client_id, txn_ctx, entry));
         }
-    }
-    let relcache = relcache.with_search_path(search_path);
-    if let Some(entry) = relcache
-        .get_by_name(&normalized)
-        .filter(|entry| !db.other_session_temp_namespace_oid(client_id, entry.namespace_oid))
-    {
-        return Some(BoundRelation {
-            rel: entry.rel,
-            relation_oid: entry.relation_oid,
-            toast: toast_relation_from_entry(db, client_id, txn_ctx, entry),
-            namespace_oid: entry.namespace_oid,
-            owner_oid: entry.owner_oid,
-            of_type_oid: entry.of_type_oid,
-            relpersistence: entry.relpersistence,
-            relkind: entry.relkind,
-            relispopulated: entry.relispopulated,
-            desc: entry.desc.clone(),
-            relispartition: entry.relispartition,
-            relpartbound: entry.relpartbound.clone(),
-            partitioned_table: entry.partitioned_table.clone(),
-        });
     }
 
     None
@@ -1599,10 +1582,10 @@ fn append_missing_derived_not_null_constraints(
     }
 }
 
-impl CatalogLookup for LazyCatalogLookup<'_> {
+impl CatalogLookup for LazyCatalogLookup {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
         lookup_any_relation(
-            self.db,
+            &self.db,
             self.client_id,
             self.txn_ctx,
             &self.search_path,
@@ -1615,11 +1598,11 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
-        let entry = relation_entry_by_oid(self.db, self.client_id, self.txn_ctx, relation_oid)?;
+        let entry = relation_entry_by_oid(&self.db, self.client_id, self.txn_ctx, relation_oid)?;
         Some(BoundRelation {
             rel: entry.rel,
             relation_oid: entry.relation_oid,
-            toast: toast_relation_from_entry(self.db, self.client_id, self.txn_ctx, &entry),
+            toast: toast_relation_from_entry(&self.db, self.client_id, self.txn_ctx, &entry),
             namespace_oid: entry.namespace_oid,
             owner_oid: entry.owner_oid,
             of_type_oid: entry.of_type_oid,
@@ -1634,7 +1617,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn index_row_by_oid(&self, index_oid: u32) -> Option<PgIndexRow> {
-        index_row_by_indexrelid(self.db, self.client_id, self.txn_ctx, index_oid)
+        index_row_by_indexrelid(&self.db, self.client_id, self.txn_ctx, index_oid)
     }
 
     fn operator_by_name_left_right(
@@ -1644,7 +1627,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         right_type_oid: u32,
     ) -> Option<PgOperatorRow> {
         operator_row_by_name_left_right(
-            self.db,
+            &self.db,
             self.client_id,
             self.txn_ctx,
             name,
@@ -1655,7 +1638,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn operator_by_oid(&self, oid: u32) -> Option<PgOperatorRow> {
         search_sys_cache1_db(
-            self.db,
+            &self.db,
             self.client_id,
             self.txn_ctx,
             SysCacheId::OperOid,
@@ -1670,7 +1653,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn operator_rows(&self) -> Vec<PgOperatorRow> {
-        backend_catcache(self.db, self.client_id, self.txn_ctx)
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
             .map(|cache| cache.operator_rows())
             .unwrap_or_default()
     }
@@ -1680,14 +1663,14 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         source_type_oid: u32,
         target_type_oid: u32,
     ) -> Option<PgCastRow> {
-        backend_catcache(self.db, self.client_id, self.txn_ctx)
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
             .ok()?
             .cast_by_source_target(source_type_oid, target_type_oid)
             .cloned()
     }
 
     fn cast_rows(&self) -> Vec<PgCastRow> {
-        backend_catcache(self.db, self.client_id, self.txn_ctx)
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
             .map(|cache| cache.cast_rows())
             .unwrap_or_default()
     }
@@ -1718,12 +1701,24 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             .unwrap_or_default()
     }
 
+    fn depend_rows(&self) -> Vec<PgDependRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.depend_rows())
+            .unwrap_or_default()
+    }
+
+    fn database_rows(&self) -> Vec<PgDatabaseRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.database_rows())
+            .unwrap_or_default()
+    }
+
     fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
-        namespace_row_by_oid(self.db, self.client_id, self.txn_ctx, oid)
+        namespace_row_by_oid(&self.db, self.client_id, self.txn_ctx, oid)
     }
 
     fn namespace_rows(&self) -> Vec<PgNamespaceRow> {
-        ensure_namespace_rows(self.db, self.client_id, self.txn_ctx)
+        ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn row_security_enabled(&self) -> bool {
@@ -1764,15 +1759,15 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {
-        constraint_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
+        constraint_rows_for_relation(&self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn constraint_row_by_oid(&self, oid: u32) -> Option<PgConstraintRow> {
-        constraint_row_by_oid(self.db, self.client_id, self.txn_ctx, oid)
+        constraint_row_by_oid(&self.db, self.client_id, self.txn_ctx, oid)
     }
 
     fn constraint_rows_for_index(&self, index_oid: u32) -> Vec<PgConstraintRow> {
-        constraint_rows_for_index(self.db, self.client_id, self.txn_ctx, index_oid)
+        constraint_rows_for_index(&self.db, self.client_id, self.txn_ctx, index_oid)
     }
 
     fn foreign_key_constraint_rows_referencing_relation(
@@ -1780,7 +1775,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         relation_oid: u32,
     ) -> Vec<PgConstraintRow> {
         foreign_key_constraint_rows_referencing_relation(
-            self.db,
+            &self.db,
             self.client_id,
             self.txn_ctx,
             relation_oid,
@@ -1792,7 +1787,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         index_oid: u32,
     ) -> Vec<PgConstraintRow> {
         foreign_key_constraint_rows_referencing_index(
-            self.db,
+            &self.db,
             self.client_id,
             self.txn_ctx,
             index_oid,
@@ -1800,13 +1795,13 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn constraint_rows(&self) -> Vec<PgConstraintRow> {
-        ensure_constraint_rows(self.db, self.client_id, self.txn_ctx)
+        ensure_constraint_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
-        let mut rows = proc_rows_by_name(self.db, self.client_id, self.txn_ctx, name);
+        let mut rows = proc_rows_by_name(&self.db, self.client_id, self.txn_ctx, name);
         if is_visible_range_proc_name(
-            self.db,
+            &self.db,
             self.client_id,
             self.txn_ctx,
             &self.search_path,
@@ -1814,7 +1809,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         ) {
             rows.extend(crate::include::catalog::synthetic_range_proc_rows_by_name(
                 name,
-                &range_proc_type_rows(self.db, &self.search_path),
+                &range_proc_type_rows(&self.db, &self.search_path),
                 &self.range_rows(),
             ));
         }
@@ -1823,26 +1818,38 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
-        proc_row_by_oid(self.db, self.client_id, self.txn_ctx, oid).or_else(|| {
+        proc_row_by_oid(&self.db, self.client_id, self.txn_ctx, oid).or_else(|| {
             crate::include::catalog::synthetic_range_proc_row_by_oid(
                 oid,
-                &range_proc_type_rows(self.db, &self.search_path),
+                &range_proc_type_rows(&self.db, &self.search_path),
                 &self.range_rows(),
             )
         })
     }
 
+    fn proc_rows(&self) -> Vec<PgProcRow> {
+        ensure_proc_rows(&self.db, self.client_id, self.txn_ctx)
+    }
+
     fn opclass_rows(&self) -> Vec<PgOpclassRow> {
-        ensure_opclass_rows(self.db, self.client_id, self.txn_ctx)
+        ensure_opclass_rows(&self.db, self.client_id, self.txn_ctx)
+    }
+
+    fn amproc_rows(&self) -> Vec<PgAmprocRow> {
+        ensure_amproc_rows(&self.db, self.client_id, self.txn_ctx)
+    }
+
+    fn amop_rows(&self) -> Vec<PgAmopRow> {
+        ensure_amop_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<PgAggregateRow> {
-        aggregate_row_by_fnoid(self.db, self.client_id, self.txn_ctx, aggfnoid)
+        aggregate_row_by_fnoid(&self.db, self.client_id, self.txn_ctx, aggfnoid)
     }
 
     fn type_rows(&self) -> Vec<PgTypeRow> {
-        let mut rows = ensure_type_rows(self.db, self.client_id, self.txn_ctx);
-        for row in dynamic_type_rows_for_search_path(self.db, &self.search_path) {
+        let mut rows = ensure_type_rows(&self.db, self.client_id, self.txn_ctx);
+        for row in dynamic_type_rows_for_search_path(&self.db, &self.search_path) {
             if rows.iter().all(|existing| existing.oid != row.oid) {
                 rows.push(row);
             }
@@ -1852,7 +1859,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn type_by_oid(&self, oid: u32) -> Option<PgTypeRow> {
         visible_type_row_by_oid(
-            self.db,
+            &self.db,
             self.client_id,
             self.txn_ctx,
             &self.search_path,
@@ -1862,7 +1869,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn type_by_name(&self, name: &str) -> Option<PgTypeRow> {
         visible_type_row_by_name(
-            self.db,
+            &self.db,
             self.client_id,
             self.txn_ctx,
             &self.search_path,
@@ -1872,7 +1879,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn domain_by_name(&self, name: &str) -> Option<DomainLookup> {
         visible_domain_by_name(
-            self.db,
+            &self.db,
             self.client_id,
             self.txn_ctx,
             &self.search_path,
@@ -1890,7 +1897,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
         visible_type_oid_for_sql_type(
-            self.db,
+            &self.db,
             self.client_id,
             self.txn_ctx,
             &self.search_path,
@@ -1933,20 +1940,20 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn language_rows(&self) -> Vec<PgLanguageRow> {
-        language_rows(self.db, self.client_id, self.txn_ctx)
+        language_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn language_row_by_oid(&self, oid: u32) -> Option<PgLanguageRow> {
-        language_row_by_oid(self.db, self.client_id, self.txn_ctx, oid)
+        language_row_by_oid(&self.db, self.client_id, self.txn_ctx, oid)
     }
 
     fn language_row_by_name(&self, name: &str) -> Option<PgLanguageRow> {
-        language_row_by_name(self.db, self.client_id, self.txn_ctx, name)
+        language_row_by_name(&self.db, self.client_id, self.txn_ctx, name)
     }
 
     fn rewrite_rows_for_relation(&self, relation_oid: u32) -> Vec<PgRewriteRow> {
         search_sys_cache_list1_db(
-            self.db,
+            &self.db,
             self.client_id,
             self.txn_ctx,
             SysCacheId::RuleRelName,
@@ -1965,64 +1972,62 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn rewrite_rows(&self) -> Vec<PgRewriteRow> {
-        ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx)
+        ensure_rewrite_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn trigger_rows_for_relation(&self, relation_oid: u32) -> Vec<PgTriggerRow> {
-        trigger_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
+        trigger_rows_for_relation(&self.db, self.client_id, self.txn_ctx, relation_oid)
+    }
+
+    fn trigger_rows(&self) -> Vec<PgTriggerRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.trigger_rows())
+            .unwrap_or_default()
     }
 
     fn policy_rows_for_relation(
         &self,
         relation_oid: u32,
     ) -> Vec<crate::include::catalog::PgPolicyRow> {
-        policy_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
+        policy_rows_for_relation(&self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {
-        class_row_by_oid(self.db, self.client_id, self.txn_ctx, relation_oid)
+        class_row_by_oid(&self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn attribute_rows_for_relation(
         &self,
         relation_oid: u32,
     ) -> Vec<crate::include::catalog::PgAttributeRow> {
-        self.db
-            .backend_catcache(self.client_id, self.txn_ctx)
-            .ok()
-            .and_then(|catcache| {
-                catcache
-                    .attributes_by_relid(relation_oid)
-                    .map(|attrs| attrs.to_vec())
-            })
-            .unwrap_or_default()
+        attribute_rows_for_relation(&self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn class_rows(&self) -> Vec<PgClassRow> {
-        ensure_class_rows(self.db, self.client_id, self.txn_ctx)
+        ensure_class_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn partitioned_table_row(
         &self,
         relation_oid: u32,
     ) -> Option<crate::include::catalog::PgPartitionedTableRow> {
-        partitioned_table_row_by_relid(self.db, self.client_id, self.txn_ctx, relation_oid)
+        partitioned_table_row_by_relid(&self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn inheritance_parents(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
-        inheritance_parent_rows(self.db, self.client_id, self.txn_ctx, relation_oid)
+        inheritance_parent_rows(&self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn inheritance_children(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
-        inheritance_child_rows(self.db, self.client_id, self.txn_ctx, relation_oid)
+        inheritance_child_rows(&self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn statistic_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticRow> {
-        statistic_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
+        statistic_rows_for_relation(&self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn statistic_ext_row_by_oid(&self, oid: u32) -> Option<PgStatisticExtRow> {
-        statistic_ext_row_by_oid(self.db, self.client_id, self.txn_ctx, oid)
+        statistic_ext_row_by_oid(&self.db, self.client_id, self.txn_ctx, oid)
     }
 
     fn statistic_ext_row_by_name_namespace(
@@ -2031,7 +2036,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         namespace_oid: u32,
     ) -> Option<PgStatisticExtRow> {
         statistic_ext_row_by_name_namespace(
-            self.db,
+            &self.db,
             self.client_id,
             self.txn_ctx,
             name,
@@ -2040,17 +2045,17 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn statistic_ext_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticExtRow> {
-        statistic_ext_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
+        statistic_ext_rows_for_relation(&self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
-        backend_catcache(self.db, self.client_id, self.txn_ctx)
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
             .map(|catcache| catcache.statistic_ext_rows())
             .unwrap_or_default()
     }
 
     fn statistic_ext_data_rows(&self) -> Vec<PgStatisticExtDataRow> {
-        backend_catcache(self.db, self.client_id, self.txn_ctx)
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
             .map(|catcache| catcache.statistic_ext_data_rows())
             .unwrap_or_default()
     }
@@ -2060,29 +2065,29 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         stxoid: u32,
         stxdinherit: bool,
     ) -> Option<PgStatisticExtDataRow> {
-        statistic_ext_data_row(self.db, self.client_id, self.txn_ctx, stxoid, stxdinherit)
+        statistic_ext_data_row(&self.db, self.client_id, self.txn_ctx, stxoid, stxdinherit)
     }
 
     fn foreign_data_wrapper_rows(&self) -> Vec<crate::include::catalog::PgForeignDataWrapperRow> {
-        backend_catcache(self.db, self.client_id, self.txn_ctx)
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
             .map(|catcache| catcache.foreign_data_wrapper_rows())
             .unwrap_or_default()
     }
 
     fn foreign_server_rows(&self) -> Vec<crate::include::catalog::PgForeignServerRow> {
-        backend_catcache(self.db, self.client_id, self.txn_ctx)
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
             .map(|catcache| catcache.foreign_server_rows())
             .unwrap_or_default()
     }
 
     fn foreign_table_rows(&self) -> Vec<crate::include::catalog::PgForeignTableRow> {
-        backend_catcache(self.db, self.client_id, self.txn_ctx)
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
             .map(|catcache| catcache.foreign_table_rows())
             .unwrap_or_default()
     }
 
     fn user_mapping_rows(&self) -> Vec<crate::include::catalog::PgUserMappingRow> {
-        backend_catcache(self.db, self.client_id, self.txn_ctx)
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
             .map(|catcache| catcache.user_mapping_rows())
             .unwrap_or_default()
     }
@@ -2094,20 +2099,20 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             .map(|catalog| catalog.roles().to_vec())
             .unwrap_or_default();
         build_pg_views_rows(
-            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx),
             authids,
-            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_class_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_rewrite_rows(&self.db, self.client_id, self.txn_ctx),
         )
     }
 
     fn pg_indexes_rows(&self) -> Vec<Vec<Value>> {
         build_pg_indexes_rows(
-            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_attribute_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_index_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_am_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_class_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_attribute_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_index_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_am_rows(&self.db, self.client_id, self.txn_ctx),
         )
     }
 
@@ -2118,11 +2123,11 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             .map(|catalog| catalog.roles().to_vec())
             .unwrap_or_default();
         build_pg_matviews_rows(
-            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx),
             authids,
-            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_index_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_class_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_index_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_rewrite_rows(&self.db, self.client_id, self.txn_ctx),
         )
     }
 
@@ -2132,31 +2137,31 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             .auth_catalog(self.client_id, self.txn_ctx)
             .map(|catalog| catalog.roles().to_vec())
             .unwrap_or_default();
-        let policy_rows = visible_catcache(self.db, self.client_id, self.txn_ctx)
+        let policy_rows = visible_catcache(&self.db, self.client_id, self.txn_ctx)
             .map(|catcache| catcache.policy_rows())
             .unwrap_or_default();
         build_pg_policies_rows(
-            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx),
             authids,
-            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_class_rows(&self.db, self.client_id, self.txn_ctx),
             policy_rows,
         )
     }
 
     fn pg_rules_rows(&self) -> Vec<Vec<Value>> {
         build_pg_rules_rows(
-            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_class_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_rewrite_rows(&self.db, self.client_id, self.txn_ctx),
         )
     }
 
     fn pg_stats_rows(&self) -> Vec<Vec<Value>> {
         build_pg_stats_rows(
-            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_attribute_rows(self.db, self.client_id, self.txn_ctx),
-            ensure_statistic_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_class_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_attribute_rows(&self.db, self.client_id, self.txn_ctx),
+            ensure_statistic_rows(&self.db, self.client_id, self.txn_ctx),
         )
     }
 
@@ -2165,9 +2170,9 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn pg_stat_all_tables_rows(&self) -> Vec<Vec<Value>> {
-        let namespaces = ensure_namespace_rows(self.db, self.client_id, self.txn_ctx);
-        let classes = ensure_class_rows(self.db, self.client_id, self.txn_ctx);
-        let indexes = ensure_index_rows(self.db, self.client_id, self.txn_ctx);
+        let namespaces = ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx);
+        let classes = ensure_class_rows(&self.db, self.client_id, self.txn_ctx);
+        let indexes = ensure_index_rows(&self.db, self.client_id, self.txn_ctx);
         let relation_oids = classes
             .iter()
             .flat_map(|class| {
@@ -2189,9 +2194,9 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn pg_stat_user_tables_rows(&self) -> Vec<Vec<Value>> {
-        let namespaces = ensure_namespace_rows(self.db, self.client_id, self.txn_ctx);
-        let classes = ensure_class_rows(self.db, self.client_id, self.txn_ctx);
-        let indexes = ensure_index_rows(self.db, self.client_id, self.txn_ctx);
+        let namespaces = ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx);
+        let classes = ensure_class_rows(&self.db, self.client_id, self.txn_ctx);
+        let indexes = ensure_index_rows(&self.db, self.client_id, self.txn_ctx);
         let relation_oids = classes
             .iter()
             .flat_map(|class| {
@@ -2213,9 +2218,9 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn pg_statio_user_tables_rows(&self) -> Vec<Vec<Value>> {
-        let namespaces = ensure_namespace_rows(self.db, self.client_id, self.txn_ctx);
-        let classes = ensure_class_rows(self.db, self.client_id, self.txn_ctx);
-        let indexes = ensure_index_rows(self.db, self.client_id, self.txn_ctx);
+        let namespaces = ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx);
+        let classes = ensure_class_rows(&self.db, self.client_id, self.txn_ctx);
+        let indexes = ensure_index_rows(&self.db, self.client_id, self.txn_ctx);
         let relation_oids = classes
             .iter()
             .flat_map(|class| {
@@ -2237,8 +2242,8 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn pg_stat_user_functions_rows(&self) -> Vec<Vec<Value>> {
-        let namespaces = ensure_namespace_rows(self.db, self.client_id, self.txn_ctx);
-        let procs = ensure_proc_rows(self.db, self.client_id, self.txn_ctx);
+        let namespaces = ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx);
+        let procs = ensure_proc_rows(&self.db, self.client_id, self.txn_ctx);
         let function_stats = self
             .db
             .session_stats_state(self.client_id)
@@ -2274,85 +2279,20 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         &self,
         relation_oid: u32,
     ) -> Vec<crate::backend::parser::BoundIndexRelation> {
-        let Ok(mut relcache) = backend_relcache(self.db, self.client_id, self.txn_ctx) else {
-            return relation_get_index_list(self.db, self.client_id, self.txn_ctx, relation_oid)
-                .into_iter()
-                .filter_map(|index_oid| {
-                    let entry =
-                        relation_entry_by_oid(self.db, self.client_id, self.txn_ctx, index_oid)?;
-                    let class = class_row_by_oid(
-                        self.db,
-                        self.client_id,
-                        self.txn_ctx,
-                        entry.relation_oid,
-                    )?;
-                    crate::backend::parser::bound_index_relation_from_relcache_entry(
-                        class.relname,
-                        &entry,
-                        self,
-                    )
-                })
-                .collect();
-        };
-
-        if let Some(temp_namespace) = owned_temp_namespace(self.db, self.client_id) {
-            for (name, entry) in temp_namespace.tables {
-                relcache.insert(name.clone(), entry.entry.clone());
-                relcache.insert(format!("{}.{}", temp_namespace.name, name), entry.entry);
-            }
-        }
-
         let heap_relation = self.relation_by_oid(relation_oid);
-        relcache
-            .relation_get_index_list(relation_oid)
+        relation_get_index_list(&self.db, self.client_id, self.txn_ctx, relation_oid)
             .into_iter()
             .filter_map(|index_oid| {
-                let entry = relcache.get_by_oid(index_oid)?;
-                if self
-                    .db
-                    .other_session_temp_namespace_oid(self.client_id, entry.namespace_oid)
-                {
-                    return None;
-                }
-                let name = relcache
-                    .relation_name_by_oid(index_oid)
-                    .unwrap_or_else(|| index_oid.to_string());
+                let entry =
+                    relation_entry_by_oid(&self.db, self.client_id, self.txn_ctx, index_oid)?;
+                let class = class_row_by_oid(&self.db, self.client_id, self.txn_ctx, index_oid)?;
                 crate::backend::parser::bound_index_relation_from_relcache_entry_with_heap(
-                    name,
-                    entry,
+                    class.relname,
+                    &entry,
                     self,
                     heap_relation.as_ref(),
                 )
             })
             .collect()
-    }
-
-    fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {
-        let catcache = visible_catcache(self.db, self.client_id, self.txn_ctx)?;
-        let mut relcache = backend_relcache(self.db, self.client_id, self.txn_ctx).ok()?;
-        if let Some(temp_namespace) = owned_temp_namespace(self.db, self.client_id) {
-            for (name, entry) in temp_namespace.tables {
-                relcache.insert(name.clone(), entry.entry.clone());
-                relcache.insert(format!("pg_temp.{name}"), entry.entry.clone());
-                relcache.insert(format!("{}.{}", temp_namespace.name, name), entry.entry);
-            }
-        }
-        let mut dynamic_type_rows = self.db.domain_type_rows_for_search_path(&self.search_path);
-        dynamic_type_rows.extend(self.db.enum_type_rows_for_search_path(&self.search_path));
-        dynamic_type_rows.extend(self.db.range_type_rows_for_search_path(&self.search_path));
-        let dynamic_range_rows = self.db.range_rows();
-        Some(
-            VisibleCatalog::with_search_path(
-                relcache.with_search_path(&self.search_path),
-                Some(catcache),
-                self.search_path.clone(),
-            )
-            .with_enum_rows(self.db.enum_rows_for_catalog())
-            .with_uncommitted_enum_label_oids(self.db.uncommitted_enum_label_oids())
-            .with_domain_checks(self.db.domain_checks_for_catalog())
-            .with_domain_lookups(self.db.domain_lookups_for_catalog())
-            .with_dynamic_type_rows(dynamic_type_rows)
-            .with_dynamic_range_rows(dynamic_range_rows),
-        )
     }
 }

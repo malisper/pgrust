@@ -21,9 +21,8 @@ use crate::backend::catalog::rowcodec::{
 use crate::backend::catalog::store::{CatalogStore, CatalogWriteContext};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::inval::CatalogInvalidation;
-use crate::backend::utils::cache::lsyscache::dynamic_type_rows_for_search_path;
 use crate::backend::utils::cache::relcache::{
-    IndexAmOpEntry, IndexAmProcEntry, IndexRelCacheEntry, RelCache, RelCacheEntry,
+    IndexAmOpEntry, IndexAmProcEntry, IndexRelCacheEntry, RelCacheEntry,
     relation_locator_for_class_row,
 };
 use crate::backend::utils::time::snapmgr::{Snapshot, get_catalog_snapshot};
@@ -882,17 +881,17 @@ impl BackendSysCacheMaps {
 pub(crate) struct BackendSysCache {
     autocommit: BackendSysCacheMaps,
     transaction: BackendSysCacheMaps,
-    transaction_ctx: Option<BackendCacheContext>,
+    transaction_xid: Option<TransactionId>,
 }
 
 impl BackendSysCache {
     fn maps_mut(&mut self, cache_ctx: BackendCacheContext) -> &mut BackendSysCacheMaps {
         match cache_ctx {
             BackendCacheContext::Autocommit => &mut self.autocommit,
-            BackendCacheContext::Transaction { .. } => {
-                if self.transaction_ctx != Some(cache_ctx) {
+            BackendCacheContext::Transaction { xid, .. } => {
+                if self.transaction_xid != Some(xid) {
                     self.transaction.clear();
-                    self.transaction_ctx = Some(cache_ctx);
+                    self.transaction_xid = Some(xid);
                 }
                 &mut self.transaction
             }
@@ -934,8 +933,8 @@ pub struct BackendCacheState {
     pub catalog_snapshot_ctx: Option<BackendCacheContext>,
     pub transaction_snapshot_override: Option<(TransactionId, Snapshot)>,
     pub catcache: Option<CatCache>,
-    pub relcache: Option<RelCache>,
-    pub cache_ctx: Option<BackendCacheContext>,
+    pub catcache_ctx: Option<BackendCacheContext>,
+    pub relation_cache: HashMap<u32, RelCacheEntry>,
     pub(crate) syscache: BackendSysCache,
     pub pending_invalidations: Vec<CatalogInvalidation>,
 }
@@ -1344,6 +1343,18 @@ pub(crate) fn relation_id_get_relation_db(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Result<Option<RelCacheEntry>, CatalogError> {
+    if txn_ctx.is_none() {
+        db.accept_invalidation_messages(client_id);
+    }
+    if let Some(entry) = db
+        .backend_cache_states
+        .read()
+        .get(&client_id)
+        .and_then(|state| state.relation_cache.get(&relation_oid).cloned())
+    {
+        return Ok(Some(entry));
+    }
+
     let Some(class_row) = search_sys_cache1_db(
         db,
         client_id,
@@ -1358,6 +1369,9 @@ pub(crate) fn relation_id_get_relation_db(
     }) else {
         return Ok(None);
     };
+    if db.other_session_temp_namespace_oid(client_id, class_row.relnamespace) {
+        return Ok(None);
+    }
 
     let mut attributes = search_sys_cache_list1_db(
         db,
@@ -1634,7 +1648,7 @@ pub(crate) fn relation_id_get_relation_db(
         })
         .transpose()?;
 
-    Ok(Some(RelCacheEntry {
+    let entry = RelCacheEntry {
         rel: relation_locator_for_class_row(class_row.oid, class_row.relfilenode, db.database_oid),
         relation_oid: class_row.oid,
         namespace_oid: class_row.relnamespace,
@@ -1655,7 +1669,16 @@ pub(crate) fn relation_id_get_relation_db(
         desc: crate::backend::executor::RelationDesc { columns },
         partitioned_table,
         index,
-    }))
+    };
+
+    db.backend_cache_states
+        .write()
+        .entry(client_id)
+        .or_default()
+        .relation_cache
+        .insert(relation_oid, entry.clone());
+
+    Ok(Some(entry))
 }
 
 fn backend_syscache_get(
@@ -1865,7 +1888,7 @@ pub fn backend_catcache(
         .backend_cache_states
         .read()
         .get(&client_id)
-        .filter(|state| state.cache_ctx == Some(cache_ctx))
+        .filter(|state| state.catcache_ctx == Some(cache_ctx))
         .and_then(|state| state.catcache.clone())
     {
         return Ok(cache);
@@ -1892,40 +1915,9 @@ pub fn backend_catcache(
 
     let mut states = db.backend_cache_states.write();
     let state = states.entry(client_id).or_default();
-    state.cache_ctx = Some(cache_ctx);
+    state.catcache_ctx = Some(cache_ctx);
     state.catcache = Some(cache.clone());
-    state.relcache = None;
     Ok(cache)
-}
-
-pub fn backend_relcache(
-    db: &Database,
-    client_id: ClientId,
-    txn_ctx: Option<(TransactionId, CommandId)>,
-) -> Result<RelCache, CatalogError> {
-    let cache_ctx = BackendCacheContext::from(txn_ctx);
-    if let Some(cache) = db
-        .backend_cache_states
-        .read()
-        .get(&client_id)
-        .filter(|state| state.cache_ctx == Some(cache_ctx))
-        .and_then(|state| state.relcache.clone())
-    {
-        return Ok(cache);
-    }
-
-    let search_path = db.effective_search_path(client_id, None);
-    let dynamic_type_rows = dynamic_type_rows_for_search_path(db, &search_path);
-    let relcache = RelCache::from_catcache_in_db_with_extra_type_rows(
-        &backend_catcache(db, client_id, txn_ctx)?,
-        db.database_oid,
-        &dynamic_type_rows,
-    )?;
-    let mut states = db.backend_cache_states.write();
-    let state = states.entry(client_id).or_default();
-    state.cache_ctx = Some(cache_ctx);
-    state.relcache = Some(relcache.clone());
-    Ok(relcache)
 }
 
 pub fn drain_pending_invalidations(db: &Database, client_id: ClientId) -> Vec<CatalogInvalidation> {
@@ -2208,18 +2200,23 @@ mod tests {
     }
 
     #[test]
-    fn backend_syscache_keeps_only_current_transaction_context() {
+    fn backend_syscache_reuses_transaction_entries_across_command_ids() {
         let mut cache = BackendSysCache::default();
         let key = SysCacheQueryKey::new(SysCacheId::RelOid, &[oid_key(42)]).unwrap();
         let first = BackendCacheContext::Transaction { xid: 1, cid: 1 };
         let second = BackendCacheContext::Transaction { xid: 1, cid: 2 };
+        let other_xid = BackendCacheContext::Transaction { xid: 2, cid: 1 };
 
         cache.insert(first, SysCacheLookupMode::Exact, key.clone(), Vec::new());
         assert_eq!(
             cache.get(first, SysCacheLookupMode::Exact, &key),
             Some(Vec::new())
         );
-        assert_eq!(cache.get(second, SysCacheLookupMode::Exact, &key), None);
+        assert_eq!(
+            cache.get(second, SysCacheLookupMode::Exact, &key),
+            Some(Vec::new())
+        );
+        assert_eq!(cache.get(other_xid, SysCacheLookupMode::Exact, &key), None);
     }
 
     #[test]

@@ -69,7 +69,7 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values(
                 "0A000",
             )
         })?;
-        let result = execute_sql_function_query(row, &arg_values, &catalog, ctx)?;
+        let result = execute_sql_function_query(row, &arg_values, catalog.as_ref(), ctx)?;
         match result {
             StatementResult::Query { rows, .. } => match rows.as_slice() {
                 [] => Ok(Value::Null),
@@ -114,7 +114,7 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
                 "0A000",
             )
         })?;
-        let result = execute_sql_function_query(row, &arg_values, &catalog, ctx)?;
+        let result = execute_sql_function_query(row, &arg_values, catalog.as_ref(), ctx)?;
         match result {
             StatementResult::Query { rows, .. } => rows
                 .into_iter()

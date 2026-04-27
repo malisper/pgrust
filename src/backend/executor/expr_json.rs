@@ -539,7 +539,7 @@ pub(crate) fn eval_json_builtin_function(
     result_type: Option<SqlType>,
     func_variadic: bool,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
-    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+    catalog: Option<&dyn CatalogLookup>,
 ) -> Option<Result<Value, ExecError>> {
     let eval = || -> Result<Value, ExecError> {
         match func {
@@ -1721,7 +1721,7 @@ fn eval_sql_json_object(
     values: &[Value],
     result_type: Option<SqlType>,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
-    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+    catalog: Option<&dyn CatalogLookup>,
 ) -> Result<Value, ExecError> {
     let absent_on_null = matches!(values.first(), Some(Value::Bool(true)));
     let unique_keys = matches!(values.get(1), Some(Value::Bool(true)));
@@ -1767,7 +1767,7 @@ fn eval_sql_json_array(
     values: &[Value],
     result_type: Option<SqlType>,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
-    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+    catalog: Option<&dyn CatalogLookup>,
 ) -> Result<Value, ExecError> {
     let null_on_null = matches!(values.first(), Some(Value::Bool(true)));
     let query_constructor = matches!(values.get(1), Some(Value::Bool(true)));
@@ -3649,7 +3649,7 @@ fn value_to_json_text(
     value: &Value,
     pretty: bool,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
-    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+    catalog: Option<&dyn CatalogLookup>,
 ) -> String {
     if pretty {
         render_json_value_text_pretty(value, datetime_config, catalog)
@@ -3661,7 +3661,7 @@ fn value_to_json_text(
 fn render_json_value_text_pretty(
     value: &Value,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
-    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+    catalog: Option<&dyn CatalogLookup>,
 ) -> String {
     match value {
         Value::Array(items) => render_json_array_values(items, true, datetime_config, catalog),
@@ -3676,7 +3676,7 @@ fn render_json_value_text_pretty(
 fn render_json_value_text_with_config(
     value: &Value,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
-    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+    catalog: Option<&dyn CatalogLookup>,
 ) -> String {
     match value {
         Value::Null => "null".into(),
@@ -3766,7 +3766,7 @@ fn render_json_array_values(
     items: &[Value],
     use_line_feeds: bool,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
-    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+    catalog: Option<&dyn CatalogLookup>,
 ) -> String {
     let mut out = String::from("[");
     let sep = if use_line_feeds { ",\n " } else { "," };
@@ -3788,7 +3788,7 @@ fn render_json_record_value(
     record: &RecordValue,
     use_line_feeds: bool,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
-    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+    catalog: Option<&dyn CatalogLookup>,
 ) -> String {
     let mut out = String::from("{");
     let sep = if use_line_feeds { ",\n " } else { "," };
@@ -3813,7 +3813,7 @@ fn render_json_field_value_text(
     value: &Value,
     sql_type: SqlType,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
-    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+    catalog: Option<&dyn CatalogLookup>,
 ) -> String {
     if sql_type.kind == SqlTypeKind::RegClass && !sql_type.is_array {
         if let Some(relation_name) = regclass_name_for_value(value, catalog) {
@@ -3824,26 +3824,14 @@ fn render_json_field_value_text(
     render_json_value_text_with_config(value, datetime_config, catalog)
 }
 
-fn regclass_name_for_value(
-    value: &Value,
-    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
-) -> Option<String> {
+fn regclass_name_for_value(value: &Value, catalog: Option<&dyn CatalogLookup>) -> Option<String> {
     let oid = match value {
         Value::Int32(v) => u32::try_from(*v).ok()?,
         Value::Int64(v) => u32::try_from(*v).ok()?,
         _ => return None,
     };
     let catalog = catalog?;
-    catalog
-        .relcache()
-        .entries()
-        .find_map(|(name, entry)| (entry.relation_oid == oid).then_some(name))
-        .map(|name| {
-            name.rsplit_once('.')
-                .map(|(_, relname)| relname)
-                .unwrap_or(name)
-                .to_string()
-        })
+    catalog.class_row_by_oid(oid).map(|row| row.relname)
 }
 
 fn oid_value_to_string(value: &Value) -> String {
@@ -4509,9 +4497,7 @@ fn sql_json_error_message(err: &ExecError) -> String {
 }
 
 fn executor_catalog(ctx: &ExecutorContext) -> Option<&dyn CatalogLookup> {
-    ctx.catalog
-        .as_ref()
-        .map(|catalog| catalog as &dyn CatalogLookup)
+    ctx.catalog.as_deref()
 }
 
 fn jsonb_scalar_sql_text(value: &JsonbValue) -> String {

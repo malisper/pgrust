@@ -170,7 +170,7 @@ pub(super) fn eval_array_subquery(
         let mut array = ArrayValue::from_1d(values);
         if let Some(element_type_oid) = subplan
             .first_col_type
-            .and_then(|sql_type| ctx.catalog.as_ref()?.type_oid_for_sql_type(sql_type))
+            .and_then(|sql_type| ctx.catalog.as_deref()?.type_oid_for_sql_type(sql_type))
         {
             array = array.with_element_type_oid(element_type_oid);
         }

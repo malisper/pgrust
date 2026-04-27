@@ -327,38 +327,52 @@ fn information_schema_view_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> 
         .collect()
 }
 
-fn information_schema_column_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
-    let Some(visible) = catalog.materialize_visible_catalog() else {
-        return Vec::new();
-    };
+fn information_schema_relation_rows(
+    catalog: &dyn CatalogLookup,
+    relkinds: &[char],
+) -> Vec<(String, String, BoundRelation)> {
+    let mut seen_relation_oids = std::collections::BTreeSet::new();
+    let mut rows = Vec::new();
+    for class_row in catalog.class_rows() {
+        if (!relkinds.is_empty() && !relkinds.contains(&class_row.relkind))
+            || !seen_relation_oids.insert(class_row.oid)
+        {
+            continue;
+        }
+        let Some(namespace) = catalog.namespace_row_by_oid(class_row.relnamespace) else {
+            continue;
+        };
+        if namespace.nspname.eq_ignore_ascii_case("pg_catalog")
+            || namespace.nspname.eq_ignore_ascii_case(INFO_SCHEMA_NAME)
+        {
+            continue;
+        }
+        let Some(relation) = catalog.relation_by_oid(class_row.oid) else {
+            continue;
+        };
+        rows.push((namespace.nspname, class_row.relname, relation));
+    }
+    rows
+}
 
+fn information_schema_column_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
     let view_metadata = information_schema_view_metadata(catalog)
         .into_iter()
         .map(|view| (view.relation_oid, view.updatability))
         .collect::<std::collections::BTreeMap<_, _>>();
-    let mut seen_relation_oids = std::collections::BTreeSet::new();
     let mut rows = Vec::new();
-    for (name, entry) in visible.relcache().entries() {
-        if !matches!(entry.relkind, 'r' | 'p' | 'v' | 'f')
-            || !seen_relation_oids.insert(entry.relation_oid)
-        {
-            continue;
-        }
-        let (schema_name, table_name) = split_qualified_relation_name(name);
-        if schema_name.eq_ignore_ascii_case("pg_catalog")
-            || schema_name.eq_ignore_ascii_case(INFO_SCHEMA_NAME)
-        {
-            continue;
-        }
-        for (index, column) in entry.desc.columns.iter().enumerate() {
+    for (schema_name, table_name, relation) in
+        information_schema_relation_rows(catalog, &['r', 'p', 'v', 'f'])
+    {
+        for (index, column) in relation.desc.columns.iter().enumerate() {
             if column.dropped {
                 continue;
             }
             let is_generated = column.generated.is_some();
-            let is_updatable = match entry.relkind {
+            let is_updatable = match relation.relkind {
                 'r' | 'p' => true,
                 'v' | 'f' => view_metadata
-                    .get(&entry.relation_oid)
+                    .get(&relation.relation_oid)
                     .and_then(|updatability| updatability.columns.get(index))
                     .is_some_and(|entry| entry.insertable || entry.updatable),
                 _ => false,
@@ -458,22 +472,12 @@ fn information_schema_column_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>
 }
 
 fn information_schema_column_column_usage_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
-    let Some(visible) = catalog.materialize_visible_catalog() else {
-        return Vec::new();
-    };
-    let depend_rows = visible.depend_rows();
+    let depend_rows = catalog.depend_rows();
     let mut rows = std::collections::BTreeSet::new();
-    for (name, entry) in visible.relcache().entries() {
-        if !matches!(entry.relkind, 'r' | 'p') {
-            continue;
-        }
-        let (schema_name, table_name) = split_qualified_relation_name(name);
-        if schema_name.eq_ignore_ascii_case("pg_catalog")
-            || schema_name.eq_ignore_ascii_case(INFO_SCHEMA_NAME)
-        {
-            continue;
-        }
-        for (dependent_index, dependent_column) in entry.desc.columns.iter().enumerate() {
+    for (schema_name, table_name, relation) in
+        information_schema_relation_rows(catalog, &['r', 'p'])
+    {
+        for (dependent_index, dependent_column) in relation.desc.columns.iter().enumerate() {
             if dependent_column.dropped || dependent_column.generated.is_none() {
                 continue;
             }
@@ -485,7 +489,7 @@ fn information_schema_column_column_usage_rows(catalog: &dyn CatalogLookup) -> V
                 row.classid == PG_ATTRDEF_RELATION_OID
                     && row.objid == attrdef_oid
                     && row.refclassid == PG_CLASS_RELATION_OID
-                    && row.refobjid == entry.relation_oid
+                    && row.refobjid == relation.relation_oid
                     && row.refobjsubid > 0
                     && row.refobjsubid != dependent_attnum
             }) {
@@ -496,7 +500,7 @@ fn information_schema_column_column_usage_rows(catalog: &dyn CatalogLookup) -> V
                 else {
                     continue;
                 };
-                let Some(source_column) = entry.desc.columns.get(column_index) else {
+                let Some(source_column) = relation.desc.columns.get(column_index) else {
                     continue;
                 };
                 if source_column.dropped {
@@ -576,45 +580,43 @@ fn value_int32(value: Option<&Value>) -> i32 {
 }
 
 fn information_schema_trigger_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
-    let Some(visible) = catalog.materialize_visible_catalog() else {
-        return Vec::new();
-    };
-
-    let mut seen_relation_oids = std::collections::BTreeSet::new();
     let mut rows = Vec::new();
-    for (name, entry) in visible.relcache().entries() {
-        if !seen_relation_oids.insert(entry.relation_oid) {
+    for trigger in catalog.trigger_rows() {
+        if trigger.tgisinternal {
             continue;
         }
-        let (schema_name, table_name) = split_qualified_relation_name(name);
-        if schema_name.eq_ignore_ascii_case("pg_catalog")
-            || schema_name.eq_ignore_ascii_case(INFO_SCHEMA_NAME)
+        let Some(relation) = catalog.relation_by_oid(trigger.tgrelid) else {
+            continue;
+        };
+        let Some(class_row) = catalog.class_row_by_oid(trigger.tgrelid) else {
+            continue;
+        };
+        let Some(namespace) = catalog.namespace_row_by_oid(relation.namespace_oid) else {
+            continue;
+        };
+        if namespace.nspname.eq_ignore_ascii_case("pg_catalog")
+            || namespace.nspname.eq_ignore_ascii_case(INFO_SCHEMA_NAME)
         {
             continue;
         }
-        for trigger in catalog.trigger_rows_for_relation(entry.relation_oid) {
-            if trigger.tgisinternal {
-                continue;
-            }
-            let Some(formatted) = format_trigger_definition(catalog, &trigger, false) else {
-                continue;
-            };
-            for event_manipulation in formatted.event_manipulations {
-                rows.push(InformationSchemaTriggerRow {
-                    trigger_schema: schema_name.clone(),
-                    trigger_name: trigger.tgname.clone(),
-                    event_manipulation,
-                    event_object_schema: schema_name.clone(),
-                    event_object_table: table_name.clone(),
-                    action_order: 0,
-                    action_condition: formatted.action_condition.clone(),
-                    action_statement: formatted.action_statement.clone(),
-                    action_orientation: formatted.action_orientation,
-                    action_timing: formatted.action_timing,
-                    action_reference_old_table: formatted.action_reference_old_table.clone(),
-                    action_reference_new_table: formatted.action_reference_new_table.clone(),
-                });
-            }
+        let Some(formatted) = format_trigger_definition(catalog, &trigger, false) else {
+            continue;
+        };
+        for event_manipulation in formatted.event_manipulations {
+            rows.push(InformationSchemaTriggerRow {
+                trigger_schema: namespace.nspname.clone(),
+                trigger_name: trigger.tgname.clone(),
+                event_manipulation,
+                event_object_schema: namespace.nspname.clone(),
+                event_object_table: class_row.relname.clone(),
+                action_order: 0,
+                action_condition: formatted.action_condition.clone(),
+                action_statement: formatted.action_statement.clone(),
+                action_orientation: formatted.action_orientation,
+                action_timing: formatted.action_timing,
+                action_reference_old_table: formatted.action_reference_old_table.clone(),
+                action_reference_new_table: formatted.action_reference_new_table.clone(),
+            });
         }
     }
 
@@ -680,36 +682,24 @@ fn information_schema_trigger_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value
 }
 
 fn information_schema_view_metadata(catalog: &dyn CatalogLookup) -> Vec<ViewMetadataRow> {
-    let Some(visible) = catalog.materialize_visible_catalog() else {
-        return Vec::new();
-    };
-
-    let mut seen_relation_oids = std::collections::BTreeSet::new();
-    let mut rows = visible
-        .relcache()
-        .entries()
-        .filter_map(|(name, entry)| {
-            if entry.relkind != 'v' || !seen_relation_oids.insert(entry.relation_oid) {
-                return None;
-            }
-
-            let (schema_name, table_name) = split_qualified_relation_name(name);
-            if schema_name.eq_ignore_ascii_case("pg_catalog")
-                || schema_name.eq_ignore_ascii_case(INFO_SCHEMA_NAME)
-            {
-                return None;
-            }
-
-            let (view_definition, check_option) = view_definition_and_check_option(catalog, entry);
-            Some(ViewMetadataRow {
+    let mut rows = information_schema_relation_rows(catalog, &['v'])
+        .into_iter()
+        .map(|(schema_name, table_name, relation)| {
+            let (view_definition, check_option) =
+                view_definition_and_check_option(catalog, relation.relation_oid);
+            ViewMetadataRow {
                 schema_name,
                 table_name,
-                relation_oid: entry.relation_oid,
-                relation_desc: entry.desc.clone(),
+                relation_oid: relation.relation_oid,
+                relation_desc: relation.desc.clone(),
                 view_definition,
                 check_option,
-                updatability: describe_view_updatability(entry.relation_oid, &entry.desc, catalog),
-            })
+                updatability: describe_view_updatability(
+                    relation.relation_oid,
+                    &relation.desc,
+                    catalog,
+                ),
+            }
         })
         .collect::<Vec<_>>();
 
@@ -722,19 +712,12 @@ fn information_schema_view_metadata(catalog: &dyn CatalogLookup) -> Vec<ViewMeta
     rows
 }
 
-fn split_qualified_relation_name(name: &str) -> (String, String) {
-    match name.split_once('.') {
-        Some((schema, relation_name)) => (schema.to_string(), relation_name.to_string()),
-        None => ("public".to_string(), name.to_string()),
-    }
-}
-
 fn view_definition_and_check_option(
     catalog: &dyn CatalogLookup,
-    entry: &crate::backend::utils::cache::relcache::RelCacheEntry,
+    relation_oid: u32,
 ) -> (String, &'static str) {
     let sql = catalog
-        .rewrite_rows_for_relation(entry.relation_oid)
+        .rewrite_rows_for_relation(relation_oid)
         .into_iter()
         .find(|row| row.rulename == "_RETURN")
         .map(|row| row.ev_action)

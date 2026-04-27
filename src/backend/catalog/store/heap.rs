@@ -36,7 +36,9 @@ use crate::backend::catalog::toasting::{
 use crate::backend::executor::{ColumnDesc, RelationDesc};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
-use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
+use crate::backend::utils::cache::relcache::{
+    RelCache, RelCacheEntry, relation_locator_for_class_row,
+};
 use crate::backend::utils::cache::syscache::{SysCacheId, SysCacheTuple};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::access::nbtree::BtreeOptions;
@@ -2643,6 +2645,94 @@ impl CatalogStore {
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_oid(&mut effect.relation_oids, row.tgrelid);
         Ok((row.oid, effect))
+    }
+
+    pub fn create_triggers_mvcc(
+        &mut self,
+        mut rows: Vec<crate::include::catalog::PgTriggerRow>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(Vec<u32>, CatalogMutationEffect), CatalogError> {
+        if rows.is_empty() {
+            return Ok((Vec::new(), CatalogMutationEffect::default()));
+        }
+
+        let mut relation_oids = rows.iter().map(|row| row.tgrelid).collect::<Vec<_>>();
+        relation_oids.sort_unstable();
+        relation_oids.dedup();
+
+        let mut existing_names = BTreeSet::new();
+        let mut old_classes = BTreeMap::new();
+        for relation_oid in &relation_oids {
+            for existing in relation_triggers_mvcc(self, ctx, *relation_oid)? {
+                existing_names.insert((*relation_oid, existing.tgname.to_ascii_lowercase()));
+            }
+            let old_class = class_row_by_oid_mvcc(self, ctx, *relation_oid)?
+                .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+            old_classes.insert(*relation_oid, old_class);
+        }
+
+        let mut incoming_names = BTreeSet::new();
+        for row in &rows {
+            let name_key = (row.tgrelid, row.tgname.to_ascii_lowercase());
+            if existing_names.contains(&name_key) || !incoming_names.insert(name_key) {
+                return Err(CatalogError::UniqueViolation(
+                    "pg_trigger_tgrelid_tgname_index".into(),
+                ));
+            }
+        }
+
+        let mut control = self.control_state()?;
+        let mut trigger_oids = Vec::with_capacity(rows.len());
+        for row in &mut rows {
+            if row.oid == 0 {
+                row.oid = control.next_oid;
+            }
+            control.next_oid = control.next_oid.max(row.oid.saturating_add(1));
+            trigger_oids.push(row.oid);
+        }
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+
+        let mut insert_rows = PhysicalCatalogRows {
+            triggers: rows.clone(),
+            depends: rows
+                .iter()
+                .flat_map(|row| trigger_depend_rows(row.oid, row.tgrelid, row.tgfoid, &row.tgattr))
+                .collect(),
+            ..PhysicalCatalogRows::default()
+        };
+        let mut delete_rows = PhysicalCatalogRows::default();
+        for old_class in old_classes.values() {
+            if !old_class.relhastriggers {
+                delete_rows.classes.push(old_class.clone());
+                insert_rows.classes.push(PgClassRow {
+                    relhastriggers: true,
+                    ..old_class.clone()
+                });
+            }
+        }
+
+        let mut kinds = vec![
+            BootstrapCatalogKind::PgTrigger,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        if !insert_rows.classes.is_empty() {
+            kinds.push(BootstrapCatalogKind::PgClass);
+            delete_catalog_rows_subset_mvcc(
+                ctx,
+                &delete_rows,
+                self.scope_db_oid(),
+                &[BootstrapCatalogKind::PgClass],
+            )?;
+        }
+        insert_catalog_rows_subset_mvcc(ctx, &insert_rows, self.scope_db_oid(), &kinds)?;
+        self.control = control;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        for relation_oid in relation_oids {
+            effect_record_oid(&mut effect.relation_oids, relation_oid);
+        }
+        Ok((trigger_oids, effect))
     }
 
     pub fn replace_trigger_mvcc(
@@ -9416,6 +9506,21 @@ fn type_row_by_oid_mvcc(
         }))
 }
 
+fn type_row_by_oid_mvcc_with_extra_type_rows(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    type_oid: u32,
+    extra_type_rows: &[PgTypeRow],
+) -> Result<Option<PgTypeRow>, CatalogError> {
+    if let Some(row) = type_row_by_oid_mvcc(store, ctx, type_oid)? {
+        return Ok(Some(row));
+    }
+    Ok(extra_type_rows
+        .iter()
+        .find(|row| row.oid == type_oid)
+        .cloned())
+}
+
 fn type_row_by_name_namespace_mvcc(
     store: &CatalogStore,
     ctx: &CatalogWriteContext,
@@ -10127,6 +10232,182 @@ fn catalog_entry_by_oid_mvcc_with_extra_type_rows(
     Ok(catalog_entry_from_relation_row(&class_row, &relation))
 }
 
+fn catalog_index_meta_from_index_row_for_drop(
+    index: crate::include::catalog::PgIndexRow,
+) -> CatalogIndexMeta {
+    CatalogIndexMeta {
+        indrelid: index.indrelid,
+        indkey: index.indkey,
+        indisunique: index.indisunique,
+        indnullsnotdistinct: index.indnullsnotdistinct,
+        indisprimary: index.indisprimary,
+        indisexclusion: index.indisexclusion,
+        indimmediate: index.indimmediate,
+        indisvalid: index.indisvalid,
+        indisready: index.indisready,
+        indislive: index.indislive,
+        indclass_options: vec![Vec::new(); index.indclass.len()],
+        indclass: index.indclass,
+        indcollation: index.indcollation,
+        indoption: index.indoption,
+        indexprs: index.indexprs,
+        indpred: index.indpred,
+        btree_options: None,
+        brin_options: None,
+        gin_options: None,
+        hash_options: None,
+    }
+}
+
+fn relation_desc_from_catalog_rows_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    attributes: &[PgAttributeRow],
+    constraints: &[PgConstraintRow],
+    attrdefs: &[PgAttrdefRow],
+    extra_type_rows: &[PgTypeRow],
+) -> Result<RelationDesc, CatalogError> {
+    let not_null_constraints = constraints
+        .iter()
+        .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_NOTNULL)
+        .filter_map(|row| {
+            let attnum = *row.conkey.as_ref()?.first()?;
+            Some((attnum, row))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let attrdefs = attrdefs
+        .iter()
+        .map(|row| (row.adnum, row))
+        .collect::<BTreeMap<_, _>>();
+    let mut columns = Vec::with_capacity(attributes.len());
+    for attr in attributes {
+        let sql_type =
+            type_row_by_oid_mvcc_with_extra_type_rows(store, ctx, attr.atttypid, extra_type_rows)?
+                .map(|row| row.sql_type)
+                .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
+        let mut desc = crate::backend::catalog::catalog::column_desc(
+            attr.attname.clone(),
+            SqlType {
+                typmod: attr.atttypmod,
+                ..sql_type
+            },
+            !attr.attnotnull,
+        );
+        desc.storage.attlen = attr.attlen;
+        desc.storage.attalign = attr.attalign;
+        desc.storage.attstorage = attr.attstorage;
+        desc.storage.attcompression = attr.attcompression;
+        desc.attstattarget = attr.attstattarget;
+        desc.attinhcount = attr.attinhcount;
+        desc.attislocal = attr.attislocal;
+        desc.attacl = attr.attacl.clone();
+        desc.collation_oid = attr.attcollation;
+        desc.fdw_options = attr.attfdwoptions.clone();
+        desc.identity = crate::include::nodes::parsenodes::ColumnIdentityKind::from_catalog_char(
+            attr.attidentity,
+        );
+        desc.generated = crate::include::nodes::parsenodes::ColumnGeneratedKind::from_catalog_char(
+            attr.attgenerated,
+        );
+        desc.dropped = attr.attisdropped;
+        if let Some(constraint) = not_null_constraints.get(&attr.attnum) {
+            desc.not_null_constraint_oid = Some(constraint.oid);
+            desc.not_null_constraint_name = Some(constraint.conname.clone());
+            desc.not_null_constraint_validated = constraint.convalidated;
+            desc.not_null_constraint_is_local = constraint.conislocal;
+            desc.not_null_constraint_inhcount = constraint.coninhcount;
+            desc.not_null_constraint_no_inherit = constraint.connoinherit;
+        }
+        if let Some(attrdef) = attrdefs.get(&attr.attnum) {
+            desc.attrdef_oid = Some(attrdef.oid);
+            desc.default_expr = Some(attrdef.adbin.clone());
+            desc.default_sequence_oid =
+                crate::pgrust::database::default_sequence_oid_from_default_expr(&attrdef.adbin);
+            desc.missing_default_value = None;
+        }
+        columns.push(desc);
+    }
+    Ok(RelationDesc { columns })
+}
+
+fn catalog_entry_by_oid_mvcc_for_drop(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    relation_oid: u32,
+    extra_type_rows: &[PgTypeRow],
+) -> Result<CatalogEntry, CatalogError> {
+    let class_row = class_row_by_oid_mvcc(store, ctx, relation_oid)?
+        .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+    let attributes = relation_attributes_mvcc(store, ctx, relation_oid)?;
+    let attrdefs = relation_attrdefs_mvcc(store, ctx, relation_oid)?;
+    let constraints = if matches!(class_row.relkind, 'r' | 'p') {
+        relation_constraints_mvcc(store, ctx, relation_oid)?
+    } else {
+        Vec::new()
+    };
+    let desc = relation_desc_from_catalog_rows_mvcc(
+        store,
+        ctx,
+        &attributes,
+        &constraints,
+        &attrdefs,
+        extra_type_rows,
+    )?;
+    let array_type_oid = if class_row.reltype == 0 {
+        0
+    } else {
+        type_row_by_oid_mvcc_with_extra_type_rows(store, ctx, class_row.reltype, extra_type_rows)?
+            .map(|row| row.typarray)
+            .unwrap_or(0)
+    };
+    let partitioned_table = if class_row.relkind == 'p' {
+        partitioned_table_row_mvcc(store, ctx, relation_oid)?
+    } else {
+        None
+    };
+    let index_meta = if matches!(class_row.relkind, 'i' | 'I') {
+        index_row_by_index_oid_mvcc(store, ctx, relation_oid)?
+            .map(catalog_index_meta_from_index_row_for_drop)
+    } else {
+        None
+    };
+    Ok(CatalogEntry {
+        rel: relation_locator_for_class_row(
+            class_row.oid,
+            class_row.relfilenode,
+            store.scope_db_oid(),
+        ),
+        relation_oid: class_row.oid,
+        namespace_oid: class_row.relnamespace,
+        owner_oid: class_row.relowner,
+        relacl: class_row.relacl,
+        reloptions: class_row.reloptions,
+        of_type_oid: class_row.reloftype,
+        row_type_oid: class_row.reltype,
+        array_type_oid,
+        reltoastrelid: class_row.reltoastrelid,
+        relhasindex: class_row.relhasindex,
+        relpersistence: class_row.relpersistence,
+        relkind: class_row.relkind,
+        am_oid: class_row.relam,
+        relhassubclass: class_row.relhassubclass,
+        relhastriggers: class_row.relhastriggers,
+        relispartition: class_row.relispartition,
+        relispopulated: class_row.relispopulated,
+        relpartbound: class_row.relpartbound,
+        relrowsecurity: class_row.relrowsecurity,
+        relforcerowsecurity: class_row.relforcerowsecurity,
+        relpages: class_row.relpages,
+        reltuples: class_row.reltuples,
+        relallvisible: class_row.relallvisible,
+        relallfrozen: class_row.relallfrozen,
+        relfrozenxid: class_row.relfrozenxid,
+        desc,
+        partitioned_table,
+        index_meta,
+    })
+}
+
 fn rows_for_existing_relation_mvcc(
     store: &CatalogStore,
     ctx: &CatalogWriteContext,
@@ -10723,11 +11004,11 @@ fn drop_relation_entries_mvcc(
     ),
     CatalogError,
 > {
-    let oids = drop_relation_oids_by_oid_mvcc(store, ctx, relation_oid, extra_type_rows)?;
+    let oids = drop_relation_oids_by_oid_mvcc(store, ctx, relation_oid)?;
     let dropped = oids
         .iter()
         .copied()
-        .map(|oid| catalog_entry_by_oid_mvcc_with_extra_type_rows(store, ctx, oid, extra_type_rows))
+        .map(|oid| catalog_entry_by_oid_mvcc_for_drop(store, ctx, oid, extra_type_rows))
         .collect::<Result<Vec<_>, _>>()?;
     let dropped_oids = dropped
         .iter()
@@ -10850,24 +11131,15 @@ fn drop_relation_oids_by_oid_mvcc(
     store: &CatalogStore,
     ctx: &CatalogWriteContext,
     relation_oid: u32,
-    extra_type_rows: &[PgTypeRow],
 ) -> Result<Vec<u32>, CatalogError> {
-    let entry = store
-        .relation_id_get_relation_with_extra_type_rows(ctx, relation_oid, extra_type_rows)?
+    let class_row = class_row_by_oid_mvcc(store, ctx, relation_oid)?
         .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-    if !(relkind_is_droppable_table(entry.relkind) || entry.relkind == 'S') {
+    if !(relkind_is_droppable_table(class_row.relkind) || class_row.relkind == 'S') {
         return Err(CatalogError::UnknownTable(relation_oid.to_string()));
     }
     let mut seen = BTreeSet::new();
     let mut order = Vec::new();
-    collect_relation_drop_oids_mvcc(
-        store,
-        ctx,
-        relation_oid,
-        extra_type_rows,
-        &mut seen,
-        &mut order,
-    )?;
+    collect_relation_drop_oids_mvcc(store, ctx, relation_oid, &mut seen, &mut order)?;
     Ok(order)
 }
 
@@ -10911,7 +11183,6 @@ fn collect_relation_drop_oids_mvcc(
     store: &CatalogStore,
     ctx: &CatalogWriteContext,
     relation_oid: u32,
-    extra_type_rows: &[PgTypeRow],
     seen: &mut BTreeSet<u32>,
     order: &mut Vec<u32>,
 ) -> Result<(), CatalogError> {
@@ -10924,20 +11195,11 @@ fn collect_relation_drop_oids_mvcc(
         if row.classid != PG_CLASS_RELATION_OID || row.objsubid != 0 {
             continue;
         }
-        if let Some(dependent) =
-            store.relation_id_get_relation_with_extra_type_rows(ctx, row.objid, extra_type_rows)?
-        {
+        if let Some(dependent) = class_row_by_oid_mvcc(store, ctx, row.objid)? {
             if !matches!(dependent.relkind, 'r' | 'i' | 'I' | 't' | 'S') {
                 continue;
             }
-            collect_relation_drop_oids_mvcc(
-                store,
-                ctx,
-                dependent.relation_oid,
-                extra_type_rows,
-                seen,
-                order,
-            )?;
+            collect_relation_drop_oids_mvcc(store, ctx, dependent.oid, seen, order)?;
         }
     }
 

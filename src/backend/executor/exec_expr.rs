@@ -552,13 +552,24 @@ fn index_am_profile(am_oid: u32) -> Option<IndexAmPropertyProfile> {
 }
 
 fn index_column_has_ordering_operator(
-    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    catalog: &dyn CatalogLookup,
+    index_meta: &crate::include::catalog::PgIndexRow,
     column_index: usize,
 ) -> bool {
-    index_meta
-        .amop_entries
-        .get(column_index)
-        .is_some_and(|entries| entries.iter().any(|entry| entry.purpose == 'o'))
+    let Some(opclass_oid) = index_meta.indclass.get(column_index).copied() else {
+        return false;
+    };
+    let Some(opclass) = catalog
+        .opclass_rows()
+        .into_iter()
+        .find(|row| row.oid == opclass_oid)
+    else {
+        return false;
+    };
+    catalog
+        .amop_rows()
+        .into_iter()
+        .any(|row| row.amopfamily == opclass.opcfamily && row.amoppurpose == 'o')
 }
 
 fn eval_pg_indexam_has_property(values: &[Value]) -> Result<Value, ExecError> {
@@ -605,13 +616,13 @@ fn eval_pg_index_has_property(values: &[Value], ctx: &ExecutorContext) -> Result
                 });
             };
             let catalog = executor_catalog(ctx)?;
-            let Some(entry) = catalog.relcache().get_by_oid(relation_oid) else {
+            let Some(index_meta) = catalog.index_row_by_oid(relation_oid) else {
                 return Ok(Value::Null);
             };
-            let Some(index_meta) = entry.index.as_ref() else {
+            let Some(class) = catalog.class_row_by_oid(index_meta.indexrelid) else {
                 return Ok(Value::Null);
             };
-            let Some(profile) = index_am_profile(index_meta.am_oid) else {
+            let Some(profile) = index_am_profile(class.relam) else {
                 return Ok(Value::Null);
             };
             Ok(match parse_index_property(property) {
@@ -649,13 +660,13 @@ fn eval_pg_index_column_has_property(
                 });
             };
             let catalog = executor_catalog(ctx)?;
-            let Some(entry) = catalog.relcache().get_by_oid(relation_oid) else {
+            let Some(index_meta) = catalog.index_row_by_oid(relation_oid) else {
                 return Ok(Value::Null);
             };
-            let Some(index_meta) = entry.index.as_ref() else {
+            let Some(class) = catalog.class_row_by_oid(index_meta.indexrelid) else {
                 return Ok(Value::Null);
             };
-            let Some(profile) = index_am_profile(index_meta.am_oid) else {
+            let Some(profile) = index_am_profile(class.relam) else {
                 return Ok(Value::Null);
             };
             let column_index = (attno - 1) as usize;
@@ -701,7 +712,7 @@ fn eval_pg_index_column_has_property(
                 Some(IndexPropertyKind::DistanceOrderable) => Value::Bool(
                     is_key
                         && profile.amcanorderbyop
-                        && index_column_has_ordering_operator(index_meta, column_index),
+                        && index_column_has_ordering_operator(catalog, &index_meta, column_index),
                 ),
                 Some(IndexPropertyKind::Returnable) => Value::Bool(match profile.returnability {
                     IndexReturnability::Never => false,
@@ -773,11 +784,7 @@ fn regproc_type_name(sql_type: SqlType) -> &'static str {
 }
 
 fn catalog_lookup(ctx: Option<&ExecutorContext>) -> Option<&dyn CatalogLookup> {
-    ctx.and_then(|ctx| {
-        ctx.catalog
-            .as_ref()
-            .map(|catalog| catalog as &dyn CatalogLookup)
-    })
+    ctx.and_then(|ctx| ctx.catalog.as_deref())
 }
 
 fn eval_reg_object_to_text(
@@ -1593,11 +1600,9 @@ fn builtin_function_for_expr(funcid: u32) -> Result<BuiltinScalarFunction, ExecE
     })
 }
 
-fn role_catalog(
-    ctx: &ExecutorContext,
-) -> Result<&crate::backend::utils::cache::visible_catalog::VisibleCatalog, ExecError> {
+fn role_catalog(ctx: &ExecutorContext) -> Result<&dyn CatalogLookup, ExecError> {
     ctx.catalog
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ExecError::DetailedError {
             message: "role lookup requires a visible catalog".into(),
             detail: None,
@@ -1782,7 +1787,7 @@ fn eval_regrole_to_text_function(
         return Ok(Value::Text("-".into()));
     }
     if let Some(role_name) = ctx
-        .and_then(|ctx| ctx.catalog.as_ref())
+        .and_then(|ctx| ctx.catalog.as_deref())
         .and_then(|catalog| {
             catalog
                 .authid_rows()
@@ -1796,21 +1801,9 @@ fn eval_regrole_to_text_function(
     Ok(Value::Text(oid.to_string().into()))
 }
 
-fn relation_name_for_regclass_oid(
-    oid: u32,
-    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
-) -> Option<String> {
+fn relation_name_for_regclass_oid(oid: u32, catalog: Option<&dyn CatalogLookup>) -> Option<String> {
     let catalog = catalog?;
-    catalog
-        .relcache()
-        .entries()
-        .find_map(|(name, entry)| (entry.relation_oid == oid).then_some(name))
-        .map(|name| {
-            name.rsplit_once('.')
-                .map(|(_, relname)| relname)
-                .unwrap_or(name)
-                .to_string()
-        })
+    catalog.class_row_by_oid(oid).map(|row| row.relname)
 }
 
 fn eval_regclass_to_text_function(
@@ -1838,7 +1831,7 @@ fn eval_regclass_to_text_function(
         return Ok(Value::Text("-".into()));
     }
     if let Some(relation_name) =
-        relation_name_for_regclass_oid(oid, ctx.and_then(|ctx| ctx.catalog.as_ref()))
+        relation_name_for_regclass_oid(oid, ctx.and_then(|ctx| ctx.catalog.as_deref()))
     {
         return Ok(Value::Text(
             quote_identifier_if_needed(&relation_name).into(),
@@ -1918,7 +1911,7 @@ fn eval_text_to_regclass_function(
         return Ok(Value::Int64(i64::from(oid)));
     }
     let catalog =
-        ctx.and_then(|ctx| ctx.catalog.as_ref())
+        ctx.and_then(|ctx| ctx.catalog.as_deref())
             .ok_or_else(|| ExecError::DetailedError {
                 message: "regclass lookup requires a visible catalog".into(),
                 detail: None,
@@ -1999,7 +1992,7 @@ fn eval_has_foreign_privilege_function(
     })?;
     let catalog = ctx
         .catalog
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ExecError::DetailedError {
             message: "foreign privilege lookup requires a visible catalog".into(),
             detail: None,
@@ -2196,11 +2189,9 @@ fn ensure_builtin_side_effects_allowed(
     Ok(())
 }
 
-fn sequence_catalog(
-    ctx: &ExecutorContext,
-) -> Result<&crate::backend::utils::cache::visible_catalog::VisibleCatalog, ExecError> {
+fn sequence_catalog(ctx: &ExecutorContext) -> Result<&dyn CatalogLookup, ExecError> {
     ctx.catalog
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ExecError::DetailedError {
             message: "sequence lookup requires a visible catalog".into(),
             detail: None,
@@ -2209,11 +2200,9 @@ fn sequence_catalog(
         })
 }
 
-fn executor_catalog(
-    ctx: &ExecutorContext,
-) -> Result<&crate::backend::utils::cache::visible_catalog::VisibleCatalog, ExecError> {
+fn executor_catalog(ctx: &ExecutorContext) -> Result<&dyn CatalogLookup, ExecError> {
     ctx.catalog
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ExecError::DetailedError {
             message: "catalog lookup requires executor catalog context".into(),
             detail: None,
@@ -3906,12 +3895,6 @@ fn eval_pg_get_ruledef(values: &[Value], ctx: &ExecutorContext) -> Result<Value,
     let relation_name = catalog
         .class_row_by_oid(rule.ev_class)
         .map(|row| row.relname)
-        .or_else(|| {
-            catalog
-                .relcache()
-                .relation_name_by_oid(rule.ev_class)
-                .map(|name| name.rsplit('.').next().unwrap_or(&name).to_string())
-        })
         .unwrap_or_else(|| rule.ev_class.to_string());
     let mut definition = format_stored_rule_definition_with_catalog(&rule, &relation_name, catalog);
     if pretty {
@@ -3939,9 +3922,9 @@ fn eval_pg_get_triggerdef(values: &[Value], ctx: &ExecutorContext) -> Result<Val
         }
     };
     let Some(trigger_row) = catalog
-        .relcache()
-        .entries()
-        .flat_map(|(_, entry)| catalog.trigger_rows_for_relation(entry.relation_oid))
+        .class_rows()
+        .into_iter()
+        .flat_map(|class| catalog.trigger_rows_for_relation(class.oid))
         .find(|row| row.oid == trigger_oid)
     else {
         return Ok(Value::Null);
@@ -4564,7 +4547,7 @@ fn effective_role_names_for_oid(
 fn role_oid_from_value(value: &Value, ctx: &ExecutorContext) -> Result<u32, ExecError> {
     let catalog = ctx
         .catalog
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ExecError::DetailedError {
             message: "has_function_privilege requires catalog context".into(),
             detail: None,
@@ -4691,7 +4674,7 @@ fn eval_has_function_privilege(
 ) -> Result<Value, ExecError> {
     let catalog = ctx
         .catalog
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ExecError::DetailedError {
             message: "has_function_privilege requires catalog context".into(),
             detail: None,
@@ -4870,7 +4853,7 @@ fn eval_pg_relation_size(values: &[Value], ctx: &ExecutorContext) -> Result<Valu
         }
         Err(err) => return Err(err),
     };
-    let Some(relation) = catalog.relcache().get_by_oid(relation_oid) else {
+    let Some(relation) = catalog.relation_by_oid(relation_oid) else {
         return Err(ExecError::DetailedError {
             message: format!("could not open relation with OID {relation_oid}"),
             detail: None,
@@ -4880,12 +4863,13 @@ fn eval_pg_relation_size(values: &[Value], ctx: &ExecutorContext) -> Result<Valu
     };
     if relation.relkind == 't'
         && let Some(parent) = catalog
-            .relcache()
-            .entries()
-            .find_map(|(_, entry)| (entry.reltoastrelid == relation_oid).then_some(entry))
+            .class_rows()
+            .into_iter()
+            .find_map(|class| (class.reltoastrelid == relation_oid).then_some(class.oid))
+            .and_then(|oid| catalog.relation_by_oid(oid))
     {
         return Ok(Value::Int64(
-            if parent_references_toast_relation(parent, relation_oid, ctx)? {
+            if parent_references_toast_relation(&parent, relation_oid, ctx)? {
                 i64::from(crate::backend::storage::smgr::smgr::BLCKSZ as i32)
             } else {
                 0
@@ -4913,7 +4897,7 @@ fn eval_pg_relation_filenode(values: &[Value], ctx: &ExecutorContext) -> Result<
     }
     let relation_oid = oid_arg_to_u32(value, "pg_relation_filenode")?;
     let catalog = executor_catalog(ctx)?;
-    let Some(relation) = catalog.relcache().get_by_oid(relation_oid) else {
+    let Some(relation) = catalog.relation_by_oid(relation_oid) else {
         return Ok(Value::Null);
     };
     if relation.rel.rel_number == 0 {
@@ -4938,7 +4922,8 @@ fn eval_pg_filenode_relation(values: &[Value], ctx: &ExecutorContext) -> Result<
         return Ok(Value::Null);
     }
     let catalog = executor_catalog(ctx)?;
-    let relation_oid = catalog.relcache().entries().find_map(|(_, relation)| {
+    let relation_oid = catalog.class_rows().into_iter().find_map(|class| {
+        let relation = catalog.relation_by_oid(class.oid)?;
         (relation.relpersistence != 't'
             && relation.rel.spc_oid == tablespace_oid
             && relation.rel.rel_number == filenode_oid)
@@ -4950,7 +4935,7 @@ fn eval_pg_filenode_relation(values: &[Value], ctx: &ExecutorContext) -> Result<
 }
 
 fn parent_references_toast_relation(
-    parent: &crate::backend::utils::cache::relcache::RelCacheEntry,
+    parent: &crate::backend::parser::BoundRelation,
     toast_oid: u32,
     ctx: &ExecutorContext,
 ) -> Result<bool, ExecError> {
@@ -5053,15 +5038,12 @@ fn sequence_runtime(
         })
 }
 
-fn sequence_name_for_oid(
-    catalog: &crate::backend::utils::cache::visible_catalog::VisibleCatalog,
-    relation_oid: u32,
-) -> Option<String> {
-    catalog
-        .relcache()
-        .entries()
-        .find(|(_, entry)| entry.relation_oid == relation_oid)
-        .map(|(name, _)| name.to_string())
+fn sequence_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> Option<String> {
+    let class = catalog.class_row_by_oid(relation_oid)?;
+    let namespace = catalog
+        .namespace_row_by_oid(class.relnamespace)
+        .map(|row| row.nspname)?;
+    Some(format!("{namespace}.{}", class.relname))
 }
 
 fn large_object_runtime(
@@ -5312,9 +5294,7 @@ fn eval_op_expr(
             expr_sql_type_hint(left),
             eval_expr(right, slot, ctx)?,
             expr_sql_type_hint(right),
-            ctx.catalog
-                .as_ref()
-                .map(|catalog| catalog as &dyn crate::backend::parser::CatalogLookup),
+            ctx.catalog.as_deref(),
             &ctx.datetime_config,
         ),
         (OpExprKind::Eq, [left, right]) => compare_values_with_type(
@@ -5451,7 +5431,7 @@ fn order_values_with_type(
     ) = (&left, left_type, &right, right_type)
         && left_type_oid == right_type_oid
         && left_type_oid != 0
-        && let Some(catalog) = ctx.catalog.as_ref()
+        && let Some(catalog) = ctx.catalog.as_deref()
     {
         let rows = catalog.enum_rows();
         let left_sort = rows
@@ -5553,16 +5533,11 @@ fn current_temp_namespace_name(ctx: &ExecutorContext) -> Option<CompactString> {
     // visible temp schema name from the qualified temp relcache entries until
     // temp namespace metadata is carried explicitly alongside the session.
     ctx.catalog
-        .as_ref()?
-        .relcache()
-        .entries()
-        .find_map(|(name, entry)| {
-            (entry.relpersistence == 't')
-                .then_some(name)
-                .and_then(|qualified| qualified.split_once('.'))
-                .and_then(|(schema, _)| schema.starts_with("pg_temp_").then_some(schema))
-                .map(Into::into)
-        })
+        .as_deref()?
+        .search_path()
+        .into_iter()
+        .find(|schema| schema.starts_with("pg_temp_"))
+        .map(Into::into)
 }
 
 fn configured_current_schema_search_path(ctx: &ExecutorContext) -> Vec<String> {
@@ -5586,7 +5561,7 @@ fn configured_current_schema_search_path(ctx: &ExecutorContext) -> Vec<String> {
 }
 
 fn current_schema_value(ctx: &ExecutorContext) -> Value {
-    let Some(catalog) = ctx.catalog.as_ref() else {
+    let Some(catalog) = ctx.catalog.as_deref() else {
         return Value::Text("public".into());
     };
     let namespaces = catalog.namespace_rows();
@@ -5618,7 +5593,7 @@ fn current_schema_value(ctx: &ExecutorContext) -> Value {
 fn current_temp_namespace_oid(ctx: &ExecutorContext) -> Option<u32> {
     let name = current_temp_namespace_name(ctx)?;
     ctx.catalog
-        .as_ref()?
+        .as_deref()?
         .namespace_rows()
         .into_iter()
         .find(|row| row.nspname == name.as_str())
@@ -5832,9 +5807,7 @@ pub fn eval_expr(
                     value,
                     expr_sql_type_hint(inner),
                     *ty,
-                    ctx.catalog
-                        .as_ref()
-                        .map(|catalog| catalog as &dyn crate::backend::parser::CatalogLookup),
+                    ctx.catalog.as_deref(),
                     &ctx.datetime_config,
                 )
             }
@@ -6492,9 +6465,7 @@ fn cast_record_value_for_target(
                 value,
                 None,
                 field.sql_type,
-                ctx.catalog
-                    .as_ref()
-                    .map(|catalog| catalog as &dyn crate::backend::parser::CatalogLookup),
+                ctx.catalog.as_deref(),
                 &ctx.datetime_config,
             )
         })
@@ -8526,7 +8497,7 @@ pub(crate) fn eval_builtin_function(
         result_type,
         func_variadic,
         &ctx.datetime_config,
-        ctx.catalog.as_ref(),
+        ctx.catalog.as_deref(),
     ) {
         return result;
     }

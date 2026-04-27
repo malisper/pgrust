@@ -1481,7 +1481,7 @@ fn load_view_runtime_triggers(
     modified_attnums: &[i16],
     ctx: &mut ExecutorContext,
 ) -> Result<RuntimeTriggers, ExecError> {
-    let visible_catalog = ctx.catalog.as_ref().ok_or(ExecError::DetailedError {
+    let visible_catalog = ctx.catalog.as_deref().ok_or(ExecError::DetailedError {
         message: "view trigger execution requires executor catalog context".into(),
         detail: None,
         hint: None,

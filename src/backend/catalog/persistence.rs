@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -113,8 +114,9 @@ pub(crate) fn delete_catalog_rows_subset_mvcc(
     for &kind in kinds {
         let desc = bootstrap_relation_desc(kind);
         let rel = bootstrap_catalog_rel(kind, db_oid);
-        for values in catalog_row_values_for_kind(rows, kind) {
-            catalog_tuple_delete_matching(ctx, kind, rel, &desc, &values, &snapshot).map_err(
+        let values = catalog_row_values_for_kind(rows, kind);
+        if !values.is_empty() {
+            catalog_tuples_delete_matching(ctx, kind, rel, &desc, &values, &snapshot).map_err(
                 |err| CatalogError::Io(format!("catalog delete for {kind:?} failed: {err:?}")),
             )?;
         }
@@ -251,31 +253,69 @@ fn catalog_tuple_update_matching(
     Ok(())
 }
 
-fn catalog_tuple_delete_matching(
+fn catalog_tuples_delete_matching(
     ctx: &CatalogWriteContext,
     kind: BootstrapCatalogKind,
     rel: RelFileLocator,
     desc: &RelationDesc,
-    values: &[Value],
+    values: &[Vec<Value>],
     snapshot: &Snapshot,
 ) -> Result<(), CatalogError> {
-    let tid = find_catalog_tuple_tid(ctx, kind, rel, desc, values, snapshot)?
-        .ok_or(CatalogError::Corrupt("missing catalog tuple for delete"))?;
+    let mut remaining = BTreeMap::<CatalogIdentityKey, usize>::new();
+    for row in values {
+        *remaining
+            .entry(catalog_row_identity_key(kind, row))
+            .or_default() += 1;
+    }
+
+    let mut tids = Vec::with_capacity(values.len());
+    {
+        let txns = ctx.txns.read();
+        let mut scan = heap_scan_begin(&ctx.pool, rel)
+            .map_err(|e| CatalogError::Io(format!("catalog scan begin failed: {e:?}")))?;
+        while let Some((tid, tuple)) = heap_scan_next(&ctx.pool, ctx.client_id, &mut scan)
+            .map_err(|e| CatalogError::Io(format!("catalog scan failed: {e:?}")))?
+        {
+            if remaining.is_empty() {
+                break;
+            }
+            if !snapshot.tuple_visible(&txns, &tuple) {
+                continue;
+            }
+            let decoded = decode_catalog_tuple_values(desc, &tuple)?;
+            let key = catalog_row_identity_key(kind, &decoded);
+            let Some(count) = remaining.get_mut(&key) else {
+                continue;
+            };
+            tids.push(tid);
+            *count -= 1;
+            if *count == 0 {
+                remaining.remove(&key);
+            }
+        }
+    }
+
+    if !remaining.is_empty() {
+        return Err(CatalogError::Corrupt("missing catalog tuple for delete"));
+    }
+
     let waiter = ctx
         .waiter
         .as_deref()
         .map(|waiter| (&*ctx.txns, waiter, ctx.interrupts.as_ref()));
-    heap_delete_with_waiter(
-        &ctx.pool,
-        ctx.client_id,
-        rel,
-        &ctx.txns,
-        ctx.xid,
-        tid,
-        snapshot,
-        waiter,
-    )
-    .map_err(|e| CatalogError::Io(format!("catalog tuple delete failed: {e:?}")))?;
+    for tid in tids {
+        heap_delete_with_waiter(
+            &ctx.pool,
+            ctx.client_id,
+            rel,
+            &ctx.txns,
+            ctx.xid,
+            tid,
+            snapshot,
+            waiter,
+        )
+        .map_err(|e| CatalogError::Io(format!("catalog tuple delete failed: {e:?}")))?;
+    }
     Ok(())
 }
 
@@ -302,6 +342,78 @@ fn find_catalog_tuple_tid(
         }
     }
     Ok(None)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum CatalogIdentityValue {
+    Null,
+    Int(i64),
+    UInt(u64),
+    Text(String),
+    Bool(bool),
+    Bytes(Vec<u8>),
+    Other(String),
+}
+
+type CatalogIdentityKey = Vec<CatalogIdentityValue>;
+
+fn catalog_row_identity_key(kind: BootstrapCatalogKind, values: &[Value]) -> CatalogIdentityKey {
+    match kind {
+        BootstrapCatalogKind::PgClass
+        | BootstrapCatalogKind::PgNamespace
+        | BootstrapCatalogKind::PgType
+        | BootstrapCatalogKind::PgAttrdef
+        | BootstrapCatalogKind::PgTrigger
+        | BootstrapCatalogKind::PgPolicy
+        | BootstrapCatalogKind::PgStatisticExt
+        | BootstrapCatalogKind::PgConversion
+        | BootstrapCatalogKind::PgProc
+        | BootstrapCatalogKind::PgAggregate
+        | BootstrapCatalogKind::PgConstraint
+        | BootstrapCatalogKind::PgIndex
+        | BootstrapCatalogKind::PgPartitionedTable => {
+            catalog_identity_key_from_indexes(values, &[0])
+        }
+        BootstrapCatalogKind::PgAttribute => catalog_identity_key_from_indexes(values, &[0, 4]),
+        BootstrapCatalogKind::PgDepend => {
+            catalog_identity_key_from_indexes(values, &[0, 1, 2, 3, 4, 5, 6])
+        }
+        BootstrapCatalogKind::PgStatistic | BootstrapCatalogKind::PgDescription => {
+            catalog_identity_key_from_indexes(values, &[0, 1, 2])
+        }
+        _ => values.iter().map(catalog_identity_value).collect(),
+    }
+}
+
+fn catalog_identity_key_from_indexes(values: &[Value], indexes: &[usize]) -> CatalogIdentityKey {
+    indexes
+        .iter()
+        .map(|index| {
+            values
+                .get(*index)
+                .map(catalog_identity_value)
+                .unwrap_or(CatalogIdentityValue::Null)
+        })
+        .collect()
+}
+
+fn catalog_identity_value(value: &Value) -> CatalogIdentityValue {
+    match value {
+        Value::Int16(value) => CatalogIdentityValue::Int(i64::from(*value)),
+        Value::Int32(value) => CatalogIdentityValue::Int(i64::from(*value)),
+        Value::Int64(value) => CatalogIdentityValue::Int(*value),
+        Value::Xid8(value) | Value::PgLsn(value) => CatalogIdentityValue::UInt(*value),
+        Value::EnumOid(value) => CatalogIdentityValue::UInt(u64::from(*value)),
+        Value::Text(value) => CatalogIdentityValue::Text(value.to_string()),
+        Value::InternalChar(value) => CatalogIdentityValue::Text(char::from(*value).to_string()),
+        Value::Bool(value) => CatalogIdentityValue::Bool(*value),
+        Value::Bytea(value) => CatalogIdentityValue::Bytes(value.clone()),
+        Value::Uuid(value) => CatalogIdentityValue::Bytes(value.to_vec()),
+        Value::MacAddr(value) => CatalogIdentityValue::Bytes(value.to_vec()),
+        Value::MacAddr8(value) => CatalogIdentityValue::Bytes(value.to_vec()),
+        Value::Null => CatalogIdentityValue::Null,
+        other => CatalogIdentityValue::Other(format!("{other:?}")),
+    }
 }
 
 fn physical_catalog_rows_empty(rows: &PhysicalCatalogRows) -> bool {

@@ -77,8 +77,8 @@ pub fn set_transaction_snapshot_override(
     state.catalog_snapshot = None;
     state.catalog_snapshot_ctx = None;
     state.catcache = None;
-    state.relcache = None;
-    state.cache_ctx = None;
+    state.catcache_ctx = None;
+    state.relation_cache.clear();
 }
 
 pub fn clear_transaction_snapshot_override(db: &Database, client_id: ClientId) {
@@ -87,8 +87,8 @@ pub fn clear_transaction_snapshot_override(db: &Database, client_id: ClientId) {
         state.catalog_snapshot = None;
         state.catalog_snapshot_ctx = None;
         state.catcache = None;
-        state.relcache = None;
-        state.cache_ctx = None;
+        state.catcache_ctx = None;
+        state.relation_cache.clear();
     }
 }
 

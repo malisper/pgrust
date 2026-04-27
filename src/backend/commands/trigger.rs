@@ -6,7 +6,6 @@ use crate::backend::parser::{
     CatalogLookup, RawWindowFrameBound, SqlCallArgs, SqlExpr, SqlType, SqlTypeKind, TriggerLevel,
     TriggerTiming, bind_scalar_expr_in_named_relation_scope, parse_expr,
 };
-use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, PG_TOAST_NAMESPACE_OID,
     PUBLIC_NAMESPACE_OID, PgTriggerRow,
@@ -71,7 +70,7 @@ pub(crate) struct RuntimeTriggers {
 
 impl RuntimeTriggers {
     pub(crate) fn load(
-        catalog: &VisibleCatalog,
+        catalog: &dyn CatalogLookup,
         relation_oid: u32,
         relation_name: &str,
         relation_desc: &RelationDesc,
@@ -515,7 +514,7 @@ fn materialized_row(row: &[Value]) -> Vec<Value> {
 }
 
 fn load_trigger_function(
-    catalog: &VisibleCatalog,
+    catalog: &dyn CatalogLookup,
     row: &PgTriggerRow,
 ) -> Result<LoadedTriggerFunction, ExecError> {
     let proc_row = catalog.proc_row_by_oid(row.tgfoid).ok_or_else(|| {
@@ -649,7 +648,7 @@ fn trigger_column_index(desc: &RelationDesc, name: &str) -> Result<usize, ExecEr
 }
 
 fn compile_when_expr(
-    catalog: &VisibleCatalog,
+    catalog: &dyn CatalogLookup,
     relation_desc: &RelationDesc,
     event: TriggerOperation,
     row: &PgTriggerRow,
@@ -688,18 +687,22 @@ fn compile_when_expr(
 }
 
 fn resolve_relation_names(
-    catalog: &VisibleCatalog,
+    catalog: &dyn CatalogLookup,
     relation_oid: u32,
     relation_name: &str,
 ) -> (String, String) {
-    let Some((cached_name, entry)) = catalog
-        .relcache()
-        .entries()
-        .find(|(_, entry)| entry.relation_oid == relation_oid)
-    else {
+    let Some(entry) = catalog.relation_by_oid(relation_oid) else {
         return split_relation_name(relation_name, None);
     };
-    split_relation_name(cached_name, Some(entry.namespace_oid))
+    let namespace_name = catalog
+        .namespace_row_by_oid(entry.namespace_oid)
+        .map(|row| row.nspname)
+        .unwrap_or_else(|| namespace_name_for_oid(entry.namespace_oid));
+    let table_name = relation_name
+        .rsplit_once('.')
+        .map(|(_, table_name)| table_name.to_string())
+        .unwrap_or_else(|| relation_name.to_string());
+    (table_name, namespace_name)
 }
 
 fn split_relation_name(name: &str, namespace_oid: Option<u32>) -> (String, String) {

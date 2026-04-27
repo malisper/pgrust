@@ -3,13 +3,12 @@ use std::sync::Arc;
 use crate::backend::access::transam::xact::Snapshot;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::CatalogError;
-use crate::backend::executor::{RelationDesc, SessionReplicationRole};
+use crate::backend::executor::{ExecutorCatalog, RelationDesc, SessionReplicationRole};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::AdvisoryLockManager;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::activity::{DatabaseStatsStore, SessionStatsState};
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
-use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::htup::AttributeCompression;
@@ -49,7 +48,7 @@ pub struct IndexBuildExprContext {
     pub current_xid: TransactionId,
     pub statement_lock_scope_id: Option<u64>,
     pub session_replication_role: SessionReplicationRole,
-    pub visible_catalog: Option<VisibleCatalog>,
+    pub visible_catalog: Option<ExecutorCatalog>,
 }
 
 #[derive(Clone)]

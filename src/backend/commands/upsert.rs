@@ -475,7 +475,7 @@ pub(crate) fn execute_insert_on_conflict_rows(
         .collect::<Vec<_>>();
     let (insert_triggers, update_triggers) = ctx
         .catalog
-        .as_ref()
+        .as_deref()
         .map(|catalog| {
             Ok::<_, ExecError>((
                 RuntimeTriggers::load(

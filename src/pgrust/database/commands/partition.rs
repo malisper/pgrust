@@ -153,7 +153,7 @@ fn detach_lock_requests(
 
 fn ddl_executor_context(
     db: &Database,
-    catalog: &dyn CatalogLookup,
+    _catalog: &dyn CatalogLookup,
     client_id: ClientId,
     xid: TransactionId,
     cid: CommandId,
@@ -205,7 +205,8 @@ fn ddl_executor_context(
         database: Some(db.clone()),
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
-        catalog: catalog.materialize_visible_catalog(),
+        catalog: None,
+        scalar_function_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: db.plpgsql_function_cache(client_id),
         pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),

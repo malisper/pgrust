@@ -47,27 +47,24 @@ impl Database {
     ) -> Result<CommandId, ExecError> {
         let rows = foreign_key_trigger_rows(constraint);
         let interrupts = self.interrupt_state(client_id);
-        let mut next_cid = cid;
-        for row in rows {
-            let ctx = CatalogWriteContext {
-                pool: self.pool.clone(),
-                txns: self.txns.clone(),
-                xid,
-                cid: next_cid,
-                client_id,
-                waiter: None,
-                interrupts: Arc::clone(&interrupts),
-            };
-            next_cid = next_cid.saturating_add(1);
-            let effect = self
-                .catalog
-                .write()
-                .create_trigger_mvcc(row, &ctx)
-                .map_err(map_catalog_error)?
-                .1;
-            self.apply_catalog_mutation_effect_immediate(&effect)?;
-            catalog_effects.push(effect);
-        }
+        let next_cid = cid.saturating_add(rows.len() as u32);
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&interrupts),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .create_triggers_mvcc(rows, &ctx)
+            .map_err(map_catalog_error)?
+            .1;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
         self.plan_cache.invalidate_all();
         Ok(next_cid)
     }

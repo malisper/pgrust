@@ -4,7 +4,6 @@ use super::expr_ops::{add_values, div_values, sub_values};
 use super::sqlfunc::execute_user_defined_sql_scalar_function_values;
 use super::{ExecError, ExecutorContext};
 use crate::backend::parser::CatalogLookup;
-use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     INT8_TYPE_OID, PG_LANGUAGE_SQL_OID, builtin_aggregate_function_for_proc_oid,
     builtin_hypothetical_aggregate_function_for_proc_oid, builtin_scalar_function_for_proc_oid,
@@ -29,7 +28,7 @@ pub(crate) fn build_aggregate_runtime(
 
     let catalog = ctx
         .catalog
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ExecError::DetailedError {
             message: "aggregate execution requires executor catalog context".into(),
             detail: None,
@@ -103,7 +102,7 @@ pub(crate) fn build_aggregate_runtime(
 
 fn load_visible_aggregate_row(
     accum: &AggAccum,
-    catalog: &VisibleCatalog,
+    catalog: &dyn CatalogLookup,
 ) -> Result<crate::include::catalog::PgAggregateRow, ExecError> {
     catalog
         .aggregate_by_fnoid(accum.aggfnoid)

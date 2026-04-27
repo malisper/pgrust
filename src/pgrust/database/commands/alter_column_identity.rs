@@ -35,12 +35,9 @@ fn serial_kind_for_identity_sql_type(sql_type: SqlType) -> Result<SerialKind, Pa
 }
 
 fn relation_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> Option<String> {
-    catalog.materialize_visible_catalog().and_then(|visible| {
-        visible
-            .relcache()
-            .entries()
-            .find_map(|(name, entry)| (entry.relation_oid == relation_oid).then_some(name.into()))
-    })
+    let class = catalog.class_row_by_oid(relation_oid)?;
+    let namespace = catalog.namespace_row_by_oid(class.relnamespace)?;
+    Some(format!("{}.{}", namespace.nspname, class.relname))
 }
 
 fn ensure_identity_add_allowed(

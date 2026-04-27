@@ -5,6 +5,9 @@ use crate::backend::commands::tablecmds::{
     reinitialize_index_relation, row_matches_index_predicate,
 };
 use crate::backend::utils::cache::relcache::{IndexAmOpEntry, IndexAmProcEntry};
+use crate::backend::utils::cache::syscache::{
+    SysCacheId, SysCacheTuple, search_sys_cache_list1_db, search_sys_cache1_db,
+};
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
@@ -20,8 +23,9 @@ use crate::include::catalog::{
     GIST_RANGE_FAMILY_OID, GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, SPGIST_AM_OID,
     builtin_range_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
+use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::RelOption;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 struct ResolvedIndexSupportMetadata {
     opfamily_oids: Vec<u32>,
@@ -29,6 +33,10 @@ struct ResolvedIndexSupportMetadata {
     opckeytype_oids: Vec<u32>,
     amop_entries: Vec<Vec<IndexAmOpEntry>>,
     amproc_entries: Vec<Vec<IndexAmProcEntry>>,
+}
+
+fn oid_syscache_key(oid: u32) -> Value {
+    Value::Int64(i64::from(oid))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -755,29 +763,29 @@ impl Database {
         txn_ctx: CatalogTxnContext,
         indclass: &[u32],
     ) -> Result<ResolvedIndexSupportMetadata, ExecError> {
-        let opclass_rows =
-            crate::backend::utils::cache::syscache::ensure_opclass_rows(self, client_id, txn_ctx);
-        let amop_rows =
-            crate::backend::utils::cache::syscache::ensure_amop_rows(self, client_id, txn_ctx);
-        let amproc_rows =
-            crate::backend::utils::cache::syscache::ensure_amproc_rows(self, client_id, txn_ctx);
-        let operator_rows = crate::include::catalog::bootstrap_pg_operator_rows();
-
-        let resolved_opclasses = indclass
-            .iter()
-            .map(|oid| {
-                opclass_rows
-                    .iter()
-                    .find(|row| row.oid == *oid)
-                    .cloned()
-                    .ok_or_else(|| {
-                        ExecError::Parse(ParseError::UnexpectedToken {
-                            expected: "valid index operator class",
-                            actual: format!("unknown operator class oid {oid}"),
-                        })
-                    })
+        let mut resolved_opclasses = Vec::with_capacity(indclass.len());
+        for oid in indclass {
+            let opclass = search_sys_cache1_db(
+                self,
+                client_id,
+                txn_ctx,
+                SysCacheId::OpclassOid,
+                oid_syscache_key(*oid),
+            )
+            .map_err(map_catalog_error)?
+            .into_iter()
+            .find_map(|tuple| match tuple {
+                SysCacheTuple::Opclass(row) => Some(row),
+                _ => None,
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "valid index operator class",
+                    actual: format!("unknown operator class oid {oid}"),
+                })
+            })?;
+            resolved_opclasses.push(opclass);
+        }
         let opfamily_oids = resolved_opclasses
             .iter()
             .map(|row| row.opcfamily)
@@ -790,43 +798,81 @@ impl Database {
             .iter()
             .map(|row| row.opckeytype)
             .collect::<Vec<_>>();
-        let amop_entries = opfamily_oids
-            .iter()
-            .map(|family_oid| {
-                amop_rows
-                    .iter()
-                    .filter(|row| row.amopfamily == *family_oid)
-                    .map(|row| IndexAmOpEntry {
-                        strategy: row.amopstrategy,
-                        purpose: row.amoppurpose,
-                        lefttype: row.amoplefttype,
-                        righttype: row.amoprighttype,
-                        operator_oid: row.amopopr,
-                        operator_proc_oid: operator_rows
-                            .iter()
-                            .find(|operator| operator.oid == row.amopopr)
-                            .map(|operator| operator.oprcode)
-                            .unwrap_or(0),
-                        sortfamily_oid: row.amopsortfamily,
+        let mut operator_proc_oids = BTreeMap::<u32, u32>::new();
+        let mut amop_entries = Vec::with_capacity(opfamily_oids.len());
+        for family_oid in &opfamily_oids {
+            let mut entries = Vec::new();
+            for row in search_sys_cache_list1_db(
+                self,
+                client_id,
+                txn_ctx,
+                SysCacheId::AmopStrategy,
+                oid_syscache_key(*family_oid),
+            )
+            .map_err(map_catalog_error)?
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Amop(row) => Some(row),
+                _ => None,
+            }) {
+                let operator_proc_oid = if let Some(proc_oid) = operator_proc_oids.get(&row.amopopr)
+                {
+                    *proc_oid
+                } else {
+                    let proc_oid = search_sys_cache1_db(
+                        self,
+                        client_id,
+                        txn_ctx,
+                        SysCacheId::OperOid,
+                        oid_syscache_key(row.amopopr),
+                    )
+                    .map_err(map_catalog_error)?
+                    .into_iter()
+                    .find_map(|tuple| match tuple {
+                        SysCacheTuple::Operator(row) => Some(row.oprcode),
+                        _ => None,
                     })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let amproc_entries = opfamily_oids
-            .iter()
-            .map(|family_oid| {
-                amproc_rows
-                    .iter()
-                    .filter(|row| row.amprocfamily == *family_oid)
-                    .map(|row| IndexAmProcEntry {
+                    .unwrap_or(0);
+                    operator_proc_oids.insert(row.amopopr, proc_oid);
+                    proc_oid
+                };
+                entries.push(IndexAmOpEntry {
+                    strategy: row.amopstrategy,
+                    purpose: row.amoppurpose,
+                    lefttype: row.amoplefttype,
+                    righttype: row.amoprighttype,
+                    operator_oid: row.amopopr,
+                    operator_proc_oid,
+                    sortfamily_oid: row.amopsortfamily,
+                });
+            }
+            amop_entries.push(entries);
+        }
+
+        let mut amproc_entries = Vec::with_capacity(opfamily_oids.len());
+        for family_oid in &opfamily_oids {
+            amproc_entries.push(
+                search_sys_cache_list1_db(
+                    self,
+                    client_id,
+                    txn_ctx,
+                    SysCacheId::AmprocNum,
+                    oid_syscache_key(*family_oid),
+                )
+                .map_err(map_catalog_error)?
+                .into_iter()
+                .filter_map(|tuple| match tuple {
+                    SysCacheTuple::Amproc(row) => Some(IndexAmProcEntry {
                         procnum: row.amprocnum,
                         lefttype: row.amproclefttype,
                         righttype: row.amprocrighttype,
                         proc_oid: row.amproc,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
+                    }),
+                    _ => None,
+                })
+                .collect(),
+            );
+        }
 
         Ok(ResolvedIndexSupportMetadata {
             opfamily_oids,
@@ -912,8 +958,12 @@ impl Database {
 
         let type_rows =
             crate::backend::utils::cache::syscache::ensure_type_rows(self, client_id, txn_ctx);
-        let opclass_rows =
-            crate::backend::utils::cache::syscache::ensure_opclass_rows(self, client_id, txn_ctx);
+        let opclass_rows = crate::backend::utils::cache::lsyscache::opclass_rows_for_am(
+            self,
+            client_id,
+            txn_ctx,
+            access_method.oid,
+        );
         let mut indclass = Vec::with_capacity(columns.len());
         let mut indclass_options = Vec::with_capacity(columns.len());
         let mut indcollation = Vec::with_capacity(columns.len());
@@ -1318,7 +1368,7 @@ impl Database {
         client_id: ClientId,
         relation: &crate::backend::parser::BoundRelation,
         index_name: &str,
-        visible_catalog: Option<crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+        visible_catalog: Option<crate::backend::executor::ExecutorCatalog>,
         columns: &[crate::backend::parser::IndexColumnDef],
         predicate_sql: Option<&str>,
         unique: bool,
@@ -1683,7 +1733,7 @@ impl Database {
         relation: &crate::backend::parser::BoundRelation,
         index_entry: &crate::backend::catalog::CatalogEntry,
         index_name: &str,
-        visible_catalog: Option<crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+        visible_catalog: Option<crate::backend::executor::ExecutorCatalog>,
         xid: TransactionId,
         cid: CommandId,
         access_method_oid: u32,
@@ -1765,6 +1815,7 @@ impl Database {
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 catalog: visible_catalog,
+                scalar_function_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                 pinned_cte_tables: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -1784,17 +1835,19 @@ impl Database {
             let index_exprs = crate::backend::parser::relation_get_index_expressions(
                 &mut relcache_index_meta,
                 &relation.desc,
-                &ctx.catalog
+                ctx.catalog
                     .clone()
-                    .expect("visible catalog for expression index build"),
+                    .expect("visible catalog for expression index build")
+                    .as_ref(),
             )
             .map_err(ExecError::Parse)?;
             let index_predicate = crate::backend::parser::relation_get_index_predicate(
                 &mut relcache_index_meta,
                 &relation.desc,
-                &ctx.catalog
+                ctx.catalog
                     .clone()
-                    .expect("visible catalog for expression index build"),
+                    .expect("visible catalog for expression index build")
+                    .as_ref(),
             )
             .map_err(ExecError::Parse)?;
             let bound_index = crate::backend::parser::BoundIndexRelation {
@@ -2214,7 +2267,7 @@ impl Database {
             client_id,
             &entry,
             &index_name,
-            catalog.materialize_visible_catalog(),
+            Some(crate::backend::executor::executor_catalog(catalog.clone())),
             &index_columns,
             create_stmt.predicate_sql.as_deref(),
             create_stmt.unique,
@@ -2270,7 +2323,7 @@ impl Database {
         client_id: ClientId,
         heap: &crate::backend::parser::BoundRelation,
         index: &crate::backend::parser::BoundIndexRelation,
-        visible_catalog: Option<crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+        visible_catalog: Option<crate::backend::executor::ExecutorCatalog>,
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
@@ -2329,6 +2382,7 @@ impl Database {
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog: visible_catalog,
+            scalar_function_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: self.plpgsql_function_cache(client_id),
             pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -2668,7 +2722,7 @@ impl Database {
             client_id,
             &heap,
             &index,
-            catalog.materialize_visible_catalog(),
+            None,
             xid,
             cid,
             catalog_effects,
@@ -2692,7 +2746,7 @@ impl Database {
                 client_id,
                 relation,
                 &index,
-                catalog.materialize_visible_catalog(),
+                None,
                 xid,
                 cid,
                 catalog_effects,

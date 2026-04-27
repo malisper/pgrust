@@ -5,75 +5,79 @@ use super::{ExecError, ExecutorContext, TupleSlot, Value};
 use crate::backend::parser::CatalogLookup;
 use crate::include::catalog::{
     PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID,
-    PgProcRow, builtin_scalar_function_for_proc_oid, builtin_scalar_function_for_proc_row,
+    PgProcRow, builtin_scalar_function_for_proc_row,
 };
-use crate::include::nodes::primnodes::{FuncExpr, ScalarFunctionImpl};
+use crate::include::nodes::primnodes::{BuiltinScalarFunction, FuncExpr, ScalarFunctionImpl};
 use crate::pl::plpgsql::execute_user_defined_scalar_function;
+
+#[derive(Debug, Clone)]
+pub enum ScalarFunctionCallInfo {
+    Builtin(BuiltinScalarFunction),
+    Sql(PgProcRow),
+    PlPgSql { proc_oid: u32 },
+    UnsupportedInternal(PgProcRow),
+    PlHandler { proc_oid: u32 },
+}
 
 pub(crate) fn call_scalar_function(
     func: &FuncExpr,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    if let Some(builtin) = builtin_scalar_function_for_proc_oid(func.funcid) {
-        return eval_builtin_function(
+    let call_info = match func.implementation {
+        ScalarFunctionImpl::Builtin(builtin) => ScalarFunctionCallInfo::Builtin(builtin),
+        ScalarFunctionImpl::UserDefined { proc_oid } => scalar_function_call_info(proc_oid, ctx)?,
+    };
+
+    match call_info {
+        ScalarFunctionCallInfo::Builtin(builtin) => eval_builtin_function(
             builtin,
             func.funcresulttype,
             &func.args,
             func.funcvariadic,
             slot,
             ctx,
-        );
-    }
-
-    if func.funcid == 0 {
-        // :HACK: Domain-check expressions are still compiler-generated helpers,
-        // not real pg_proc rows. Keep this narrow fallback until those checks
-        // are represented as catalog-backed constraints or support functions.
-        if let ScalarFunctionImpl::Builtin(builtin) = func.implementation {
-            return eval_builtin_function(
-                builtin,
-                func.funcresulttype,
-                &func.args,
-                func.funcvariadic,
-                slot,
-                ctx,
-            );
-        }
-    }
-
-    let row = proc_row_for_fmgr_call(func.funcid, ctx)?;
-    if let Some(builtin) = builtin_scalar_function_for_proc_row(&row) {
-        return eval_builtin_function(
-            builtin,
-            func.funcresulttype,
-            &func.args,
-            func.funcvariadic,
-            slot,
-            ctx,
-        );
-    }
-
-    match row.prolang {
-        PG_LANGUAGE_SQL_OID => {
+        ),
+        ScalarFunctionCallInfo::Sql(row) => {
             execute_user_defined_sql_scalar_function(&row, &func.args, slot, ctx)
         }
-        PG_LANGUAGE_PLPGSQL_OID => execute_user_defined_scalar_function(
-            func.funcid,
+        ScalarFunctionCallInfo::PlPgSql { proc_oid }
+        | ScalarFunctionCallInfo::PlHandler { proc_oid } => execute_user_defined_scalar_function(
+            proc_oid,
             func.funcresulttype,
             &func.args,
             slot,
             ctx,
         ),
-        PG_LANGUAGE_INTERNAL_OID | PG_LANGUAGE_C_OID => Err(unsupported_internal_function(&row)),
-        _ => execute_user_defined_scalar_function(
-            func.funcid,
-            func.funcresulttype,
-            &func.args,
-            slot,
-            ctx,
-        ),
+        ScalarFunctionCallInfo::UnsupportedInternal(row) => {
+            Err(unsupported_internal_function(&row))
+        }
     }
+}
+
+fn scalar_function_call_info(
+    proc_oid: u32,
+    ctx: &mut ExecutorContext,
+) -> Result<ScalarFunctionCallInfo, ExecError> {
+    if let Some(info) = ctx.scalar_function_cache.get(&proc_oid) {
+        return Ok(info.clone());
+    }
+
+    let row = proc_row_for_fmgr_call(proc_oid, ctx)?;
+    let info = if let Some(builtin) = builtin_scalar_function_for_proc_row(&row) {
+        ScalarFunctionCallInfo::Builtin(builtin)
+    } else {
+        match row.prolang {
+            PG_LANGUAGE_SQL_OID => ScalarFunctionCallInfo::Sql(row),
+            PG_LANGUAGE_PLPGSQL_OID => ScalarFunctionCallInfo::PlPgSql { proc_oid },
+            PG_LANGUAGE_INTERNAL_OID | PG_LANGUAGE_C_OID => {
+                ScalarFunctionCallInfo::UnsupportedInternal(row)
+            }
+            _ => ScalarFunctionCallInfo::PlHandler { proc_oid },
+        }
+    };
+    ctx.scalar_function_cache.insert(proc_oid, info.clone());
+    Ok(info)
 }
 
 fn proc_row_for_fmgr_call(funcid: u32, ctx: &ExecutorContext) -> Result<PgProcRow, ExecError> {

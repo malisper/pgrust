@@ -98,12 +98,12 @@ fn foreign_key_trigger_enabled(
     constrrelid: Option<u32>,
     ctx: &ExecutorContext,
 ) -> bool {
-    let Some(catalog) = ctx.catalog.as_ref() else {
+    let Some(catalog) = ctx.catalog.as_deref() else {
         return true;
     };
-    let trigger = catalog.relcache().entries().find_map(|(_, relation)| {
+    let trigger = catalog.class_rows().into_iter().find_map(|relation| {
         catalog
-            .trigger_rows_for_relation(relation.relation_oid)
+            .trigger_rows_for_relation(relation.oid)
             .into_iter()
             .find(|row| {
                 row.tgisinternal
@@ -1102,10 +1102,8 @@ fn render_key_value(value: &Value, ctx: &ExecutorContext) -> String {
         Value::InternalChar(v) => v.to_string(),
         Value::EnumOid(v) => ctx
             .catalog
-            .as_ref()
-            .and_then(|catalog| {
-                crate::backend::parser::CatalogLookup::enum_label_by_oid(catalog, *v)
-            })
+            .as_deref()
+            .and_then(|catalog| catalog.enum_label_by_oid(*v))
             .unwrap_or_else(|| v.to_string()),
         Value::TextRef(_, _) | Value::Text(_) | Value::JsonPath(_) => {
             value.as_text().unwrap_or_default().to_string()

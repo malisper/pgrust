@@ -3857,79 +3857,42 @@ fn split_simple_query_statements(sql: &str, standard_conforming_strings: bool) -
 
 fn role_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
     catalog
-        .materialize_visible_catalog()
-        .map(|visible| {
-            visible
-                .authid_rows()
-                .into_iter()
-                .map(|row| (row.oid, row.rolname))
-                .collect()
-        })
-        .unwrap_or_default()
+        .authid_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.rolname))
+        .collect()
 }
 
 fn proc_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
     catalog
-        .materialize_visible_catalog()
-        .map(|visible| {
-            visible
-                .proc_rows()
-                .into_iter()
-                .map(|row| (row.oid, row.proname))
-                .collect()
-        })
-        .unwrap_or_else(|| {
-            crate::include::catalog::bootstrap_pg_proc_rows()
-                .into_iter()
-                .map(|row| (row.oid, row.proname))
-                .collect()
-        })
+        .proc_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.proname))
+        .collect()
 }
 
 fn relation_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
     catalog
-        .materialize_visible_catalog()
-        .map(|visible| {
-            visible
-                .relcache()
-                .entries()
-                .map(|(name, entry)| {
-                    let relname = name
-                        .rsplit_once('.')
-                        .map(|(_, relname)| relname)
-                        .unwrap_or(name)
-                        .to_string();
-                    (entry.relation_oid, relname)
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+        .class_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.relname))
+        .collect()
 }
 
 fn namespace_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
     catalog
-        .materialize_visible_catalog()
-        .map(|visible| {
-            visible
-                .namespace_rows()
-                .into_iter()
-                .map(|row| (row.oid, row.nspname))
-                .collect()
-        })
-        .unwrap_or_default()
+        .namespace_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect()
 }
 
 fn enum_label_map(catalog: &dyn CatalogLookup) -> HashMap<(u32, u32), String> {
     catalog
-        .materialize_visible_catalog()
-        .map(|visible| {
-            visible
-                .enum_rows()
-                .into_iter()
-                .map(|row| ((row.enumtypid, row.oid), row.enumlabel))
-                .collect()
-        })
-        .unwrap_or_default()
+        .enum_rows()
+        .into_iter()
+        .map(|row| ((row.enumtypid, row.oid), row.enumlabel))
+        .collect()
 }
 
 fn try_handle_psql_describe_query(

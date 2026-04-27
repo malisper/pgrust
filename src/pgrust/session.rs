@@ -1555,7 +1555,7 @@ impl Session {
         }
     }
 
-    pub(crate) fn catalog_lookup<'a>(&self, db: &'a Database) -> LazyCatalogLookup<'a> {
+    pub(crate) fn catalog_lookup<'a>(&self, db: &'a Database) -> LazyCatalogLookup {
         db.install_row_security_enabled(self.client_id, self.row_security_enabled());
         let search_path = self.configured_search_path();
         db.lazy_catalog_lookup(
@@ -1576,7 +1576,7 @@ impl Session {
         db: &'a Database,
         xid: TransactionId,
         cid: u32,
-    ) -> LazyCatalogLookup<'a> {
+    ) -> LazyCatalogLookup {
         db.install_row_security_enabled(self.client_id, self.row_security_enabled());
         let search_path = self.configured_search_path();
         db.lazy_catalog_lookup(self.client_id, Some((xid, cid)), search_path.as_deref())
@@ -1826,7 +1826,7 @@ impl Session {
         db: &Database,
         snapshot: crate::backend::access::transam::xact::Snapshot,
         cid: u32,
-        catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup<'_>,
+        catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup,
         deferred_foreign_keys: Option<DeferredForeignKeyTracker>,
         statement_lock_scope_id: Option<u64>,
     ) -> ExecutorContext {
@@ -1903,7 +1903,8 @@ impl Session {
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
             subplans: Vec::new(),
-            catalog: catalog.materialize_visible_catalog(),
+            catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+            scalar_function_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: Arc::clone(&self.plpgsql_function_cache),
             pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -11850,15 +11851,10 @@ fn copy_options_force_quote_column(
 
 fn copy_enum_label_map(catalog: &dyn CatalogLookup) -> HashMap<(u32, u32), String> {
     catalog
-        .materialize_visible_catalog()
-        .map(|visible| {
-            visible
-                .enum_rows()
-                .into_iter()
-                .map(|row| ((row.enumtypid, row.oid), row.enumlabel))
-                .collect()
-        })
-        .unwrap_or_default()
+        .enum_rows()
+        .into_iter()
+        .map(|row| ((row.enumtypid, row.oid), row.enumlabel))
+        .collect()
 }
 
 fn escape_copy_text_field(value: &str) -> String {

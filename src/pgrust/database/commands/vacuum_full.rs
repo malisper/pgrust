@@ -201,7 +201,9 @@ impl Database {
             Some((xid, cid.saturating_add(1))),
             configured_search_path,
         );
-        ctx.catalog = refreshed_catalog.materialize_visible_catalog();
+        ctx.catalog = Some(crate::backend::executor::executor_catalog(
+            refreshed_catalog.clone(),
+        ));
         Ok(())
     }
 
