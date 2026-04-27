@@ -31,6 +31,9 @@ Runtime behavior:
 - stores `GRANT/REVOKE USAGE` ACLs for foreign data wrappers and servers
 - exposes minimal `pg_roles`, `pg_table_is_visible`, and `pg_get_partkeydef`
   catalog helper behavior needed by FDW describe/privilege queries
+- stores and alters foreign table/column FDW options, including
+  `ALTER FOREIGN TABLE ... OPTIONS`, add-column options, and column option
+  changes through `pg_attribute.attfdwoptions`
 
 Tests run:
 - `cargo fmt`
@@ -56,9 +59,13 @@ Tests run:
 - `scripts/run_regression.sh --skip-build --port 55441 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-pg-roles`
 - `scripts/cargo_isolated.sh test --lib --quiet pg_get_partkeydef_and_pg_table_is_visible_use_catalog`
 - `scripts/run_regression.sh --skip-build --port 55442 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-helper-funcs`
+- `scripts/cargo_isolated.sh test --lib --quiet parse_foreign_data_wrapper_statements`
+- `scripts/cargo_isolated.sh test --lib --quiet foreign_data_catalogs_track_servers_mappings_and_tables`
+- `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
+- `scripts/run_regression.sh --skip-build --port 55443 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-column-alter`
 
 Remaining:
-`foreign_data` still fails, but improved to 285/539 matching queries. Biggest
+`foreign_data` still fails, but improved to 317/539 matching queries. Biggest
 remaining groups:
 - FDW dependency reporting for handler functions and owners
 - full `IMPORT FOREIGN SCHEMA` callback behavior beyond missing-handler errors

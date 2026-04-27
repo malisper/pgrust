@@ -180,6 +180,15 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_partition_statement(&sql, options)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_alter_table_add_column_with_fdw_options(&sql)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_alter_table_column_fdw_options_statement(&sql)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_alter_table_fdw_options_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_alter_table_multi_action_statement(&sql, options)? {
         return Ok(stmt);
     }
@@ -700,6 +709,178 @@ fn try_parse_alter_table_multi_action_statement(
         )));
     }
     Ok(Some(Statement::AlterTableMulti(statements)))
+}
+
+fn parse_alter_table_target_sql(input: &str) -> Result<(bool, bool, String, &str), ParseError> {
+    let mut rest = input.trim_start();
+    let if_exists = if keyword_at_start(rest, "if exists") {
+        rest = consume_keyword(rest, "if exists").trim_start();
+        true
+    } else {
+        false
+    };
+    let mut only = false;
+    if keyword_at_start(rest, "only") {
+        rest = consume_keyword(rest, "only").trim_start();
+        only = true;
+    }
+    let ((schema_name, table_name), next) = parse_schema_qualified_name(rest)?;
+    rest = next.trim_start();
+    if rest.starts_with('*') {
+        rest = rest[1..].trim_start();
+    }
+    let table_name = schema_name
+        .map(|schema| format!("{schema}.{table_name}"))
+        .unwrap_or(table_name);
+    Ok((if_exists, only, table_name, rest))
+}
+
+fn strip_column_fdw_options(
+    column_sql: &str,
+) -> Result<(String, Option<Vec<RelOption>>), ParseError> {
+    let trimmed = column_sql.trim();
+    let Some(options_idx) = find_top_level_keyword(trimmed, "options") else {
+        return Ok((trimmed.to_string(), None));
+    };
+    let options_tail = trimmed[options_idx + "options".len()..].trim_start();
+    let options_end = find_matching_create_foreign_table_columns_end(options_tail).ok_or(
+        ParseError::UnexpectedToken {
+            expected: "OPTIONS (name 'value' [, ...])",
+            actual: options_tail.into(),
+        },
+    )?;
+    let options_sql = format!("options {}", &options_tail[..=options_end]);
+    let options = parse_create_generic_options(&options_sql)?;
+    let before = trimmed[..options_idx].trim_end();
+    let after = options_tail[options_end + 1..].trim_start();
+    let cleaned = if after.is_empty() {
+        before.to_string()
+    } else {
+        format!("{before} {after}")
+    };
+    Ok((cleaned, Some(options)))
+}
+
+fn parse_column_def_sql(column_sql: &str) -> Result<ColumnDef, ParseError> {
+    let mut pairs = SqlParser::parse(Rule::column_def, column_sql)
+        .map_err(|err| map_pest_error("column definition", column_sql, err))?;
+    build_column_def(pairs.next().ok_or(ParseError::UnexpectedEof)?)
+}
+
+fn try_parse_alter_table_add_column_with_fdw_options(
+    sql: &str,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "alter") {
+        return Ok(None);
+    }
+    let mut rest = consume_keyword(trimmed, "alter").trim_start();
+    if !keyword_at_start(rest, "table") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "table").trim_start();
+    let (if_exists, only, table_name, next) = parse_alter_table_target_sql(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "add") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "add").trim_start();
+    if keyword_at_start(rest, "column") {
+        rest = consume_keyword(rest, "column").trim_start();
+    }
+    let missing_ok = if keyword_at_start(rest, "if not exists") {
+        rest = consume_keyword(rest, "if not exists").trim_start();
+        true
+    } else {
+        false
+    };
+    let (column_sql, fdw_options) = strip_column_fdw_options(rest)?;
+    let Some(fdw_options) = fdw_options else {
+        return Ok(None);
+    };
+    let column = parse_column_def_sql(&column_sql)?;
+    Ok(Some(Statement::AlterTableAddColumn(
+        AlterTableAddColumnStatement {
+            if_exists,
+            missing_ok,
+            only,
+            table_name,
+            column,
+            fdw_options: Some(fdw_options),
+        },
+    )))
+}
+
+fn try_parse_alter_table_column_fdw_options_statement(
+    sql: &str,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "alter") {
+        return Ok(None);
+    }
+    let mut rest = consume_keyword(trimmed, "alter").trim_start();
+    if !keyword_at_start(rest, "table") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "table").trim_start();
+    let (if_exists, only, table_name, next) = parse_alter_table_target_sql(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "alter") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "alter").trim_start();
+    if keyword_at_start(rest, "column") {
+        rest = consume_keyword(rest, "column").trim_start();
+    }
+    let (column_name, next) = parse_sql_identifier(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "options") {
+        return Ok(None);
+    }
+    let options_tail = consume_keyword(rest, "options").trim_start();
+    let Some(options_end) = find_matching_create_foreign_table_columns_end(options_tail) else {
+        return Ok(None);
+    };
+    if !options_tail[options_end + 1..].trim().is_empty() {
+        return Ok(None);
+    }
+    let options_sql = format!("options {}", &options_tail[..=options_end]);
+    let options = parse_alter_generic_options(&options_sql)?;
+    Ok(Some(Statement::AlterTableAlterColumnOptions(
+        AlterTableAlterColumnOptionsStatement {
+            if_exists,
+            only,
+            table_name,
+            column_name,
+            action: AlterColumnOptionsAction::Fdw(options),
+        },
+    )))
+}
+
+fn try_parse_alter_table_fdw_options_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "alter") {
+        return Ok(None);
+    }
+    let mut rest = consume_keyword(trimmed, "alter").trim_start();
+    if !keyword_at_start(rest, "table") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "table").trim_start();
+    let (if_exists, only, table_name, next) = parse_alter_table_target_sql(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "options") {
+        return Ok(None);
+    }
+    let options = parse_alter_generic_options(rest)?;
+    Ok(Some(Statement::AlterForeignTableOptions(
+        AlterForeignTableOptionsStatement {
+            if_exists,
+            only,
+            table_name,
+            options,
+        },
+    )))
 }
 
 fn split_top_level_commas(input: &str) -> Result<Vec<String>, ParseError> {
@@ -5185,6 +5366,47 @@ fn find_matching_create_foreign_table_columns_end(input: &str) -> Option<usize> 
     None
 }
 
+fn strip_create_foreign_table_column_options(
+    columns_sql: &str,
+) -> Result<(String, Vec<(String, Vec<RelOption>)>), ParseError> {
+    let Some(inner) = columns_sql
+        .trim()
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return Ok((columns_sql.to_string(), Vec::new()));
+    };
+    let mut cleaned_items = Vec::new();
+    let mut column_options = Vec::new();
+    for item in split_top_level_items(inner, ',')? {
+        let trimmed = item.trim();
+        let Some(options_idx) = find_top_level_keyword(trimmed, "options") else {
+            cleaned_items.push(item);
+            continue;
+        };
+        let (column_name, _) = parse_sql_identifier(trimmed)?;
+        let options_tail = trimmed[options_idx + "options".len()..].trim_start();
+        let options_end = find_matching_create_foreign_table_columns_end(options_tail).ok_or(
+            ParseError::UnexpectedToken {
+                expected: "OPTIONS (name 'value' [, ...])",
+                actual: options_tail.into(),
+            },
+        )?;
+        let options_sql = format!("options {}", &options_tail[..=options_end]);
+        let options = parse_create_generic_options(&options_sql)?;
+        column_options.push((column_name, options));
+
+        let before = trimmed[..options_idx].trim_end();
+        let after = options_tail[options_end + 1..].trim_start();
+        cleaned_items.push(if after.is_empty() {
+            before.to_string()
+        } else {
+            format!("{before} {after}")
+        });
+    }
+    Ok((format!("({})", cleaned_items.join(", ")), column_options))
+}
+
 fn build_create_foreign_table_statement(
     sql: &str,
 ) -> Result<CreateForeignTableStatement, ParseError> {
@@ -5204,6 +5426,7 @@ fn build_create_foreign_table_statement(
         },
     )?;
     let columns_sql = &rest[..=columns_end];
+    let (columns_sql, column_options) = strip_create_foreign_table_column_options(columns_sql)?;
     rest = rest[columns_end + 1..].trim_start();
     if !keyword_at_start(rest, "server") {
         return Err(ParseError::UnexpectedToken {
@@ -5242,6 +5465,7 @@ fn build_create_foreign_table_statement(
         create_table,
         server_name,
         options,
+        column_options,
     })
 }
 
@@ -20565,6 +20789,7 @@ fn build_alter_table_add_column(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableAddColumnStatement, ParseError> {
     let mut if_exists = false;
+    let mut missing_ok = false;
     let mut only = false;
     let mut table_name = None;
     let mut column = None;
@@ -20577,6 +20802,7 @@ fn build_alter_table_add_column(
                 only = parsed_only;
                 table_name = Some(parsed_table_name);
             }
+            Rule::if_not_exists_clause => missing_ok = true,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::column_def => column = Some(build_column_def(part)?),
             _ => {}
@@ -20584,9 +20810,11 @@ fn build_alter_table_add_column(
     }
     Ok(AlterTableAddColumnStatement {
         if_exists,
+        missing_ok,
         only,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         column: column.ok_or(ParseError::UnexpectedEof)?,
+        fdw_options: None,
     })
 }
 
@@ -20657,6 +20885,7 @@ fn build_alter_table_drop_column(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableDropColumnStatement, ParseError> {
     let mut if_exists = false;
+    let mut missing_ok = false;
     let mut only = false;
     let mut cascade = false;
     let mut parts = Vec::new();
@@ -20669,6 +20898,7 @@ fn build_alter_table_drop_column(
                 only = parsed_only;
                 parts.push(parsed_table_name);
             }
+            Rule::if_exists_clause => missing_ok = true,
             Rule::identifier => parts.push(build_identifier(part)),
             Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
             _ => {}
@@ -20677,6 +20907,7 @@ fn build_alter_table_drop_column(
     let mut parts = parts.into_iter();
     Ok(AlterTableDropColumnStatement {
         if_exists,
+        missing_ok,
         only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
@@ -20688,6 +20919,7 @@ fn build_alter_table_drop_constraint(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableDropConstraintStatement, ParseError> {
     let mut if_exists = false;
+    let mut missing_ok = false;
     let mut only = false;
     let mut cascade = false;
     let mut parts = Vec::new();
@@ -20700,6 +20932,7 @@ fn build_alter_table_drop_constraint(
                 only = parsed_only;
                 parts.push(parsed_table_name);
             }
+            Rule::if_exists_clause => missing_ok = true,
             Rule::identifier => parts.push(build_identifier(part)),
             Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
             _ => {}
@@ -20708,6 +20941,7 @@ fn build_alter_table_drop_constraint(
     let mut parts = parts.into_iter();
     Ok(AlterTableDropConstraintStatement {
         if_exists,
+        missing_ok,
         only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,

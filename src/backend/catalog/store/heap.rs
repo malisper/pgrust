@@ -1838,6 +1838,31 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn replace_foreign_table_mvcc(
+        &mut self,
+        old_row: &PgForeignTableRow,
+        row: PgForeignTableRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let kinds = [BootstrapCatalogKind::PgForeignTable];
+        let old_rows = PhysicalCatalogRows {
+            foreign_tables: vec![old_row.clone()],
+            ..PhysicalCatalogRows::default()
+        };
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+
+        let new_rows = PhysicalCatalogRows {
+            foreign_tables: vec![row.clone()],
+            ..PhysicalCatalogRows::default()
+        };
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.ftrelid);
+        Ok(effect)
+    }
+
     pub fn drop_foreign_table_mvcc(
         &mut self,
         row: &PgForeignTableRow,
@@ -5005,7 +5030,7 @@ impl CatalogStore {
         let table = self
             .relation_id_get_relation(ctx, relation_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if !matches!(table.relkind, 'r' | 'p') {
+        if !matches!(table.relkind, 'r' | 'p' | 'f') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
         if relation_constraint_exists_mvcc(self, ctx, relation_oid, &conname, None)? {
@@ -5393,7 +5418,7 @@ impl CatalogStore {
         let constraint_name = constraint_name.into();
         let (old_entry, _new_entry, constraint_oid, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, control| {
-                if !matches!(entry.relkind, 'r' | 'p') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -5435,7 +5460,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, _new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if !matches!(entry.relkind, 'r' | 'p') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -6181,7 +6206,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, control| {
-                if !matches!(entry.relkind, 'r' | 'p') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 if entry
@@ -6290,7 +6315,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if !matches!(entry.relkind, 'r' | 'v') {
+                if !matches!(entry.relkind, 'r' | 'v' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -6337,7 +6362,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, control| {
-                if !matches!(entry.relkind, 'r' | 'p') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -6424,7 +6449,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, control| {
-                if !matches!(entry.relkind, 'r' | 'p') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -6471,7 +6496,7 @@ impl CatalogStore {
             column_name,
             statistics_target,
             ctx,
-            &['r'],
+            &['r', 'f'],
         )
     }
 
@@ -6525,7 +6550,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if !matches!(entry.relkind, 'r' | 'v') {
+                if !matches!(entry.relkind, 'r' | 'v' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -6549,11 +6574,35 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if !matches!(entry.relkind, 'r' | 'v') {
+                if !matches!(entry.relkind, 'r' | 'v' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
                 entry.desc.columns[column_index].storage.attcompression = compression;
+                Ok(((), vec![BootstrapCatalogKind::PgAttribute]))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
+    pub fn alter_table_set_column_fdw_options_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        fdw_options: Option<Vec<String>>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, _control| {
+                if entry.relkind != 'f' {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let column_index = relation_column_index_visible(&entry.desc, column_name)?;
+                entry.desc.columns[column_index].fdw_options = fdw_options;
                 Ok(((), vec![BootstrapCatalogKind::PgAttribute]))
             })?;
 
@@ -6573,7 +6622,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, _control| {
-                if entry.relkind != 'r' {
+                if !matches!(entry.relkind, 'r' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -6604,7 +6653,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if entry.relkind != 'r' {
+                if !matches!(entry.relkind, 'r' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 if entry.desc.columns.iter().any(|column| {
@@ -6683,7 +6732,7 @@ impl CatalogStore {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 entry.desc = desc;
-                if matches!(entry.relkind, 'r' | 'p') {
+                if matches!(entry.relkind, 'r' | 'p' | 'f') {
                     allocate_relation_object_oids(&mut entry.desc, &mut control.next_oid);
                 }
                 Ok((
@@ -6715,7 +6764,7 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let entry = catalog_entry_by_oid_mvcc(self, ctx, relation_oid)?;
-        if !matches!(entry.relkind, 'r' | 'p' | 'S' | 'i' | 'I' | 'v') {
+        if !matches!(entry.relkind, 'r' | 'p' | 'S' | 'i' | 'I' | 'v' | 'f') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
         if self
@@ -8744,7 +8793,7 @@ fn rows_for_new_relation_entry(
                     ),
                     attacl: column.attacl.clone(),
                     attoptions: None,
-                    attfdwoptions: None,
+                    attfdwoptions: column.fdw_options.clone(),
                     attmissingval: None,
                     attbyval: crate::include::catalog::builtin_type_row_by_oid(atttypid)
                         .is_some_and(|row| row.typbyval),

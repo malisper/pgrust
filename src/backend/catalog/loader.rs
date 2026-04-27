@@ -361,6 +361,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 desc.attinhcount = attr.attinhcount;
                 desc.attislocal = attr.attislocal;
                 desc.collation_oid = attr.attcollation;
+                desc.fdw_options = attr.attfdwoptions.clone();
                 desc.identity =
                     crate::include::nodes::parsenodes::ColumnIdentityKind::from_catalog_char(
                         attr.attidentity,

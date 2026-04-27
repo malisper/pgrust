@@ -3140,6 +3140,7 @@ fn parse_alter_table_add_column_statement() {
         stmt,
         Statement::AlterTableAddColumn(AlterTableAddColumnStatement {
             if_exists: false,
+            missing_ok: false,
             only: false,
             table_name: "items".into(),
             column: ColumnDef {
@@ -3153,6 +3154,7 @@ fn parse_alter_table_add_column_statement() {
                 compression: None,
                 constraints: vec![],
             },
+            fdw_options: None,
         })
     );
 }
@@ -3412,6 +3414,7 @@ fn parse_alter_table_constraint_statements() {
         stmt,
         Statement::AlterTableDropConstraint(AlterTableDropConstraintStatement {
             if_exists: false,
+            missing_ok: false,
             only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
@@ -4202,6 +4205,7 @@ fn parse_alter_table_drop_column_statement() {
         stmt,
         Statement::AlterTableDropColumn(AlterTableDropColumnStatement {
             if_exists: false,
+            missing_ok: false,
             only: false,
             table_name: "items".into(),
             column_name: "note".into(),
@@ -13271,6 +13275,101 @@ fn parse_foreign_data_wrapper_statements() {
     );
     assert_eq!(alter_server.options[0].name, "host");
     assert_eq!(alter_server.options[0].value.as_deref(), Some("127.0.0.1"));
+
+    let Statement::CreateForeignTable(create_table) = parse_statement(
+        "create foreign table ft (a int options (column_name 'remote_a') not null, b text) server srv options (table_name 'remote_ft')",
+    )
+    .unwrap() else {
+        panic!("expected create foreign table");
+    };
+    assert_eq!(create_table.create_table.table_name, "ft");
+    assert_eq!(create_table.server_name, "srv");
+    assert_eq!(
+        create_table.options,
+        vec![RelOption {
+            name: "table_name".into(),
+            value: "remote_ft".into(),
+        }]
+    );
+    assert_eq!(
+        create_table.column_options,
+        vec![(
+            "a".into(),
+            vec![RelOption {
+                name: "column_name".into(),
+                value: "remote_a".into(),
+            }]
+        )]
+    );
+    assert_eq!(create_table.create_table.elements.len(), 2);
+
+    let Statement::AlterTableAddColumn(add_column) = parse_statement(
+        "alter foreign table ft add column if not exists c int options (column_name 'remote_c')",
+    )
+    .unwrap() else {
+        panic!("expected alter foreign table add column");
+    };
+    assert!(add_column.missing_ok);
+    assert_eq!(add_column.table_name, "ft");
+    assert_eq!(add_column.column.name, "c");
+    assert_eq!(
+        add_column.fdw_options,
+        Some(vec![RelOption {
+            name: "column_name".into(),
+            value: "remote_c".into(),
+        }])
+    );
+
+    let Statement::AlterTableAlterColumnOptions(column_options) =
+        parse_statement("alter foreign table ft alter column c options (add p1 'v1', set p2 'v2')")
+            .unwrap()
+    else {
+        panic!("expected alter foreign table column options");
+    };
+    assert_eq!(column_options.table_name, "ft");
+    assert_eq!(column_options.column_name, "c");
+    let AlterColumnOptionsAction::Fdw(options) = column_options.action else {
+        panic!("expected fdw column options action");
+    };
+    assert_eq!(options.len(), 2);
+    assert_eq!(options[0].action, AlterGenericOptionAction::Add);
+    assert_eq!(options[1].action, AlterGenericOptionAction::Set);
+
+    let Statement::AlterTableAddColumn(add_column) = parse_statement(
+        "alter foreign table ft add column b text options (column_name 'remote_b')",
+    )
+    .unwrap() else {
+        panic!("expected alter foreign table add column without missing_ok");
+    };
+    assert!(!add_column.missing_ok);
+    assert_eq!(
+        add_column.fdw_options,
+        Some(vec![RelOption {
+            name: "column_name".into(),
+            value: "remote_b".into(),
+        }])
+    );
+
+    let Statement::AlterForeignTableOptions(table_options) = parse_statement(
+        "alter foreign table ft options (drop delimiter, set quote '~', add escape '@')",
+    )
+    .unwrap() else {
+        panic!("expected alter foreign table options");
+    };
+    assert_eq!(table_options.table_name, "ft");
+    assert_eq!(table_options.options.len(), 3);
+    assert_eq!(
+        table_options.options[0].action,
+        AlterGenericOptionAction::Drop
+    );
+    assert_eq!(
+        table_options.options[1].action,
+        AlterGenericOptionAction::Set
+    );
+    assert_eq!(
+        table_options.options[2].action,
+        AlterGenericOptionAction::Add
+    );
 
     let Statement::CreateUserMapping(create_mapping) = parse_statement(
         "create user mapping if not exists for current_user server srv options (user 'alice')",

@@ -372,6 +372,7 @@ fn execute_statement_with_source(
         | Statement::AlterForeignServer(_)
         | Statement::AlterForeignServerOwner(_)
         | Statement::AlterForeignServerRename(_)
+        | Statement::AlterForeignTableOptions(_)
         | Statement::AlterUserMapping(_)
         | Statement::DropForeignServer(_)
         | Statement::DropUserMapping(_)

@@ -3,6 +3,7 @@ use super::constraint::{find_constraint_row, validate_check_rows, validate_not_n
 use super::create::{
     aggregate_signature_arg_oids, format_aggregate_signature, resolve_aggregate_proc_rows,
 };
+use super::foreign_data_wrapper::format_fdw_options;
 use super::operator::{
     lookup_operator_row, operator_signature_display, resolve_operator_type_oid,
     unsupported_postfix_operator_error,
@@ -2649,6 +2650,22 @@ impl Database {
         };
         reject_typed_table_ddl(&relation, "add column to")?;
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
+        if relation.desc.columns.iter().any(|existing| {
+            !existing.dropped && existing.name.eq_ignore_ascii_case(&alter_stmt.column.name)
+        }) {
+            if alter_stmt.missing_ok {
+                push_notice(format!(
+                    "column \"{}\" of relation \"{}\" already exists, skipping",
+                    alter_stmt.column.name,
+                    relation_basename(&alter_stmt.table_name)
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "new column name",
+                actual: format!("column already exists: {}", alter_stmt.column.name),
+            }));
+        }
         let _ = dependent_view_rewrites_for_relation(
             self,
             client_id,
@@ -2670,6 +2687,9 @@ impl Database {
             not_null_action,
             check_actions,
         } = plan;
+        if let Some(fdw_options) = &alter_stmt.fdw_options {
+            column.fdw_options = format_fdw_options(fdw_options)?;
+        }
         if let Some(serial_column) = owned_sequence.as_ref() {
             let mut used_names = std::collections::BTreeSet::new();
             let created = self.create_owned_sequence_for_serial_column(
@@ -2763,6 +2783,9 @@ impl Database {
                 trigger_depth: 0,
             };
             for target in &targets {
+                if target.relation.relkind == 'f' {
+                    continue;
+                }
                 rewrite_heap_rows_for_added_serial_column(
                     self,
                     &target.relation,
@@ -2820,7 +2843,7 @@ impl Database {
                 waiter: ctx.waiter.clone(),
                 interrupts: ctx.interrupts.clone(),
             };
-            if target.relation.relkind == 'r' {
+            if target.relation.relkind != 'f' {
                 if let Some(effect) = self
                     .catalog
                     .write()

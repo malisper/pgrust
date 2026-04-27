@@ -80,6 +80,7 @@ pub struct ColumnDesc {
     pub generated: Option<ColumnGeneratedKind>,
     pub identity: Option<crate::include::nodes::parsenodes::ColumnIdentityKind>,
     pub missing_default_value: Option<Value>,
+    pub fdw_options: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -404,7 +404,7 @@ impl CatCache {
                         ),
                         attacl: None,
                         attoptions: None,
-                        attfdwoptions: None,
+                        attfdwoptions: column.fdw_options.clone(),
                         attmissingval: None,
                         attbyval: type_row.is_some_and(|row| row.typbyval),
                         sql_type: column.sql_type,

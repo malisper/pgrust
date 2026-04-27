@@ -87,6 +87,8 @@ struct ColumnDescFile {
     attrdef_oid: Option<u32>,
     default_expr: Option<String>,
     #[serde(default)]
+    fdw_options: Option<Vec<String>>,
+    #[serde(default)]
     generated: Option<crate::include::nodes::parsenodes::ColumnGeneratedKind>,
     #[serde(default)]
     identity: Option<crate::include::nodes::parsenodes::ColumnIdentityKind>,
@@ -279,6 +281,7 @@ fn column_desc_to_file(column: &ColumnDesc) -> ColumnDescFile {
         attacl: column.attacl.clone(),
         attrdef_oid: column.attrdef_oid,
         default_expr: column.default_expr.clone(),
+        fdw_options: column.fdw_options.clone(),
         generated: column.generated,
         identity: column.identity,
     }
@@ -317,5 +320,6 @@ fn column_desc_from_file(column: ColumnDescFile) -> ColumnDesc {
         generated: column.generated,
         identity: column.identity,
         missing_default_value: None,
+        fdw_options: column.fdw_options,
     }
 }

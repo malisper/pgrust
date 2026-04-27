@@ -465,7 +465,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                 ),
                 attacl: column.attacl.clone(),
                 attoptions: None,
-                attfdwoptions: None,
+                attfdwoptions: column.fdw_options.clone(),
                 attmissingval: None,
                 attbyval: type_row.as_ref().is_some_and(|row| row.typbyval),
                 sql_type: column.sql_type,

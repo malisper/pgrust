@@ -1413,6 +1413,12 @@ impl Database {
             Statement::AlterForeignServerRename(ref alter_stmt) => {
                 self.execute_alter_foreign_server_rename_stmt(client_id, alter_stmt)
             }
+            Statement::AlterForeignTableOptions(ref alter_stmt) => self
+                .execute_alter_foreign_table_options_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterUserMapping(ref alter_stmt) => {
                 self.execute_alter_user_mapping_stmt(client_id, alter_stmt)
             }

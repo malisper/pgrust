@@ -16,7 +16,7 @@ fn lookup_relation_for_owner_change(
     match catalog.lookup_any_relation(relation_name) {
         Some(entry)
             if entry.relkind == expected_relkind
-                || expected_relkind == 'r' && entry.relkind == 'p' =>
+                || (expected_relkind == 'r' && matches!(entry.relkind, 'p' | 'f')) =>
         {
             Ok(entry)
         }

@@ -419,6 +419,7 @@ pub enum Statement {
     AlterTableAttachPartition(AlterTableAttachPartitionStatement),
     AlterTableDetachPartition(AlterTableDetachPartitionStatement),
     AlterTableTriggerState(AlterTableTriggerStateStatement),
+    AlterForeignTableOptions(AlterForeignTableOptionsStatement),
     AlterPublication(AlterPublicationStatement),
     AlterOperator(AlterOperatorStatement),
     AlterAggregateRename(AlterAggregateRenameStatement),
@@ -2499,9 +2500,11 @@ pub struct AlterSequenceStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableAddColumnStatement {
     pub if_exists: bool,
+    pub missing_ok: bool,
     pub only: bool,
     pub table_name: String,
     pub column: ColumnDef,
+    pub fdw_options: Option<Vec<RelOption>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2523,6 +2526,7 @@ pub struct AlterTableAddConstraintStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableDropColumnStatement {
     pub if_exists: bool,
+    pub missing_ok: bool,
     pub only: bool,
     pub table_name: String,
     pub column_name: String,
@@ -2532,6 +2536,7 @@ pub struct AlterTableDropColumnStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableDropConstraintStatement {
     pub if_exists: bool,
+    pub missing_ok: bool,
     pub only: bool,
     pub table_name: String,
     pub constraint_name: String,
@@ -2620,6 +2625,7 @@ pub struct AlterTableAlterColumnStorageStatement {
 pub enum AlterColumnOptionsAction {
     Set(Vec<RelOption>),
     Reset(Vec<String>),
+    Fdw(Vec<AlterGenericOption>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2757,6 +2763,14 @@ pub struct AlterTableDropNotNullStatement {
     pub only: bool,
     pub table_name: String,
     pub column_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterForeignTableOptionsStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub options: Vec<AlterGenericOption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3186,6 +3200,7 @@ pub struct CreateForeignTableStatement {
     pub create_table: CreateTableStatement,
     pub server_name: String,
     pub options: Vec<RelOption>,
+    pub column_options: Vec<(String, Vec<RelOption>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

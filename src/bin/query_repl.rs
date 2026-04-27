@@ -598,6 +598,7 @@ fn run_statement(
         | Statement::AlterForeignServer(_)
         | Statement::AlterForeignServerOwner(_)
         | Statement::AlterForeignServerRename(_)
+        | Statement::AlterForeignTableOptions(_)
         | Statement::AlterUserMapping(_)
         | Statement::DropForeignServer(_)
         | Statement::DropUserMapping(_)

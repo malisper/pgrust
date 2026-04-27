@@ -5649,6 +5649,18 @@ impl Session {
             Statement::AlterForeignServerRename(ref alter_stmt) => {
                 db.execute_alter_foreign_server_rename_stmt(client_id, alter_stmt)
             }
+            Statement::AlterForeignTableOptions(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_foreign_table_options_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::AlterUserMapping(ref alter_stmt) => {
                 db.execute_alter_user_mapping_stmt(client_id, alter_stmt)
             }

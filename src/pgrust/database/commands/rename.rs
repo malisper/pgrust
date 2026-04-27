@@ -98,7 +98,12 @@ fn lookup_relation_for_rename(
     expected_relkind: char,
 ) -> Result<Option<BoundRelation>, ExecError> {
     match catalog.lookup_any_relation(relation_name) {
-        Some(relation) if relation.relkind == expected_relkind => Ok(Some(relation)),
+        Some(relation)
+            if relation.relkind == expected_relkind
+                || (expected_relkind == 'r' && relation.relkind == 'f') =>
+        {
+            Ok(Some(relation))
+        }
         Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
             name: relation_name.to_string(),
             expected: relation_kind_name(expected_relkind),

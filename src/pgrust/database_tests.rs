@@ -31848,7 +31848,7 @@ fn foreign_data_catalogs_track_servers_mappings_and_tables() {
 
     db.execute(
         1,
-        "create foreign table fdw_ft (a int4) server fdw_srv options (table_name 'remote_table')",
+        "create foreign table fdw_ft (a int4 options (column_name 'remote_a')) server fdw_srv options (table_name 'remote_table')",
     )
     .unwrap();
     assert_eq!(
@@ -31864,6 +31864,56 @@ fn foreign_data_catalogs_track_servers_mappings_and_tables() {
                 crate::include::catalog::TEXT_TYPE_OID,
             ),
         ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attfdwoptions from pg_attribute where attrelid = 'fdw_ft'::regclass and attname = 'a'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["column_name=remote_a"],
+            crate::include::catalog::TEXT_TYPE_OID,
+        )]]
+    );
+
+    db.execute(
+        1,
+        "alter foreign table fdw_ft add column b text options (column_name 'remote_b')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter foreign table fdw_ft alter column b options (set column_name 'remote_b2', add encoding 'utf8')",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attfdwoptions from pg_attribute where attrelid = 'fdw_ft'::regclass and attname = 'b'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["column_name=remote_b2", "encoding=utf8"],
+            crate::include::catalog::TEXT_TYPE_OID,
+        )]]
+    );
+
+    db.execute(
+        1,
+        "alter foreign table fdw_ft options (set table_name 'remote_table2', add schema_name 'remote_schema')",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ftoptions from pg_foreign_table where ftrelid = 'fdw_ft'::regclass",
+        ),
+        vec![vec![typed_text_array_value(
+            &["table_name=remote_table2", "schema_name=remote_schema"],
+            crate::include::catalog::TEXT_TYPE_OID,
+        )]]
     );
 
     db.execute(1, "drop foreign table fdw_ft").unwrap();
