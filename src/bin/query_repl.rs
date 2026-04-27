@@ -590,6 +590,7 @@ fn run_statement(
         | Statement::AlterLanguage(_)
         | Statement::DropLanguage(_)
         | Statement::CreateForeignTable(_)
+        | Statement::ImportForeignSchema(_)
         | Statement::CreateUserMapping(_)
         | Statement::AlterForeignDataWrapper(_)
         | Statement::AlterForeignDataWrapperOwner(_)

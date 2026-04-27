@@ -32237,6 +32237,36 @@ fn foreign_data_usage_controls_server_mapping_and_table_creation() {
 }
 
 #[test]
+fn import_foreign_schema_requires_fdw_handler() {
+    let base = temp_dir("import_foreign_schema_handler");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create foreign data wrapper import_fdw")
+        .unwrap();
+    db.execute(
+        1,
+        "create server import_srv foreign data wrapper import_fdw",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "import foreign schema remote_schema limit to (t1) from server import_srv into public options (sample 'true')",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "HV00N");
+            assert_eq!(
+                message,
+                "foreign-data wrapper \"import_fdw\" has no handler"
+            );
+        }
+        other => panic!("expected missing handler error, got {other:?}"),
+    }
+}
+
+#[test]
 fn comment_on_server_uses_pg_description_rows() {
     let base = temp_dir("comment_on_server");
     let db = Database::open(&base, 64).unwrap();

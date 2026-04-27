@@ -49,13 +49,15 @@ Tests run:
 - `scripts/cargo_isolated.sh test --lib --quiet concat_right_and_quote_functions_are_available_to_sql`
 - `scripts/cargo_isolated.sh test --lib --quiet foreign_data_usage_controls_server_mapping_and_table_creation`
 - `scripts/run_regression.sh --skip-build --port 55439 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-priv-funcs`
+- `scripts/cargo_isolated.sh test --lib --quiet import_foreign_schema_requires_fdw_handler`
+- `scripts/run_regression.sh --skip-build --port 55440 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-import`
 
 Remaining:
-`foreign_data` still fails, but improved to 278/539 matching queries. Biggest
+`foreign_data` still fails, but improved to 282/539 matching queries. Biggest
 remaining groups:
 - `pg_roles` synthetic view for OID-subquery privilege checks
 - `pg_catalog.pg_table_is_visible` and `pg_catalog.pg_get_partkeydef`
 - FDW dependency reporting for handler functions and owners
-- `IMPORT FOREIGN SCHEMA`
+- full `IMPORT FOREIGN SCHEMA` callback behavior beyond missing-handler errors
 - foreign table DDL/partition forms and psql helper functions
 - Notices and exact PostgreSQL error/caret wording

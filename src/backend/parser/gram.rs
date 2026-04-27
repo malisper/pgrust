@@ -4455,6 +4455,10 @@ fn try_parse_foreign_data_wrapper_statement(sql: &str) -> Result<Option<Statemen
         return build_create_foreign_table_statement(trimmed)
             .map(|stmt| Some(Statement::CreateForeignTable(stmt)));
     }
+    if lowered.starts_with("import foreign schema ") {
+        return build_import_foreign_schema_statement(trimmed)
+            .map(|stmt| Some(Statement::ImportForeignSchema(stmt)));
+    }
     if lowered.starts_with("alter foreign table ") {
         // :HACK: PostgreSQL routes ALTER FOREIGN TABLE through the ALTER TABLE
         // machinery with relkind checks. Reuse the existing parser until
@@ -5239,6 +5243,77 @@ fn build_create_foreign_table_statement(
         server_name,
         options,
     })
+}
+
+fn build_import_foreign_schema_statement(
+    sql: &str,
+) -> Result<ImportForeignSchemaStatement, ParseError> {
+    let prefix = "import foreign schema ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (schema_and_restriction, after_from) = split_once_keyword(rest, "from server")?;
+    let (server_name, after_into) = split_once_keyword(after_from, "into")?;
+    let (local_schema, options_tail) =
+        split_optional_keyword(after_into, "options").unwrap_or((after_into.trim(), None));
+    let options = options_tail
+        .map(|tail| parse_create_generic_options(&format!("options {tail}")))
+        .transpose()?
+        .unwrap_or_default();
+    let (remote_schema, restriction) =
+        parse_import_foreign_schema_restriction(schema_and_restriction)?;
+    Ok(ImportForeignSchemaStatement {
+        remote_schema,
+        restriction,
+        server_name: normalize_simple_identifier(server_name)?,
+        local_schema: normalize_simple_identifier(local_schema)?,
+        options,
+    })
+}
+
+fn parse_import_foreign_schema_restriction(
+    input: &str,
+) -> Result<(String, ImportForeignSchemaRestriction), ParseError> {
+    let (remote_schema, tail) = parse_sql_identifier(input.trim())?;
+    let tail = tail.trim();
+    if tail.is_empty() {
+        return Ok((remote_schema, ImportForeignSchemaRestriction::All));
+    }
+    if keyword_at_start(tail, "limit") {
+        let rest = consume_keyword(tail, "limit").trim_start();
+        if !keyword_at_start(rest, "to") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "TO",
+                actual: rest.into(),
+            });
+        }
+        let list = parse_parenthesized_identifier_list(consume_keyword(rest, "to").trim_start())?;
+        return Ok((remote_schema, ImportForeignSchemaRestriction::LimitTo(list)));
+    }
+    if keyword_at_start(tail, "except") {
+        let list =
+            parse_parenthesized_identifier_list(consume_keyword(tail, "except").trim_start())?;
+        return Ok((remote_schema, ImportForeignSchemaRestriction::Except(list)));
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "IMPORT FOREIGN SCHEMA restriction",
+        actual: tail.into(),
+    })
+}
+
+fn parse_parenthesized_identifier_list(input: &str) -> Result<Vec<String>, ParseError> {
+    let trimmed = input.trim();
+    let Some(inner) = trimmed
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "parenthesized identifier list",
+            actual: input.into(),
+        });
+    };
+    parse_identifier_list(inner)
 }
 
 fn build_create_foreign_data_wrapper_statement(

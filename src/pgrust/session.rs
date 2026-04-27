@@ -5623,6 +5623,9 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::ImportForeignSchema(ref import_stmt) => {
+                db.execute_import_foreign_schema_stmt(client_id, import_stmt)
+            }
             Statement::AlterForeignDataWrapper(ref alter_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_alter_foreign_data_wrapper_stmt_with_search_path(

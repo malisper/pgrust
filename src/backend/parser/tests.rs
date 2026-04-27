@@ -13297,6 +13297,27 @@ fn parse_foreign_data_wrapper_statements() {
     assert!(drop_mapping.if_exists);
     assert_eq!(drop_mapping.user, UserMappingUser::Public);
     assert_eq!(drop_mapping.server_name, "srv");
+
+    let Statement::ImportForeignSchema(import_schema) = parse_statement(
+        "import foreign schema remote_schema except (t1, t2) from server srv into public options (sample 'true')",
+    )
+    .unwrap() else {
+        panic!("expected import foreign schema");
+    };
+    assert_eq!(import_schema.remote_schema, "remote_schema");
+    assert_eq!(
+        import_schema.restriction,
+        ImportForeignSchemaRestriction::Except(vec!["t1".into(), "t2".into()])
+    );
+    assert_eq!(import_schema.server_name, "srv");
+    assert_eq!(import_schema.local_schema, "public");
+    assert_eq!(
+        import_schema.options,
+        vec![RelOption {
+            name: "sample".into(),
+            value: "true".into(),
+        }]
+    );
 }
 
 #[test]

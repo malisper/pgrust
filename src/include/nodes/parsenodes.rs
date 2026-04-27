@@ -357,6 +357,7 @@ pub enum Statement {
     CreateForeignServer(CreateForeignServerStatement),
     AlterForeignServerRename(AlterForeignServerRenameStatement),
     CreateForeignTable(CreateForeignTableStatement),
+    ImportForeignSchema(ImportForeignSchemaStatement),
     CreateUserMapping(CreateUserMappingStatement),
     CreateIndex(CreateIndexStatement),
     CreateOperator(CreateOperatorStatement),
@@ -3184,6 +3185,22 @@ pub struct AlterForeignServerRenameStatement {
 pub struct CreateForeignTableStatement {
     pub create_table: CreateTableStatement,
     pub server_name: String,
+    pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportForeignSchemaRestriction {
+    All,
+    LimitTo(Vec<String>),
+    Except(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportForeignSchemaStatement {
+    pub remote_schema: String,
+    pub restriction: ImportForeignSchemaRestriction,
+    pub server_name: String,
+    pub local_schema: String,
     pub options: Vec<RelOption>,
 }
 

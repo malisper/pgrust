@@ -1389,6 +1389,9 @@ impl Database {
                 guard.disarm();
                 result
             }
+            Statement::ImportForeignSchema(ref import_stmt) => {
+                self.execute_import_foreign_schema_stmt(client_id, import_stmt)
+            }
             Statement::AlterForeignDataWrapper(ref alter_stmt) => self
                 .execute_alter_foreign_data_wrapper_stmt_with_search_path(
                     client_id,
