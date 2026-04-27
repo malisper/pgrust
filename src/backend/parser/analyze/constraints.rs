@@ -1931,10 +1931,7 @@ fn resolve_pending_self_referenced_key(
                 if period.is_none() && referenced_period.is_some() {
                     return Err(foreign_key_period_on_parent_only_error());
                 }
-                return Err(ParseError::UnexpectedToken {
-                    expected: "referenced UNIQUE or PRIMARY KEY index",
-                    actual: format!("table \"{table_name}\" lacks an exact matching unique key"),
-                });
+                return Err(foreign_key_no_unique_constraint_error(table_name));
             };
             (
                 referenced_columns,
@@ -2051,6 +2048,17 @@ fn foreign_key_referenced_columns_duplicate_error() -> ParseError {
     }
 }
 
+fn foreign_key_no_unique_constraint_error(table_name: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!(
+            "there is no unique constraint matching given keys for referenced table \"{table_name}\""
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42830",
+    }
+}
+
 fn foreign_key_period_on_child_only_error() -> ParseError {
     ParseError::DetailedError {
         message: "foreign key uses PERIOD on the referencing table but not the referenced table"
@@ -2095,56 +2103,44 @@ fn foreign_key_type_mismatch_error(
     parent_types: &[SqlType],
     catalog: &dyn super::CatalogLookup,
 ) -> ParseError {
-    let mismatches = child_types
+    let mismatch = child_types
         .iter()
         .zip(parent_types)
         .enumerate()
-        .filter(|&(_, (&child, &parent))| !foreign_key_type_compatible(child, parent))
-        .map(|(index, (&child, &parent))| {
-            (
-                child_columns
-                    .get(index)
-                    .cloned()
-                    .unwrap_or_else(|| "?column?".into()),
-                parent_columns
-                    .get(index)
-                    .cloned()
-                    .unwrap_or_else(|| "?column?".into()),
-                child,
-                parent,
-            )
+        .find_map(|(index, (&child, &parent))| {
+            (!foreign_key_type_compatible(child, parent)).then(|| {
+                (
+                    child_columns
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| "?column?".into()),
+                    parent_columns
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| "?column?".into()),
+                    child,
+                    parent,
+                )
+            })
         })
-        .collect::<Vec<_>>();
-    let child_names = quoted_column_list(
-        &mismatches
-            .iter()
-            .map(|(column, _, _, _)| column.clone())
-            .collect::<Vec<_>>(),
-    );
-    let parent_names = quoted_column_list(
-        &mismatches
-            .iter()
-            .map(|(_, column, _, _)| column.clone())
-            .collect::<Vec<_>>(),
-    );
-    let child_type_names = mismatches
-        .iter()
-        .map(|(_, _, ty, _)| foreign_key_type_name(*ty, catalog))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let parent_type_names = mismatches
-        .iter()
-        .map(|(_, _, _, ty)| foreign_key_type_name(*ty, catalog))
-        .collect::<Vec<_>>()
-        .join(", ");
+        .expect("foreign_key_type_mismatch_error requires at least one mismatched column");
+    let (child_column, parent_column, child_type, parent_type) = mismatch;
+    let child_name = quoted_column(&child_column);
+    let parent_name = quoted_column(&parent_column);
+    let child_type_name = foreign_key_type_name(child_type, catalog);
+    let parent_type_name = foreign_key_type_name(parent_type, catalog);
     ParseError::DetailedError {
         message: format!("foreign key constraint \"{constraint_name}\" cannot be implemented"),
         detail: Some(format!(
-            "Key columns {child_names} of the referencing table and {parent_names} of the referenced table are of incompatible types: {child_type_names} and {parent_type_names}."
+            "Key columns {child_name} of the referencing table and {parent_name} of the referenced table are of incompatible types: {child_type_name} and {parent_type_name}."
         )),
         hint: None,
         sqlstate: "42804",
     }
+}
+
+fn quoted_column(column: &str) -> String {
+    format!("\"{column}\"")
 }
 
 fn quoted_column_list(columns: &[String]) -> String {
@@ -2228,11 +2224,6 @@ fn resolve_referenced_key(
     if !matches!(relation.relkind, 'r' | 'p') {
         return Err(ParseError::UnknownTable(referenced_table.to_string()));
     }
-    if relation.relkind == 'p' {
-        return Err(ParseError::FeatureNotSupported(
-            "REFERENCES to partitioned tables".into(),
-        ));
-    }
     let _ = child_relation_name;
     let _ = child_relation_oid;
     validate_foreign_key_persistence(child_persistence, relation.relpersistence)?;
@@ -2283,13 +2274,7 @@ fn resolve_referenced_key(
                     relation.relation_oid,
                     &attnums,
                 )
-                .ok_or_else(|| ParseError::UnexpectedToken {
-                    expected: "referenced UNIQUE or PRIMARY KEY index",
-                    actual: format!(
-                        "table \"{}\" lacks an exact matching unique key",
-                        referenced_table
-                    ),
-                })?;
+                .ok_or_else(|| foreign_key_no_unique_constraint_error(referenced_table))?;
                 (columns, attnums, index.relation_oid, None, false, false)
             }
         } else {
