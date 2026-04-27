@@ -1,4 +1,13 @@
 use super::*;
+use crate::backend::catalog::persistence::delete_catalog_rows_subset_mvcc;
+use crate::backend::catalog::rows::{PhysicalCatalogRows, drop_relation_delete_kinds};
+use crate::backend::utils::cache::catcache::CatCache;
+use crate::include::catalog::{
+    PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
+    PG_POLICY_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID, PG_REWRITE_RELATION_OID,
+    PG_STATISTIC_EXT_RELATION_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID,
+    relkind_has_storage,
+};
 
 fn normalize_temp_lookup_name(table_name: &str) -> String {
     table_name
@@ -7,52 +16,213 @@ fn normalize_temp_lookup_name(table_name: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn temp_relation_drop_order(
-    relation_oids: Vec<u32>,
-    inherit_rows: &[crate::include::catalog::PgInheritsRow],
-) -> Vec<u32> {
-    fn visit_relation(
-        relation_oid: u32,
-        children_by_parent: &std::collections::BTreeMap<u32, Vec<u32>>,
-        seen: &mut std::collections::BTreeSet<u32>,
-        ordered: &mut Vec<u32>,
-    ) {
-        if !seen.insert(relation_oid) {
-            return;
-        }
-        if let Some(children) = children_by_parent.get(&relation_oid) {
-            for child_oid in children {
-                visit_relation(*child_oid, children_by_parent, seen, ordered);
-            }
-        }
-        ordered.push(relation_oid);
+fn push_unique<T: PartialEq>(target: &mut Vec<T>, row: T) {
+    if !target.contains(&row) {
+        target.push(row);
     }
+}
 
-    let mut relation_oids = relation_oids;
-    relation_oids.sort_unstable();
-    let relation_set = relation_oids
+fn push_oid(target: &mut Vec<u32>, oid: u32) {
+    if oid != 0 && !target.contains(&oid) {
+        target.push(oid);
+    }
+}
+
+fn temp_namespace_catalog_rows(
+    catcache: &CatCache,
+    namespace_oids: &[u32],
+    temp_db_oid: u32,
+) -> (PhysicalCatalogRows, CatalogMutationEffect) {
+    let namespace_set = namespace_oids.iter().copied().collect::<BTreeSet<_>>();
+    let classes = catcache
+        .class_rows()
+        .into_iter()
+        .filter(|row| row.relpersistence == 't' && namespace_set.contains(&row.relnamespace))
+        .collect::<Vec<_>>();
+    let relation_oids = classes.iter().map(|row| row.oid).collect::<BTreeSet<_>>();
+    let mut type_oids = classes
         .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut children_by_parent = std::collections::BTreeMap::<u32, Vec<u32>>::new();
-    for row in inherit_rows {
-        if relation_set.contains(&row.inhparent) && relation_set.contains(&row.inhrelid) {
-            children_by_parent
-                .entry(row.inhparent)
-                .or_default()
-                .push(row.inhrelid);
+        .filter_map(|row| (row.reltype != 0).then_some(row.reltype))
+        .collect::<BTreeSet<_>>();
+
+    let mut rows = PhysicalCatalogRows::default();
+    for row in classes {
+        push_unique(&mut rows.classes, row);
+    }
+    for row in catcache.type_rows() {
+        if relation_oids.contains(&row.typrelid)
+            || type_oids.contains(&row.oid)
+            || namespace_set.contains(&row.typnamespace)
+        {
+            type_oids.insert(row.oid);
+            if row.typarray != 0 {
+                type_oids.insert(row.typarray);
+            }
+            push_unique(&mut rows.types, row);
         }
     }
-    for children in children_by_parent.values_mut() {
-        children.sort_unstable();
+    for row in catcache.type_rows() {
+        if type_oids.contains(&row.oid) {
+            push_unique(&mut rows.types, row);
+        }
+    }
+    for row in catcache.attribute_rows() {
+        if relation_oids.contains(&row.attrelid) {
+            push_unique(&mut rows.attributes, row);
+        }
+    }
+    for row in catcache.attrdef_rows() {
+        if relation_oids.contains(&row.adrelid) {
+            push_unique(&mut rows.attrdefs, row);
+        }
+    }
+    for row in catcache.index_rows() {
+        if relation_oids.contains(&row.indexrelid) || relation_oids.contains(&row.indrelid) {
+            push_unique(&mut rows.indexes, row);
+        }
+    }
+    for row in catcache.inherit_rows() {
+        if relation_oids.contains(&row.inhrelid) || relation_oids.contains(&row.inhparent) {
+            push_unique(&mut rows.inherits, row);
+        }
+    }
+    for row in catcache.partitioned_table_rows() {
+        if relation_oids.contains(&row.partrelid) {
+            push_unique(&mut rows.partitioned_tables, row);
+        }
+    }
+    for row in catcache.constraint_rows() {
+        if relation_oids.contains(&row.conrelid)
+            || relation_oids.contains(&row.conindid)
+            || relation_oids.contains(&row.confrelid)
+            || type_oids.contains(&row.contypid)
+            || namespace_set.contains(&row.connamespace)
+        {
+            push_unique(&mut rows.constraints, row);
+        }
+    }
+    for row in catcache.rewrite_rows() {
+        if relation_oids.contains(&row.ev_class) {
+            push_unique(&mut rows.rewrites, row);
+        }
+    }
+    for row in catcache.trigger_rows() {
+        if relation_oids.contains(&row.tgrelid)
+            || relation_oids.contains(&row.tgconstrrelid)
+            || relation_oids.contains(&row.tgconstrindid)
+        {
+            push_unique(&mut rows.triggers, row);
+        }
+    }
+    for row in catcache.policy_rows() {
+        if relation_oids.contains(&row.polrelid) {
+            push_unique(&mut rows.policies, row);
+        }
+    }
+    for row in catcache.publication_rel_rows() {
+        if relation_oids.contains(&row.prrelid) {
+            push_unique(&mut rows.publication_rels, row);
+        }
+    }
+    for row in catcache.statistic_rows() {
+        if relation_oids.contains(&row.starelid) {
+            push_unique(&mut rows.statistics, row);
+        }
+    }
+    for row in catcache.statistic_ext_rows() {
+        if relation_oids.contains(&row.stxrelid) || namespace_set.contains(&row.stxnamespace) {
+            push_unique(&mut rows.statistics_ext, row);
+        }
+    }
+    let statistic_ext_oids = rows
+        .statistics_ext
+        .iter()
+        .map(|row| row.oid)
+        .collect::<BTreeSet<_>>();
+    for row in catcache.statistic_ext_data_rows() {
+        if statistic_ext_oids.contains(&row.stxoid) {
+            push_unique(&mut rows.statistics_ext_data, row);
+        }
     }
 
-    let mut ordered = Vec::with_capacity(relation_oids.len());
-    let mut seen = std::collections::BTreeSet::new();
-    for relation_oid in relation_oids {
-        visit_relation(relation_oid, &children_by_parent, &mut seen, &mut ordered);
+    let mut object_keys = rows
+        .classes
+        .iter()
+        .map(|row| (PG_CLASS_RELATION_OID, row.oid))
+        .collect::<BTreeSet<_>>();
+    object_keys.extend(rows.types.iter().map(|row| (PG_TYPE_RELATION_OID, row.oid)));
+    object_keys.extend(
+        rows.attrdefs
+            .iter()
+            .map(|row| (PG_ATTRDEF_RELATION_OID, row.oid)),
+    );
+    object_keys.extend(
+        rows.constraints
+            .iter()
+            .map(|row| (PG_CONSTRAINT_RELATION_OID, row.oid)),
+    );
+    object_keys.extend(
+        rows.rewrites
+            .iter()
+            .map(|row| (PG_REWRITE_RELATION_OID, row.oid)),
+    );
+    object_keys.extend(
+        rows.triggers
+            .iter()
+            .map(|row| (PG_TRIGGER_RELATION_OID, row.oid)),
+    );
+    object_keys.extend(
+        rows.policies
+            .iter()
+            .map(|row| (PG_POLICY_RELATION_OID, row.oid)),
+    );
+    object_keys.extend(
+        rows.publication_rels
+            .iter()
+            .map(|row| (PG_PUBLICATION_REL_RELATION_OID, row.oid)),
+    );
+    object_keys.extend(
+        rows.statistics_ext
+            .iter()
+            .map(|row| (PG_STATISTIC_EXT_RELATION_OID, row.oid)),
+    );
+
+    for row in catcache.depend_rows() {
+        if object_keys.contains(&(row.classid, row.objid))
+            || object_keys.contains(&(row.refclassid, row.refobjid))
+        {
+            push_unique(&mut rows.depends, row);
+        }
     }
-    ordered
+
+    let mut effect = CatalogMutationEffect {
+        touched_catalogs: drop_relation_delete_kinds(),
+        ..CatalogMutationEffect::default()
+    };
+    for row in &rows.classes {
+        push_oid(&mut effect.relation_oids, row.oid);
+        push_oid(&mut effect.namespace_oids, row.relnamespace);
+        push_oid(&mut effect.type_oids, row.reltype);
+        if row.relfilenode != 0 && relkind_has_storage(row.relkind) {
+            push_unique(
+                &mut effect.dropped_rels,
+                RelFileLocator {
+                    spc_oid: row.reltablespace,
+                    db_oid: temp_db_oid,
+                    rel_number: row.relfilenode,
+                },
+            );
+        }
+    }
+    for row in &rows.types {
+        push_oid(&mut effect.type_oids, row.oid);
+        push_oid(&mut effect.namespace_oids, row.typnamespace);
+    }
+    for oid in namespace_oids {
+        push_oid(&mut effect.namespace_oids, *oid);
+    }
+
+    (rows, effect)
 }
 
 impl Database {
@@ -248,66 +418,35 @@ impl Database {
             Self::temp_namespace_oid(temp_backend_id),
             Self::temp_toast_namespace_oid(temp_backend_id),
         ];
-        let mut dropped_relation_oids = std::collections::BTreeSet::new();
-        for include_indexes in [false, true] {
-            let catcache = self
-                .txn_backend_catcache(client_id, xid, *cid)
-                .map_err(map_catalog_error)?;
-            let relation_oids = temp_relation_drop_order(
-                catcache
-                    .class_rows()
-                    .into_iter()
-                    .filter(|row| {
-                        row.relpersistence == 't'
-                            && namespace_oids.contains(&row.relnamespace)
-                            && (include_indexes == matches!(row.relkind, 'i' | 'I'))
-                    })
-                    .map(|row| row.oid)
-                    .collect::<Vec<_>>(),
-                &catcache.inherit_rows(),
-            );
-            for relation_oid in relation_oids {
-                if dropped_relation_oids.contains(&relation_oid) {
-                    continue;
-                }
-                let ctx = CatalogWriteContext {
-                    pool: self.pool.clone(),
-                    txns: self.txns.clone(),
-                    xid,
-                    cid: *cid,
-                    client_id,
-                    waiter: Some(self.txn_waiter.clone()),
-                    interrupts: self.interrupt_state(client_id),
-                };
-                let visible_type_rows = self
-                    .lazy_catalog_lookup(client_id, Some((xid, *cid)), None)
-                    .type_rows();
-                let drop_result = self
-                    .catalog
-                    .write()
-                    .drop_relation_by_oid_mvcc_with_extra_type_rows(
-                        relation_oid,
-                        &ctx,
-                        &visible_type_rows,
-                    );
-                let (dropped, effect) = match drop_result {
-                    Ok(result) => result,
-                    Err(crate::backend::catalog::CatalogError::UnknownTable(_)) => {
-                        // :HACK: Failed concurrent temp-index commands can leave a
-                        // temp pg_class row without enough companion rows to build
-                        // a relcache entry. PostgreSQL drops these backend-local
-                        // leftovers on namespace reuse; skip the broken row here so
-                        // the fresh temp namespace can still be used.
-                        dropped_relation_oids.insert(relation_oid);
-                        continue;
-                    }
-                    Err(err) => return Err(map_catalog_error(err)),
-                };
-                dropped_relation_oids.extend(dropped.into_iter().map(|entry| entry.relation_oid));
-                catalog_effects.push(effect);
-                *cid = (*cid).saturating_add(1);
-            }
+        let catcache = self
+            .txn_backend_catcache(client_id, xid, *cid)
+            .map_err(map_catalog_error)?;
+        let (rows, effect) = temp_namespace_catalog_rows(
+            &catcache,
+            &namespace_oids,
+            Self::temp_db_oid(temp_backend_id),
+        );
+        if rows.classes.is_empty() {
+            return Ok(());
         }
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: *cid,
+            client_id,
+            waiter: Some(self.txn_waiter.clone()),
+            interrupts: self.interrupt_state(client_id),
+        };
+        delete_catalog_rows_subset_mvcc(
+            &ctx,
+            &rows,
+            self.database_oid,
+            &drop_relation_delete_kinds(),
+        )
+        .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        *cid = (*cid).saturating_add(1);
         Ok(())
     }
 
@@ -829,12 +968,11 @@ impl Database {
         Ok(())
     }
 
-    pub(crate) fn cleanup_client_temp_relations(&self, client_id: ClientId) {
-        let temp_backend_id = self.temp_backend_id(client_id);
-        let Some(_namespace) = self.owned_temp_namespace(client_id) else {
-            self.temp_relations.write().remove(&temp_backend_id);
-            return;
-        };
+    fn cleanup_client_temp_relations_once(
+        &self,
+        client_id: ClientId,
+        temp_backend_id: TempBackendId,
+    ) -> Result<(), ExecError> {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut cid = 0;
@@ -846,7 +984,7 @@ impl Database {
             &mut cid,
             &mut effects,
         );
-        let _ = self.finish_txn(
+        let result = self.finish_txn(
             client_id,
             xid,
             result.map(|_| StatementResult::AffectedRows(0)),
@@ -855,7 +993,21 @@ impl Database {
             &[],
         );
         guard.disarm();
+        result.map(|_| ())
+    }
+
+    pub(crate) fn cleanup_client_temp_relations(
+        &self,
+        client_id: ClientId,
+    ) -> Result<(), ExecError> {
+        let temp_backend_id = self.temp_backend_id(client_id);
+        let Some(_namespace) = self.owned_temp_namespace(client_id) else {
+            self.temp_relations.write().remove(&temp_backend_id);
+            return Ok(());
+        };
+        let result = self.cleanup_client_temp_relations_once(client_id, temp_backend_id);
         self.temp_relations.write().remove(&temp_backend_id);
         self.invalidate_backend_cache_state(client_id);
+        result
     }
 }

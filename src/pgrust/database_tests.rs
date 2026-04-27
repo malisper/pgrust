@@ -23672,6 +23672,57 @@ fn failed_unique_index_concurrently_leaves_invalid_catalog_state() {
 }
 
 #[test]
+fn create_index_concurrently_on_temp_table_uses_nonconcurrent_catalog_cleanup() {
+    let base = temp_dir("temp_create_index_concurrently_cleanup");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table temp_items (id int4, note text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into temp_items values (1, 'a'), (1, 'b')")
+        .unwrap();
+
+    assert!(
+        session
+            .execute(
+                &db,
+                "create unique index concurrently temp_items_id_key on temp_items (id)",
+            )
+            .is_err()
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_class where relname = 'temp_items_id_key'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    session
+        .execute(&db, "delete from temp_items where note = 'b'")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index concurrently temp_items_id_key on temp_items (id)",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select indisready, indisvalid \
+             from pg_index i join pg_class c on c.oid = i.indexrelid \
+             where c.relname = 'temp_items_id_key'",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn create_index_if_not_exists_emits_relation_notice() {
     let base = temp_dir("create_index_if_not_exists_notice");
     let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
@@ -31160,7 +31211,7 @@ fn temp_tables_are_removed_on_client_cleanup() {
         other => panic!("expected query result, got {:?}", other),
     }
 
-    db.cleanup_client_temp_relations(1);
+    db.cleanup_client_temp_relations(1).unwrap();
     let err = db
         .execute(1, "select count(*) from cleanup_me")
         .unwrap_err();
@@ -31238,7 +31289,7 @@ fn temp_cleanup_keeps_namespace_rows_and_permanent_catalogs_visible() {
         other => panic!("expected query result, got {:?}", other),
     }
 
-    db.cleanup_client_temp_relations(1);
+    db.cleanup_client_temp_relations(1).unwrap();
     db.clear_temp_backend_id(1);
 
     match other_session.execute(&db, "select id from items").unwrap() {
@@ -31289,7 +31340,7 @@ fn temp_slot_reuse_starts_from_clean_namespace_contents() {
         .execute(&db, "insert into temp_old (id) values (7)")
         .unwrap();
 
-    db.cleanup_client_temp_relations(10);
+    db.cleanup_client_temp_relations(10).unwrap();
     db.clear_temp_backend_id(10);
 
     let err = reused_session
@@ -31371,6 +31422,108 @@ fn stale_temp_cleanup_skips_dependents_dropped_with_parent() {
         ),
         vec![vec![Value::Text("fresh_temp".into())]]
     );
+}
+
+#[test]
+fn temp_namespace_reuse_cleans_stale_relations_before_create_table_lowering() {
+    let base = temp_dir("temp_cleanup_before_create_lowering");
+    {
+        let db = Database::open(&base, 16).unwrap();
+        let mut first_session = Session::with_temp_backend_id(10, 1);
+
+        first_session
+            .execute(&db, "create temp table point_tbl (f1 point)")
+            .unwrap();
+        first_session
+            .execute(&db, "create index gpointind on point_tbl using gist (f1)")
+            .unwrap();
+        first_session
+            .execute(&db, "create temp table gpolygon_tbl (f1 polygon)")
+            .unwrap();
+        first_session
+            .execute(
+                &db,
+                "create index ggpolygonind on gpolygon_tbl using gist (f1)",
+            )
+            .unwrap();
+        first_session
+            .execute(
+                &db,
+                "create temp table boolindex (b bool, i int, unique(b, i), junk float)",
+            )
+            .unwrap();
+        first_session
+            .execute(&db, "create temp table concur_temp_tab_3 (c1 int, c2 text)")
+            .unwrap();
+        first_session
+            .execute(
+                &db,
+                "create index concur_temp_ind_3 on concur_temp_tab_3(c2)",
+            )
+            .unwrap();
+        // Simulate a backend/process exit before temp cleanup. The next user
+        // of this temp slot must clean these catalog rows before CREATE TABLE
+        // performs relation/type lookups.
+    }
+
+    let db = Database::open(&base, 16).unwrap();
+    let mut reused_session = Session::with_temp_backend_id(11, 1);
+    reused_session
+        .execute(
+            &db,
+            "create temporary table empsalary (
+                depname varchar,
+                empno bigint,
+                salary int,
+                enroll_date date
+            )",
+        )
+        .unwrap();
+    match reused_session
+        .execute(
+            &db,
+            "select count(*) from pg_class
+             where relpersistence = 't'
+               and relname in (
+                   'point_tbl',
+                   'gpointind',
+                   'gpolygon_tbl',
+                   'ggpolygonind',
+                   'boolindex',
+                   'concur_temp_tab_3',
+                   'concur_temp_ind_3'
+               )",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+    reused_session
+        .execute(
+            &db,
+            "insert into empsalary values ('develop', 10, 5200, '2007-08-01')",
+        )
+        .unwrap();
+
+    match reused_session
+        .execute(&db, "select depname, empno, salary from empsalary")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("develop".into()),
+                    Value::Int64(10),
+                    Value::Int32(5200),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
 }
 
 #[test]
@@ -34381,6 +34534,52 @@ fn reindex_system_concurrently_and_other_database_reject_before_work() {
             assert_eq!(message, "can only reindex the currently open database");
         }
         other => panic!("expected other database rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn reindex_catalog_table_and_index_concurrently_reject_without_corrupting_catalogs() {
+    let base = temp_dir("reindex_catalog_concurrently_rejects");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    for sql in [
+        "reindex table concurrently pg_class",
+        "reindex index concurrently pg_class_oid_index",
+    ] {
+        match session.execute(&db, sql) {
+            Err(ExecError::DetailedError { message, .. }) => {
+                assert_eq!(message, "cannot reindex system catalogs concurrently");
+            }
+            other => panic!("expected catalog concurrently rejection for {sql}, got {other:?}"),
+        }
+    }
+
+    clear_backend_notices();
+    session
+        .execute(&db, "reindex schema concurrently pg_catalog")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from(
+            "cannot reindex system catalogs concurrently, skipping all"
+        )]
+    );
+
+    session
+        .execute(&db, "create temp table temp_catalog_guard (id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into temp_catalog_guard values (7)")
+        .unwrap();
+    match session
+        .execute(&db, "select id from temp_catalog_guard")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(7)]]);
+        }
+        other => panic!("expected temp table query result, got {other:?}"),
     }
 }
 

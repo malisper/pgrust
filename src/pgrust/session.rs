@@ -8749,11 +8749,11 @@ impl Session {
 
         match target {
             DiscardTarget::Temp => {
-                db.cleanup_client_temp_relations(self.client_id);
+                db.cleanup_client_temp_relations(self.client_id)?;
             }
             DiscardTarget::All => {
                 self.close_all_cursors();
-                db.cleanup_client_temp_relations(self.client_id);
+                db.cleanup_client_temp_relations(self.client_id)?;
                 db.async_notify_runtime.disconnect(self.client_id);
                 db.advisory_locks.unlock_all_session(self.client_id);
                 db.row_locks.unlock_all_session(self.client_id);
