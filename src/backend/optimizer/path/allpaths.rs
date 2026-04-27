@@ -739,10 +739,12 @@ fn full_index_scan_spec(
         order_by_keys: Vec::new(),
         residual: filter,
         used_quals: Vec::new(),
+        scan_quals: Vec::new(),
         recheck_quals: Vec::new(),
         filter_quals,
         direction: crate::include::access::relscan::ScanDirection::Forward,
         removes_order: false,
+        btree_prefix_columns: 0,
         row_prefix: false,
     }
 }

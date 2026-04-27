@@ -43,10 +43,7 @@ fn comparison_operator_for_quantified_array(op: SubqueryComparisonOp) -> Option<
 }
 
 fn quantified_array_literal_prefers_left_type(element: &SqlExpr) -> bool {
-    matches!(
-        element,
-        SqlExpr::Const(_) | SqlExpr::IntegerLiteral(_) | SqlExpr::NumericLiteral(_)
-    )
+    matches!(element, SqlExpr::Const(_) | SqlExpr::IntegerLiteral(_))
 }
 
 fn infer_quantified_array_literal_type(

@@ -1772,7 +1772,11 @@ fn make_distinct_on_rel(
                 }
             }
         }
-        let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
+        let mut rel = RelOptInfo::new(
+            input_rel.relids.clone(),
+            RelOptKind::UpperRel,
+            reltarget.clone(),
+        );
         for path in input_paths {
             let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
                 let display_items = sort_key_display_items(root, &required_pathkeys, catalog);
@@ -1818,7 +1822,11 @@ fn make_distinct_on_rel(
         }
     }
 
-    let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
+    let mut rel = RelOptInfo::new(
+        input_rel.relids.clone(),
+        RelOptKind::UpperRel,
+        reltarget.clone(),
+    );
     for path in input_paths {
         let required_pathkeys = distinct_on_required_pathkeys_for_path(root, &path, &key_pathkeys);
         let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
@@ -1841,7 +1849,7 @@ fn make_distinct_on_rel(
         rel.add_path(optimize_path_with_config(
             Path::Unique {
                 plan_info: PlanEstimate::default(),
-                pathtarget: path.semantic_output_target(),
+                pathtarget: reltarget.clone(),
                 key_indices,
                 input: Box::new(path),
             },

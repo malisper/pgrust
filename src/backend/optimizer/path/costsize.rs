@@ -1938,12 +1938,19 @@ pub(super) fn estimate_index_candidate(
         .map(|row| row.relpages.max(1) as f64)
         .unwrap_or(DEFAULT_NUM_PAGES);
 
+    let scan_sel = spec
+        .scan_quals
+        .iter()
+        .map(|expr| clause_selectivity(expr, Some(stats), stats.reltuples))
+        .product::<f64>()
+        .clamp(0.0, 1.0);
     let used_sel = spec
         .used_quals
         .iter()
         .map(|expr| clause_selectivity(expr, Some(stats), stats.reltuples))
         .product::<f64>()
         .clamp(0.0, 1.0);
+    let index_scan_rows = clamp_rows(stats.reltuples * scan_sel);
     let index_rows = clamp_rows(stats.reltuples * used_sel);
     let unordered_probe = order_items.is_none();
     let (startup_cost, mut base_cost) = if is_gist_like_am(spec.index.index_meta.am_oid) {
@@ -1956,12 +1963,25 @@ pub(super) fn estimate_index_candidate(
         )
     } else {
         let total = RANDOM_PAGE_COST
-            + index_pages.min(index_rows.max(1.0)) * RANDOM_PAGE_COST
-            + index_rows * (CPU_INDEX_TUPLE_COST + CPU_TUPLE_COST);
+            + index_pages.min(index_scan_rows.max(1.0)) * RANDOM_PAGE_COST
+            + index_scan_rows * CPU_INDEX_TUPLE_COST
+            + index_rows * CPU_TUPLE_COST;
         (CPU_OPERATOR_COST, total)
     };
     if spec.row_prefix && unordered_probe {
         base_cost += stats.relpages * RANDOM_PAGE_COST + stats.reltuples * CPU_TUPLE_COST;
+    }
+    if spec.index.index_meta.am_oid == BTREE_AM_OID {
+        let order_columns = if spec.removes_order {
+            order_items.as_ref().map(Vec::len).unwrap_or_default()
+        } else {
+            0
+        };
+        let matched_columns = spec
+            .btree_prefix_columns
+            .max(btree_ordering_equality_prefix(&spec.keys) + order_columns);
+        let unused_columns = index_key_count(&spec.index).saturating_sub(matched_columns);
+        base_cost += unused_columns as f64 * RANDOM_PAGE_COST;
     }
     let full_index_only =
         config.enable_indexonlyscan && index_supports_index_only_scan(&desc, &spec.index);
@@ -3652,27 +3672,36 @@ pub(super) fn build_index_path_spec(
         .filter(|qual| qual.is_not_null)
         .filter_map(|qual| qual.column)
         .collect::<Vec<_>>();
-    let (keys, used_indexes, equality_prefix) = match index.index_meta.am_oid {
-        BTREE_AM_OID => build_btree_index_keys(index, &parsed_quals),
-        BRIN_AM_OID => {
-            let (keys, used_indexes) = build_brin_index_keys(index, &parsed_quals);
-            (keys, used_indexes, 0)
-        }
-        GIN_AM_OID => {
-            let (keys, used_indexes) = build_gist_index_keys(index, &parsed_quals);
-            (keys, used_indexes, 0)
-        }
-        HASH_AM_OID => {
-            let (keys, used_indexes) = build_hash_index_keys(index, &parsed_quals);
-            (keys, used_indexes, 0)
-        }
-        GIST_AM_OID | SPGIST_AM_OID => {
-            let (keys, used_indexes) = build_gist_index_keys(index, &parsed_quals);
-            (keys, used_indexes, 0)
-        }
-        _ => return None,
-    };
+    let (keys, used_indexes, scan_indexes, equality_prefix, btree_prefix_columns) =
+        match index.index_meta.am_oid {
+            BTREE_AM_OID => build_btree_index_keys(index, &parsed_quals),
+            BRIN_AM_OID => {
+                let (keys, used_indexes) = build_brin_index_keys(index, &parsed_quals);
+                let scan_indexes = used_indexes.clone();
+                (keys, used_indexes, scan_indexes, 0, 0)
+            }
+            GIN_AM_OID => {
+                let (keys, used_indexes) = build_gist_index_keys(index, &parsed_quals);
+                let scan_indexes = used_indexes.clone();
+                (keys, used_indexes, scan_indexes, 0, 0)
+            }
+            HASH_AM_OID => {
+                let (keys, used_indexes) = build_hash_index_keys(index, &parsed_quals);
+                let scan_indexes = used_indexes.clone();
+                (keys, used_indexes, scan_indexes, 0, 0)
+            }
+            GIST_AM_OID | SPGIST_AM_OID => {
+                let (keys, used_indexes) = build_gist_index_keys(index, &parsed_quals);
+                let scan_indexes = used_indexes.clone();
+                (keys, used_indexes, scan_indexes, 0, 0)
+            }
+            _ => return None,
+        };
     let used_quals = used_indexes
+        .iter()
+        .filter_map(|idx| parsed_quals.get(*idx).map(|qual| qual.index_expr.clone()))
+        .collect::<Vec<_>>();
+    let scan_quals = scan_indexes
         .iter()
         .filter_map(|idx| parsed_quals.get(*idx).map(|qual| qual.index_expr.clone()))
         .collect::<Vec<_>>();
@@ -3768,6 +3797,7 @@ pub(super) fn build_index_path_spec(
         order_by_keys,
         residual,
         used_quals,
+        scan_quals,
         recheck_quals,
         filter_quals,
         direction: order_match
@@ -3775,6 +3805,7 @@ pub(super) fn build_index_path_spec(
             .map(|(_, direction)| *direction)
             .unwrap_or(crate::include::access::relscan::ScanDirection::Forward),
         removes_order: order_match.is_some(),
+        btree_prefix_columns,
         row_prefix: used_indexes
             .iter()
             .any(|idx| parsed_quals.get(*idx).is_some_and(|qual| qual.row_prefix)),
@@ -4981,11 +5012,13 @@ fn qual_strategy(
 fn build_btree_index_keys(
     index: &BoundIndexRelation,
     parsed_quals: &[IndexableQual],
-) -> (Vec<IndexScanKey>, Vec<usize>, usize) {
+) -> (Vec<IndexScanKey>, Vec<usize>, Vec<usize>, usize, usize) {
     let mut used = vec![false; parsed_quals.len()];
     let mut used_qual_indexes = Vec::new();
+    let mut scan_qual_indexes = Vec::new();
     let mut keys = Vec::new();
     let mut equality_prefix = 0usize;
+    let mut prefix_columns = 0usize;
 
     for index_pos in 0..index_key_count(index) {
         if simple_index_column(index, index_pos).is_none() {
@@ -5000,7 +5033,9 @@ fn build_btree_index_keys(
             {
                 used[qual_idx] = true;
                 used_qual_indexes.push(qual_idx);
+                scan_qual_indexes.push(qual_idx);
                 equality_prefix += 1;
+                prefix_columns = equality_prefix;
                 keys.push(btree_index_scan_key_for_qual(
                     index,
                     index_pos,
@@ -5023,7 +5058,9 @@ fn build_btree_index_keys(
         {
             used[qual_idx] = true;
             used_qual_indexes.push(qual_idx);
+            scan_qual_indexes.push(qual_idx);
             equality_prefix += 1;
+            prefix_columns = equality_prefix;
             keys.push(btree_index_scan_key_for_qual(
                 index,
                 index_pos,
@@ -5044,6 +5081,9 @@ fn build_btree_index_keys(
             })
         {
             used[qual_idx] = true;
+            used_qual_indexes.push(qual_idx);
+            scan_qual_indexes.push(qual_idx);
+            prefix_columns = index_pos + 1;
             keys.extend(range_keys);
             break;
         }
@@ -5073,6 +5113,8 @@ fn build_btree_index_keys(
         {
             used[qual_idx] = true;
             used_qual_indexes.push(qual_idx);
+            scan_qual_indexes.push(qual_idx);
+            prefix_columns = index_pos + 1;
             keys.push(btree_index_scan_key_for_qual(
                 index,
                 index_pos,
@@ -5086,6 +5128,8 @@ fn build_btree_index_keys(
                 }
                 used[idx] = true;
                 used_qual_indexes.push(idx);
+                scan_qual_indexes.push(idx);
+                prefix_columns = index_pos + 1;
                 keys.push(btree_index_scan_key_for_qual(
                     index,
                     index_pos,
@@ -5106,7 +5150,13 @@ fn build_btree_index_keys(
         &mut keys,
     );
 
-    (keys, used_qual_indexes, equality_prefix)
+    (
+        keys,
+        used_qual_indexes,
+        scan_qual_indexes,
+        equality_prefix,
+        prefix_columns,
+    )
 }
 
 fn btree_ordering_equality_prefix(keys: &[IndexScanKey]) -> usize {

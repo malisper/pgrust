@@ -3156,22 +3156,20 @@ fn planner_uses_index_order_for_distinct_on_reordered_keys() {
         }),
         1
     );
+    fn skip_projection(plan: &Plan) -> &Plan {
+        match plan {
+            Plan::Projection { input, .. } => input.as_ref(),
+            other => other,
+        }
+    }
+    let unique_input = match skip_projection(&planned.plan_tree) {
+        Plan::Unique { input, .. } => Some(skip_projection(input.as_ref())),
+        _ => None,
+    };
     assert!(matches!(
-        &planned.plan_tree,
-        Plan::Projection { input, .. }
-            if matches!(
-                input.as_ref(),
-                Plan::Unique { input, .. }
-                    if matches!(
-                        input.as_ref(),
-                        Plan::IndexOnlyScan { index_name, .. }
-                            if index_name == "distinct_on_tbl_x_y_idx"
-                    ) || matches!(
-                        input.as_ref(),
-                        Plan::IndexScan { index_name, .. }
-                            if index_name == "distinct_on_tbl_x_y_idx"
-                    )
-            )
+        unique_input,
+        Some(Plan::IndexOnlyScan { index_name, .. } | Plan::IndexScan { index_name, .. })
+            if index_name == "distinct_on_tbl_x_y_idx"
     ));
 }
 
