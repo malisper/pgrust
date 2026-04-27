@@ -183,6 +183,12 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_alter_table_trigger_state_statement(&sql)? {
         return Ok(stmt);
     }
+    if create_table_uses_bare_with_oids(&sql) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "statement",
+            actual: "syntax error at or near \"OIDS\"".into(),
+        });
+    }
     if let Some(stmt) = try_parse_index_statement(&sql)? {
         return Ok(stmt);
     }
@@ -267,6 +273,23 @@ fn postgres_compatible_preparse_error(sql: &str) -> Option<ParseError> {
     }
 
     None
+}
+
+fn create_table_uses_bare_with_oids(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("create table ") {
+        return false;
+    }
+    let Some(with_idx) = find_next_top_level_keyword(trimmed, &["with"]) else {
+        return false;
+    };
+    let after_with = trimmed[with_idx + "with".len()..].trim_start();
+    if !keyword_at_start(after_with, "oids") {
+        return false;
+    }
+    let after_oids = consume_keyword(after_with, "oids").trim();
+    after_oids.is_empty() || after_oids == ";"
 }
 
 fn is_select_with_trailing_operator(sql: &str) -> bool {
@@ -1096,6 +1119,289 @@ fn try_parse_statistics_statement(sql: &str) -> Result<Option<Statement>, ParseE
     Ok(None)
 }
 
+fn try_parse_text_search_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create text search dictionary ") {
+        return match build_create_text_search_statement(trimmed) {
+            Ok(stmt) => Ok(Some(Statement::CreateTextSearch(stmt))),
+            Err(_) => build_create_text_search_dictionary_statement(trimmed)
+                .map(|stmt| Some(Statement::CreateTextSearchDictionary(stmt))),
+        };
+    }
+    if lowered.starts_with("alter text search dictionary ") {
+        if lowered.contains('(') {
+            return build_alter_text_search_dictionary_statement(trimmed)
+                .map(|stmt| Some(Statement::AlterTextSearchDictionary(stmt)));
+        }
+        return build_alter_text_search_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterTextSearch(stmt)));
+    }
+    if lowered.starts_with("create text search configuration ") {
+        return build_create_text_search_configuration_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateTextSearchConfiguration(stmt)));
+    }
+    if lowered.starts_with("alter text search configuration ") {
+        if lowered.contains("mapping") {
+            return build_alter_text_search_configuration_statement(trimmed)
+                .map(|stmt| Some(Statement::AlterTextSearchConfiguration(stmt)));
+        }
+        return build_alter_text_search_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterTextSearch(stmt)));
+    }
+    if lowered.starts_with("drop text search configuration ") {
+        return build_drop_text_search_configuration_statement(trimmed)
+            .map(|stmt| Some(Statement::DropTextSearchConfiguration(stmt)));
+    }
+    if lowered.starts_with("create text search ") {
+        return build_create_text_search_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateTextSearch(stmt)));
+    }
+    if lowered.starts_with("alter text search ") {
+        return build_alter_text_search_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterTextSearch(stmt)));
+    }
+    Ok(None)
+}
+
+fn build_create_text_search_dictionary_statement(
+    sql: &str,
+) -> Result<CreateTextSearchDictionaryStatement, ParseError> {
+    let rest = sql["create text search dictionary".len()..].trim_start();
+    let ((schema_name, dictionary_name), rest) = parse_schema_qualified_name(rest)?;
+    let (options_sql, rest) = take_parenthesized_segment(rest)?;
+    require_empty_tail(rest, "end of CREATE TEXT SEARCH DICTIONARY")?;
+    Ok(CreateTextSearchDictionaryStatement {
+        schema_name,
+        dictionary_name,
+        options: parse_text_search_options(&options_sql)?,
+    })
+}
+
+fn build_alter_text_search_dictionary_statement(
+    sql: &str,
+) -> Result<AlterTextSearchDictionaryStatement, ParseError> {
+    let rest = sql["alter text search dictionary".len()..].trim_start();
+    let ((schema_name, dictionary_name), rest) = parse_schema_qualified_name(rest)?;
+    let (options_sql, rest) = take_parenthesized_segment(rest)?;
+    require_empty_tail(rest, "end of ALTER TEXT SEARCH DICTIONARY")?;
+    Ok(AlterTextSearchDictionaryStatement {
+        schema_name,
+        dictionary_name,
+        options: parse_text_search_options(&options_sql)?,
+    })
+}
+
+fn build_create_text_search_configuration_statement(
+    sql: &str,
+) -> Result<CreateTextSearchConfigurationStatement, ParseError> {
+    let rest = sql["create text search configuration".len()..].trim_start();
+    let ((schema_name, config_name), rest) = parse_schema_qualified_name(rest)?;
+    let (options_sql, rest) = take_parenthesized_segment(rest)?;
+    require_empty_tail(rest, "end of CREATE TEXT SEARCH CONFIGURATION")?;
+    let options = parse_text_search_options(&options_sql)?;
+    let copy_config_name = options
+        .iter()
+        .find(|option| option.name.eq_ignore_ascii_case("copy"))
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "COPY option",
+            actual: options_sql.clone(),
+        })?
+        .value
+        .clone();
+    Ok(CreateTextSearchConfigurationStatement {
+        schema_name,
+        config_name,
+        copy_config_name,
+    })
+}
+
+fn build_alter_text_search_configuration_statement(
+    sql: &str,
+) -> Result<AlterTextSearchConfigurationStatement, ParseError> {
+    let rest = sql["alter text search configuration".len()..].trim_start();
+    let ((schema_name, config_name), rest) = parse_schema_qualified_name(rest)?;
+    let action_sql = rest.trim_start();
+    let action = if let Some(rest) = consume_keywords(action_sql, &["alter", "mapping", "for"]) {
+        let (tokens_sql, dictionaries_sql) = split_text_search_keyword(rest, "with")?;
+        AlterTextSearchConfigurationAction::AlterMappingFor {
+            token_names: parse_text_search_name_list(tokens_sql)?,
+            dictionary_names: parse_text_search_name_list(dictionaries_sql)?,
+        }
+    } else if let Some(rest) = consume_keywords(action_sql, &["alter", "mapping", "replace"]) {
+        let (old_dictionary_name, rest) = parse_text_search_single_name(rest)?;
+        let Some(rest) = consume_keywords(rest, &["with"]) else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "WITH",
+                actual: rest.into(),
+            });
+        };
+        let (new_dictionary_name, rest) = parse_text_search_single_name(rest)?;
+        require_empty_tail(rest, "end of ALTER TEXT SEARCH CONFIGURATION")?;
+        AlterTextSearchConfigurationAction::AlterMappingReplace {
+            old_dictionary_name,
+            new_dictionary_name,
+        }
+    } else if let Some(rest) = consume_keywords(action_sql, &["add", "mapping", "for"]) {
+        let (tokens_sql, dictionaries_sql) = split_text_search_keyword(rest, "with")?;
+        AlterTextSearchConfigurationAction::AddMapping {
+            token_names: parse_text_search_name_list(tokens_sql)?,
+            dictionary_names: parse_text_search_name_list(dictionaries_sql)?,
+        }
+    } else if let Some(rest) =
+        consume_keywords(action_sql, &["drop", "mapping", "if", "exists", "for"])
+    {
+        AlterTextSearchConfigurationAction::DropMapping {
+            if_exists: true,
+            token_names: parse_text_search_name_list(rest)?,
+        }
+    } else if let Some(rest) = consume_keywords(action_sql, &["drop", "mapping", "for"]) {
+        AlterTextSearchConfigurationAction::DropMapping {
+            if_exists: false,
+            token_names: parse_text_search_name_list(rest)?,
+        }
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER/ADD/DROP MAPPING",
+            actual: action_sql.into(),
+        });
+    };
+    Ok(AlterTextSearchConfigurationStatement {
+        schema_name,
+        config_name,
+        action,
+    })
+}
+
+fn build_drop_text_search_configuration_statement(
+    sql: &str,
+) -> Result<DropTextSearchConfigurationStatement, ParseError> {
+    let mut rest = sql["drop text search configuration".len()..].trim_start();
+    let if_exists = if let Some(after) = strip_keyword_prefix(rest, "if exists") {
+        rest = after;
+        true
+    } else {
+        false
+    };
+    let ((schema_name, config_name), rest) = parse_schema_qualified_name(rest)?;
+    require_empty_tail(rest, "end of DROP TEXT SEARCH CONFIGURATION")?;
+    Ok(DropTextSearchConfigurationStatement {
+        if_exists,
+        schema_name,
+        config_name,
+    })
+}
+
+fn parse_text_search_options(input: &str) -> Result<Vec<TextSearchOption>, ParseError> {
+    split_top_level_items(input, ',')?
+        .into_iter()
+        .filter(|item| !item.is_empty())
+        .map(|item| {
+            let Some((name_sql, value_sql)) = item.split_once('=') else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "text search option",
+                    actual: item,
+                });
+            };
+            let (name, rest) = parse_sql_identifier(name_sql)?;
+            require_empty_tail(rest, "end of text search option name")?;
+            let (value, value_kind, rest) = parse_text_search_option_value(value_sql)?;
+            require_empty_tail(rest, "end of text search option value")?;
+            Ok(TextSearchOption {
+                name,
+                value,
+                value_kind,
+            })
+        })
+        .collect()
+}
+
+fn parse_text_search_option_value(
+    input: &str,
+) -> Result<(String, TextSearchOptionValueKind, &str), ParseError> {
+    let input = input.trim_start();
+    if input.starts_with('\'') {
+        let end = parse_delimited_token_end(input.as_bytes(), 0, b'\'');
+        let raw = &input[..end];
+        return Ok((
+            decode_string_literal(raw)?,
+            TextSearchOptionValueKind::String,
+            &input[end..],
+        ));
+    }
+    if input
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '+' || ch == '-' || ch.is_ascii_digit())
+    {
+        let mut end = 0usize;
+        for ch in input.chars() {
+            if (end == 0 && (ch == '+' || ch == '-')) || ch.is_ascii_digit() {
+                end += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if end > 0 && input[..end].chars().any(|ch| ch.is_ascii_digit()) {
+            return Ok((
+                input[..end].to_string(),
+                TextSearchOptionValueKind::Integer,
+                &input[end..],
+            ));
+        }
+    }
+    let (value, rest) = parse_sql_identifier(input)?;
+    Ok((value, TextSearchOptionValueKind::Identifier, rest))
+}
+
+fn parse_text_search_name_list(input: &str) -> Result<Vec<String>, ParseError> {
+    split_top_level_items(input, ',')?
+        .into_iter()
+        .map(|item| {
+            let (name, rest) = parse_text_search_single_name(&item)?;
+            require_empty_tail(rest, "end of text search name")?;
+            Ok(name)
+        })
+        .collect()
+}
+
+fn split_text_search_keyword<'a>(
+    input: &'a str,
+    keyword: &'static str,
+) -> Result<(&'a str, &'a str), ParseError> {
+    let Some(index) = find_top_level_keyword(input, keyword) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: keyword,
+            actual: input.into(),
+        });
+    };
+    Ok((
+        input[..index].trim(),
+        input[index + keyword.len()..].trim_start(),
+    ))
+}
+
+fn parse_text_search_single_name(input: &str) -> Result<(String, &str), ParseError> {
+    let ((schema_name, name), rest) = parse_schema_qualified_name(input)?;
+    Ok((
+        schema_name
+            .map(|schema| format!("{schema}.{name}"))
+            .unwrap_or(name),
+        rest,
+    ))
+}
+
+fn require_empty_tail(rest: &str, expected: &'static str) -> Result<(), ParseError> {
+    if rest.trim().is_empty() {
+        Ok(())
+    } else {
+        Err(ParseError::UnexpectedToken {
+            expected,
+            actual: rest.trim().into(),
+        })
+    }
+}
+
 fn try_parse_create_schema_statement(
     sql: &str,
     options: ParseOptions,
@@ -1278,6 +1584,7 @@ fn try_parse_partition_statement(
     let lowered = trimmed.to_ascii_lowercase();
 
     if (lowered.starts_with("create table ")
+        || lowered.starts_with("create unlogged table ")
         || lowered.starts_with("create temp table ")
         || lowered.starts_with("create temporary table "))
         && find_next_top_level_keyword(trimmed, &["partition"]).is_some()
@@ -1335,7 +1642,13 @@ fn build_partition_create_table_statement(
             return Err(PartitionStatementParseError::Unsupported);
         };
         let (partition_spec, rest) = parse_partition_spec_clause(partition_clause)?;
-        if !rest.trim().is_empty() {
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            if partitioned_table_storage_clause_is_unsupported(rest)? {
+                return Err(PartitionStatementParseError::Parse(
+                    partitioned_table_storage_parameter_error(),
+                ));
+            }
             return Err(PartitionStatementParseError::Unsupported);
         }
         create_stmt.partition_spec = Some(partition_spec);
@@ -1418,6 +1731,26 @@ fn parse_partition_of_table_storage_clause(
         .ok_or(PartitionStatementParseError::Unsupported)?;
     build_table_storage_options(pair).map_err(|_| PartitionStatementParseError::Unsupported)?;
     Ok("")
+}
+
+fn partitioned_table_storage_clause_is_unsupported(rest: &str) -> Result<bool, ParseError> {
+    if !keyword_at_start(rest, "with") {
+        return Ok(false);
+    }
+    let after_with = consume_keyword(rest, "with").trim_start();
+    if keyword_at_start(after_with, "oids") {
+        return Err(ParseError::TablesDeclaredWithOidsNotSupported);
+    }
+    Ok(after_with.starts_with('('))
+}
+
+fn partitioned_table_storage_parameter_error() -> ParseError {
+    ParseError::DetailedError {
+        message: "cannot specify storage parameters for a partitioned table".into(),
+        detail: None,
+        hint: Some("Specify storage parameters for its leaf partitions instead.".into()),
+        sqlstate: "0A000",
+    }
 }
 
 fn parse_partition_of_elements(
@@ -1554,7 +1887,19 @@ fn parse_partition_spec_clause(
         rest = consume_keyword(rest, "hash").trim_start();
         PartitionStrategy::Hash
     } else {
-        return Err(PartitionStatementParseError::Unsupported);
+        let strategy_name = rest
+            .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(rest)
+            .to_ascii_lowercase();
+        return Err(ParseError::DetailedError {
+            message: format!("unrecognized partitioning strategy \"{strategy_name}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        }
+        .into());
     };
     let (keys_sql, rest) = take_parenthesized_segment(rest)?;
     let mut keys = Vec::new();
@@ -4027,20 +4372,6 @@ fn try_parse_language_statement(sql: &str) -> Result<Option<Statement>, ParseErr
     if lowered.starts_with("drop language ") {
         return build_drop_language_statement(trimmed)
             .map(|stmt| Some(Statement::DropLanguage(stmt)));
-    }
-    Ok(None)
-}
-
-fn try_parse_text_search_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
-    let trimmed = sql.trim().trim_end_matches(';').trim();
-    let lowered = trimmed.to_ascii_lowercase();
-    if lowered.starts_with("create text search ") {
-        return build_create_text_search_statement(trimmed)
-            .map(|stmt| Some(Statement::CreateTextSearch(stmt)));
-    }
-    if lowered.starts_with("alter text search ") {
-        return build_alter_text_search_statement(trimmed)
-            .map(|stmt| Some(Statement::AlterTextSearch(stmt)));
     }
     Ok(None)
 }
@@ -8109,14 +8440,14 @@ fn build_comment_on_column_statement(sql: &str) -> Result<CommentOnColumnStateme
         });
     };
     let target = rest[..is_index].trim();
-    let Some((relation_name, column_name)) = target.rsplit_once('.') else {
+    let Some((table_name, column_name)) = target.rsplit_once('.') else {
         return Err(ParseError::UnexpectedToken {
             expected: "relation.column",
             actual: target.into(),
         });
     };
     Ok(CommentOnColumnStatement {
-        relation_name: relation_name.trim().to_string(),
+        table_name: table_name.trim().to_string(),
         column_name: column_name.trim().to_string(),
         comment: parse_comment_value(&rest[is_index..], "end of COMMENT ON COLUMN")?,
     })
@@ -12554,6 +12885,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::fetch_stmt => Ok(Statement::Fetch(build_fetch(inner)?)),
         Rule::move_stmt => Ok(Statement::Move(build_fetch(inner)?)),
         Rule::close_portal_stmt => Ok(Statement::ClosePortal(build_close_portal(inner)?)),
+        Rule::prepare_stmt => Ok(Statement::Prepare(build_prepare_statement(inner)?)),
+        Rule::execute_prepared_stmt => Ok(Statement::Execute(build_execute_statement(inner)?)),
+        Rule::deallocate_stmt => Ok(Statement::Deallocate(build_deallocate_statement(inner)?)),
         Rule::set_session_authorization_stmt => Ok(Statement::SetSessionAuthorization(
             build_set_session_authorization(inner)?,
         )),
@@ -12640,6 +12974,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_schema_owner_stmt => Ok(Statement::AlterSchemaOwner(build_alter_schema_owner(
             inner,
         )?)),
+        Rule::alter_table_set_persistence_stmt => Ok(Statement::AlterTableSetPersistence(
+            build_alter_table_set_persistence(inner)?,
+        )),
         Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
         Rule::alter_table_reset_stmt => {
             Ok(Statement::AlterTableReset(build_alter_table_reset(inner)?))
@@ -13150,6 +13487,51 @@ fn build_close_portal(pair: Pair<'_, Rule>) -> Result<ClosePortalStatement, Pars
         }
     }
     Ok(ClosePortalStatement {
+        name: if all { None } else { name },
+    })
+}
+
+fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, ParseError> {
+    let mut name = None;
+    let mut query = None;
+    let mut query_sql = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::select_stmt => {
+                query_sql = Some(part.as_str().trim().to_string());
+                query = Some(build_select(part)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(PrepareStatement {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        query: query.ok_or(ParseError::UnexpectedEof)?,
+        query_sql: query_sql.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_execute_statement(pair: Pair<'_, Rule>) -> Result<ExecuteStatement, ParseError> {
+    let name = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier)
+        .ok_or(ParseError::UnexpectedEof)?;
+    Ok(ExecuteStatement { name })
+}
+
+fn build_deallocate_statement(pair: Pair<'_, Rule>) -> Result<DeallocateStatement, ParseError> {
+    let mut name = None;
+    let mut all = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::kw_all => all = true,
+            _ => {}
+        }
+    }
+    Ok(DeallocateStatement {
         name: if all { None } else { name },
     })
 }
@@ -14154,7 +14536,7 @@ fn build_select_into(pair: Pair<'_, Rule>) -> Result<CreateTableAsStatement, Par
         persistence,
         on_commit: OnCommitAction::PreserveRows,
         column_names: Vec::new(),
-        query: build_simple_select_statement(query_parts)?,
+        query: CreateTableAsQuery::Select(build_simple_select_statement(query_parts)?),
         query_sql: None,
         if_not_exists: false,
         object_type: TableAsObjectType::Table,
@@ -15333,6 +15715,14 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             part
         };
         match part.as_rule() {
+            Rule::table_persistence_clause => {
+                let lowered = part.as_str().to_ascii_lowercase();
+                persistence = if lowered.contains("unlogged") {
+                    TablePersistence::Unlogged
+                } else {
+                    TablePersistence::Temporary
+                };
+            }
             Rule::temp_clause => persistence = TablePersistence::Temporary,
             Rule::if_not_exists_clause => if_not_exists = true,
             Rule::identifier if relation_name.is_none() => {
@@ -15377,9 +15767,11 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                                 .unwrap_or_default();
                         }
                         Rule::on_commit_clause => on_commit = build_on_commit_action(inner)?,
-                        Rule::select_stmt => {
-                            query_sql = Some(inner.as_str().trim().to_string());
-                            query = Some(build_select(inner)?);
+                        Rule::table_storage_clause => validate_table_storage_clause(inner)?,
+                        Rule::ctas_query | Rule::select_stmt | Rule::execute_prepared_stmt => {
+                            let (parsed_query, parsed_sql) = build_ctas_query(inner)?;
+                            query = Some(parsed_query);
+                            query_sql = parsed_sql;
                         }
                         _ => {}
                     }
@@ -15432,6 +15824,29 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             partition_bound: None,
             if_not_exists,
         }))
+    }
+}
+
+fn build_ctas_query(
+    pair: Pair<'_, Rule>,
+) -> Result<(CreateTableAsQuery, Option<String>), ParseError> {
+    match pair.as_rule() {
+        Rule::ctas_query => {
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            build_ctas_query(inner)
+        }
+        Rule::select_stmt => {
+            let sql = pair.as_str().trim().to_string();
+            Ok((CreateTableAsQuery::Select(build_select(pair)?), Some(sql)))
+        }
+        Rule::execute_prepared_stmt => {
+            let execute = build_execute_statement(pair)?;
+            Ok((CreateTableAsQuery::Execute(execute.name), None))
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "CREATE TABLE AS query",
+            actual: pair.as_str().to_string(),
+        }),
     }
 }
 
@@ -15500,7 +15915,7 @@ fn build_create_materialized_view(
             }
             Rule::select_stmt => {
                 query_sql = Some(part.as_str().trim().to_string());
-                query = Some(build_select(part)?);
+                query = Some(CreateTableAsQuery::Select(build_select(part)?));
             }
             Rule::matview_data_clause => {
                 skip_data = part.as_str().to_ascii_lowercase().contains("no");
@@ -16813,6 +17228,40 @@ fn build_alter_table_reset(pair: Pair<'_, Rule>) -> Result<AlterTableResetStatem
     })
 }
 
+fn build_alter_table_set_persistence(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableSetPersistenceStatement, ParseError> {
+    let lowered = pair.as_str().trim_end().to_ascii_lowercase();
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            _ => {}
+        }
+    }
+    let persistence = if lowered.ends_with(" set unlogged") {
+        TablePersistence::Unlogged
+    } else if lowered.ends_with(" set logged") {
+        TablePersistence::Permanent
+    } else {
+        return Err(ParseError::UnexpectedEof);
+    };
+    Ok(AlterTableSetPersistenceStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        persistence,
+    })
+}
+
 fn build_alter_table_set_row_security(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableSetRowSecurityStatement, ParseError> {
@@ -17098,6 +17547,10 @@ fn build_table_storage_options(pair: Pair<'_, Rule>) -> Result<Vec<RelOption>, P
             actual: part.as_str().to_string(),
         }),
     }
+}
+
+fn validate_table_storage_clause(pair: Pair<'_, Rule>) -> Result<(), ParseError> {
+    build_table_storage_options(pair).map(|_| ())
 }
 
 fn build_relation_name(pair: Pair<'_, Rule>) -> (Option<String>, String) {

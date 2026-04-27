@@ -14,13 +14,14 @@ use crate::include::catalog::{
     PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgEnumRow,
     PgForeignDataWrapperRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
     PgOperatorRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTsConfigRow,
-    PgTsDictRow, PgTypeRow, bootstrap_pg_aggregate_rows, bootstrap_pg_amproc_rows,
-    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_database_rows,
-    bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
-    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
-    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, builtin_range_rows, builtin_type_rows,
-    synthetic_range_proc_rows_by_name,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTsTemplateRow, PgTypeRow, bootstrap_pg_aggregate_rows,
+    bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_rows, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
+    bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_template_rows, builtin_range_rows,
+    builtin_type_rows, synthetic_range_proc_rows_by_name,
 };
 use crate::pgrust::database::DatabaseStatsStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -507,6 +508,20 @@ impl CatalogLookup for VisibleCatalog {
             .as_ref()
             .map(CatCache::ts_dict_rows)
             .unwrap_or_else(|| bootstrap_pg_ts_dict_rows().to_vec())
+    }
+
+    fn ts_template_rows(&self) -> Vec<PgTsTemplateRow> {
+        self.catcache
+            .as_ref()
+            .map(CatCache::ts_template_rows)
+            .unwrap_or_else(|| bootstrap_pg_ts_template_rows().to_vec())
+    }
+
+    fn ts_config_map_rows(&self) -> Vec<PgTsConfigMapRow> {
+        self.catcache
+            .as_ref()
+            .map(CatCache::ts_config_map_rows)
+            .unwrap_or_else(bootstrap_pg_ts_config_map_rows)
     }
 
     fn cast_by_source_target(

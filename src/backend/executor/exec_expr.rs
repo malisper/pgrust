@@ -124,7 +124,9 @@ use crate::backend::executor::jsonb::{
 };
 use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
-    CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
+    CatalogLookup, LoweredPartitionSpec, ParseError, PartitionBoundSpec, PartitionRangeDatumValue,
+    SerializedPartitionValue, SqlType, SqlTypeKind, SubqueryComparisonOp,
+    deserialize_partition_bound, partition_value_to_value,
 };
 use crate::backend::rewrite::{format_stored_rule_definition_with_catalog, format_view_definition};
 use crate::backend::statistics::{
@@ -137,15 +139,17 @@ use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
 use crate::include::access::toast_compression::ToastCompressionId;
 use crate::include::catalog::pg_proc::bootstrap_proc_execute_acl_has_grantee;
 use crate::include::catalog::{
-    ANYOID, BOX_SPGIST_OPCLASS_OID, BPCHAR_HASH_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID,
-    BYTEA_TYPE_OID, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
-    CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, GIN_AM_OID,
-    GIST_AM_OID, HASH_AM_OID, INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID,
-    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID,
-    PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID,
-    PG_NDISTINCT_TYPE_OID, PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID,
-    POLY_SPGIST_OPCLASS_OID, QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID,
-    bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
+    ANYOID, ARRAY_BTREE_OPCLASS_OID, BOX_SPGIST_OPCLASS_OID, BPCHAR_HASH_OPCLASS_OID, BRIN_AM_OID,
+    BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN,
+    CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID,
+    DEFAULT_COLLATION_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID,
+    INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID,
+    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
+    PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, POLY_SPGIST_OPCLASS_OID,
+    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID, bootstrap_pg_am_rows,
+    builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid, default_btree_opclass_oid,
+    default_hash_opclass_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
@@ -2166,6 +2170,11 @@ fn acl_privilege_abbrev(privileges: &str) -> String {
 
 fn eval_obj_description(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     match values {
+        [Value::Null] => Ok(Value::Null),
+        [objoid] => {
+            let objoid = oid_arg_to_u32(objoid, "obj_description")?;
+            eval_obj_description_for_classoid(objoid, PG_CLASS_RELATION_OID, ctx)
+        }
         [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
         [objoid, class_name] => {
             let objoid = oid_arg_to_u32(objoid, "obj_description")?;
@@ -2183,54 +2192,61 @@ fn eval_obj_description(values: &[Value], ctx: &ExecutorContext) -> Result<Value
             else {
                 return Ok(Value::Null);
             };
-            let rows = probe_system_catalog_rows_visible_in_db(
-                &ctx.pool,
-                &ctx.txns,
-                &ctx.snapshot,
-                ctx.client_id,
-                CURRENT_DATABASE_OID,
-                PG_DESCRIPTION_O_C_O_INDEX_OID,
-                vec![
-                    crate::include::access::scankey::ScanKeyData {
-                        attribute_number: 1,
-                        strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
-                        argument: Value::Int64(i64::from(objoid)),
-                    },
-                    crate::include::access::scankey::ScanKeyData {
-                        attribute_number: 2,
-                        strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
-                        argument: Value::Int64(i64::from(classoid)),
-                    },
-                    crate::include::access::scankey::ScanKeyData {
-                        attribute_number: 3,
-                        strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
-                        argument: Value::Int32(0),
-                    },
-                ],
-            )
-            .map_err(|err| ExecError::DetailedError {
-                message: format!("pg_description lookup failed: {err:?}"),
-                detail: None,
-                hint: None,
-                sqlstate: "XX000",
-            })?;
-            let Some(row) = rows.into_iter().next() else {
-                return Ok(Value::Null);
-            };
-            let row =
-                pg_description_row_from_values(row).map_err(|err| ExecError::DetailedError {
-                    message: format!("invalid pg_description row: {err:?}"),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "XX000",
-                })?;
-            Ok(Value::Text(row.description.into()))
+            eval_obj_description_for_classoid(objoid, classoid, ctx)
         }
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "obj_description(oid, catalog_name)",
             actual: format!("ObjDescription({} args)", values.len()),
         })),
     }
+}
+
+fn eval_obj_description_for_classoid(
+    objoid: u32,
+    classoid: u32,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let rows = probe_system_catalog_rows_visible_in_db(
+        &ctx.pool,
+        &ctx.txns,
+        &ctx.snapshot,
+        ctx.client_id,
+        CURRENT_DATABASE_OID,
+        PG_DESCRIPTION_O_C_O_INDEX_OID,
+        vec![
+            crate::include::access::scankey::ScanKeyData {
+                attribute_number: 1,
+                strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                argument: Value::Int64(i64::from(objoid)),
+            },
+            crate::include::access::scankey::ScanKeyData {
+                attribute_number: 2,
+                strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                argument: Value::Int64(i64::from(classoid)),
+            },
+            crate::include::access::scankey::ScanKeyData {
+                attribute_number: 3,
+                strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                argument: Value::Int32(0),
+            },
+        ],
+    )
+    .map_err(|err| ExecError::DetailedError {
+        message: format!("pg_description lookup failed: {err:?}"),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(Value::Null);
+    };
+    let row = pg_description_row_from_values(row).map_err(|err| ExecError::DetailedError {
+        message: format!("invalid pg_description row: {err:?}"),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    Ok(Value::Text(row.description.into()))
 }
 
 fn eval_pg_describe_object(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -2486,21 +2502,8 @@ fn eval_pg_get_expr(values: &[Value], ctx: &ExecutorContext) -> Result<Value, Ex
         [Value::Null, _] | [Value::Null, _, _] | [_, Value::Null] | [_, Value::Null, _] => {
             Ok(Value::Null)
         }
-        [expr, _relation] | [expr, _relation, _] => {
-            let Some(text) = expr.as_text() else {
-                return Ok(Value::Null);
-            };
-            if let Ok(bound) = crate::backend::parser::deserialize_partition_bound(text) {
-                return Ok(Value::Text(
-                    crate::backend::commands::partition::render_partition_bound(
-                        &bound,
-                        &ctx.datetime_config,
-                    )
-                    .into(),
-                ));
-            }
-            Ok(Value::Text(text.into()))
-        }
+        [expr, relation] => eval_pg_get_expr_text(expr, relation, ctx),
+        [expr, relation, _pretty] => eval_pg_get_expr_text(expr, relation, ctx),
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "pg_get_expr(pg_node_tree, oid [, pretty])",
             actual: format!("PgGetExpr({} args)", values.len()),
@@ -2508,11 +2511,35 @@ fn eval_pg_get_expr(values: &[Value], ctx: &ExecutorContext) -> Result<Value, Ex
     }
 }
 
+fn eval_pg_get_expr_text(
+    expr: &Value,
+    relation: &Value,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let Some(text) = expr.as_text() else {
+        return Ok(Value::Null);
+    };
+    let relation_oid = oid_arg_to_u32(relation, "pg_get_expr")?;
+    if let Ok(bound) = deserialize_partition_bound(text) {
+        let catalog = executor_catalog(ctx)?;
+        if catalog
+            .relation_by_oid(relation_oid)
+            .and_then(|relation| relation.relpartbound)
+            .as_deref()
+            == Some(text)
+        {
+            return Ok(Value::Text(
+                format_partition_bound_for_catalog(&bound).into(),
+            ));
+        }
+    }
+    Ok(Value::Text(text.into()))
+}
+
 fn eval_pg_get_partkeydef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
-    let catalog = executor_catalog(ctx)?;
     let relation_oid = match values {
         [Value::Null] => return Ok(Value::Null),
-        [value] => oid_arg_to_u32(value, "pg_get_partkeydef")?,
+        [relation_oid] => oid_arg_to_u32(relation_oid, "pg_get_partkeydef")?,
         _ => {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "pg_get_partkeydef(oid)",
@@ -2520,14 +2547,664 @@ fn eval_pg_get_partkeydef(values: &[Value], ctx: &ExecutorContext) -> Result<Val
             }));
         }
     };
+    let catalog = executor_catalog(ctx)?;
     let Some(relation) = catalog.relation_by_oid(relation_oid) else {
         return Ok(Value::Null);
     };
-    crate::backend::commands::partition::render_partition_keydef(&relation).map(|value| {
-        value
-            .map(|text| Value::Text(text.into()))
-            .unwrap_or(Value::Null)
-    })
+    let Some(row) = relation.partitioned_table.as_ref() else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::Text(
+        format_partition_keydef_for_catalog(catalog, &relation, row)?.into(),
+    ))
+}
+
+fn eval_pg_get_partition_constraintdef(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let relation_oid = match values {
+        [Value::Null] => return Ok(Value::Null),
+        [relation_oid] => oid_arg_to_u32(relation_oid, "pg_get_partition_constraintdef")?,
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "pg_get_partition_constraintdef(oid)",
+                actual: format!("PgGetPartitionConstraintDef({} args)", values.len()),
+            }));
+        }
+    };
+    let catalog = executor_catalog(ctx)?;
+    let Some(relation) = catalog.relation_by_oid(relation_oid) else {
+        return Ok(Value::Null);
+    };
+    if !relation.relispartition {
+        return Ok(Value::Null);
+    }
+    let mut relation_oid = relation.relation_oid;
+    let mut levels = Vec::new();
+    while let Some(parent_row) = catalog
+        .inheritance_parents(relation_oid)
+        .into_iter()
+        .find(|row| !row.inhdetachpending)
+    {
+        let Some(child) = catalog.relation_by_oid(relation_oid) else {
+            break;
+        };
+        let Some(parent) = catalog.relation_by_oid(parent_row.inhparent) else {
+            break;
+        };
+        let Some(bound_text) = child.relpartbound.as_deref() else {
+            break;
+        };
+        let bound = deserialize_partition_bound(bound_text).map_err(ExecError::Parse)?;
+        if let Some(constraints) =
+            partition_constraint_conditions_for_catalog(catalog, &parent, &bound)?
+        {
+            levels.push(constraints);
+        }
+        relation_oid = parent.relation_oid;
+    }
+    if levels.is_empty() {
+        return Ok(Value::Null);
+    }
+    levels.reverse();
+    let parts = levels.into_iter().flatten().collect::<Vec<_>>();
+    Ok(Value::Text(format!("({})", parts.join(" AND ")).into()))
+}
+
+fn format_partition_bound_for_catalog(bound: &PartitionBoundSpec) -> String {
+    match bound {
+        PartitionBoundSpec::List {
+            is_default: true, ..
+        }
+        | PartitionBoundSpec::Range {
+            is_default: true, ..
+        } => "DEFAULT".into(),
+        PartitionBoundSpec::List { values, .. } => format!(
+            "FOR VALUES IN ({})",
+            values
+                .iter()
+                .map(partition_value_bound_literal)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        PartitionBoundSpec::Range { from, to, .. } => format!(
+            "FOR VALUES FROM ({}) TO ({})",
+            from.iter()
+                .map(partition_range_datum_bound_literal)
+                .collect::<Vec<_>>()
+                .join(", "),
+            to.iter()
+                .map(partition_range_datum_bound_literal)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        PartitionBoundSpec::Hash { modulus, remainder } => {
+            format!("FOR VALUES WITH (MODULUS {modulus}, REMAINDER {remainder})")
+        }
+    }
+}
+
+fn partition_range_datum_bound_literal(value: &PartitionRangeDatumValue) -> String {
+    match value {
+        PartitionRangeDatumValue::MinValue => "MINVALUE".into(),
+        PartitionRangeDatumValue::MaxValue => "MAXVALUE".into(),
+        PartitionRangeDatumValue::Value(value) => partition_value_bound_literal(value),
+    }
+}
+
+fn partition_value_bound_literal(value: &SerializedPartitionValue) -> String {
+    match value {
+        SerializedPartitionValue::Null => "NULL".into(),
+        SerializedPartitionValue::Text(text)
+        | SerializedPartitionValue::Json(text)
+        | SerializedPartitionValue::JsonPath(text)
+        | SerializedPartitionValue::Xml(text)
+        | SerializedPartitionValue::Numeric(text)
+        | SerializedPartitionValue::Float64(text) => quote_sql_literal(text),
+        SerializedPartitionValue::Jsonb(bytes) => {
+            let text =
+                crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap_or_default();
+            quote_sql_literal(&text)
+        }
+        SerializedPartitionValue::Int16(value) if *value < 0 => {
+            quote_sql_literal(&value.to_string())
+        }
+        SerializedPartitionValue::Int32(value) if *value < 0 => {
+            quote_sql_literal(&value.to_string())
+        }
+        SerializedPartitionValue::Int64(value) if *value < 0 => {
+            quote_sql_literal(&value.to_string())
+        }
+        SerializedPartitionValue::Int16(value) => value.to_string(),
+        SerializedPartitionValue::Int32(value) => value.to_string(),
+        SerializedPartitionValue::Int64(value) => value.to_string(),
+        SerializedPartitionValue::Money(value) => value.to_string(),
+        SerializedPartitionValue::Bool(value) => value.to_string(),
+        SerializedPartitionValue::Date(_)
+        | SerializedPartitionValue::Time(_)
+        | SerializedPartitionValue::TimeTz { .. }
+        | SerializedPartitionValue::Timestamp(_)
+        | SerializedPartitionValue::TimestampTz(_)
+        | SerializedPartitionValue::Array(_)
+        | SerializedPartitionValue::Range(_)
+        | SerializedPartitionValue::Multirange(_) => {
+            quote_sql_literal(&partition_value_text(value))
+        }
+        SerializedPartitionValue::Bytea(bytes) => {
+            let mut out = String::from("'\\\\x");
+            for byte in bytes {
+                out.push_str(&format!("{byte:02x}"));
+            }
+            out.push('\'');
+            out
+        }
+        SerializedPartitionValue::InternalChar(byte) => {
+            quote_sql_literal(&(*byte as char).to_string())
+        }
+    }
+}
+
+fn partition_constraint_conditions_for_catalog(
+    catalog: &dyn CatalogLookup,
+    parent: &crate::backend::parser::BoundRelation,
+    bound: &PartitionBoundSpec,
+) -> Result<Option<Vec<String>>, ExecError> {
+    let Some(row) = parent.partitioned_table.as_ref() else {
+        return Ok(None);
+    };
+    let key_names = partition_key_constraint_names_for_catalog(parent, row)?;
+    let conditions = match bound {
+        PartitionBoundSpec::List {
+            is_default: true, ..
+        }
+        | PartitionBoundSpec::Range {
+            is_default: true, ..
+        }
+        | PartitionBoundSpec::Hash { .. } => return Ok(None),
+        PartitionBoundSpec::List { values, .. } => {
+            if key_names.is_empty() {
+                return Ok(None);
+            }
+            list_partition_constraint_conditions(&key_names[0], values)
+        }
+        PartitionBoundSpec::Range { from, to, .. } => {
+            range_partition_constraint_conditions(&key_names, from, to)
+        }
+    };
+    let _ = catalog;
+    Ok(Some(conditions))
+}
+
+fn list_partition_constraint_conditions(
+    key: &str,
+    values: &[SerializedPartitionValue],
+) -> Vec<String> {
+    let mut conditions = Vec::new();
+    let non_null = values
+        .iter()
+        .filter(|value| !matches!(value, SerializedPartitionValue::Null))
+        .collect::<Vec<_>>();
+    if !non_null.is_empty() {
+        conditions.push(format!("({key} IS NOT NULL)"));
+    }
+    let value_conditions = values
+        .iter()
+        .map(|value| {
+            if matches!(value, SerializedPartitionValue::Null) {
+                format!("({key} IS NULL)")
+            } else {
+                format!("({key} = {})", partition_value_constraint_literal(value))
+            }
+        })
+        .collect::<Vec<_>>();
+    if value_conditions.len() == 1 {
+        conditions.push(value_conditions[0].clone());
+    } else if !value_conditions.is_empty() {
+        conditions.push(format!("({})", value_conditions.join(" OR ")));
+    }
+    conditions
+}
+
+fn range_partition_constraint_conditions(
+    keys: &[String],
+    from: &[PartitionRangeDatumValue],
+    to: &[PartitionRangeDatumValue],
+) -> Vec<String> {
+    let mut conditions = keys
+        .iter()
+        .map(|key| format!("({key} IS NOT NULL)"))
+        .collect::<Vec<_>>();
+    if let Some(lower) = range_partition_side_constraint(keys, from, true) {
+        conditions.push(lower);
+    }
+    if let Some(upper) = range_partition_side_constraint(keys, to, false) {
+        conditions.push(upper);
+    }
+    conditions
+}
+
+fn range_partition_side_constraint(
+    keys: &[String],
+    values: &[PartitionRangeDatumValue],
+    lower: bool,
+) -> Option<String> {
+    let concrete = values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| match value {
+            PartitionRangeDatumValue::Value(value) => Some((index, value)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if concrete.is_empty() {
+        return None;
+    }
+    let last_index = concrete.last().map(|(index, _)| *index)?;
+    let upper_has_trailing_max = !lower
+        && values
+            .iter()
+            .skip(last_index + 1)
+            .any(|value| matches!(value, PartitionRangeDatumValue::MaxValue));
+    let mut disjuncts = Vec::new();
+    for (position, (index, value)) in concrete.iter().enumerate() {
+        let key = keys.get(*index)?;
+        let mut terms = concrete
+            .iter()
+            .take(position)
+            .filter_map(|(prev_index, prev_value)| {
+                keys.get(*prev_index).map(|prev_key| {
+                    format!(
+                        "({prev_key} = {})",
+                        partition_value_constraint_literal(prev_value)
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let op = if *index == last_index {
+            if lower {
+                ">="
+            } else if upper_has_trailing_max {
+                "<="
+            } else {
+                "<"
+            }
+        } else if lower {
+            ">"
+        } else {
+            "<"
+        };
+        terms.push(format!(
+            "({key} {op} {})",
+            partition_value_constraint_literal(value)
+        ));
+        disjuncts.push(if terms.len() == 1 {
+            terms.remove(0)
+        } else {
+            format!("({})", terms.join(" AND "))
+        });
+    }
+    if disjuncts.len() == 1 {
+        Some(disjuncts.remove(0))
+    } else {
+        Some(format!("({})", disjuncts.join(" OR ")))
+    }
+}
+
+fn partition_key_constraint_names_for_catalog(
+    relation: &crate::backend::parser::BoundRelation,
+    row: &crate::include::catalog::PgPartitionedTableRow,
+) -> Result<Vec<String>, ExecError> {
+    let exprs = deserialize_partition_key_exprs(row)?;
+    Ok(row
+        .partattrs
+        .iter()
+        .enumerate()
+        .map(|(index, attnum)| {
+            if *attnum > 0 {
+                let column_index = (*attnum as usize).saturating_sub(1);
+                relation
+                    .desc
+                    .columns
+                    .get(column_index)
+                    .map(|column| quote_identifier_if_needed(&column.name))
+                    .unwrap_or_else(|| attnum.to_string())
+            } else {
+                exprs
+                    .get(index)
+                    .and_then(|expr| expr.as_deref())
+                    .map(format_partition_expr_sql_for_constraint)
+                    .unwrap_or_else(|| "?column?".into())
+            }
+        })
+        .collect())
+}
+
+fn partition_value_constraint_literal(value: &SerializedPartitionValue) -> String {
+    match value {
+        SerializedPartitionValue::Array(array) => format!(
+            "{}::{}",
+            quote_sql_literal(&partition_value_text(value)),
+            array.type_name
+        ),
+        SerializedPartitionValue::Text(_)
+        | SerializedPartitionValue::Date(_)
+        | SerializedPartitionValue::Time(_)
+        | SerializedPartitionValue::TimeTz { .. }
+        | SerializedPartitionValue::Timestamp(_)
+        | SerializedPartitionValue::TimestampTz(_)
+        | SerializedPartitionValue::Range(_)
+        | SerializedPartitionValue::Multirange(_) => format!(
+            "{}::{}",
+            quote_sql_literal(&partition_value_text(value)),
+            partition_value_type_name(value)
+        ),
+        SerializedPartitionValue::Int16(value) if *value < 0 => {
+            format!("{}::smallint", quote_sql_literal(&value.to_string()))
+        }
+        SerializedPartitionValue::Int32(value) if *value < 0 => {
+            format!("{}::integer", quote_sql_literal(&value.to_string()))
+        }
+        SerializedPartitionValue::Int64(value) if *value < 0 => {
+            format!("{}::bigint", quote_sql_literal(&value.to_string()))
+        }
+        SerializedPartitionValue::Null => "NULL".into(),
+        _ => partition_value_bound_literal(value),
+    }
+}
+
+fn partition_value_type_name(value: &SerializedPartitionValue) -> &'static str {
+    match value {
+        SerializedPartitionValue::Null => "unknown",
+        SerializedPartitionValue::Int16(_) => "smallint",
+        SerializedPartitionValue::Int32(_) => "integer",
+        SerializedPartitionValue::Int64(_) => "bigint",
+        SerializedPartitionValue::Money(_) => "money",
+        SerializedPartitionValue::Float64(_) => "double precision",
+        SerializedPartitionValue::Numeric(_) => "numeric",
+        SerializedPartitionValue::Text(_) => "text",
+        SerializedPartitionValue::Bytea(_) => "bytea",
+        SerializedPartitionValue::Json(_) => "json",
+        SerializedPartitionValue::Jsonb(_) => "jsonb",
+        SerializedPartitionValue::JsonPath(_) => "jsonpath",
+        SerializedPartitionValue::Xml(_) => "xml",
+        SerializedPartitionValue::InternalChar(_) => "\"char\"",
+        SerializedPartitionValue::Bool(_) => "boolean",
+        SerializedPartitionValue::Date(_) => "date",
+        SerializedPartitionValue::Time(_) => "time without time zone",
+        SerializedPartitionValue::TimeTz { .. } => "time with time zone",
+        SerializedPartitionValue::Timestamp(_) => "timestamp without time zone",
+        SerializedPartitionValue::TimestampTz(_) => "timestamp with time zone",
+        SerializedPartitionValue::Array(_) => "text[]",
+        SerializedPartitionValue::Range(_) => "text",
+        SerializedPartitionValue::Multirange(_) => "text",
+    }
+}
+
+fn partition_value_text(value: &SerializedPartitionValue) -> String {
+    let value = partition_value_to_value(value);
+    match &value {
+        Value::Null => String::new(),
+        Value::Text(_) | Value::TextRef(_, _) => value.as_text().unwrap_or_default().to_string(),
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => render_datetime_value_text_with_config(
+            &value,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        )
+        .unwrap_or_default(),
+        Value::Bool(value) => value.to_string(),
+        Value::Int16(value) => value.to_string(),
+        Value::Int32(value) => value.to_string(),
+        Value::Int64(value) => value.to_string(),
+        Value::Money(value) => crate::backend::executor::money_format_text(*value),
+        Value::Float64(value) => value.to_string(),
+        Value::Numeric(value) => value.render(),
+        Value::Json(value) => value.to_string(),
+        Value::JsonPath(value) | Value::Xml(value) => value.to_string(),
+        Value::Array(values) => crate::backend::executor::value_io::format_array_text(values),
+        Value::PgArray(array) => crate::backend::executor::value_io::format_array_value_text(array),
+        Value::Bytea(bytes) => {
+            let mut out = String::from("\\x");
+            for byte in bytes {
+                out.push_str(&format!("{byte:02x}"));
+            }
+            out
+        }
+        _ => format!("{value:?}"),
+    }
+}
+
+fn quote_sql_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn format_partition_keydef_for_catalog(
+    catalog: &dyn CatalogLookup,
+    relation: &crate::backend::parser::BoundRelation,
+    row: &crate::include::catalog::PgPartitionedTableRow,
+) -> Result<String, ExecError> {
+    let strategy = match row.partstrat {
+        'l' => "LIST",
+        'r' => "RANGE",
+        'h' => "HASH",
+        other => {
+            return Err(ExecError::DetailedError {
+                message: format!("unrecognized partition strategy \"{other}\""),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            });
+        }
+    };
+    let exprs = deserialize_partition_key_exprs(row)?;
+    let keys = row
+        .partattrs
+        .iter()
+        .enumerate()
+        .map(|(index, attnum)| {
+            format_partition_keydef_item(catalog, relation, row, &exprs, index, *attnum)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(format!("{strategy} ({})", keys.join(", ")))
+}
+
+fn deserialize_partition_key_exprs(
+    row: &crate::include::catalog::PgPartitionedTableRow,
+) -> Result<Vec<Option<String>>, ExecError> {
+    match row.partexprs.as_deref() {
+        Some(text) => serde_json::from_str(text).map_err(|_| ExecError::DetailedError {
+            message: "invalid partition expression metadata".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }),
+        None => Ok(vec![None; row.partattrs.len()]),
+    }
+}
+
+fn format_partition_keydef_item(
+    catalog: &dyn CatalogLookup,
+    relation: &crate::backend::parser::BoundRelation,
+    row: &crate::include::catalog::PgPartitionedTableRow,
+    exprs: &[Option<String>],
+    index: usize,
+    attnum: i16,
+) -> Result<String, ExecError> {
+    let mut key = if attnum > 0 {
+        let column_index = (attnum as usize).saturating_sub(1);
+        relation
+            .desc
+            .columns
+            .get(column_index)
+            .map(|column| quote_identifier_if_needed(&column.name))
+            .unwrap_or_else(|| attnum.to_string())
+    } else {
+        exprs
+            .get(index)
+            .and_then(|expr| expr.clone())
+            .map(|expr| format_partition_expr_sql_for_keydef(&expr))
+            .unwrap_or_else(|| "?column?".into())
+    };
+    if let Some(opclass) = partition_key_opclass_display_name(catalog, relation, row, index, attnum)
+    {
+        key.push(' ');
+        key.push_str(&opclass);
+    }
+    if let Some(collation) = partition_key_collation_display_name(catalog, row, index) {
+        key.push_str(" COLLATE ");
+        key.push_str(&collation);
+    }
+    Ok(key)
+}
+
+fn format_partition_expr_sql_for_keydef(expr_sql: &str) -> String {
+    let constraint_expr = format_partition_expr_sql_for_constraint(expr_sql);
+    if constraint_expr.starts_with('(') || contains_display_operator(&constraint_expr) {
+        format!("({constraint_expr})")
+    } else {
+        constraint_expr
+    }
+}
+
+fn format_partition_expr_sql_for_constraint(expr_sql: &str) -> String {
+    let stripped = strip_outer_expr_parens(expr_sql.trim());
+    let normalized = normalize_partition_expr_operator_spacing(stripped);
+    if contains_display_operator(&normalized) {
+        format!("({normalized})")
+    } else {
+        normalized
+    }
+}
+
+fn contains_display_operator(expr: &str) -> bool {
+    expr.contains(" + ")
+        || expr.contains(" - ")
+        || expr.contains(" * ")
+        || expr.contains(" / ")
+        || expr.contains(" % ")
+}
+
+fn strip_outer_expr_parens(expr: &str) -> &str {
+    let mut current = expr.trim();
+    loop {
+        if !current.starts_with('(') || !current.ends_with(')') {
+            return current;
+        }
+        let mut depth = 0_i32;
+        let mut wraps = true;
+        for (index, ch) in current.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 && index != current.len() - 1 {
+                        wraps = false;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !wraps {
+            return current;
+        }
+        current = current[1..current.len() - 1].trim();
+    }
+}
+
+fn normalize_partition_expr_operator_spacing(expr: &str) -> String {
+    let mut out = String::with_capacity(expr.len());
+    let mut chars = expr.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if matches!(ch, '+' | '*' | '/' | '%') {
+            while out.ends_with(' ') {
+                out.pop();
+            }
+            out.push(' ');
+            out.push(ch);
+            out.push(' ');
+            while chars.peek().is_some_and(|next| next.is_ascii_whitespace()) {
+                chars.next();
+            }
+        } else if ch == '-' && !out.trim_end().is_empty() {
+            while out.ends_with(' ') {
+                out.pop();
+            }
+            out.push(' ');
+            out.push(ch);
+            out.push(' ');
+            while chars.peek().is_some_and(|next| next.is_ascii_whitespace()) {
+                chars.next();
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn partition_key_opclass_display_name(
+    catalog: &dyn CatalogLookup,
+    relation: &crate::backend::parser::BoundRelation,
+    row: &crate::include::catalog::PgPartitionedTableRow,
+    index: usize,
+    attnum: i16,
+) -> Option<String> {
+    let opclass_oid = *row.partclass.get(index)?;
+    if opclass_oid == 0 {
+        return None;
+    }
+    let sql_type = if attnum > 0 {
+        let column_index = (attnum as usize).checked_sub(1)?;
+        relation.desc.columns.get(column_index)?.sql_type
+    } else {
+        partition_spec_for_relation_best_effort(relation)
+            .and_then(|spec| spec.key_types.get(index).copied())?
+    };
+    let default_opclass = default_partition_opclass_oid(row.partstrat, sql_type);
+    if default_opclass == Some(opclass_oid) {
+        return None;
+    }
+    catalog
+        .opclass_rows()
+        .into_iter()
+        .find(|row| row.oid == opclass_oid)
+        .map(|row| quote_identifier_if_needed(&row.opcname))
+}
+
+fn default_partition_opclass_oid(partstrat: char, sql_type: SqlType) -> Option<u32> {
+    let type_oid = crate::backend::utils::cache::catcache::sql_type_oid(sql_type);
+    match partstrat {
+        'h' => default_hash_opclass_oid(type_oid),
+        'l' | 'r' if sql_type.is_array => Some(ARRAY_BTREE_OPCLASS_OID),
+        'l' | 'r' => default_btree_opclass_oid(type_oid),
+        _ => None,
+    }
+}
+
+fn partition_spec_for_relation_best_effort(
+    relation: &crate::backend::parser::BoundRelation,
+) -> Option<LoweredPartitionSpec> {
+    crate::backend::parser::relation_partition_spec(relation).ok()
+}
+
+fn partition_key_collation_display_name(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgPartitionedTableRow,
+    index: usize,
+) -> Option<String> {
+    let collation_oid = *row.partcollation.get(index)?;
+    if matches!(collation_oid, 0 | DEFAULT_COLLATION_OID) {
+        return None;
+    }
+    catalog
+        .collation_rows()
+        .into_iter()
+        .find(|row| row.oid == collation_oid)
+        .map(|row| quote_identifier_if_needed(&row.collname))
 }
 
 fn eval_pg_get_constraintdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -3947,6 +4624,54 @@ fn eval_pg_relation_size(values: &[Value], ctx: &ExecutorContext) -> Result<Valu
     Ok(Value::Int64(
         i64::from(nblocks) * i64::from(crate::backend::storage::smgr::smgr::BLCKSZ as i32),
     ))
+}
+
+fn eval_pg_relation_filenode(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_relation_filenode(regclass)",
+            actual: format!("PgRelationFilenode({} args)", values.len()),
+        }));
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let relation_oid = oid_arg_to_u32(value, "pg_relation_filenode")?;
+    let catalog = executor_catalog(ctx)?;
+    let Some(relation) = catalog.relcache().get_by_oid(relation_oid) else {
+        return Ok(Value::Null);
+    };
+    if relation.rel.rel_number == 0 {
+        return Ok(Value::Null);
+    }
+    Ok(Value::Int64(i64::from(relation.rel.rel_number)))
+}
+
+fn eval_pg_filenode_relation(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let [tablespace, filenode] = values else {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_filenode_relation(oid, oid)",
+            actual: format!("PgFilenodeRelation({} args)", values.len()),
+        }));
+    };
+    if matches!(tablespace, Value::Null) || matches!(filenode, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let tablespace_oid = oid_arg_to_u32(tablespace, "pg_filenode_relation")?;
+    let filenode_oid = oid_arg_to_u32(filenode, "pg_filenode_relation")?;
+    if filenode_oid == 0 {
+        return Ok(Value::Null);
+    }
+    let catalog = executor_catalog(ctx)?;
+    let relation_oid = catalog.relcache().entries().find_map(|(_, relation)| {
+        (relation.relpersistence != 't'
+            && relation.rel.spc_oid == tablespace_oid
+            && relation.rel.rel_number == filenode_oid)
+            .then_some(relation.relation_oid)
+    });
+    Ok(relation_oid
+        .map(|oid| Value::Int64(i64::from(oid)))
+        .unwrap_or(Value::Null))
 }
 
 fn parent_references_toast_relation(
@@ -5579,7 +6304,7 @@ fn eval_plpgsql_builtin_function(
         return result;
     }
     if is_text_search_builtin_function(func) {
-        return eval_text_search_builtin_function(func, &values);
+        return eval_text_search_builtin_function(func, &values, None);
     }
     match func {
         BuiltinScalarFunction::ToTsVector
@@ -5588,7 +6313,7 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::PlainToTsQuery
         | BuiltinScalarFunction::PhraseToTsQuery
         | BuiltinScalarFunction::WebSearchToTsQuery
-        | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values),
+        | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values, None),
         BuiltinScalarFunction::Length => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
@@ -5996,6 +6721,7 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::PgGetFunctionResult
         | BuiltinScalarFunction::PgGetExpr
         | BuiltinScalarFunction::PgGetPartKeyDef
+        | BuiltinScalarFunction::PgGetPartitionConstraintDef
         | BuiltinScalarFunction::PgGetStatisticsObjDef
         | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
         | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
@@ -6270,6 +6996,7 @@ fn is_text_search_builtin_function(func: BuiltinScalarFunction) -> bool {
 fn eval_text_search_builtin_function(
     func: BuiltinScalarFunction,
     values: &[Value],
+    catalog: Option<&dyn CatalogLookup>,
 ) -> Result<Value, ExecError> {
     fn arg_text(
         values: &[Value],
@@ -6419,13 +7146,14 @@ fn eval_text_search_builtin_function(
     match func {
         BuiltinScalarFunction::ToTsVector => {
             if let [Value::Jsonb(_)] = values {
-                return jsonb_to_tsvector_value(None, &values[0], None);
+                return jsonb_to_tsvector_value(None, &values[0], None, catalog);
             }
             if let [_, Value::Jsonb(_)] = values {
                 return jsonb_to_tsvector_value(
                     arg_text(values, 0, "to_tsvector")?.as_deref(),
                     &values[1],
                     None,
+                    catalog,
                 );
             }
             let result = match values {
@@ -6435,12 +7163,14 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "to_tsvector")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 [_, _] => crate::backend::tsearch::to_tsvector_with_config_name(
                     arg_text(values, 0, "to_tsvector")?.as_deref(),
                     arg_text(values, 1, "to_tsvector")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 _ => unreachable!(),
             };
@@ -6456,11 +7186,14 @@ fn eval_text_search_builtin_function(
             | [_, _, Value::Null] => {
                 return Ok(Value::Null);
             }
-            [Value::Jsonb(_), _] => jsonb_to_tsvector_value(None, &values[0], values.get(1)),
+            [Value::Jsonb(_), _] => {
+                jsonb_to_tsvector_value(None, &values[0], values.get(1), catalog)
+            }
             [_, Value::Jsonb(_), _] => jsonb_to_tsvector_value(
                 arg_text(values, 0, "jsonb_to_tsvector")?.as_deref(),
                 &values[1],
                 values.get(2),
+                catalog,
             ),
             _ => Err(ExecError::TypeMismatch {
                 op: "jsonb_to_tsvector",
@@ -6476,12 +7209,14 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "to_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 [_, _] => crate::backend::tsearch::to_tsquery_with_config_name(
                     arg_text(values, 0, "to_tsquery")?.as_deref(),
                     arg_text(values, 1, "to_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 _ => unreachable!(),
             };
@@ -6497,12 +7232,14 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "plainto_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 [_, _] => crate::backend::tsearch::plainto_tsquery_with_config_name(
                     arg_text(values, 0, "plainto_tsquery")?.as_deref(),
                     arg_text(values, 1, "plainto_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 _ => unreachable!(),
             };
@@ -6518,12 +7255,14 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "phraseto_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 [_, _] => crate::backend::tsearch::phraseto_tsquery_with_config_name(
                     arg_text(values, 0, "phraseto_tsquery")?.as_deref(),
                     arg_text(values, 1, "phraseto_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 _ => unreachable!(),
             };
@@ -6539,12 +7278,14 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "websearch_to_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 [_, _] => crate::backend::tsearch::websearch_to_tsquery_with_config_name(
                     arg_text(values, 0, "websearch_to_tsquery")?.as_deref(),
                     arg_text(values, 1, "websearch_to_tsquery")?
                         .as_deref()
                         .unwrap_or_default(),
+                    catalog,
                 ),
                 _ => unreachable!(),
             };
@@ -6711,14 +7452,19 @@ fn eval_text_search_builtin_function(
                 arg_text(values, 1, "ts_lexize")?
                     .as_deref()
                     .unwrap_or_default(),
+                catalog,
             )
             .map(|lexemes| {
-                Value::Array(
-                    lexemes
-                        .into_iter()
-                        .map(|lexeme| Value::Text(lexeme.into()))
-                        .collect(),
-                )
+                lexemes
+                    .map(|lexemes| {
+                        Value::Array(
+                            lexemes
+                                .into_iter()
+                                .map(|lexeme| Value::Text(lexeme.into()))
+                                .collect(),
+                        )
+                    })
+                    .unwrap_or(Value::Null)
             })
             .map_err(|e| parse_error("ts_lexize", e)),
             _ => unreachable!(),
@@ -7270,7 +8016,13 @@ pub(crate) fn eval_builtin_function(
         return result;
     }
     if is_text_search_builtin_function(func) {
-        return eval_text_search_builtin_function(func, &values);
+        return eval_text_search_builtin_function(
+            func,
+            &values,
+            ctx.catalog
+                .as_ref()
+                .map(|catalog| catalog as &dyn CatalogLookup),
+        );
     }
     if matches!(
         func,
@@ -7285,7 +8037,13 @@ pub(crate) fn eval_builtin_function(
         | BuiltinScalarFunction::PlainToTsQuery
         | BuiltinScalarFunction::PhraseToTsQuery
         | BuiltinScalarFunction::WebSearchToTsQuery
-        | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values),
+        | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(
+            func,
+            &values,
+            ctx.catalog
+                .as_ref()
+                .map(|catalog| catalog as &dyn CatalogLookup),
+        ),
         BuiltinScalarFunction::Random => eval_random_function(&values, ctx),
         BuiltinScalarFunction::RandomNormal => eval_random_normal_function(&values, ctx),
         BuiltinScalarFunction::SetSeed => eval_setseed_function(&values, ctx),
@@ -7740,6 +8498,8 @@ pub(crate) fn eval_builtin_function(
             eval_pg_column_toast_chunk_id_values(&values)
         }
         BuiltinScalarFunction::PgColumnSize => eval_pg_column_size_values(&values),
+        BuiltinScalarFunction::PgRelationFilenode => eval_pg_relation_filenode(&values, ctx),
+        BuiltinScalarFunction::PgFilenodeRelation => eval_pg_filenode_relation(&values, ctx),
         BuiltinScalarFunction::PgRelationSize => eval_pg_relation_size(&values, ctx),
         BuiltinScalarFunction::NumNulls => Ok(eval_num_nulls(&values, func_variadic, true)),
         BuiltinScalarFunction::NumNonNulls => Ok(eval_num_nulls(&values, func_variadic, false)),
@@ -7775,10 +8535,13 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgGetFunctionDef => eval_pg_get_functiondef(&values, ctx),
         BuiltinScalarFunction::PgGetFunctionResult => eval_pg_get_function_result(&values, ctx),
         BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values, ctx),
-        BuiltinScalarFunction::PgGetPartKeyDef => eval_pg_get_partkeydef(&values, ctx),
         BuiltinScalarFunction::PgGetConstraintDef => eval_pg_get_constraintdef(&values, ctx),
+        BuiltinScalarFunction::PgGetPartitionConstraintDef => {
+            eval_pg_get_partition_constraintdef(&values, ctx)
+        }
         BuiltinScalarFunction::PgGetIndexDef => eval_pg_get_indexdef(&values, ctx),
         BuiltinScalarFunction::PgGetRuleDef => eval_pg_get_ruledef(&values, ctx),
+        BuiltinScalarFunction::PgGetPartKeyDef => eval_pg_get_partkeydef(&values, ctx),
         BuiltinScalarFunction::PgGetViewDef => eval_pg_get_viewdef(&values, ctx),
         BuiltinScalarFunction::PgGetTriggerDef => eval_pg_get_triggerdef(&values, ctx),
         BuiltinScalarFunction::PgTriggerDepth => Ok(Value::Int32(ctx.trigger_depth as i32)),

@@ -49,8 +49,9 @@ use crate::backend::utils::time::timestamp::{
     is_valid_finite_timestamp_usecs, parse_timestamp_text, parse_timestamptz_text,
 };
 use crate::include::catalog::{
-    INT2_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID, XID8_TYPE_OID, bootstrap_pg_cast_rows,
-    builtin_type_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    INT2_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID, UNKNOWN_TYPE_OID, XID8_TYPE_OID,
+    bootstrap_pg_cast_rows, builtin_type_rows, multirange_type_ref_for_sql_type,
+    range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT,
@@ -5461,7 +5462,8 @@ fn array_element_type_oid(element_type: SqlType) -> Option<u32> {
         return Some(element_type.type_oid);
     }
     builtin_type_rows().into_iter().find_map(|row| {
-        (!row.sql_type.is_array
+        (row.oid != UNKNOWN_TYPE_OID
+            && !row.sql_type.is_array
             && row.sql_type.kind == element_type.kind
             && !matches!(row.sql_type.kind, SqlTypeKind::AnyArray))
         .then_some(row.oid)

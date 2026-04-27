@@ -17995,6 +17995,79 @@ fn jsonpath_operators_and_functions_work() {
 }
 
 #[test]
+fn sql_json_plain_query_functions_work() {
+    let base = temp_dir("sql_json_plain_query_functions");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select JSON_EXISTS(NULL::jsonb, '$'), JSON_EXISTS(jsonb '[]', '$'), JSON_EXISTS(jsonb '1', 'strict $.a'), JSON_EXISTS(jsonb '{\"a\":1}', '$.a')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Null,
+                    Value::Bool(true),
+                    Value::Bool(false),
+                    Value::Bool(true),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select JSON_VALUE(jsonb 'true', '$'), JSON_VALUE(jsonb '\"aaa\"', '$'), JSON_VALUE(jsonb '{}', '$'), JSON_VALUE(jsonb '[1,2]', '$[*]')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("t".into()),
+                    Value::Text("aaa".into()),
+                    Value::Null,
+                    Value::Null,
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select JSON_QUERY(jsonb 'null', '$'), JSON_QUERY(jsonb '\"aaa\"', '$'), JSON_QUERY(jsonb '[1,2]', '$'), JSON_QUERY(jsonb '[]', '$[*]'), JSON_QUERY(jsonb '[1,2]', '$[*]')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text("null").unwrap()),
+                    Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text("\"aaa\"").unwrap()),
+                    Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text("[1,2]").unwrap()),
+                    Value::Null,
+                    Value::Null,
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonpath_cast_and_silent_behavior_work() {
     let base = temp_dir("jsonpath_cast");
     let txns = TransactionManager::new_durable(&base).unwrap();

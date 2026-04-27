@@ -2200,7 +2200,7 @@ fn parse_comment_on_type_and_column_statements() {
     assert_eq!(
         parse_statement("comment on column default_test_row.f1 is null").unwrap(),
         Statement::CommentOnColumn(CommentOnColumnStatement {
-            relation_name: "default_test_row".into(),
+            table_name: "default_test_row".into(),
             column_name: "f1".into(),
             comment: None,
         })
@@ -2392,6 +2392,109 @@ fn parse_statistics_rejects_unparenthesized_expression_targets() {
     assert!(matches!(
         parse_statement("create statistics tst on (x, y) from items"),
         Err(ParseError::UnexpectedToken { .. })
+    ));
+}
+
+#[test]
+fn parse_text_search_dictionary_ddl() {
+    let stmt = parse_statement(
+        "create text search dictionary ispell (Template=ispell, DictFile=ispell_sample)",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::CreateTextSearchDictionary(CreateTextSearchDictionaryStatement {
+            schema_name: None,
+            dictionary_name,
+            options,
+        }) if dictionary_name == "ispell"
+            && options.iter().any(|option| option.name == "template" && option.value == "ispell")
+            && options.iter().any(|option| option.name == "dictfile" && option.value == "ispell_sample")
+    ));
+
+    let stmt = parse_statement(
+        "CREATE TEXT SEARCH DICTIONARY ispell (
+                        Template=ispell,
+                        DictFile=ispell_sample,
+                        AffFile=ispell_sample
+);",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::CreateTextSearchDictionary(CreateTextSearchDictionaryStatement {
+            dictionary_name,
+            options,
+            ..
+        }) if dictionary_name == "ispell"
+            && options.iter().any(|option| option.name == "afffile" && option.value == "ispell_sample")
+    ));
+
+    let stmt =
+        parse_statement(r#"alter text search dictionary synonym (CaseSensitive = off)"#).unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::AlterTextSearchDictionary(AlterTextSearchDictionaryStatement {
+            schema_name: None,
+            dictionary_name,
+            options,
+        }) if dictionary_name == "synonym"
+            && options.iter().any(|option| option.name == "casesensitive" && option.value == "off")
+    ));
+}
+
+#[test]
+fn parse_text_search_configuration_ddl() {
+    let stmt = parse_statement("create text search configuration public.ispell_tst (copy=english)")
+        .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::CreateTextSearchConfiguration(CreateTextSearchConfigurationStatement {
+            schema_name: Some(schema_name),
+            config_name,
+            copy_config_name,
+        }) if schema_name == "public" && config_name == "ispell_tst" && copy_config_name == "english"
+    ));
+
+    let stmt = parse_statement(
+        "alter text search configuration ispell_tst alter mapping for word, asciiword with ispell, english_stem",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::AlterTextSearchConfiguration(AlterTextSearchConfigurationStatement {
+            config_name,
+            action: AlterTextSearchConfigurationAction::AlterMappingFor { token_names, dictionary_names },
+            ..
+        }) if config_name == "ispell_tst"
+            && token_names == vec!["word", "asciiword"]
+            && dictionary_names == vec!["ispell", "english_stem"]
+    ));
+
+    let stmt = parse_statement(
+        "alter text search configuration hunspell_tst alter mapping
+            replace ispell with hunspell",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::AlterTextSearchConfiguration(AlterTextSearchConfigurationStatement {
+            action: AlterTextSearchConfigurationAction::AlterMappingReplace {
+                old_dictionary_name,
+                new_dictionary_name,
+            },
+            ..
+        }) if old_dictionary_name == "ispell" && new_dictionary_name == "hunspell"
+    ));
+
+    let stmt = parse_statement("drop text search configuration if exists dummy_tst").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::DropTextSearchConfiguration(DropTextSearchConfigurationStatement {
+            if_exists: true,
+            config_name,
+            ..
+        }) if config_name == "dummy_tst"
     ));
 }
 
@@ -3378,6 +3481,28 @@ fn parse_not_null_constraint_no_inherit() {
 
 #[test]
 fn parse_alter_table_set_statement() {
+    let stmt = parse_statement("alter table unlogged1 set logged").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableSetPersistence(AlterTableSetPersistenceStatement {
+            if_exists: false,
+            only: false,
+            table_name: "unlogged1".into(),
+            persistence: TablePersistence::Permanent,
+        })
+    );
+
+    let stmt = parse_statement("alter table unlogged1 set unlogged").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableSetPersistence(AlterTableSetPersistenceStatement {
+            if_exists: false,
+            only: false,
+            table_name: "unlogged1".into(),
+            persistence: TablePersistence::Unlogged,
+        })
+    );
+
     let stmt = parse_statement("alter table num_variance set (parallel_workers = 4)").unwrap();
     assert_eq!(
         stmt,
@@ -9302,6 +9427,11 @@ fn parse_insert_update_delete() {
         parse_statement("create table withoid() with (oids = true)"),
         Err(ParseError::TablesDeclaredWithOidsNotSupported)
     ));
+    assert!(matches!(
+        parse_statement("create table withoid() with oids"),
+        Err(ParseError::UnexpectedToken { actual, .. })
+            if actual == "syntax error at or near \"OIDS\""
+    ));
     assert!(
         matches!(parse_statement("create table pg_temp.tempy (id int4)").unwrap(), Statement::CreateTable(CreateTableStatement { schema_name: Some(schema), table_name, persistence: TablePersistence::Permanent, .. }) if schema == "pg_temp" && table_name == "tempy")
     );
@@ -9323,6 +9453,12 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create temp table tempy(id) as select 1").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, column_names, persistence: TablePersistence::Temporary, .. }) if table_name == "tempy" && column_names == vec!["id"])
     );
     assert!(
+        matches!(parse_statement("create unlogged table unlogged_items(id int4)").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, persistence: TablePersistence::Unlogged, .. }) if table_name == "unlogged_items")
+    );
+    assert!(
+        matches!(parse_statement("create table ctas_opts with (fillfactor=70) as select 1").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, .. }) if table_name == "ctas_opts")
+    );
+    assert!(
         matches!(
             parse_statement("create materialized view if not exists mv_items(id, name) as select id, name from people with no data").unwrap(),
             Statement::CreateTableAs(CreateTableAsStatement {
@@ -9339,7 +9475,16 @@ fn parse_insert_update_delete() {
         )
     );
     assert!(
-        matches!(parse_statement("select * into cmmove1 from cmdata").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { schema_name: None, table_name, persistence: TablePersistence::Permanent, column_names, query: SelectStatement { from: Some(FromItem::Table { name, .. }), .. }, .. }) if table_name == "cmmove1" && column_names.is_empty() && name == "cmdata")
+        matches!(parse_statement("select * into cmmove1 from cmdata").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { schema_name: None, table_name, persistence: TablePersistence::Permanent, column_names, query: CreateTableAsQuery::Select(SelectStatement { from: Some(FromItem::Table { name, .. }), .. }), .. }) if table_name == "cmmove1" && column_names.is_empty() && name == "cmdata")
+    );
+    assert!(
+        matches!(parse_statement("prepare q as select * from cmdata").unwrap(), Statement::Prepare(PrepareStatement { name, .. }) if name == "q")
+    );
+    assert!(
+        matches!(parse_statement("create table from_prep as execute q").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { query: CreateTableAsQuery::Execute(name), .. }) if name == "q")
+    );
+    assert!(
+        matches!(parse_statement("deallocate prepare q").unwrap(), Statement::Deallocate(DeallocateStatement { name: Some(name) }) if name == "q")
     );
     assert!(
         matches!(parse_statement("select * into temp table tempy from cmdata").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, persistence: TablePersistence::Temporary, .. }) if table_name == "tempy")

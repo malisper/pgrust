@@ -5,11 +5,12 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{
     ColumnConstraint, ConstraintAttributes, CreateTableElement, CreateTableLikeClause,
-    CreateTableLikeOption, RawTypeName, SequenceOptionsSpec, SerialKind, SqlType, SqlTypeKind,
-    TableConstraint,
+    CreateTableLikeOption, RawTypeName, SequenceOptionsSpec, SerialKind, SqlExpr, SqlType,
+    SqlTypeKind, TableConstraint,
 };
 use crate::include::access::htup::{AttributeCompression, AttributeStorage};
 use crate::include::catalog::{CONSTRAINT_CHECK, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
+use crate::include::nodes::primnodes::expr_contains_set_returning;
 use crate::pgrust::database::ddl::format_sql_type_name;
 
 use super::{
@@ -108,11 +109,14 @@ pub fn lower_create_table(
                 if sql_type.kind == SqlTypeKind::AnyArray {
                     return Err(ParseError::UnsupportedType("anyarray".into()));
                 }
-                if matches!(sql_type.kind, SqlTypeKind::Cstring) {
+                if matches!(sql_type.kind, SqlTypeKind::Cstring)
+                    || sql_type.type_oid == crate::include::catalog::UNKNOWN_TYPE_OID
+                {
                     return Err(ParseError::DetailedError {
                         message: format!(
-                            "column \"{}\" has pseudo-type cstring",
-                            column.name
+                            "column \"{}\" has pseudo-type {}",
+                            column.name,
+                            super::sql_type_name(sql_type)
                         ),
                         detail: None,
                         hint: None,
@@ -217,6 +221,9 @@ pub fn lower_create_table(
                         && let Some(type_default) = catalog.type_default_sql(type_oid)
                     {
                         desc.default_expr = Some(type_default);
+                    }
+                    if let Some(default_sql) = desc.default_expr.as_deref() {
+                        validate_column_default_expr(default_sql, catalog)?;
                     }
                     desc.missing_default_value = desc
                         .default_expr
@@ -689,6 +696,219 @@ fn constraint_column_names(attnums: Option<&[i16]>, desc: &RelationDesc) -> Opti
         .collect()
 }
 
+fn validate_column_default_expr(
+    default_sql: &str,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    let parsed = crate::backend::parser::parse_expr(default_sql)?;
+    if raw_expr_any(&parsed, &|expr| matches!(expr, SqlExpr::Column(_))) {
+        return Err(default_expr_error(
+            "cannot use column reference in DEFAULT expression",
+        ));
+    }
+    if super::agg::expr_contains_agg(catalog, &parsed) {
+        return Err(default_expr_error(
+            "aggregate functions are not allowed in DEFAULT expressions",
+        ));
+    }
+    if raw_expr_any(&parsed, &|expr| {
+        matches!(expr, SqlExpr::FuncCall { over: Some(_), .. })
+    }) {
+        return Err(default_expr_error(
+            "window functions are not allowed in DEFAULT expressions",
+        ));
+    }
+    if raw_expr_any(&parsed, &|expr| {
+        matches!(
+            expr,
+            SqlExpr::ScalarSubquery(_)
+                | SqlExpr::ArraySubquery(_)
+                | SqlExpr::Exists(_)
+                | SqlExpr::InSubquery { .. }
+                | SqlExpr::QuantifiedSubquery { .. }
+        )
+    }) {
+        return Err(default_expr_error(
+            "cannot use subquery in DEFAULT expression",
+        ));
+    }
+    let (bound, _) = super::bind_scalar_expr_in_scope(&parsed, &[], catalog)?;
+    if expr_contains_set_returning(&bound) {
+        return Err(default_expr_error(
+            "set-returning functions are not allowed in DEFAULT expressions",
+        ));
+    }
+    Ok(())
+}
+
+fn default_expr_error(message: impl Into<String>) -> ParseError {
+    ParseError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn raw_expr_any(expr: &SqlExpr, predicate: &impl Fn(&SqlExpr) -> bool) -> bool {
+    if predicate(expr) {
+        return true;
+    }
+    match expr {
+        SqlExpr::Column(_)
+        | SqlExpr::Default
+        | SqlExpr::Const(_)
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
+        | SqlExpr::Random
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentCatalog
+        | SqlExpr::CurrentSchema
+        | SqlExpr::CurrentUser
+        | SqlExpr::SessionUser
+        | SqlExpr::CurrentRole
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. }
+        | SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
+        | SqlExpr::Exists(_) => false,
+        SqlExpr::FuncCall {
+            args,
+            order_by,
+            within_group,
+            filter,
+            ..
+        } => {
+            args.args()
+                .iter()
+                .any(|arg| raw_expr_any(&arg.value, predicate))
+                || order_by
+                    .iter()
+                    .any(|item| raw_expr_any(&item.expr, predicate))
+                || within_group.as_deref().is_some_and(|items| {
+                    items.iter().any(|item| raw_expr_any(&item.expr, predicate))
+                })
+                || filter
+                    .as_deref()
+                    .is_some_and(|expr| raw_expr_any(expr, predicate))
+        }
+        SqlExpr::InSubquery { expr, .. } => raw_expr_any(expr, predicate),
+        SqlExpr::QuantifiedSubquery { left, .. } => raw_expr_any(left, predicate),
+        SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
+            raw_expr_any(expr, predicate)
+        }
+        SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => {
+            elements.iter().any(|expr| raw_expr_any(expr, predicate))
+        }
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            raw_expr_any(array, predicate)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_deref()
+                        .is_some_and(|expr| raw_expr_any(expr, predicate))
+                        || subscript
+                            .upper
+                            .as_deref()
+                            .is_some_and(|expr| raw_expr_any(expr, predicate))
+                })
+        }
+        SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::Overlaps(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
+        | SqlExpr::QuantifiedArray {
+            left, array: right, ..
+        }
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonbExistsAny(left, right)
+        | SqlExpr::JsonbExistsAll(left, right)
+        | SqlExpr::JsonbPathExists(left, right)
+        | SqlExpr::JsonbPathMatch(left, right)
+        | SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::GeometryBinaryOp { left, right, .. }
+        | SqlExpr::AtTimeZone {
+            expr: left,
+            zone: right,
+        }
+        | SqlExpr::BinaryOperator { left, right, .. } => {
+            raw_expr_any(left, predicate) || raw_expr_any(right, predicate)
+        }
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            raw_expr_any(expr, predicate)
+                || raw_expr_any(pattern, predicate)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| raw_expr_any(expr, predicate))
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            arg.as_deref()
+                .is_some_and(|expr| raw_expr_any(expr, predicate))
+                || args.iter().any(|arm| {
+                    raw_expr_any(&arm.expr, predicate) || raw_expr_any(&arm.result, predicate)
+                })
+                || defresult
+                    .as_deref()
+                    .is_some_and(|expr| raw_expr_any(expr, predicate))
+        }
+        SqlExpr::Cast(inner, _)
+        | SqlExpr::Collate { expr: inner, .. }
+        | SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
+        | SqlExpr::Not(inner)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::Subscript { expr: inner, .. } => raw_expr_any(inner, predicate),
+        SqlExpr::Xml(xml) => xml.child_exprs().any(|expr| raw_expr_any(expr, predicate)),
+    }
+}
+
 fn serial_kind_for_identity_sql_type(sql_type: SqlType) -> Result<SerialKind, ParseError> {
     match sql_type.kind {
         SqlTypeKind::Int2 if !sql_type.is_array => Ok(SerialKind::Small),
@@ -803,6 +1023,106 @@ mod tests {
             ),
             Err(ParseError::UnsupportedType("anyarray".into()))
         );
+    }
+
+    #[test]
+    fn lower_create_table_rejects_unknown_pseudotype_columns() {
+        let stmt = CreateTableStatement {
+            schema_name: None,
+            table_name: "bad_unknown".into(),
+            of_type_name: None,
+            persistence: TablePersistence::Permanent,
+            on_commit: OnCommitAction::PreserveRows,
+            elements: vec![CreateTableElement::Column(ColumnDef {
+                name: "u".into(),
+                ty: RawTypeName::Named {
+                    name: "unknown".into(),
+                    array_bounds: 0,
+                },
+                collation: None,
+                default_expr: None,
+                generated: None,
+                identity: None,
+                storage: None,
+                compression: None,
+                constraints: vec![],
+            })],
+            options: Vec::new(),
+            inherits: Vec::new(),
+            partition_spec: None,
+            partition_of: None,
+            partition_bound: None,
+            if_not_exists: false,
+        };
+
+        assert_eq!(
+            lower_create_table(
+                &stmt,
+                &crate::backend::parser::analyze::LiteralDefaultCatalog
+            ),
+            Err(ParseError::DetailedError {
+                message: "column \"u\" has pseudo-type unknown".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            })
+        );
+    }
+
+    #[test]
+    fn lower_create_table_rejects_invalid_default_expressions() {
+        fn stmt(default_expr: &str) -> CreateTableStatement {
+            CreateTableStatement {
+                schema_name: None,
+                table_name: "bad_default".into(),
+                of_type_name: None,
+                persistence: TablePersistence::Permanent,
+                on_commit: OnCommitAction::PreserveRows,
+                elements: vec![CreateTableElement::Column(ColumnDef {
+                    name: "u".into(),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                    collation: None,
+                    default_expr: Some(default_expr.into()),
+                    generated: None,
+                    identity: None,
+                    storage: None,
+                    compression: None,
+                    constraints: vec![],
+                })],
+                options: Vec::new(),
+                inherits: Vec::new(),
+                partition_spec: None,
+                partition_of: None,
+                partition_bound: None,
+                if_not_exists: false,
+            }
+        }
+
+        for (default_expr, expected) in [
+            ("u", "cannot use column reference in DEFAULT expression"),
+            (
+                "sum(1)",
+                "aggregate functions are not allowed in DEFAULT expressions",
+            ),
+            (
+                "sum(1) over ()",
+                "window functions are not allowed in DEFAULT expressions",
+            ),
+            ("(select 1)", "cannot use subquery in DEFAULT expression"),
+            (
+                "generate_series(1, 2)",
+                "set-returning functions are not allowed in DEFAULT expressions",
+            ),
+        ] {
+            assert!(matches!(
+                lower_create_table(
+                    &stmt(default_expr),
+                    &crate::backend::parser::analyze::LiteralDefaultCatalog
+                ),
+                Err(ParseError::DetailedError { message, sqlstate, .. })
+                    if message == expected && sqlstate == "0A000"
+            ));
+        }
     }
 
     #[test]

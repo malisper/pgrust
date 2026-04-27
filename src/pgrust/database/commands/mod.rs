@@ -41,6 +41,7 @@ mod session_auth;
 mod tablespace;
 mod text_search;
 mod trigger;
+mod tsearch;
 mod typecmds;
 mod typed_table;
 mod vacuum_full;

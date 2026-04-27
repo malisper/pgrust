@@ -1242,6 +1242,9 @@ pub(crate) fn format_sql_type_name(sql_type: SqlType) -> String {
     if let Some((precision, scale)) = sql_type.numeric_precision_scale() {
         return format!("numeric({precision},{scale})");
     }
+    if sql_type.is_array {
+        return format!("{}[]", format_sql_type_name(sql_type.element_type()));
+    }
     if !sql_type.is_array
         && sql_type.type_oid != 0
         && let Some(name) = builtin_type_name_for_oid(sql_type.type_oid)
@@ -1350,6 +1353,12 @@ mod tests {
         assert_eq!(
             format_sql_type_name(SqlType::with_numeric_precision_scale(12, 4)),
             "numeric(12,4)"
+        );
+        assert_eq!(
+            format_sql_type_name(SqlType::array_of(SqlType::new(
+                crate::backend::parser::SqlTypeKind::Int4
+            ))),
+            "integer[]"
         );
     }
 }

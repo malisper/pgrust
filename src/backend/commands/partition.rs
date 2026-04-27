@@ -6,7 +6,6 @@ use crate::backend::executor::value_io::format_failing_row_detail;
 use crate::backend::executor::{
     ExecError, ExecutorContext, TupleSlot, compare_order_values, eval_expr,
     execute_scalar_function_value_call, render_datetime_value_text_with_config,
-    render_explain_expr,
 };
 use crate::backend::parser::{
     BoundRelation, CatalogLookup, LoweredPartitionSpec, PartitionBoundSpec,
@@ -326,21 +325,15 @@ fn key_values(
 }
 
 fn partition_key_names(relation: &BoundRelation, spec: &LoweredPartitionSpec) -> Vec<String> {
-    let column_names = relation
-        .desc
-        .columns
-        .iter()
-        .map(|column| column.name.clone())
-        .collect::<Vec<_>>();
     spec.partattrs
         .iter()
         .enumerate()
         .map(|(index, attnum)| {
             if *attnum == 0 {
                 return spec
-                    .key_exprs
+                    .key_sqls
                     .get(index)
-                    .map(|expr| render_explain_expr(expr, &column_names))
+                    .map(|expr| format_partition_key_expr_name(expr))
                     .unwrap_or_else(|| format!("partition key {}", index + 1));
             }
             relation
@@ -351,6 +344,62 @@ fn partition_key_names(relation: &BoundRelation, spec: &LoweredPartitionSpec) ->
                 .unwrap_or_else(|| format!("partition key {}", index + 1))
         })
         .collect()
+}
+
+fn format_partition_key_expr_name(expr_sql: &str) -> String {
+    let stripped = strip_outer_expr_parens(expr_sql.trim());
+    let normalized = normalize_partition_expr_operator_spacing(stripped);
+    if normalized.contains(" + ")
+        || normalized.contains(" - ")
+        || normalized.contains(" * ")
+        || normalized.contains(" / ")
+        || normalized.contains(" % ")
+    {
+        format!("({normalized})")
+    } else {
+        normalized
+    }
+}
+
+fn strip_outer_expr_parens(expr: &str) -> &str {
+    if !expr.starts_with('(') || !expr.ends_with(')') {
+        return expr;
+    }
+    let mut depth = 0_i32;
+    for (index, ch) in expr.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 && index != expr.len() - 1 {
+                    return expr;
+                }
+            }
+            _ => {}
+        }
+    }
+    expr[1..expr.len() - 1].trim()
+}
+
+fn normalize_partition_expr_operator_spacing(expr: &str) -> String {
+    let mut out = String::with_capacity(expr.len());
+    let mut chars = expr.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if matches!(ch, '+' | '*' | '/' | '%') || (ch == '-' && !out.trim_end().is_empty()) {
+            while out.ends_with(' ') {
+                out.pop();
+            }
+            out.push(' ');
+            out.push(ch);
+            out.push(' ');
+            while chars.peek().is_some_and(|next| next.is_ascii_whitespace()) {
+                chars.next();
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn acl_item_grants_privilege(
@@ -942,6 +991,22 @@ fn hash_moduli_compatible(left: i32, right: i32) -> bool {
     higher % lower == 0
 }
 
+fn hash_modulus_compatibility_detail(
+    new_modulus: i32,
+    existing_modulus: i32,
+    existing_name: &str,
+) -> String {
+    if new_modulus > existing_modulus {
+        format!(
+            "The new modulus {new_modulus} is not divisible by {existing_modulus}, the modulus of existing partition \"{existing_name}\"."
+        )
+    } else {
+        format!(
+            "The new modulus {new_modulus} is not a factor of {existing_modulus}, the modulus of existing partition \"{existing_name}\"."
+        )
+    }
+}
+
 fn hash_bounds_overlap(
     left_modulus: i32,
     left_remainder: i32,
@@ -966,6 +1031,24 @@ pub(crate) fn validate_new_partition_bound(
     skip_child_oid: Option<u32>,
 ) -> Result<(), ExecError> {
     let spec = relation_partition_spec(parent).map_err(ExecError::Parse)?;
+    if let PartitionBoundSpec::Range {
+        from,
+        to,
+        is_default: false,
+    } = bound
+        && compare_range_bounds(from, to, &spec.partcollation)? != Ordering::Less
+    {
+        return Err(ExecError::DetailedError {
+            message: format!("empty range bound specified for partition \"{new_relation_name}\""),
+            detail: Some(format!(
+                "Specified lower bound ({}) is greater than or equal to upper bound ({}).",
+                format_range_bound_for_error(from),
+                format_range_bound_for_error(to)
+            )),
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
     if bound.is_default()
         && let Some(existing) = default_partition(catalog, parent, skip_child_oid)?
     {
@@ -982,9 +1065,12 @@ pub(crate) fn validate_new_partition_bound(
 
     if let PartitionBoundSpec::Hash {
         modulus: new_modulus,
-        ..
+        remainder: new_remainder,
     } = bound
     {
+        let mut next_larger_incompatible: Option<(i32, String)> = None;
+        let mut matching_lower_incompatible: Option<(i32, String)> = None;
+        let mut first_lower_incompatible: Option<(i32, String)> = None;
         for child in direct_partition_children(catalog, parent.relation_oid)? {
             if skip_child_oid.is_some_and(|oid| oid == child.relation_oid) {
                 continue;
@@ -992,19 +1078,40 @@ pub(crate) fn validate_new_partition_bound(
             let existing_bound = child_partition_bound(&child)?;
             if let PartitionBoundSpec::Hash {
                 modulus: existing_modulus,
-                ..
+                remainder: existing_remainder,
             } = existing_bound
                 && !hash_moduli_compatible(*new_modulus, existing_modulus)
             {
-                return Err(ExecError::DetailedError {
-                    message:
-                        "every hash partition modulus must be a factor of the next larger modulus"
-                            .into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42P17",
-                });
+                let existing_name = relation_name_for_oid(catalog, child.relation_oid);
+                if existing_modulus > *new_modulus {
+                    if next_larger_incompatible
+                        .as_ref()
+                        .is_none_or(|(modulus, _)| existing_modulus < *modulus)
+                    {
+                        next_larger_incompatible = Some((existing_modulus, existing_name));
+                    }
+                } else if *new_remainder % existing_modulus == existing_remainder {
+                    matching_lower_incompatible = Some((existing_modulus, existing_name));
+                } else if first_lower_incompatible.is_none() {
+                    first_lower_incompatible = Some((existing_modulus, existing_name));
+                }
             }
+        }
+        if let Some((existing_modulus, existing_name)) = next_larger_incompatible
+            .or(matching_lower_incompatible)
+            .or(first_lower_incompatible)
+        {
+            return Err(ExecError::DetailedError {
+                message: "every hash partition modulus must be a factor of the next larger modulus"
+                    .into(),
+                detail: Some(hash_modulus_compatibility_detail(
+                    *new_modulus,
+                    existing_modulus,
+                    &existing_name,
+                )),
+                hint: None,
+                sqlstate: "42P17",
+            });
         }
     }
 
@@ -1031,6 +1138,24 @@ pub(crate) fn validate_new_partition_bound(
     Ok(())
 }
 
+fn format_range_bound_for_error(bound: &[PartitionRangeDatumValue]) -> String {
+    bound
+        .iter()
+        .map(|datum| match datum {
+            PartitionRangeDatumValue::MinValue => "MINVALUE".into(),
+            PartitionRangeDatumValue::MaxValue => "MAXVALUE".into(),
+            PartitionRangeDatumValue::Value(value) => {
+                let value = partition_value_to_value(value);
+                render_partition_key_value(
+                    &value,
+                    &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub(crate) fn validate_partition_relation_compatibility(
     catalog: &dyn CatalogLookup,
     parent: &BoundRelation,
@@ -1039,12 +1164,12 @@ pub(crate) fn validate_partition_relation_compatibility(
     child_name: &str,
 ) -> Result<(), ExecError> {
     if parent.relkind != 'p' || parent.partitioned_table.is_none() {
-        return Err(ExecError::Parse(
-            crate::backend::parser::ParseError::WrongObjectType {
-                name: parent_name.to_string(),
-                expected: "partitioned table",
-            },
-        ));
+        return Err(ExecError::DetailedError {
+            message: format!("\"{parent_name}\" is not partitioned"),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
     }
     if !matches!(child.relkind, 'r' | 'p') {
         return Err(ExecError::Parse(

@@ -2188,6 +2188,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             's',
         ),
         proc_row(
+            3408,
+            "pg_get_partition_constraintdef",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_get_partition_constraintdef",
+            1,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
             1387,
             "pg_get_constraintdef",
             TEXT_TYPE_OID,
@@ -3545,6 +3557,30 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             false,
             'f',
             'v',
+        ),
+        proc_row(
+            2999,
+            "pg_relation_filenode",
+            OID_TYPE_OID,
+            &oid_argtypes(&[REGCLASS_TYPE_OID]),
+            "pg_relation_filenode",
+            1,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            3454,
+            "pg_filenode_relation",
+            REGCLASS_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID]),
+            "pg_filenode_relation",
+            2,
+            false,
+            false,
+            'f',
+            's',
         ),
         proc_row(
             2769,
@@ -9422,6 +9458,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_get_partkeydef", BuiltinScalarFunction::PgGetPartKeyDef),
         ("pg_get_indexdef", BuiltinScalarFunction::PgGetIndexDef),
         ("pg_get_indexdef_ext", BuiltinScalarFunction::PgGetIndexDef),
+        ("pg_get_partkeydef", BuiltinScalarFunction::PgGetPartKeyDef),
+        (
+            "pg_get_partition_constraintdef",
+            BuiltinScalarFunction::PgGetPartitionConstraintDef,
+        ),
         ("xmlcomment", BuiltinScalarFunction::XmlComment),
         ("xml_is_well_formed", BuiltinScalarFunction::XmlIsWellFormed),
         (
@@ -9506,6 +9547,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgEncodingToChar,
         ),
         ("pg_partition_root", BuiltinScalarFunction::PgPartitionRoot),
+        (
+            "pg_relation_filenode",
+            BuiltinScalarFunction::PgRelationFilenode,
+        ),
+        (
+            "pg_filenode_relation",
+            BuiltinScalarFunction::PgFilenodeRelation,
+        ),
         ("pg_my_temp_schema", BuiltinScalarFunction::PgMyTempSchema),
         (
             "pg_rust_internal_binary_coercible",
@@ -10061,6 +10110,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "json_extract_path_text",
             BuiltinScalarFunction::JsonExtractPathText,
         ),
+        // :HACK: Keep synthetic OID mapping for plain SQL/JSON query function
+        // spellings while they are lowered through legacy scalar builtins.
+        ("json_exists", BuiltinScalarFunction::JsonExists),
+        ("json_value", BuiltinScalarFunction::JsonValue),
+        ("json_query", BuiltinScalarFunction::JsonQuery),
         ("jsonb_typeof", BuiltinScalarFunction::JsonbTypeof),
         (
             "jsonb_array_length",
@@ -10650,6 +10704,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_get_expr", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_expr_ext", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_partkeydef", BuiltinScalarFunction::PgGetPartKeyDef),
+        (
+            "pg_get_partition_constraintdef",
+            BuiltinScalarFunction::PgGetPartitionConstraintDef,
+        ),
         (
             "pg_relation_is_publishable",
             BuiltinScalarFunction::PgRelationIsPublishable,
@@ -15917,7 +15975,9 @@ mod tests {
             BuiltinScalarFunction::PgDescribeObject,
             BuiltinScalarFunction::PgGetRuleDef,
             BuiltinScalarFunction::PgGetViewDef,
-            BuiltinScalarFunction::PgGetRuleDef,
+            BuiltinScalarFunction::PgGetPartKeyDef,
+            BuiltinScalarFunction::PgRelationFilenode,
+            BuiltinScalarFunction::PgFilenodeRelation,
             BuiltinScalarFunction::PgNotify,
             BuiltinScalarFunction::PgNotificationQueueUsage,
             BuiltinScalarFunction::PgIndexAmHasProperty,

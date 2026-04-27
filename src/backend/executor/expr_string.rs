@@ -591,7 +591,7 @@ fn to_char_interval_value(value: IntervalValue, format: &str) -> Option<String> 
     Some(out)
 }
 
-pub(super) fn eval_to_char_function(
+pub(crate) fn eval_to_char_function(
     values: &[Value],
     datetime_config: &DateTimeConfig,
 ) -> Result<Value, ExecError> {

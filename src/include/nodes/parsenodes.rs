@@ -338,6 +338,9 @@ pub enum Statement {
     CreateTablespace(CreateTablespaceStatement),
     CreateTable(CreateTableStatement),
     CreateTableAs(CreateTableAsStatement),
+    Prepare(PrepareStatement),
+    Execute(ExecuteStatement),
+    Deallocate(DeallocateStatement),
     CreateSequence(CreateSequenceStatement),
     CreateView(CreateViewStatement),
     RefreshMaterializedView(RefreshMaterializedViewStatement),
@@ -345,6 +348,11 @@ pub enum Statement {
     CreatePolicy(CreatePolicyStatement),
     CreateStatistics(CreateStatisticsStatement),
     AlterStatistics(AlterStatisticsStatement),
+    CreateTextSearchDictionary(CreateTextSearchDictionaryStatement),
+    AlterTextSearchDictionary(AlterTextSearchDictionaryStatement),
+    CreateTextSearchConfiguration(CreateTextSearchConfigurationStatement),
+    AlterTextSearchConfiguration(AlterTextSearchConfigurationStatement),
+    DropTextSearchConfiguration(DropTextSearchConfigurationStatement),
     CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
     CreateForeignServer(CreateForeignServerStatement),
     AlterForeignServerRename(AlterForeignServerRenameStatement),
@@ -390,6 +398,7 @@ pub enum Statement {
     AlterViewSetSchema(AlterRelationSetSchemaStatement),
     AlterViewOwner(AlterRelationOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
+    AlterTableSetPersistence(AlterTableSetPersistenceStatement),
     AlterTableSet(AlterTableSetStatement),
     AlterTableReset(AlterTableResetStatement),
     AlterTableReplicaIdentity(AlterTableReplicaIdentityStatement),
@@ -414,10 +423,10 @@ pub enum Statement {
     DropLanguage(DropLanguageStatement),
     AlterTriggerRename(AlterTriggerRenameStatement),
     CommentOnTable(CommentOnTableStatement),
+    CommentOnColumn(CommentOnColumnStatement),
     CommentOnView(CommentOnViewStatement),
     CommentOnIndex(CommentOnIndexStatement),
     CommentOnType(CommentOnTypeStatement),
-    CommentOnColumn(CommentOnColumnStatement),
     CommentOnConstraint(CommentOnConstraintStatement),
     CommentOnRule(CommentOnRuleStatement),
     CommentOnTrigger(CommentOnTriggerStatement),
@@ -879,6 +888,75 @@ pub struct CreateAggregateStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextSearchOptionValueKind {
+    Identifier,
+    String,
+    Integer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextSearchOption {
+    pub name: String,
+    pub value: String,
+    pub value_kind: TextSearchOptionValueKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTextSearchDictionaryStatement {
+    pub schema_name: Option<String>,
+    pub dictionary_name: String,
+    pub options: Vec<TextSearchOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTextSearchDictionaryStatement {
+    pub schema_name: Option<String>,
+    pub dictionary_name: String,
+    pub options: Vec<TextSearchOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTextSearchConfigurationStatement {
+    pub schema_name: Option<String>,
+    pub config_name: String,
+    pub copy_config_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterTextSearchConfigurationAction {
+    AlterMappingFor {
+        token_names: Vec<String>,
+        dictionary_names: Vec<String>,
+    },
+    AlterMappingReplace {
+        old_dictionary_name: String,
+        new_dictionary_name: String,
+    },
+    AddMapping {
+        token_names: Vec<String>,
+        dictionary_names: Vec<String>,
+    },
+    DropMapping {
+        if_exists: bool,
+        token_names: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTextSearchConfigurationStatement {
+    pub schema_name: Option<String>,
+    pub config_name: String,
+    pub action: AlterTextSearchConfigurationAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropTextSearchConfigurationStatement {
+    pub if_exists: bool,
+    pub schema_name: Option<String>,
+    pub config_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriggerTiming {
     Before,
     After,
@@ -1066,6 +1144,7 @@ pub struct CreateRangeTypeStatement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TablePersistence {
     Permanent,
+    Unlogged,
     Temporary,
 }
 
@@ -1934,17 +2013,40 @@ pub struct CreateTableAsStatement {
     pub persistence: TablePersistence,
     pub on_commit: OnCommitAction,
     pub column_names: Vec<String>,
-    pub query: SelectStatement,
+    pub query: CreateTableAsQuery,
     pub query_sql: Option<String>,
     pub if_not_exists: bool,
     pub object_type: TableAsObjectType,
     pub skip_data: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateTableAsQuery {
+    Select(SelectStatement),
+    Execute(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableAsObjectType {
     Table,
     MaterializedView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrepareStatement {
+    pub name: String,
+    pub query: SelectStatement,
+    pub query_sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecuteStatement {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeallocateStatement {
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2235,6 +2337,14 @@ pub struct AlterTableReplicaIdentityStatement {
     pub only: bool,
     pub table_name: String,
     pub index_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableSetPersistenceStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub persistence: TablePersistence,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2611,6 +2721,13 @@ pub struct CommentOnTableStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnColumnStatement {
+    pub table_name: String,
+    pub column_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnViewStatement {
     pub view_name: String,
     pub comment: Option<String>,
@@ -2625,13 +2742,6 @@ pub struct CommentOnIndexStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnTypeStatement {
     pub type_name: String,
-    pub comment: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommentOnColumnStatement {
-    pub relation_name: String,
-    pub column_name: String,
     pub comment: Option<String>,
 }
 
