@@ -682,11 +682,14 @@ pub(super) fn bind_from_item_with_ctes(
             let entry = catalog
                 .lookup_any_relation(name)
                 .ok_or_else(|| ParseError::UnknownTable(name.to_string()))?;
-            if !matches!(entry.relkind, 'r' | 'p' | 'v' | 'm' | 'S' | 't') {
+            if !matches!(entry.relkind, 'r' | 'p' | 'v' | 'm' | 'S' | 't' | 'f') {
                 return Err(ParseError::WrongObjectType {
                     name: name.to_string(),
                     expected: "table, view, materialized view, sequence, or TOAST table",
                 });
+            }
+            if entry.relkind == 'f' {
+                validate_foreign_table_scan_handler(catalog, entry.relation_oid)?;
             }
             let desc = entry.desc.clone();
             let mut plan = AnalyzedFrom::relation(
@@ -1387,6 +1390,60 @@ fn sql_json_table_quotes(quotes: JsonTableQuotes) -> SqlJsonTableQuotes {
         JsonTableQuotes::Keep => SqlJsonTableQuotes::Keep,
         JsonTableQuotes::Omit => SqlJsonTableQuotes::Omit,
     }
+}
+
+fn validate_foreign_table_scan_handler(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> Result<(), ParseError> {
+    let foreign_table = catalog
+        .foreign_table_rows()
+        .into_iter()
+        .find(|row| row.ftrelid == relation_oid)
+        .ok_or_else(|| ParseError::DetailedError {
+            message: format!("cache lookup failed for foreign table {relation_oid}"),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    let server = catalog
+        .foreign_server_rows()
+        .into_iter()
+        .find(|row| row.oid == foreign_table.ftserver)
+        .ok_or_else(|| ParseError::DetailedError {
+            message: format!(
+                "cache lookup failed for foreign server {}",
+                foreign_table.ftserver
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    let fdw = catalog
+        .foreign_data_wrapper_rows()
+        .into_iter()
+        .find(|row| row.oid == server.srvfdw)
+        .ok_or_else(|| ParseError::DetailedError {
+            message: format!(
+                "cache lookup failed for foreign-data wrapper {}",
+                server.srvfdw
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    if fdw.fdwhandler == 0 {
+        return Err(ParseError::DetailedError {
+            message: format!("foreign-data wrapper \"{}\" has no handler", fdw.fdwname),
+            detail: None,
+            hint: None,
+            sqlstate: "HV00N",
+        });
+    }
+
+    Err(ParseError::FeatureNotSupportedMessage(
+        "foreign table scans".into(),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]

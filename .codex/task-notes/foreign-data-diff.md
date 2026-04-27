@@ -60,6 +60,8 @@ Runtime behavior:
   rendering for user mappings
 - rejects `CREATE INDEX` on foreign tables with PostgreSQL's foreign-table
   unsupported-operation error and detail
+- validates foreign table scans during FROM binding so `SELECT` and non-ANALYZE
+  `EXPLAIN` report the FDW missing-handler error before planning/execution
 
 Tests run:
 - `cargo fmt`
@@ -139,9 +141,13 @@ Tests run:
 - `scripts/cargo_isolated.sh check`
 - `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
 - `scripts/run_regression.sh --skip-build --port 55471 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-foreign-index-error`
+- `scripts/cargo_isolated.sh test --lib --quiet scanning_foreign_table_requires_fdw_handler`
+- `scripts/cargo_isolated.sh check`
+- `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
+- `scripts/run_regression.sh --skip-build --port 55472 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-foreign-scan-handler`
 
 Remaining:
-`foreign_data` still fails, but improved to 400/539 matching queries and 1432
+`foreign_data` still fails, but improved to 402/539 matching queries and 1424
 diff lines in the latest run. Biggest
 remaining groups:
 - owner dependency reporting beyond the handled FDW function dependencies
