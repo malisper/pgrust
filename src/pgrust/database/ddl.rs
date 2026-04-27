@@ -17,6 +17,7 @@ use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
     ensure_class_rows, ensure_depend_rows, ensure_namespace_rows, ensure_rewrite_rows,
 };
+use crate::backend::utils::misc::notices::push_notice;
 use crate::include::access::htup::{AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID,
@@ -114,7 +115,10 @@ pub(super) fn lookup_heap_relation_for_alter_table(
             name: name.to_string(),
             expected: "table",
         })),
-        None if if_exists => Ok(None),
+        None if if_exists => {
+            push_notice(format!(r#"relation "{name}" does not exist, skipping"#));
+            Ok(None)
+        }
         None => Err(ExecError::Parse(ParseError::UnknownTable(name.to_string()))),
     }
 }
@@ -130,7 +134,10 @@ pub(super) fn lookup_table_or_partitioned_table_for_alter_table(
             name: name.to_string(),
             expected: "table",
         })),
-        None if if_exists => Ok(None),
+        None if if_exists => {
+            push_notice(format!(r#"relation "{name}" does not exist, skipping"#));
+            Ok(None)
+        }
         None => Err(ExecError::Parse(ParseError::UnknownTable(name.to_string()))),
     }
 }

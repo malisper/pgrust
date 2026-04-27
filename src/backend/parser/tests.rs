@@ -13371,6 +13371,16 @@ fn parse_foreign_data_wrapper_statements() {
         AlterGenericOptionAction::Add
     );
 
+    let Statement::AlterTableRenameColumn(rename_column) =
+        parse_statement("alter foreign table if exists ft rename c1 to c2").unwrap()
+    else {
+        panic!("expected alter foreign table rename column");
+    };
+    assert!(rename_column.if_exists);
+    assert_eq!(rename_column.table_name, "ft");
+    assert_eq!(rename_column.column_name, "c1");
+    assert_eq!(rename_column.new_column_name, "c2");
+
     let Statement::CreateUserMapping(create_mapping) = parse_statement(
         "create user mapping if not exists for current_user server srv options (user 'alice')",
     )

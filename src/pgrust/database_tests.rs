@@ -31936,6 +31936,94 @@ fn foreign_data_catalogs_track_servers_mappings_and_tables() {
 }
 
 #[test]
+fn foreign_tables_reject_unsupported_constraints() {
+    let base = temp_dir("foreign_table_constraints");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create foreign data wrapper fdw_constraints")
+        .unwrap();
+    db.execute(
+        1,
+        "create server fdw_constraints_srv foreign data wrapper fdw_constraints",
+    )
+    .unwrap();
+    db.execute(1, "create table fdw_ref (id int4 primary key)")
+        .unwrap();
+
+    let assert_error = |sql: &str, expected_message: &str| match db.execute(1, sql) {
+        Err(ExecError::DetailedError { message, .. }) if message == expected_message => {}
+        other => panic!("expected {expected_message:?} error, got {other:?}"),
+    };
+
+    assert_error(
+        "create foreign table fdw_pk (a int4 primary key) server fdw_constraints_srv",
+        "primary key constraints are not supported on foreign tables",
+    );
+    assert_error(
+        "create foreign table fdw_fk (a int4 references fdw_ref(id)) server fdw_constraints_srv",
+        "foreign key constraints are not supported on foreign tables",
+    );
+    assert_error(
+        "create foreign table fdw_unique (a int4, unique (a)) server fdw_constraints_srv",
+        "unique constraints are not supported on foreign tables",
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname in ('fdw_pk', 'fdw_fk', 'fdw_unique')",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn alter_foreign_table_if_exists_reports_missing_relation_notice() {
+    let base = temp_dir("alter_foreign_table_missing_notice");
+    let db = Database::open(&base, 64).unwrap();
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "alter foreign table if exists missing_fdw_table add column a int4",
+    )
+    .unwrap();
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(
+        notices[0].message,
+        r#"relation "missing_fdw_table" does not exist, skipping"#
+    );
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "alter foreign table if exists missing_fdw_table rename a to b",
+    )
+    .unwrap();
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(
+        notices[0].message,
+        r#"relation "missing_fdw_table" does not exist, skipping"#
+    );
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "alter foreign table if exists missing_fdw_table options (add sample 'true')",
+    )
+    .unwrap();
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(
+        notices[0].message,
+        r#"relation "missing_fdw_table" does not exist, skipping"#
+    );
+}
+
+#[test]
 fn pg_options_to_table_expands_foreign_data_options() {
     let base = temp_dir("pg_options_to_table_fdw");
     let db = Database::open(&base, 64).unwrap();

@@ -34,6 +34,10 @@ Runtime behavior:
 - stores and alters foreign table/column FDW options, including
   `ALTER FOREIGN TABLE ... OPTIONS`, add-column options, and column option
   changes through `pg_attribute.attfdwoptions`
+- rejects unsupported primary key, unique, foreign key, and exclusion
+  constraints on foreign tables before creating catalog rows
+- emits missing-relation notices for `ALTER TABLE/FOREIGN TABLE IF EXISTS`
+  paths that share the table lookup helpers
 
 Tests run:
 - `cargo fmt`
@@ -63,9 +67,17 @@ Tests run:
 - `scripts/cargo_isolated.sh test --lib --quiet foreign_data_catalogs_track_servers_mappings_and_tables`
 - `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
 - `scripts/run_regression.sh --skip-build --port 55443 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-column-alter`
+- `scripts/cargo_isolated.sh test --lib --quiet foreign_tables_reject_unsupported_constraints`
+- `scripts/run_regression.sh --skip-build --port 55444 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-foreign-constraints`
+- `scripts/cargo_isolated.sh test --lib --quiet parse_foreign_data_wrapper_statements`
+- `scripts/cargo_isolated.sh test --lib --quiet alter_foreign_table_if_exists_reports_missing_relation_notice`
+- `scripts/cargo_isolated.sh test --lib --quiet foreign_tables_reject_unsupported_constraints`
+- `scripts/cargo_isolated.sh check`
+- `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
+- `scripts/run_regression.sh --skip-build --port 55445 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-alter-missing-notices`
 
 Remaining:
-`foreign_data` still fails, but improved to 317/539 matching queries. Biggest
+`foreign_data` still fails, but improved to 343/539 matching queries. Biggest
 remaining groups:
 - FDW dependency reporting for handler functions and owners
 - full `IMPORT FOREIGN SCHEMA` callback behavior beyond missing-handler errors
