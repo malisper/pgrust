@@ -932,6 +932,9 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         timed: false,
         allow_side_effects: true,
         pending_async_notifications: Vec::new(),
+        catalog_effects: Vec::new(),
+        temp_effects: Vec::new(),
+        database: None,
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
         catalog: None,
@@ -1008,6 +1011,9 @@ fn run_plan(
         timed: false,
         allow_side_effects: true,
         pending_async_notifications: Vec::new(),
+        catalog_effects: Vec::new(),
+        temp_effects: Vec::new(),
+        database: None,
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
         catalog: None,
@@ -1120,6 +1126,9 @@ fn first_tuple_slot_kind_for_sql(
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            catalog_effects: Vec::new(),
+            temp_effects: Vec::new(),
+            database: None,
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
@@ -1214,6 +1223,9 @@ fn first_tuple_slot_kind_for_plan(
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            catalog_effects: Vec::new(),
+            temp_effects: Vec::new(),
+            database: None,
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog: None,
@@ -1322,6 +1334,9 @@ fn run_sql_with_catalog(
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            catalog_effects: Vec::new(),
+            temp_effects: Vec::new(),
+            database: None,
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
@@ -5034,7 +5049,9 @@ fn explain_indents_child_plan_nodes() {
                 "expected stored sort key display, got {rendered:?}"
             );
             assert!(
-                rendered.iter().any(|line| line.starts_with("  Seq Scan")),
+                rendered
+                    .iter()
+                    .any(|line| line.starts_with("  ->  Seq Scan")),
                 "expected indented seq scan child line, got {rendered:?}"
             );
         }
@@ -11271,6 +11288,9 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         timed: false,
         allow_side_effects: true,
         pending_async_notifications: Vec::new(),
+        catalog_effects: Vec::new(),
+        temp_effects: Vec::new(),
+        database: None,
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
         catalog: catalog.materialize_visible_catalog(),
@@ -15473,7 +15493,7 @@ fn explain_primary_key_groupby_reduction_hides_trim_projection() {
                 rendered.join("\n")
             );
             assert!(
-                rendered.iter().any(|line| line.trim() == "Group Key: (id)"),
+                rendered.iter().any(|line| line.trim() == "Group Key: id"),
                 "{}",
                 rendered.join("\n")
             );
@@ -23513,6 +23533,9 @@ fn large_object_metadata_tracks_create_and_unlink() {
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            catalog_effects: Vec::new(),
+            temp_effects: Vec::new(),
+            database: None,
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),

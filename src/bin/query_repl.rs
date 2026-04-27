@@ -635,6 +635,12 @@ fn run_statement(
                 stmt.relation_name, stmt.schema_name
             )),
         )),
+        Statement::AlterMaterializedViewSetSchema(stmt) => Err(ExecError::Parse(
+            ParseError::FeatureNotSupported(format!(
+                "ALTER MATERIALIZED VIEW SET SCHEMA in query_repl: {} -> {}",
+                stmt.relation_name, stmt.schema_name
+            )),
+        )),
         Statement::AlterSequence(stmt) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             format!("ALTER SEQUENCE in query_repl: {}", stmt.sequence_name),
         ))),
@@ -679,6 +685,9 @@ fn run_statement(
                 "ALTER TABLE ALTER COLUMN TYPE in query_repl: {}.{} -> {:?}",
                 stmt.table_name, stmt.column_name, stmt.ty
             ))))
+        }
+        Statement::Unsupported(stmt) if stmt.feature == "ALTER DEFAULT PRIVILEGES" => {
+            Ok(StatementResult::AffectedRows(0))
         }
         Statement::Unsupported(stmt) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             format!("{}: {}", stmt.feature, stmt.sql),
@@ -868,6 +877,9 @@ fn run_statement(
                 timed: false,
                 allow_side_effects: false,
                 pending_async_notifications: Vec::new(),
+                catalog_effects: Vec::new(),
+                temp_effects: Vec::new(),
+                database: None,
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
@@ -926,6 +938,9 @@ fn run_statement(
                 timed: false,
                 allow_side_effects: false,
                 pending_async_notifications: Vec::new(),
+                catalog_effects: Vec::new(),
+                temp_effects: Vec::new(),
+                database: None,
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
@@ -984,6 +999,9 @@ fn run_statement(
                 timed: false,
                 allow_side_effects: false,
                 pending_async_notifications: Vec::new(),
+                catalog_effects: Vec::new(),
+                temp_effects: Vec::new(),
+                database: None,
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
@@ -1042,6 +1060,9 @@ fn run_statement(
                 timed: false,
                 allow_side_effects: false,
                 pending_async_notifications: Vec::new(),
+                catalog_effects: Vec::new(),
+                temp_effects: Vec::new(),
+                database: None,
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
@@ -1204,6 +1225,9 @@ fn run_statement(
                 timed: false,
                 allow_side_effects: true,
                 pending_async_notifications: Vec::new(),
+                catalog_effects: Vec::new(),
+                temp_effects: Vec::new(),
+                database: None,
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
@@ -1262,6 +1286,9 @@ fn run_statement(
                 timed: false,
                 allow_side_effects: false,
                 pending_async_notifications: Vec::new(),
+                catalog_effects: Vec::new(),
+                temp_effects: Vec::new(),
+                database: None,
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
@@ -1323,6 +1350,9 @@ fn run_statement(
                     timed: false,
                     allow_side_effects: true,
                     pending_async_notifications: Vec::new(),
+                    catalog_effects: Vec::new(),
+                    temp_effects: Vec::new(),
+                    database: None,
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
                     catalog: relcache.materialize_visible_catalog(),
@@ -1395,6 +1425,9 @@ fn run_statement(
                     timed: false,
                     allow_side_effects: true,
                     pending_async_notifications: Vec::new(),
+                    catalog_effects: Vec::new(),
+                    temp_effects: Vec::new(),
+                    database: None,
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
                     catalog: relcache.materialize_visible_catalog(),
@@ -1467,6 +1500,9 @@ fn run_statement(
                     timed: false,
                     allow_side_effects: true,
                     pending_async_notifications: Vec::new(),
+                    catalog_effects: Vec::new(),
+                    temp_effects: Vec::new(),
+                    database: None,
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
                     catalog: relcache.materialize_visible_catalog(),

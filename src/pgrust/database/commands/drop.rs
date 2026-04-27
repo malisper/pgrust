@@ -686,6 +686,77 @@ fn record_drop_table_blocker(
     }
 }
 
+fn collect_drop_table_restrict_blockers(
+    ctx: &DropTableDependencyContext<'_>,
+    relation_oid: u32,
+    explicit_relation_oids: &BTreeSet<u32>,
+    plan: &mut DropTablePlan,
+    visited: &mut BTreeSet<u32>,
+) {
+    if !visited.insert(relation_oid) {
+        return;
+    }
+
+    let Some(class) = ctx.catcache.class_by_oid(relation_oid) else {
+        return;
+    };
+    let source_relkind = class.relkind;
+    let source_name = drop_table_display_relation_name(ctx.catcache, relation_oid, ctx.search_path);
+    let referenced_kind = drop_table_relation_kind_name(source_relkind);
+
+    for dep in drop_table_direct_dependencies(ctx, relation_oid) {
+        match dep {
+            DropTableDependency::Relation {
+                relation_oid: dependent_oid,
+                is_partition,
+                ..
+            } => {
+                if is_partition || explicit_relation_oids.contains(&dependent_oid) {
+                    collect_drop_table_restrict_blockers(
+                        ctx,
+                        dependent_oid,
+                        explicit_relation_oids,
+                        plan,
+                        visited,
+                    );
+                    continue;
+                }
+                record_drop_table_blocker(
+                    plan,
+                    source_relkind,
+                    source_name.clone(),
+                    dep.blocker_detail(referenced_kind, &source_name),
+                );
+                collect_drop_table_restrict_blockers(
+                    ctx,
+                    dependent_oid,
+                    explicit_relation_oids,
+                    plan,
+                    visited,
+                );
+            }
+            DropTableDependency::ForeignKey {
+                relation_oid: dependent_relation_oid,
+                ..
+            }
+            | DropTableDependency::Rule {
+                relation_oid: dependent_relation_oid,
+                ..
+            } => {
+                if explicit_relation_oids.contains(&dependent_relation_oid) {
+                    continue;
+                }
+                record_drop_table_blocker(
+                    plan,
+                    source_relkind,
+                    source_name.clone(),
+                    dep.blocker_detail(referenced_kind, &source_name),
+                );
+            }
+        }
+    }
+}
+
 fn plan_drop_table_relation(
     ctx: &DropTableDependencyContext<'_>,
     relation_oid: u32,
@@ -739,6 +810,15 @@ fn plan_drop_table_relation(
                         source_relkind,
                         source_name.clone(),
                         dep.blocker_detail(referenced_kind, &source_name),
+                    );
+                    let mut visited = BTreeSet::new();
+                    visited.insert(relation_oid);
+                    collect_drop_table_restrict_blockers(
+                        ctx,
+                        dependent_oid,
+                        explicit_relation_oids,
+                        plan,
+                        &mut visited,
                     );
                 }
             }
@@ -1391,7 +1471,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
-    ) -> Result<(), ExecError> {
+    ) -> Result<CommandId, ExecError> {
         let catcache = self
             .backend_catcache(client_id, Some((xid, cid)))
             .map_err(map_catalog_error)?;
@@ -1400,6 +1480,7 @@ impl Database {
             .class_rows()
             .into_iter()
             .filter(|row| row.relnamespace == schema_oid)
+            .filter(|row| matches!(row.relkind, 'r' | 'p' | 'm' | 'S' | 'v'))
             .collect::<Vec<_>>();
         let proc_rows = catcache
             .proc_rows()
@@ -1496,7 +1577,7 @@ impl Database {
             next_cid = next_cid.saturating_add(1);
         }
 
-        Ok(())
+        Ok(next_cid)
     }
 
     pub(crate) fn execute_drop_domain_stmt_with_search_path(
@@ -1804,6 +1885,7 @@ impl Database {
             configured_search_path,
             catalog_effects,
             Some(temp_effects),
+            drop_stmt.cascade,
             'v',
             "view",
         )
@@ -1837,7 +1919,11 @@ impl Database {
         for index_name in &drop_stmt.index_names {
             let Some(entry) = catalog.lookup_any_relation(index_name) else {
                 if drop_stmt.if_exists {
-                    push_notice(format!("index \"{index_name}\" does not exist, skipping"));
+                    let display_name = index_name.rsplit('.').next().unwrap_or(index_name);
+                    push_notice(format!(
+                        "index \"{}\" does not exist, skipping",
+                        display_name.trim_matches('"')
+                    ));
                     continue;
                 }
                 return Err(ExecError::DetailedError {
@@ -2302,8 +2388,9 @@ impl Database {
                     ),
                 }
             }
+            let mut namespace_cid = cid;
             if has_relations || has_procs {
-                self.drop_schema_owned_objects_in_transaction(
+                namespace_cid = self.drop_schema_owned_objects_in_transaction(
                     client_id,
                     schema.oid,
                     xid,
@@ -2315,7 +2402,7 @@ impl Database {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
                 xid,
-                cid,
+                cid: namespace_cid,
                 client_id,
                 waiter: Some(self.txn_waiter.clone()),
                 interrupts: self.interrupt_state(client_id),
@@ -2347,11 +2434,27 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         mut temp_effects: Option<&mut Vec<TempMutationEffect>>,
+        cascade: bool,
         expected_relkind: char,
         expected_name: &'static str,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        if cascade || matches!(expected_relkind, 'v' | 'm') {
+            return self.execute_drop_relation_dependency_stmt_in_transaction_with_search_path(
+                client_id,
+                relation_names,
+                if_exists,
+                xid,
+                cid,
+                configured_search_path,
+                catalog_effects,
+                temp_effects,
+                cascade,
+                expected_relkind,
+                expected_name,
+            );
+        }
         let rels = relation_names
             .iter()
             .filter_map(|name| catalog.lookup_any_relation(name).map(|e| e.rel))
@@ -2532,6 +2635,242 @@ impl Database {
         } else {
             result
         }
+    }
+
+    fn execute_drop_relation_dependency_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        relation_names: &[String],
+        if_exists: bool,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        mut temp_effects: Option<&mut Vec<TempMutationEffect>>,
+        cascade: bool,
+        expected_relkind: char,
+        expected_name: &'static str,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let search_path = self.effective_search_path(client_id, configured_search_path);
+        let catcache = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        let mut rels = Vec::new();
+        let mut explicit_relation_oids = BTreeSet::new();
+        let mut dropped = 0usize;
+
+        for relation_name in relation_names {
+            let relation = match catalog.lookup_any_relation(relation_name) {
+                Some(relation) if relation.relkind == expected_relkind => relation,
+                Some(_) => {
+                    return Err(ExecError::Parse(ParseError::WrongObjectType {
+                        name: relation_name.clone(),
+                        expected: expected_name,
+                    }));
+                }
+                None if if_exists => {
+                    push_notice(format!(
+                        "{} \"{}\" does not exist, skipping",
+                        expected_name,
+                        relation_name
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(relation_name)
+                            .trim_matches('"')
+                    ));
+                    continue;
+                }
+                None => {
+                    return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                        relation_name.clone(),
+                    )));
+                }
+            };
+            ensure_relation_owner(self, client_id, &relation, relation_name)?;
+            explicit_relation_oids.insert(relation.relation_oid);
+            rels.push(relation.rel);
+            dropped += 1;
+        }
+
+        lock_tables_interruptible(
+            &self.table_locks,
+            client_id,
+            &rels,
+            TableLockMode::AccessExclusive,
+            interrupts.as_ref(),
+        )?;
+
+        let result = (|| {
+            let graph = CatalogDependencyGraph::new(&catcache);
+            let dependency_ctx = DropTableDependencyContext {
+                catcache: &catcache,
+                graph: &graph,
+                constraints_by_oid: catcache
+                    .constraint_rows()
+                    .into_iter()
+                    .map(|row| (row.oid, row))
+                    .collect(),
+                rewrites_by_oid: catcache
+                    .rewrite_rows()
+                    .into_iter()
+                    .map(|row| (row.oid, row))
+                    .collect(),
+                search_path: &search_path,
+            };
+            let mut plan = DropTablePlan::default();
+            let behavior = DropBehavior::from_cascade(cascade);
+            for &relation_oid in &explicit_relation_oids {
+                plan_drop_table_relation(
+                    &dependency_ctx,
+                    relation_oid,
+                    &explicit_relation_oids,
+                    behavior,
+                    &mut plan,
+                );
+            }
+
+            if !cascade && !plan.blocker_details.is_empty() {
+                let (_, source_name) = plan
+                    .blocker_source
+                    .unwrap_or((expected_relkind, expected_name.to_string()));
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "cannot drop {expected_name} {source_name} because other objects depend on it"
+                    ),
+                    detail: Some(plan.blocker_details.join("\n")),
+                    hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+                    sqlstate: "2BP01",
+                });
+            }
+
+            if cascade {
+                match plan.notices.as_slice() {
+                    [] => {}
+                    [notice] => push_notice(notice.clone()),
+                    notices => push_notice_with_detail(
+                        format!("drop cascades to {} other objects", notices.len()),
+                        notices.join("\n"),
+                    ),
+                }
+            }
+
+            let mut next_cid = cid;
+            for rule in &plan.rule_drops {
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: Arc::clone(&interrupts),
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .drop_rule_mvcc(rule.rewrite_oid, &ctx)
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+                next_cid = next_cid.saturating_add(1);
+            }
+
+            for relation_oid in &plan.relation_drop_order {
+                let (relkind, relpersistence) = catcache
+                    .class_by_oid(*relation_oid)
+                    .map(|row| (row.relkind, row.relpersistence))
+                    .unwrap_or((expected_relkind, 'p'));
+                if relpersistence == 't' {
+                    let temp_name = self
+                        .temp_relation_name_for_oid(client_id, *relation_oid)
+                        .ok_or_else(|| {
+                            ExecError::Parse(ParseError::UnexpectedToken {
+                                expected: "tracked temporary relation",
+                                actual: relation_oid.to_string(),
+                            })
+                        })?;
+                    if relkind == 'v' {
+                        let ctx = CatalogWriteContext {
+                            pool: self.pool.clone(),
+                            txns: self.txns.clone(),
+                            xid,
+                            cid: next_cid,
+                            client_id,
+                            waiter: Some(self.txn_waiter.clone()),
+                            interrupts: Arc::clone(&interrupts),
+                        };
+                        let effect = self
+                            .catalog
+                            .write()
+                            .drop_view_by_oid_mvcc(*relation_oid, &ctx)
+                            .map(|(_, effect)| effect)
+                            .map_err(map_catalog_error)?;
+                        catalog_effects.push(effect);
+                        self.remove_temp_entry_after_catalog_drop(
+                            client_id,
+                            &temp_name,
+                            temp_effects
+                                .as_deref_mut()
+                                .expect("temp effects required for DROP VIEW"),
+                        )?;
+                    } else {
+                        self.drop_temp_relation_in_transaction(
+                            client_id,
+                            &temp_name,
+                            xid,
+                            next_cid,
+                            catalog_effects,
+                            temp_effects
+                                .as_deref_mut()
+                                .expect("temp effects required for DROP VIEW"),
+                        )?;
+                    }
+                    next_cid = next_cid.saturating_add(1);
+                    continue;
+                }
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: Some(self.txn_waiter.clone()),
+                    interrupts: Arc::clone(&interrupts),
+                };
+                let effect = match relkind {
+                    'v' => self
+                        .catalog
+                        .write()
+                        .drop_view_by_oid_mvcc(*relation_oid, &ctx)
+                        .map(|(_, effect)| effect),
+                    _ => self
+                        .catalog
+                        .write()
+                        .drop_relation_by_oid_mvcc(*relation_oid, &ctx)
+                        .map(|(_, effect)| effect),
+                }
+                .map_err(map_catalog_error)?;
+                if relkind != 'v' {
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                }
+                if matches!(relkind, 'r' | 'p' | 'm') {
+                    self.session_stats_state(client_id)
+                        .write()
+                        .note_relation_drop(*relation_oid, &self.stats);
+                }
+                catalog_effects.push(effect);
+                next_cid = next_cid.saturating_add(1);
+            }
+
+            Ok(StatementResult::AffectedRows(dropped))
+        })();
+
+        for rel in rels {
+            self.table_locks.unlock_table(rel, client_id);
+        }
+
+        result
     }
 }
 

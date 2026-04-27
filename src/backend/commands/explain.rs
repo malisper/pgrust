@@ -45,8 +45,26 @@ pub(crate) fn format_explain_lines_with_options(
     show_timing: bool,
     lines: &mut Vec<String>,
 ) {
+    format_explain_lines_with_options_inner(state, indent, analyze, show_costs, show_timing, lines);
+}
+
+fn format_explain_lines_with_options_inner(
+    state: &dyn PlanNode,
+    indent: usize,
+    analyze: bool,
+    show_costs: bool,
+    show_timing: bool,
+    lines: &mut Vec<String>,
+) {
     if let Some(child) = state.explain_passthrough() {
-        format_explain_lines_with_options(child, indent, analyze, show_costs, show_timing, lines);
+        format_explain_lines_with_options_inner(
+            child,
+            indent,
+            analyze,
+            show_costs,
+            show_timing,
+            lines,
+        );
         return;
     }
     push_explain_state_line(state, indent, analyze, show_costs, show_timing, lines);
@@ -87,6 +105,7 @@ pub(crate) fn format_explain_plan_with_subplans(
         show_costs,
         false,
         false,
+        false,
         &VerboseExplainContext::default(),
         lines,
     );
@@ -106,6 +125,7 @@ pub(crate) fn format_verbose_explain_plan_with_subplans(
         show_costs,
         true,
         false,
+        false,
         &VerboseExplainContext::default(),
         lines,
     );
@@ -118,6 +138,7 @@ fn format_explain_plan_with_subplans_inner(
     show_costs: bool,
     verbose: bool,
     is_child: bool,
+    qualify_aggregate_group_keys: bool,
     ctx: &VerboseExplainContext,
     lines: &mut Vec<String>,
 ) {
@@ -132,7 +153,15 @@ fn format_explain_plan_with_subplans_inner(
         && (!verbose || explain_passthrough_applies_in_verbose(plan))
     {
         format_explain_plan_with_subplans_inner(
-            child, subplans, indent, show_costs, verbose, is_child, ctx, lines,
+            child,
+            subplans,
+            indent,
+            show_costs,
+            verbose,
+            is_child,
+            qualify_aggregate_group_keys,
+            ctx,
+            lines,
         );
         return;
     }
@@ -159,7 +188,7 @@ fn format_explain_plan_with_subplans_inner(
             ctx,
             lines,
         );
-        if !push_nonverbose_plan_details(plan, indent, ctx, lines) {
+        if !push_nonverbose_plan_details(plan, indent, qualify_aggregate_group_keys, ctx, lines) {
             state.explain_details(indent, false, show_costs, lines);
         }
     }
@@ -195,6 +224,7 @@ fn push_direct_plan_subplans(
                 show_costs,
                 verbose,
                 true,
+                false,
                 &child_ctx,
                 lines,
             );
@@ -287,52 +317,35 @@ fn push_explain_state_line(
     show_timing: bool,
     lines: &mut Vec<String>,
 ) {
-    let prefix = explain_node_prefix(indent, false);
+    let prefix = explain_node_prefix(indent, indent > 0);
     let label = state.node_label();
     let plan_info = state.plan_info();
-    if analyze && show_costs && show_timing {
+    if analyze {
         let stats = state.node_stats();
-        let actual = format!(
-            " (actual time={:.3}..{:.3} rows={:.2} loops={})",
-            stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
-            stats.total_time.as_secs_f64() * 1000.0,
-            stats.rows as f64,
-            stats.loops,
-        );
-        lines.push(format!(
-            "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={}){actual}",
-            plan_info.startup_cost.as_f64(),
-            plan_info.total_cost.as_f64(),
-            plan_info.plan_rows.as_f64().round() as u64,
-            plan_info.plan_width,
-        ));
-    } else if analyze && show_costs {
-        let stats = state.node_stats();
-        lines.push(format!(
-            "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={}) (actual rows={:.2} loops={})",
-            plan_info.startup_cost.as_f64(),
-            plan_info.total_cost.as_f64(),
-            plan_info.plan_rows.as_f64().round() as u64,
-            plan_info.plan_width,
-            stats.rows as f64,
-            stats.loops,
-        ));
-    } else if analyze && !show_timing {
-        let stats = state.node_stats();
-        lines.push(format!(
-            "{prefix}{label}  (actual rows={:.2} loops={})",
-            stats.rows as f64, stats.loops,
-        ));
-    } else if analyze {
-        let stats = state.node_stats();
-        let actual = format!(
-            "actual time={:.3}..{:.3} rows={:.2} loops={}",
-            stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
-            stats.total_time.as_secs_f64() * 1000.0,
-            stats.rows as f64,
-            stats.loops,
-        );
-        lines.push(format!("{prefix}{label} ({actual})"));
+        let actual = if stats.loops == 0 {
+            "never executed".to_string()
+        } else if show_timing {
+            format!(
+                "actual time={:.3}..{:.3} rows={:.2} loops={}",
+                stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
+                stats.total_time.as_secs_f64() * 1000.0,
+                stats.rows as f64,
+                stats.loops,
+            )
+        } else {
+            format!("actual rows={:.2} loops={}", stats.rows as f64, stats.loops)
+        };
+        if show_costs {
+            lines.push(format!(
+                "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={}) ({actual})",
+                plan_info.startup_cost.as_f64(),
+                plan_info.total_cost.as_f64(),
+                plan_info.plan_rows.as_f64().round() as u64,
+                plan_info.plan_width,
+            ));
+        } else {
+            lines.push(format!("{prefix}{label} ({actual})"));
+        }
     } else if show_costs {
         lines.push(format!(
             "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={})",
@@ -368,6 +381,7 @@ fn push_explain_plan_state_line(
 fn push_nonverbose_plan_details(
     plan: &Plan,
     indent: usize,
+    qualify_aggregate_group_keys: bool,
     ctx: &VerboseExplainContext,
     lines: &mut Vec<String>,
 ) -> bool {
@@ -431,6 +445,7 @@ fn push_nonverbose_plan_details(
                         output_columns.get(index).map(|column| column.sql_type),
                         ctx,
                         *disabled,
+                        qualify_aggregate_group_keys,
                     );
                     if !group_items.contains(&rendered) {
                         group_items.push(rendered);
@@ -612,13 +627,74 @@ fn nonverbose_sort_items(
     ctx: &VerboseExplainContext,
 ) -> Vec<String> {
     if !display_items.is_empty() {
-        return display_items.to_vec();
+        return display_items
+            .iter()
+            .map(|item| {
+                remap_sort_display_item_through_aggregate(input, item)
+                    .unwrap_or_else(|| item.clone())
+            })
+            .collect();
     }
     let input_names = verbose_plan_output_exprs(input, ctx, true);
     items
         .iter()
         .map(|item| render_nonverbose_sort_item(item, &input_names, ctx))
         .collect()
+}
+
+fn remap_sort_display_item_through_aggregate(input: &Plan, item: &str) -> Option<String> {
+    if let Plan::Projection { input, .. }
+    | Plan::Filter { input, .. }
+    | Plan::SubqueryScan { input, .. } = input
+    {
+        return remap_sort_display_item_through_aggregate(input, item);
+    }
+    let Plan::Aggregate {
+        input: aggregate_input,
+        group_by,
+        ..
+    } = input
+    else {
+        return None;
+    };
+    let column = item.rsplit('.').next().unwrap_or(item);
+    let qualified_names = qualified_scan_output_names(aggregate_input)?;
+    group_by.iter().find_map(|expr| {
+        let Expr::Var(var) = expr else {
+            return None;
+        };
+        let index = crate::include::nodes::primnodes::attrno_index(var.varattno)?;
+        let qualified = qualified_names.get(index)?;
+        qualified
+            .rsplit('.')
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case(column))
+            .then(|| qualified.clone())
+    })
+}
+
+fn qualified_scan_output_names(plan: &Plan) -> Option<Vec<String>> {
+    match plan {
+        Plan::SeqScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexOnlyScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexScan {
+            relation_name,
+            desc,
+            ..
+        } => Some(qualified_base_scan_output_exprs(relation_name, desc)),
+        Plan::Filter { input, .. } | Plan::Projection { input, .. } => {
+            qualified_scan_output_names(input)
+        }
+        _ => None,
+    }
 }
 
 fn render_nonverbose_sort_item(
@@ -646,6 +722,7 @@ fn render_nonverbose_aggregate_group_key(
     sql_type: Option<crate::backend::parser::SqlType>,
     ctx: &VerboseExplainContext,
     force_xid_const: bool,
+    qualify_base_scan: bool,
 ) -> String {
     if force_xid_const
         || sql_type.is_some_and(|ty| matches!(ty.kind, crate::backend::parser::SqlTypeKind::Xid))
@@ -659,6 +736,10 @@ fn render_nonverbose_aggregate_group_key(
             force_xid_const,
         );
     }
+    if matches!(expr, Expr::Var(_)) {
+        let input_names = aggregate_group_key_input_names(input, ctx, qualify_base_scan);
+        return render_nonverbose_group_key_expr(expr, sql_type, &input_names, ctx, false);
+    }
     let input_names = input.column_names();
     let rendered = render_explain_expr(expr, &input_names);
     if !rendered.contains("?column?") && !group_key_refs_projection_alias(expr, input, &rendered) {
@@ -666,6 +747,23 @@ fn render_nonverbose_aggregate_group_key(
     }
     let input_names = nonverbose_aggregate_input_names(input, ctx);
     render_nonverbose_group_key_expr(expr, sql_type, &input_names, ctx, force_xid_const)
+}
+
+fn aggregate_group_key_input_names(
+    input: &Plan,
+    ctx: &VerboseExplainContext,
+    qualify_base_scan: bool,
+) -> Vec<String> {
+    if qualify_base_scan {
+        if let Some(names) = qualified_scan_output_names(input) {
+            return names;
+        }
+        return verbose_plan_output_exprs(input, ctx, true);
+    }
+    if matches!(input, Plan::Projection { .. }) {
+        return nonverbose_aggregate_input_names(input, ctx);
+    }
+    input.column_names()
 }
 
 fn group_key_refs_projection_alias(expr: &Expr, input: &Plan, rendered: &str) -> bool {
@@ -904,14 +1002,7 @@ fn render_nonverbose_group_key_expr(
         return format!("('{rendered}'::xid)");
     }
     if matches!(expr, Expr::Var(_)) {
-        let name = rendered
-            .rsplit_once('.')
-            .map(|(_, name)| name)
-            .unwrap_or(&rendered);
-        if name.starts_with('(') && name.ends_with(')') {
-            return name.to_string();
-        }
-        return format!("({name})");
+        return rendered;
     }
     if (matches!(expr, Expr::Op(_)) || rendered.contains(" || "))
         && rendered.starts_with('(')
@@ -1675,6 +1766,7 @@ fn explain_plan_children_with_context(
                 show_costs,
                 verbose,
                 true,
+                false,
                 ctx,
                 lines,
             );
@@ -1698,6 +1790,7 @@ fn explain_plan_children_with_context(
                 show_costs,
                 verbose,
                 true,
+                false,
                 &right_ctx,
                 lines,
             );
@@ -1711,6 +1804,7 @@ fn explain_plan_children_with_context(
                 show_costs,
                 verbose,
                 true,
+                false,
                 ctx,
                 lines,
             );
@@ -1743,6 +1837,7 @@ fn explain_plan_children_with_context(
                 show_costs,
                 verbose,
                 true,
+                true,
                 &child_ctx,
                 lines,
             );
@@ -1756,6 +1851,7 @@ fn explain_plan_children_with_context(
                 show_costs,
                 verbose,
                 true,
+                false,
                 ctx,
                 lines,
             );
@@ -1773,6 +1869,7 @@ fn explain_plan_children_with_context(
                     show_costs,
                     verbose,
                     true,
+                    matches!(plan, Plan::OrderBy { .. } | Plan::IncrementalSort { .. }),
                     ctx,
                     lines,
                 );
@@ -1802,6 +1899,7 @@ fn explain_plan_children_with_context(
                     show_costs,
                     verbose,
                     true,
+                    false,
                     &child_ctx,
                     lines,
                 );

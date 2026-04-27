@@ -2417,6 +2417,9 @@ pub(crate) fn raw_type_name_hint(raw: &RawTypeName) -> SqlType {
         RawTypeName::Serial(SerialKind::Big) => SqlType::new(SqlTypeKind::Int8),
         RawTypeName::Named { array_bounds, .. } => {
             let (base_name, _) = split_named_type_typmod(raw_type_name_name(raw));
+            if *array_bounds == 0 && base_name.eq_ignore_ascii_case("unknown") {
+                return SqlType::new(SqlTypeKind::Text);
+            }
             let mut ty = builtin_named_type_alias(base_name)
                 .unwrap_or_else(|| SqlType::new(SqlTypeKind::Composite));
             for _ in 0..*array_bounds {
@@ -2425,6 +2428,16 @@ pub(crate) fn raw_type_name_hint(raw: &RawTypeName) -> SqlType {
             ty
         }
         RawTypeName::Record => SqlType::record(RECORD_TYPE_OID),
+    }
+}
+
+pub(crate) fn raw_type_name_is_unknown(raw: &RawTypeName) -> bool {
+    match raw {
+        RawTypeName::Named { name, array_bounds } if *array_bounds == 0 => {
+            let (base_name, typmod_args) = split_named_type_typmod(name);
+            typmod_args.is_none() && base_name.eq_ignore_ascii_case("unknown")
+        }
+        _ => false,
     }
 }
 

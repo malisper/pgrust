@@ -510,7 +510,7 @@ pub(crate) struct DatabaseCreateGrant {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub(crate) enum TempMutationEffect {
+pub enum TempMutationEffect {
     Create {
         name: String,
         entry: RelCacheEntry,

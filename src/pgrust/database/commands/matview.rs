@@ -1,6 +1,8 @@
 use super::super::*;
+use super::create::describe_select_query_without_planning;
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::commands::tablecmds::{execute_insert_values, reinitialize_index_relation};
+use crate::backend::parser::{BoundIndexRelation, BoundRelation};
 use crate::backend::rewrite::load_view_return_select;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
@@ -9,7 +11,7 @@ use crate::include::nodes::parsenodes::{
     TableAsObjectType,
 };
 use crate::include::nodes::primnodes::QueryColumn;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 impl Database {
     pub(crate) fn execute_create_materialized_view_stmt_in_transaction_with_search_path(
@@ -53,11 +55,21 @@ impl Database {
             .is_some_and(|relation| relation.namespace_oid == namespace_oid)
         {
             if create_stmt.if_not_exists {
+                crate::backend::utils::misc::notices::push_notice(format!(
+                    "relation \"{}\" already exists, skipping",
+                    relation_notice_name(&matview_name)
+                ));
                 return Ok(StatementResult::AffectedRows(0));
             }
-            return Err(ExecError::Parse(ParseError::TableAlreadyExists(
-                matview_name,
-            )));
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "relation \"{}\" already exists",
+                    relation_notice_name(&matview_name)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P07",
+            });
         }
 
         let query_sql = create_stmt.query_sql.clone().ok_or_else(|| {
@@ -77,16 +89,19 @@ impl Database {
                 }));
             }
         };
-        let planned_stmt = crate::backend::parser::pg_plan_query(select_query, &catalog)?;
-        let columns = planned_stmt.columns();
-        let column_names = planned_stmt.column_names();
+        let (columns, column_names) = if create_stmt.skip_data {
+            describe_select_query_without_planning(select_query, &catalog)?
+        } else {
+            let planned_stmt = crate::backend::parser::pg_plan_query(select_query, &catalog)?;
+            (planned_stmt.columns(), planned_stmt.column_names())
+        };
         validate_matview_column_names(create_stmt, columns.len())?;
         let desc = matview_relation_desc(create_stmt, &columns, &column_names);
 
-        let rows = if create_stmt.skip_data {
-            Vec::new()
+        let (rows, create_cid) = if create_stmt.skip_data {
+            (Vec::new(), cid)
         } else {
-            execute_matview_select_rows(
+            let select_result = execute_matview_select_rows(
                 self,
                 client_id,
                 xid,
@@ -95,14 +110,17 @@ impl Database {
                 &catalog,
                 Statement::Select(select_query.clone()),
                 false,
-            )?
+            )?;
+            let create_cid = select_result.next_command_id.max(cid);
+            catalog_effects.extend(select_result.catalog_effects);
+            (select_result.rows, create_cid)
         };
 
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
             xid,
-            cid,
+            cid: create_cid,
             client_id,
             waiter: None,
             interrupts: Arc::clone(&interrupts),
@@ -119,6 +137,7 @@ impl Database {
                 crate::include::catalog::PG_TOAST_NAMESPACE_OID,
                 crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                 self.auth_state(client_id).current_user_oid(),
+                !create_stmt.skip_data,
                 &ctx,
             )
             .map_err(map_catalog_error)?;
@@ -134,7 +153,7 @@ impl Database {
             &mut referenced_relation_oids,
         );
         let rule_ctx = CatalogWriteContext {
-            cid: cid.saturating_add(1),
+            cid: create_cid.saturating_add(1),
             ..ctx
         };
         let rule_effect = self
@@ -177,27 +196,8 @@ impl Database {
                 &rows,
                 &mut insert_ctx,
                 xid,
-                cid,
+                create_cid,
             )?;
-        }
-
-        if create_stmt.skip_data {
-            let populated_ctx = CatalogWriteContext {
-                pool: self.pool.clone(),
-                txns: self.txns.clone(),
-                xid,
-                cid: cid.saturating_add(2),
-                client_id,
-                waiter: None,
-                interrupts: Arc::clone(&interrupts),
-            };
-            let effect = self
-                .catalog
-                .write()
-                .set_matview_populated_mvcc(created.entry.relation_oid, false, &populated_ctx)
-                .map_err(map_catalog_error)?;
-            self.apply_catalog_mutation_effect_immediate(&effect)?;
-            catalog_effects.push(effect);
         }
 
         Ok(StatementResult::AffectedRows(rows.len()))
@@ -212,12 +212,6 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        if refresh_stmt.concurrently {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
-                "REFRESH MATERIALIZED VIEW CONCURRENTLY is not supported".into(),
-            )));
-        }
-
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation = match catalog.lookup_any_relation(&refresh_stmt.relation_name) {
@@ -235,6 +229,7 @@ impl Database {
             }
         };
         ensure_relation_owner(self, client_id, &relation, &refresh_stmt.relation_name)?;
+        validate_concurrent_matview_refresh(refresh_stmt, &relation, &catalog)?;
         lock_tables_interruptible(
             &self.table_locks,
             client_id,
@@ -245,10 +240,10 @@ impl Database {
 
         let result = (|| {
             let select = load_view_return_select(relation.relation_oid, None, &catalog, &[])?;
-            let rows = if refresh_stmt.skip_data {
-                Vec::new()
+            let (rows, refresh_cid) = if refresh_stmt.skip_data {
+                (Vec::new(), cid)
             } else {
-                execute_matview_select_rows(
+                let select_result = execute_matview_select_rows(
                     self,
                     client_id,
                     xid,
@@ -257,18 +252,47 @@ impl Database {
                     &catalog,
                     Statement::Select(select),
                     false,
-                )?
+                )?;
+                let refresh_cid = select_result.next_command_id.max(cid);
+                catalog_effects.extend(select_result.catalog_effects);
+                (select_result.rows, refresh_cid)
             };
-            truncate_matview_storage(self, client_id, xid, cid, &relation, &catalog)?;
+            let refresh_catalog = self.lazy_catalog_lookup(
+                client_id,
+                Some((xid, refresh_cid)),
+                configured_search_path,
+            );
+            let refresh_relation = refresh_catalog
+                .relation_by_oid(relation.relation_oid)
+                .unwrap_or_else(|| relation.clone());
+            validate_concurrent_matview_unique_index_after_query(
+                refresh_stmt,
+                &refresh_relation,
+                &refresh_catalog,
+            )?;
+            validate_refresh_matview_rows(
+                refresh_stmt,
+                &refresh_relation,
+                &refresh_catalog,
+                &rows,
+            )?;
+            truncate_matview_storage(
+                self,
+                client_id,
+                xid,
+                refresh_cid,
+                &refresh_relation,
+                &refresh_catalog,
+            )?;
             if !rows.is_empty() {
                 insert_matview_rows(
                     self,
                     client_id,
                     xid,
-                    cid,
+                    refresh_cid,
                     Arc::clone(&interrupts),
-                    &relation,
-                    &catalog,
+                    &refresh_relation,
+                    &refresh_catalog,
                     &rows,
                 )?;
             }
@@ -276,7 +300,7 @@ impl Database {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
                 xid,
-                cid: cid.saturating_add(1),
+                cid: refresh_cid.saturating_add(1),
                 client_id,
                 waiter: Some(self.txn_waiter.clone()),
                 interrupts: Arc::clone(&interrupts),
@@ -357,6 +381,7 @@ impl Database {
             configured_search_path,
             catalog_effects,
             None,
+            drop_stmt.cascade,
             'm',
             "materialized view",
         )
@@ -447,6 +472,9 @@ impl Database {
             timed: false,
             allow_side_effects,
             pending_async_notifications: Vec::new(),
+            catalog_effects: Vec::new(),
+            temp_effects: Vec::new(),
+            database: Some(self.clone()),
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog,
@@ -459,6 +487,246 @@ impl Database {
             trigger_depth: 0,
         })
     }
+}
+
+fn validate_concurrent_matview_refresh(
+    refresh_stmt: &RefreshMaterializedViewStatement,
+    relation: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    if !refresh_stmt.concurrently {
+        return Ok(());
+    }
+    if !relation.relispopulated {
+        return Err(ExecError::DetailedError {
+            message: "CONCURRENTLY cannot be used when the materialized view is not populated"
+                .into(),
+            detail: None,
+            hint: None,
+            sqlstate: "55000",
+        });
+    }
+    if refresh_stmt.skip_data {
+        return Err(ExecError::DetailedError {
+            message: "CONCURRENTLY and WITH NO DATA options cannot be used together".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+    if catalog
+        .index_relations_for_heap(relation.relation_oid)
+        .iter()
+        .any(is_usable_unique_index_for_concurrent_refresh)
+    {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!(
+            "cannot refresh materialized view \"{}\" concurrently",
+            qualified_matview_name(catalog, relation)
+        ),
+        detail: None,
+        hint: Some(
+            "Create a unique index with no WHERE clause on one or more columns of the materialized view."
+                .into(),
+        ),
+        sqlstate: "55000",
+    })
+}
+
+fn is_usable_unique_index_for_concurrent_refresh(index: &BoundIndexRelation) -> bool {
+    let meta = &index.index_meta;
+    meta.indisunique
+        && meta.indimmediate
+        && meta.indisvalid
+        && meta.indisready
+        && meta.indislive
+        && meta.indpred.is_none()
+        && meta.indexprs.is_none()
+        && !meta.indkey.is_empty()
+        && meta.indkey.iter().all(|attnum| *attnum > 0)
+}
+
+fn validate_concurrent_matview_unique_index_after_query(
+    refresh_stmt: &RefreshMaterializedViewStatement,
+    relation: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    if !refresh_stmt.concurrently {
+        return Ok(());
+    }
+    if catalog
+        .index_relations_for_heap(relation.relation_oid)
+        .iter()
+        .any(is_usable_unique_index_for_concurrent_refresh)
+    {
+        return Ok(());
+    }
+    let relname = catalog
+        .class_row_by_oid(relation.relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation.relation_oid.to_string());
+    Err(ExecError::DetailedError {
+        message: format!(
+            "could not find suitable unique index on materialized view \"{}\"",
+            relname
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "55000",
+    })
+}
+
+fn validate_refresh_matview_rows(
+    refresh_stmt: &RefreshMaterializedViewStatement,
+    relation: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+    rows: &[Vec<Value>],
+) -> Result<(), ExecError> {
+    if refresh_stmt.concurrently {
+        if let Some(row) = first_duplicate_full_row_without_nulls(rows) {
+            let relname = catalog
+                .class_row_by_oid(relation.relation_oid)
+                .map(|row| row.relname)
+                .unwrap_or_else(|| relation.relation_oid.to_string());
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "new data for materialized view \"{}\" contains duplicate rows without any null columns",
+                    relname
+                ),
+                detail: Some(format!("Row: ({})", format_matview_row(row, false))),
+                hint: None,
+                sqlstate: "21000",
+            });
+        }
+        return Ok(());
+    }
+
+    if let Some((index_name, columns, values)) =
+        first_duplicate_unique_index_key(relation, catalog, rows)
+    {
+        return Err(ExecError::DetailedError {
+            message: format!("could not create unique index \"{}\"", index_name),
+            detail: Some(format!(
+                "Key ({})=({}) is duplicated.",
+                columns.join(", "),
+                format_matview_row(&values, true)
+            )),
+            hint: None,
+            sqlstate: "23505",
+        });
+    }
+    Ok(())
+}
+
+fn first_duplicate_full_row_without_nulls(rows: &[Vec<Value>]) -> Option<&[Value]> {
+    let mut seen = HashSet::new();
+    for row in rows {
+        if row.iter().any(|value| matches!(value, Value::Null)) {
+            continue;
+        }
+        if !seen.insert(row.clone()) {
+            return Some(row);
+        }
+    }
+    None
+}
+
+fn first_duplicate_unique_index_key(
+    relation: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+    rows: &[Vec<Value>],
+) -> Option<(String, Vec<String>, Vec<Value>)> {
+    for index in catalog.index_relations_for_heap(relation.relation_oid) {
+        let meta = &index.index_meta;
+        if !meta.indisunique
+            || !meta.indisvalid
+            || !meta.indisready
+            || meta.indexprs.is_some()
+            || meta.indpred.is_some()
+        {
+            continue;
+        }
+        let key_attnums = meta
+            .indkey
+            .iter()
+            .take(usize::try_from(meta.indnkeyatts.max(0)).ok()?)
+            .copied()
+            .collect::<Vec<_>>();
+        if key_attnums.is_empty() || key_attnums.iter().any(|attnum| *attnum <= 0) {
+            continue;
+        }
+        let mut key_indexes = Vec::with_capacity(key_attnums.len());
+        let mut key_columns = Vec::with_capacity(key_attnums.len());
+        for attnum in key_attnums {
+            let index = usize::try_from(attnum - 1).ok()?;
+            let column = relation.desc.columns.get(index)?;
+            key_indexes.push(index);
+            key_columns.push(column.name.clone());
+        }
+
+        let mut seen = HashSet::new();
+        for row in rows {
+            let key = key_indexes
+                .iter()
+                .filter_map(|index| row.get(*index).cloned())
+                .collect::<Vec<_>>();
+            if key.len() != key_indexes.len() {
+                continue;
+            }
+            if !meta.indnullsnotdistinct && key.iter().any(|value| matches!(value, Value::Null)) {
+                continue;
+            }
+            if !seen.insert(key.clone()) {
+                return Some((index.name, key_columns, key));
+            }
+        }
+    }
+    None
+}
+
+fn format_matview_row(values: &[Value], include_spaces: bool) -> String {
+    let separator = if include_spaces { ", " } else { "," };
+    values
+        .iter()
+        .map(format_matview_value)
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+fn format_matview_value(value: &Value) -> String {
+    match value {
+        Value::Null => "null".into(),
+        Value::Int16(value) => value.to_string(),
+        Value::Int32(value) => value.to_string(),
+        Value::Int64(value) => value.to_string(),
+        Value::Xid8(value) => value.to_string(),
+        Value::Money(value) => value.to_string(),
+        Value::Float64(value) => value.to_string(),
+        Value::Numeric(value) => value.render(),
+        Value::Text(value) => value.to_string(),
+        Value::TextRef(_, _) => value.as_text().unwrap_or_default().to_string(),
+        Value::Bool(true) => "t".into(),
+        Value::Bool(false) => "f".into(),
+        _ => format!("{value:?}"),
+    }
+}
+
+fn qualified_matview_name(catalog: &dyn CatalogLookup, relation: &BoundRelation) -> String {
+    let relname = catalog
+        .class_row_by_oid(relation.relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation.relation_oid.to_string());
+    let nspname = catalog
+        .namespace_row_by_oid(relation.namespace_oid)
+        .map(|row| row.nspname)
+        .unwrap_or_else(|| "public".into());
+    format!("{nspname}.{relname}")
+}
+
+fn relation_notice_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name).trim_matches('"')
 }
 
 fn validate_matview_column_names(
@@ -497,6 +765,12 @@ fn matview_relation_desc(
     }
 }
 
+struct MatviewSelectResult {
+    rows: Vec<Vec<Value>>,
+    catalog_effects: Vec<CatalogMutationEffect>,
+    next_command_id: CommandId,
+}
+
 fn execute_matview_select_rows(
     db: &Database,
     client_id: ClientId,
@@ -506,7 +780,7 @@ fn execute_matview_select_rows(
     catalog: &dyn CatalogLookup,
     stmt: Statement,
     allow_side_effects: bool,
-) -> Result<Vec<Vec<Value>>, ExecError> {
+) -> Result<MatviewSelectResult, ExecError> {
     let mut ctx = db.matview_executor_context(
         client_id,
         xid,
@@ -519,7 +793,11 @@ fn execute_matview_select_rows(
     else {
         unreachable!("materialized view query should return rows");
     };
-    Ok(rows)
+    Ok(MatviewSelectResult {
+        rows,
+        catalog_effects: ctx.catalog_effects,
+        next_command_id: ctx.next_command_id,
+    })
 }
 
 fn truncate_matview_storage(

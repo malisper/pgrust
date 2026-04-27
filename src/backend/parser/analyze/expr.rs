@@ -2485,7 +2485,11 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             )
         }
         SqlExpr::Cast(inner, ty) => {
-            let target_type = resolve_raw_type_name(ty, catalog)?;
+            let target_type = if raw_type_name_is_unknown(ty) {
+                SqlType::new(SqlTypeKind::Text)
+            } else {
+                resolve_raw_type_name(ty, catalog)?
+            };
             if let SqlExpr::FuncCall {
                 name,
                 args,
@@ -2549,7 +2553,11 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 )?
             };
-            let domain = domain_lookup_for_raw_type_name(ty, catalog);
+            let domain = if raw_type_name_is_unknown(ty) {
+                None
+            } else {
+                domain_lookup_for_raw_type_name(ty, catalog)
+            };
             if let SqlExpr::Negate(negated_inner) = inner.as_ref()
                 && matches!(
                     target_type.kind,

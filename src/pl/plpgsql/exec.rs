@@ -1039,7 +1039,8 @@ fn exec_do_stmt(
         | CompiledStmt::ExecUpdateInto { .. }
         | CompiledStmt::ExecUpdate { .. }
         | CompiledStmt::ExecDeleteInto { .. }
-        | CompiledStmt::ExecDelete { .. } => {
+        | CompiledStmt::ExecDelete { .. }
+        | CompiledStmt::CreateTableAs { .. } => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "statement is only supported inside CREATE FUNCTION".into(),
             )))
@@ -1466,6 +1467,10 @@ fn exec_function_stmt(
         }
         CompiledStmt::ExecDelete { stmt } => {
             exec_function_delete(stmt, compiled, state, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::CreateTableAs { stmt } => {
+            exec_function_create_table_as(stmt, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
     }
@@ -1911,8 +1916,81 @@ fn exec_function_delete_into(
     assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state, ctx)
 }
 
+fn exec_function_create_table_as(
+    stmt: &crate::backend::parser::CreateTableAsStatement,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let db = ctx.database.clone().ok_or_else(|| {
+        function_runtime_error(
+            "PL/pgSQL CREATE TABLE AS requires database execution context",
+            None,
+            "0A000",
+        )
+    })?;
+    let xid = ctx.ensure_write_xid()?;
+    let cid = ctx.next_command_id;
+    let effect_start = ctx.catalog_effects.len();
+    db.execute_create_table_as_stmt_in_transaction_with_search_path(
+        ctx.client_id,
+        stmt,
+        xid,
+        cid,
+        None,
+        crate::include::nodes::pathnodes::PlannerConfig::default(),
+        &mut ctx.catalog_effects,
+        &mut ctx.temp_effects,
+    )?;
+    let consumed_catalog_cids = ctx
+        .catalog_effects
+        .len()
+        .saturating_sub(effect_start)
+        .max(1);
+    advance_plpgsql_command_id_by(ctx, consumed_catalog_cids as u32);
+    state.values[compiled.found_slot] = Value::Bool(false);
+    Ok(())
+}
+
+fn exec_function_drop_index(
+    stmt: &crate::backend::parser::DropIndexStatement,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    let db = ctx.database.clone().ok_or_else(|| {
+        function_runtime_error(
+            "PL/pgSQL DROP INDEX requires database execution context",
+            None,
+            "0A000",
+        )
+    })?;
+    let xid = ctx.ensure_write_xid()?;
+    let cid = ctx.next_command_id;
+    let effect_start = ctx.catalog_effects.len();
+    let result = db.execute_drop_index_stmt_in_transaction_with_search_path(
+        ctx.client_id,
+        stmt,
+        xid,
+        cid,
+        None,
+        &mut ctx.catalog_effects,
+    );
+    if result.is_ok() {
+        let consumed_catalog_cids = ctx
+            .catalog_effects
+            .len()
+            .saturating_sub(effect_start)
+            .max(1);
+        advance_plpgsql_command_id_by(ctx, consumed_catalog_cids as u32);
+    }
+    result
+}
+
 fn advance_plpgsql_command_id(ctx: &mut ExecutorContext) {
-    ctx.next_command_id = ctx.next_command_id.saturating_add(1);
+    advance_plpgsql_command_id_by(ctx, 1);
+}
+
+fn advance_plpgsql_command_id_by(ctx: &mut ExecutorContext, count: CommandId) {
+    ctx.next_command_id = ctx.next_command_id.saturating_add(count);
     ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(ctx.next_command_id);
 }
 
@@ -2073,6 +2151,9 @@ fn execute_dynamic_statement(
                     advance_plpgsql_command_id(ctx);
                 }
                 result
+            }
+            crate::backend::parser::Statement::DropIndex(stmt) => {
+                exec_function_drop_index(&stmt, ctx)
             }
             crate::backend::parser::Statement::Set(stmt)
                 if stmt.name.eq_ignore_ascii_case("jit") =>
@@ -3263,7 +3344,8 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
         | CompiledStmt::ExecUpdateInto { .. }
         | CompiledStmt::ExecUpdate { .. }
         | CompiledStmt::ExecDeleteInto { .. }
-        | CompiledStmt::ExecDelete { .. } => "SQL statement",
+        | CompiledStmt::ExecDelete { .. }
+        | CompiledStmt::CreateTableAs { .. } => "SQL statement",
     }
 }
 

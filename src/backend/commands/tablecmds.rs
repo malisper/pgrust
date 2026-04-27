@@ -24,12 +24,12 @@ use crate::backend::parser::{
     BoundInsertStatement, BoundMergeAction, BoundMergeStatement, BoundMergeWhenClause,
     BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey, BoundRelation,
     BoundRelationConstraints, BoundTemporalConstraint, BoundUpdateStatement, BoundUpdateTarget,
-    Catalog, CatalogLookup, DropTableStatement, ExplainStatement, ForeignKeyAction,
-    MaintenanceTarget, MergeStatement, OverridingKind, ParseError, SelectStatement, SqlType,
-    SqlTypeKind, Statement, TruncateTableStatement, UpdateStatement, VacuumStatement,
-    bind_create_table, bind_expr_with_outer_and_ctes, bind_generated_expr,
-    bind_referenced_by_foreign_keys, bind_relation_constraints, bind_scalar_expr_in_scope,
-    bind_update, parse_expr, scope_for_relation,
+    Catalog, CatalogLookup, CreateTableAsStatement, DropTableStatement, ExplainStatement,
+    ForeignKeyAction, MaintenanceTarget, MergeStatement, OverridingKind, ParseError,
+    SelectStatement, SqlType, SqlTypeKind, Statement, TableAsObjectType, TruncateTableStatement,
+    UpdateStatement, VacuumStatement, bind_create_table, bind_expr_with_outer_and_ctes,
+    bind_generated_expr, bind_referenced_by_foreign_keys, bind_relation_constraints,
+    bind_scalar_expr_in_scope, bind_update, parse_expr, scope_for_relation,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -437,6 +437,16 @@ pub(crate) fn execute_explain(
             )));
         }
         Statement::Merge(merge) => EitherExplainTarget::Merge(merge),
+        Statement::CreateTableAs(create_table_as) => {
+            if explain_create_table_as_relation_exists(&create_table_as, catalog)? {
+                return Ok(StatementResult::Query {
+                    columns: vec![QueryColumn::text("QUERY PLAN")],
+                    column_names: vec!["QUERY PLAN".into()],
+                    rows: Vec::new(),
+                });
+            }
+            EitherExplainTarget::CreateTableAs(create_table_as)
+        }
         _ => {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "SELECT, UPDATE, or MERGE statement after EXPLAIN",
@@ -447,6 +457,14 @@ pub(crate) fn execute_explain(
 
     ctx.pool.reset_usage_stats();
     let plan_start = Instant::now();
+    let analyzed_create_table_as = if analyze {
+        match &explain_target {
+            EitherExplainTarget::CreateTableAs(create_table_as) => Some(create_table_as.clone()),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let (query_desc, merge_target_name) = match explain_target {
         EitherExplainTarget::Select(select) => (
             create_query_desc(
@@ -466,6 +484,29 @@ pub(crate) fn execute_explain(
                 Some(bound.explain_target_name),
             )
         }
+        EitherExplainTarget::CreateTableAs(create_table_as) => (
+            create_query_desc(
+                crate::backend::parser::pg_plan_query_with_config(
+                    match &create_table_as.query {
+                        crate::include::nodes::parsenodes::CreateTableAsQuery::Select(query) => {
+                            query
+                        }
+                        crate::include::nodes::parsenodes::CreateTableAsQuery::Execute(name) => {
+                            return Err(ExecError::Parse(ParseError::DetailedError {
+                                message: format!("prepared statement \"{name}\" does not exist"),
+                                detail: None,
+                                hint: None,
+                                sqlstate: "26000",
+                            }));
+                        }
+                    },
+                    catalog,
+                    planner_config,
+                )?,
+                None,
+            ),
+            None,
+        ),
     };
     let planning_elapsed = plan_start.elapsed();
     let planning_buffer_stats = ctx.pool.usage_stats();
@@ -476,12 +517,21 @@ pub(crate) fn execute_explain(
         )));
     }
     if analyze {
+        if let Some(create_table_as) = analyzed_create_table_as.as_ref() {
+            execute_explain_analyze_create_table_as(create_table_as, ctx, planner_config)?;
+        }
         ctx.pool.reset_usage_stats();
         ctx.timed = timing;
         let saved_subplans =
             std::mem::replace(&mut ctx.subplans, query_desc.planned_stmt.subplans.clone());
         let exec_result: Result<(_, _, _), ExecError> = (|| {
             let mut state = executor_start(query_desc.planned_stmt.plan_tree.clone());
+            if analyzed_create_table_as
+                .as_ref()
+                .is_some_and(|create_table_as| create_table_as.skip_data)
+            {
+                return Ok((state, 0, std::time::Duration::ZERO));
+            }
             let mut row_count: u64 = 0;
             let started_at = Instant::now();
             while let Some(_slot) = state.exec_proc_node(ctx)? {
@@ -547,9 +597,83 @@ pub(crate) fn execute_explain(
     })
 }
 
+fn execute_explain_analyze_create_table_as(
+    stmt: &CreateTableAsStatement,
+    ctx: &mut ExecutorContext,
+    planner_config: PlannerConfig,
+) -> Result<(), ExecError> {
+    let db = ctx
+        .database
+        .clone()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "EXPLAIN ANALYZE CREATE TABLE AS requires database execution context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })?;
+    let xid = ctx.ensure_write_xid()?;
+    let cid = ctx.next_command_id;
+    let effect_start = ctx.catalog_effects.len();
+    db.execute_create_table_as_stmt_in_transaction_with_search_path(
+        ctx.client_id,
+        stmt,
+        xid,
+        cid,
+        None,
+        planner_config,
+        &mut ctx.catalog_effects,
+        &mut ctx.temp_effects,
+    )?;
+    let consumed_catalog_cids = ctx
+        .catalog_effects
+        .len()
+        .saturating_sub(effect_start)
+        .max(1);
+    ctx.next_command_id = ctx
+        .next_command_id
+        .saturating_add(consumed_catalog_cids as u32);
+    ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(ctx.next_command_id);
+    Ok(())
+}
+
 enum EitherExplainTarget {
     Select(SelectStatement),
     Merge(MergeStatement),
+    CreateTableAs(CreateTableAsStatement),
+}
+
+fn explain_create_table_as_relation_exists(
+    stmt: &CreateTableAsStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<bool, ExecError> {
+    let name = match &stmt.schema_name {
+        Some(schema) => format!("{schema}.{}", stmt.table_name),
+        None => stmt.table_name.clone(),
+    };
+    let Some(relation) = catalog.lookup_any_relation(&name) else {
+        return Ok(false);
+    };
+    let expected_relkind = match stmt.object_type {
+        TableAsObjectType::Table => 'r',
+        TableAsObjectType::MaterializedView => 'm',
+    };
+    if relation.relkind != expected_relkind {
+        return Ok(false);
+    }
+    let display_name = stmt.table_name.trim_matches('"');
+    if stmt.if_not_exists {
+        crate::backend::utils::misc::notices::push_notice(format!(
+            "relation \"{}\" already exists, skipping",
+            display_name
+        ));
+        return Ok(true);
+    }
+    Err(ExecError::DetailedError {
+        message: format!("relation \"{}\" already exists", display_name),
+        detail: None,
+        hint: None,
+        sqlstate: "42P07",
+    })
 }
 
 fn execute_explain_update(

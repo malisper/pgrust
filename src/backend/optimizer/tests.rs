@@ -1931,9 +1931,7 @@ fn explain_hides_projection_for_trimmed_aggregate_output_after_reduction() {
         "{rendered}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line.trim() == "Group Key: (a), (b)"),
+        lines.iter().any(|line| line.trim() == "Group Key: a, b"),
         "{rendered}"
     );
     assert!(
@@ -1955,9 +1953,7 @@ fn explain_hides_projection_for_trimmed_aggregate_output_without_reduction() {
         "{rendered}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line.trim() == "Group Key: (a), (c), (d)"),
+        lines.iter().any(|line| line.trim() == "Group Key: a, c, d"),
         "{rendered}"
     );
     assert!(

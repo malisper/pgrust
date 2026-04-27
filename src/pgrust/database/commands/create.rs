@@ -161,6 +161,30 @@ fn procedure_has_output_args(row: &PgProcRow) -> bool {
         .is_some_and(|modes| modes.iter().any(|mode| matches!(*mode, b'o' | b'b')))
 }
 
+pub(super) fn describe_select_query_without_planning(
+    stmt: &crate::backend::parser::SelectStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<(Vec<QueryColumn>, Vec<String>), ExecError> {
+    let (query, _) = crate::backend::parser::analyze_select_query_with_outer(
+        stmt,
+        catalog,
+        &[],
+        None,
+        None,
+        &[],
+        &[],
+    )?;
+    let mut rewritten = crate::backend::rewrite::pg_rewrite_query(query, catalog)?;
+    if rewritten.len() != 1 {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "single rewritten SELECT query",
+            actual: format!("{} queries", rewritten.len()),
+        }));
+    }
+    let query = rewritten.remove(0);
+    Ok((query.columns(), query.column_names()))
+}
+
 fn split_sql_body_statements(body: &str) -> Result<Vec<String>, ExecError> {
     let body = sql_standard_body_inner(body).unwrap_or(body);
     let mut statements = Vec::new();
@@ -4091,13 +4115,6 @@ impl Database {
                 }));
             }
         };
-        let planned_stmt = crate::backend::parser::pg_plan_query_with_config(
-            select_query,
-            &catalog,
-            planner_config,
-        )?;
-        let mut rels = std::collections::BTreeSet::new();
-        collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
 
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let mut ctx = ExecutorContext {
@@ -4140,6 +4157,9 @@ impl Database {
             timed: false,
             allow_side_effects: false,
             pending_async_notifications: Vec::new(),
+            catalog_effects: Vec::new(),
+            temp_effects: Vec::new(),
+            database: Some(self.clone()),
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
@@ -4151,19 +4171,26 @@ impl Database {
             deferred_foreign_keys: None,
             trigger_depth: 0,
         };
-        let query_result = crate::backend::executor::execute_readonly_statement_with_config(
-            Statement::Select(select_query.clone()),
-            &catalog,
-            &mut ctx,
-            planner_config,
-        );
-        let StatementResult::Query {
-            columns,
-            column_names,
-            rows,
-        } = query_result?
-        else {
-            unreachable!("ctas query should return rows");
+        let (columns, column_names, rows) = if create_stmt.skip_data {
+            let (columns, column_names) =
+                describe_select_query_without_planning(select_query, &catalog)?;
+            (columns, column_names, Vec::new())
+        } else {
+            let query_result = crate::backend::executor::execute_readonly_statement_with_config(
+                Statement::Select(select_query.clone()),
+                &catalog,
+                &mut ctx,
+                planner_config,
+            );
+            let StatementResult::Query {
+                columns,
+                column_names,
+                rows,
+            } = query_result?
+            else {
+                unreachable!("ctas query should return rows");
+            };
+            (columns, column_names, rows)
         };
 
         let desc = crate::backend::executor::RelationDesc {
@@ -4324,6 +4351,9 @@ impl Database {
             timed: false,
             allow_side_effects: true,
             pending_async_notifications: Vec::new(),
+            catalog_effects: Vec::new(),
+            temp_effects: Vec::new(),
+            database: Some(self.clone()),
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog: insert_catalog.materialize_visible_catalog(),

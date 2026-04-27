@@ -224,6 +224,9 @@ fn analyze_executor_context(
         system_bindings: Vec::new(),
         subplans: Vec::new(),
         pending_async_notifications: Vec::new(),
+        catalog_effects: Vec::new(),
+        temp_effects: Vec::new(),
+        database: None,
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
         catalog: visible_catalog,
@@ -2368,6 +2371,639 @@ fn materialized_view_with_no_data_refreshes_and_rejects_writes() {
         vec![vec![Value::Bool(false)]]
     );
     session.execute(&db, "rollback").unwrap();
+
+    session
+        .execute(&db, "create schema plpgsql_spi_prefix")
+        .unwrap();
+    session
+        .execute(&db, "set search_path = plpgsql_spi_prefix, public")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create or replace function plpgsql_spi_drop_index_prefix() returns bool language plpgsql as $$
+             begin
+               execute 'drop index if exists plpgsql_spi_prefix.missing_idx';
+               return true;
+             end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view plpgsql_spi_prefix_succeeds as \
+             select 1 as i where plpgsql_spi_drop_index_prefix()",
+        )
+        .unwrap();
+    session
+        .execute(&db, "drop materialized view plpgsql_spi_prefix_succeeds")
+        .unwrap();
+    session.execute(&db, "reset search_path").unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "create function create_plpgsql_void_matviews() returns void language plpgsql as $$
+             begin
+               create materialized view plpgsql_void_mv1 as select 1 as x;
+               create materialized view plpgsql_void_mv2 as select 2 as x with no data;
+             end $$",
+        )
+        .unwrap();
+    session
+        .execute(&db, "select create_plpgsql_void_matviews()")
+        .unwrap();
+    let unpopulated_err = session
+        .execute(&db, "select * from plpgsql_void_mv2")
+        .unwrap_err();
+    assert!(matches!(
+        unpopulated_err,
+        ExecError::DetailedError { message, .. }
+            if message == "materialized view \"plpgsql_void_mv2\" has not been populated"
+    ));
+    session.execute(&db, "rollback").unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "create function create_plpgsql_portal_matviews() returns void language plpgsql as $$
+             begin
+               create materialized view plpgsql_portal_mv1 as select 1 as x;
+               create materialized view plpgsql_portal_mv2 as select 2 as x with no data;
+             end $$",
+        )
+        .unwrap();
+    session
+        .bind_protocol_portal(
+            &db,
+            "",
+            None,
+            "select create_plpgsql_portal_matviews()",
+            Vec::new(),
+        )
+        .unwrap();
+    let portal_result = session
+        .execute_portal_forward(&db, "", crate::pgrust::portal::PortalFetchLimit::All)
+        .unwrap();
+    assert!(portal_result.completed);
+    let portal_unpopulated_err = session
+        .execute(&db, "select * from plpgsql_portal_mv2")
+        .unwrap_err();
+    assert!(matches!(
+        portal_unpopulated_err,
+        ExecError::DetailedError { message, .. }
+            if message == "materialized view \"plpgsql_portal_mv2\" has not been populated"
+    ));
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn materialized_view_rejects_row_locks_and_renders_viewdef() {
+    let dir = temp_dir("matview_lock_viewdef");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table mv_lock_base(id int4, note text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into mv_lock_base values (1, 'one')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mv_lock as \
+             select id, note from mv_lock_base order by id",
+        )
+        .unwrap();
+
+    let lock_err = session
+        .execute(&db, "select * from mv_lock for share")
+        .unwrap_err();
+    assert!(matches!(
+        lock_err,
+        ExecError::Parse(ParseError::DetailedError {
+            message,
+            sqlstate: "0A000",
+            ..
+        }) if message == "cannot lock rows in materialized view \"mv_lock\""
+    ));
+
+    let viewdef = query_rows(&db, 1, "select pg_get_viewdef('mv_lock'::regclass)");
+    match &viewdef[..] {
+        [row] => match &row[..] {
+            [Value::Text(def)] => {
+                assert!(def.contains("SELECT id,"));
+                assert!(def.contains("FROM mv_lock_base"));
+                assert!(def.contains("ORDER BY id"));
+            }
+            other => panic!("expected text viewdef, got {other:?}"),
+        },
+        other => panic!("expected one viewdef row, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_table_as_values_and_matview_unknown_outputs_work() {
+    let dir = temp_dir("ctas_values_unknown_matview");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table ctas_values(a, b) as values (1, 10)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select a, b from ctas_values"),
+        vec![vec![Value::Int32(1), Value::Int32(10)]]
+    );
+    session
+        .execute(
+            &db,
+            "create table ctas_srf as select generate_series(1, 3) as a",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select a from ctas_srf order by a"),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+        ]
+    );
+
+    session
+        .execute(
+            &db,
+            "create materialized view mv_unknown as \
+             select 42 as i, 42.5 as num, 'foo' as u, 'foo'::unknown as u2, null as n",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a.attname, t.typname
+             from pg_attribute a
+             join pg_class c on c.oid = a.attrelid
+             join pg_type t on t.oid = a.atttypid
+             where c.relname = 'mv_unknown' and a.attnum > 0
+             order by a.attnum",
+        ),
+        vec![
+            vec![Value::Text("i".into()), Value::Text("int4".into())],
+            vec![Value::Text("num".into()), Value::Text("numeric".into())],
+            vec![Value::Text("u".into()), Value::Text("text".into())],
+            vec![Value::Text("u2".into()), Value::Text("text".into())],
+            vec![Value::Text("n".into()), Value::Text("text".into())],
+        ]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select u, u2, n from mv_unknown"),
+        vec![vec![
+            Value::Text("foo".into()),
+            Value::Text("foo".into()),
+            Value::Null,
+        ]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create materialized view mv_no_plan as select 1/0 as x with no data",
+        )
+        .unwrap();
+    assert!(matches!(
+        session.execute(&db, "refresh materialized view mv_no_plan"),
+        Err(crate::backend::executor::ExecError::Parse(ParseError::DetailedError {
+            message,
+            ..
+        })) if message == "division by zero"
+    ));
+
+    session
+        .execute(
+            &db,
+            "create materialized view mv_exists_wording as select 1 as x",
+        )
+        .unwrap();
+    let duplicate_matview_err = session
+        .execute(
+            &db,
+            "create materialized view mv_exists_wording as select 1 as x",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        duplicate_matview_err,
+        ExecError::DetailedError { message, sqlstate, .. }
+            if message == "relation \"mv_exists_wording\" already exists" && sqlstate == "42P07"
+    ));
+    clear_backend_notices();
+    session
+        .execute(
+            &db,
+            "create materialized view if not exists mv_exists_wording as select 1 as x",
+        )
+        .unwrap();
+    assert_eq!(
+        take_backend_notices()
+            .into_iter()
+            .map(|notice| notice.message)
+            .collect::<Vec<_>>(),
+        vec![r#"relation "mv_exists_wording" already exists, skipping"#.to_string()]
+    );
+    clear_backend_notices();
+    session
+        .execute(&db, "drop materialized view if exists mv_missing_wording")
+        .unwrap();
+    assert_eq!(
+        take_backend_notices()
+            .into_iter()
+            .map(|notice| notice.message)
+            .collect::<Vec<_>>(),
+        vec![r#"materialized view "mv_missing_wording" does not exist, skipping"#.to_string()]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table mv_delete_base as select generate_series(1, 5) as a",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mv_delete_filter as \
+             select a from mv_delete_base where a <= 3",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "delete from mv_delete_base \
+             where exists (select * from mv_delete_filter \
+                           where mv_delete_filter.a = mv_delete_base.a)",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select a from mv_delete_base order by a"),
+        vec![vec![Value::Int32(4)], vec![Value::Int32(5)]]
+    );
+}
+
+#[test]
+fn explain_analyze_create_materialized_view_executes_create() {
+    let dir = temp_dir("explain_analyze_create_matview");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    let result = session
+        .execute(
+            &db,
+            "explain (analyze, costs off, summary off, timing off, buffers off) \
+             create materialized view explain_mv_data(a) as \
+             select generate_series(1, 3) with data",
+        )
+        .unwrap();
+    let explain_lines = match result {
+        StatementResult::Query { rows, .. } => rows
+            .into_iter()
+            .map(|row| match &row[0] {
+                Value::Text(text) => text.to_string(),
+                other => panic!("expected text explain row, got {other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        other => panic!("expected query result, got {other:?}"),
+    };
+    assert!(
+        explain_lines
+            .iter()
+            .any(|line| line.trim() == "ProjectSet (actual rows=3.00 loops=1)")
+    );
+    assert!(!explain_lines.iter().any(|line| line.contains("Time:")));
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select a from explain_mv_data order by a"
+        ),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+        ]
+    );
+
+    let nodata_result = session
+        .execute(
+            &db,
+            "explain (analyze, costs off, summary off, timing off, buffers off) \
+             create materialized view explain_mv_nodata(a) as \
+             select generate_series(1, 3) with no data",
+        )
+        .unwrap();
+    let nodata_lines = match nodata_result {
+        StatementResult::Query { rows, .. } => rows
+            .into_iter()
+            .map(|row| match &row[0] {
+                Value::Text(text) => text.to_string(),
+                other => panic!("expected text explain row, got {other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        other => panic!("expected query result, got {other:?}"),
+    };
+    assert!(
+        nodata_lines
+            .iter()
+            .any(|line| line.trim() == "ProjectSet (never executed)")
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ispopulated from pg_matviews where matviewname = 'explain_mv_nodata'",
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn plpgsql_create_materialized_view_executes_spi_statement() {
+    let dir = temp_dir("plpgsql_create_matview");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function create_plpgsql_matviews() returns int4 language plpgsql as $$
+             begin
+               create materialized view plpgsql_mv1 as select 1 as x;
+               create materialized view plpgsql_mv2 as select 2 as x with no data;
+               return 0;
+             end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select create_plpgsql_matviews()"),
+        vec![vec![Value::Int32(0)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select x from plpgsql_mv1"),
+        vec![vec![Value::Int32(1)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ispopulated from pg_matviews where matviewname = 'plpgsql_mv2'",
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "create function create_plpgsql_txn_matviews() returns int4 language plpgsql as $$
+             begin
+               create materialized view plpgsql_txn_mv1 as select 1 as x;
+               create materialized view plpgsql_txn_mv2 as select 2 as x with no data;
+               return 0;
+             end $$",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select create_plpgsql_txn_matviews()"),
+        vec![vec![Value::Int32(0)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select x from plpgsql_txn_mv1"),
+        vec![vec![Value::Int32(1)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select ispopulated from pg_matviews where matviewname = 'plpgsql_txn_mv2'",
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn materialized_view_set_schema_refresh_concurrently_and_drop_cascade() {
+    let db = Database::open_ephemeral(64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table mv_reg_base(id int4 primary key, amount int4)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into mv_reg_base values (1, 10), (2, 20)")
+        .unwrap();
+    session.execute(&db, "create schema mv_reg_schema").unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mv_reg_mv as select id, amount from mv_reg_base",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter materialized view mv_reg_mv set schema mv_reg_schema",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select n.nspname from pg_class c join pg_namespace n on n.oid = c.relnamespace \
+             where c.relname = 'mv_reg_mv'",
+        ),
+        vec![vec![Value::Text("mv_reg_schema".into())]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create unique index mv_reg_mv_id on mv_reg_schema.mv_reg_mv(id)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into mv_reg_base values (3, 30)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "refresh materialized view concurrently mv_reg_schema.mv_reg_mv",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id, amount from mv_reg_schema.mv_reg_mv order by id",
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10)],
+            vec![Value::Int32(2), Value::Int32(20)],
+            vec![Value::Int32(3), Value::Int32(30)],
+        ]
+    );
+
+    session
+        .execute(
+            &db,
+            "create materialized view mv_reg_bad as select amount from mv_reg_base",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index mv_reg_bad_pred on mv_reg_bad(amount) where amount < 0",
+        )
+        .unwrap();
+    let refresh_err = session
+        .execute(&db, "refresh materialized view concurrently mv_reg_bad")
+        .unwrap_err();
+    assert!(matches!(
+        refresh_err,
+        ExecError::DetailedError {
+            message,
+            hint: Some(hint),
+            ..
+        } if message == "cannot refresh materialized view \"public.mv_reg_bad\" concurrently"
+            && hint == "Create a unique index with no WHERE clause on one or more columns of the materialized view."
+    ));
+
+    session
+        .execute(
+            &db,
+            "create function mv_reg_drop_idx_fn() returns bool language plpgsql as $$
+             begin
+               execute 'drop index if exists mv_reg_drop_idx_i';
+               return true;
+             end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mv_reg_drop_idx as \
+             select 1 as i where mv_reg_drop_idx_fn()",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index mv_reg_drop_idx_i on mv_reg_drop_idx(i)",
+        )
+        .unwrap();
+    let dropped_index_refresh_err = session
+        .execute(
+            &db,
+            "refresh materialized view concurrently mv_reg_drop_idx",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        dropped_index_refresh_err,
+        ExecError::DetailedError { message, .. }
+            if message == "could not find suitable unique index on materialized view \"mv_reg_drop_idx\""
+    ));
+
+    session
+        .execute(&db, "create table mv_reg_dups(a int4, b int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into mv_reg_dups values (1, 10)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mv_reg_dups_mv as select * from mv_reg_dups",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create unique index mv_reg_dups_mv_a_idx on mv_reg_dups_mv(a)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into mv_reg_dups values (1, 10)")
+        .unwrap();
+    let refresh_dup_err = session
+        .execute(&db, "refresh materialized view mv_reg_dups_mv")
+        .unwrap_err();
+    assert!(matches!(
+        refresh_dup_err,
+        ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            ..
+        } if message == "could not create unique index \"mv_reg_dups_mv_a_idx\""
+            && detail == "Key (a)=(1) is duplicated."
+    ));
+    let refresh_concurrent_dup_err = session
+        .execute(&db, "refresh materialized view concurrently mv_reg_dups_mv")
+        .unwrap_err();
+    assert!(matches!(
+        refresh_concurrent_dup_err,
+        ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            ..
+        } if message == "new data for materialized view \"mv_reg_dups_mv\" contains duplicate rows without any null columns"
+            && detail == "Row: (1,10)"
+    ));
+
+    session
+        .execute(&db, "create view mv_reg_v as select * from mv_reg_base")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mv_reg_dep_mv as select * from mv_reg_v",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view mv_reg_dep_v as select * from mv_reg_dep_mv",
+        )
+        .unwrap();
+    let drop_restrict_err = session.execute(&db, "drop view mv_reg_v").unwrap_err();
+    match drop_restrict_err {
+        ExecError::DetailedError {
+            detail: Some(detail),
+            ..
+        } => {
+            assert!(
+                detail.contains("materialized view mv_reg_dep_mv depends on view mv_reg_v")
+                    && detail
+                        .contains("view mv_reg_dep_v depends on materialized view mv_reg_dep_mv"),
+                "{detail}"
+            );
+        }
+        other => panic!("expected dependency detail, got {other:?}"),
+    }
+    session.execute(&db, "drop view mv_reg_v cascade").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_class where relname in \
+             ('mv_reg_v', 'mv_reg_dep_mv', 'mv_reg_dep_v')",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
 }
 
 #[test]
@@ -9946,8 +10582,15 @@ fn drop_view_rejects_depended_on_view() {
         .unwrap();
 
     match session.execute(&db, "drop view first_view") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
-            if actual.contains("view depends on it: second_view") => {}
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            hint: Some(hint),
+            sqlstate,
+        }) if message == "cannot drop view first_view because other objects depend on it"
+            && detail == "view second_view depends on view first_view"
+            && hint == "Use DROP ... CASCADE to drop the dependent objects too."
+            && sqlstate == "2BP01" => {}
         other => panic!("expected dependent-view drop-view error, got {other:?}"),
     }
 }
@@ -24472,7 +25115,7 @@ fn partial_index_catalog_persists_predicate_and_pg_get_indexdef_renders_where() 
     );
     assert_eq!(
         psql_index_definition(&db, 1, "items", "items_keep_idx"),
-        "CREATE INDEX items_keep_idx ON items USING btree (id) WHERE (flag = 'keep')"
+        "CREATE INDEX items_keep_idx ON items USING btree (id) WHERE flag = 'keep'"
     );
 }
 

@@ -170,16 +170,21 @@ fn normalize_deparsed_view_sql_for_parser(sql: &str) -> String {
 
 pub(crate) fn refresh_query_relation_descriptors(query: &mut Query, catalog: &dyn CatalogLookup) {
     for rte in &mut query.rtable {
-        match &mut rte.kind {
-            RangeTblEntryKind::Relation { relation_oid, .. } => {
-                if let Some(relation) = catalog.lookup_relation_by_oid(*relation_oid) {
-                    rte.desc = relation.desc;
+        let relation_oid = match &rte.kind {
+            RangeTblEntryKind::Relation { relation_oid, .. } => Some(*relation_oid),
+            _ => None,
+        };
+        if let Some(relation_oid) = relation_oid {
+            if let Some(relation) = catalog.lookup_relation_by_oid(relation_oid) {
+                rte.desc = relation.desc;
+                if !rte_is_user_aliased_relation(rte, catalog) {
+                    rte.eref.colnames = rte_current_visible_colnames(rte);
                 }
             }
-            RangeTblEntryKind::Subquery { query: subquery } => {
-                refresh_query_relation_descriptors(subquery, catalog);
-            }
-            _ => {}
+            continue;
+        }
+        if let RangeTblEntryKind::Subquery { query: subquery } = &mut rte.kind {
+            refresh_query_relation_descriptors(subquery, catalog);
         }
     }
     if let Some(jointree) = &mut query.jointree {
@@ -212,9 +217,7 @@ fn validate_view_shape(
     for (actual_column, stored_column) in
         actual_columns.into_iter().zip(relation_desc.columns.iter())
     {
-        if !actual_column.name.eq_ignore_ascii_case(&stored_column.name)
-            || actual_column.sql_type != stored_column.sql_type
-        {
+        if actual_column.sql_type != stored_column.sql_type {
             return Err(ParseError::UnexpectedToken {
                 expected: "view query columns matching stored view descriptor",
                 actual: format!("stale view definition for {display_name}"),
@@ -222,6 +225,21 @@ fn validate_view_shape(
         }
     }
     Ok(())
+}
+
+fn apply_relation_desc_target_names(query: &mut Query, relation_desc: &RelationDesc) {
+    let mut column_index = 0usize;
+    for target in query
+        .target_list
+        .iter_mut()
+        .filter(|target| !target.resjunk)
+    {
+        if let Some(column) = relation_desc.columns.get(column_index) {
+            target.name = column.name.clone();
+            target.sql_type = column.sql_type;
+        }
+        column_index += 1;
+    }
 }
 
 pub(crate) fn load_view_return_query(
@@ -234,10 +252,11 @@ pub(crate) fn load_view_return_query(
     let select = load_view_return_select(relation_oid, alias, catalog, expanded_views)?;
     let mut next_views = expanded_views.to_vec();
     next_views.push(relation_oid);
-    let (query, _) =
+    let (mut query, _) =
         analyze_select_query_with_outer(&select, catalog, &[], None, None, &[], &next_views)?;
     let display_name = view_display_name(relation_oid, alias);
     validate_view_shape(&query, relation_desc, &display_name)?;
+    apply_relation_desc_target_names(&mut query, relation_desc);
     Ok(query)
 }
 
@@ -261,11 +280,15 @@ pub(crate) fn load_view_return_select(
         stmt =
             crate::backend::parser::parse_statement(&normalize_deparsed_view_sql_for_parser(sql))?;
     }
-    let Statement::Select(select) = stmt else {
-        return Err(ParseError::UnexpectedToken {
-            expected: "SELECT view definition",
-            actual: sql.to_string(),
-        });
+    let select = match stmt {
+        Statement::Select(select) => select,
+        Statement::Values(values) => crate::backend::parser::wrap_values_as_select(values),
+        _ => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "SELECT view definition",
+                actual: sql.to_string(),
+            });
+        }
     };
     Ok(select)
 }
@@ -413,8 +436,9 @@ fn render_set_operation_query(
     let mut rendered = set_operation
         .inputs
         .iter()
-        .map(|input| {
-            let sql = render_view_query(input, catalog);
+        .enumerate()
+        .map(|(index, input)| {
+            let sql = render_set_operation_input_query(input, catalog, index == 0);
             sql.strip_suffix(';').unwrap_or(&sql).to_string()
         })
         .collect::<Vec<_>>()
@@ -434,6 +458,115 @@ fn render_set_operation_query(
     rendered
 }
 
+fn render_set_operation_input_query(
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    include_aliases: bool,
+) -> String {
+    let select_keyword = render_select_keyword(query, catalog);
+    let targets = query
+        .target_list
+        .iter()
+        .filter(|target| !target.resjunk)
+        .map(|target| render_set_operation_target_entry(target, query, catalog, include_aliases))
+        .collect::<Vec<_>>();
+    let mut lines = if targets.len() > 1 {
+        let mut lines = vec![format!(" {select_keyword} {},", targets[0])];
+        for (index, target) in targets.iter().enumerate().skip(1) {
+            let suffix = if index + 1 == targets.len() { "" } else { "," };
+            lines.push(format!("    {target}{suffix}"));
+        }
+        lines
+    } else {
+        vec![format!(" {select_keyword} {}", targets.join(", "))]
+    };
+    if let Some(jointree) = &query.jointree {
+        lines.push(format!(
+            "   FROM {}",
+            render_from_node(query, jointree, catalog, 3)
+        ));
+    }
+    if let Some(where_qual) = &query.where_qual {
+        lines.push(format!(
+            "  WHERE {}",
+            render_set_operation_expr(where_qual, query, catalog)
+        ));
+    }
+    lines.join("\n") + ";"
+}
+
+fn render_set_operation_target_entry(
+    target: &TargetEntry,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    include_aliases: bool,
+) -> String {
+    let rendered = render_set_operation_expr(&target.expr, query, catalog);
+    if !include_aliases || rendered_matches_target_name(&rendered, &target.name) {
+        rendered
+    } else {
+        format!("{rendered} AS {}", quote_identifier_if_needed(&target.name))
+    }
+}
+
+fn render_set_operation_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> String {
+    match expr {
+        Expr::Var(var) => qualified_var_name(var, query, catalog)
+            .unwrap_or_else(|| format!("var{}", var.varattno)),
+        Expr::Const(value) => render_literal(value),
+        Expr::Op(op) => render_set_operation_op(op.op, &op.args, query, catalog),
+        _ => render_expr(expr, query, catalog),
+    }
+}
+
+fn render_set_operation_wrapped_expr(
+    expr: &Expr,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    match expr {
+        Expr::Op(_) | Expr::Bool(_) | Expr::ScalarArrayOp(_) => {
+            format!("({})", render_set_operation_expr(expr, query, catalog))
+        }
+        _ => render_set_operation_expr(expr, query, catalog),
+    }
+}
+
+fn render_set_operation_op(
+    op: OpExprKind,
+    args: &[Expr],
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    match (op, args) {
+        (OpExprKind::UnaryPlus, [arg]) => {
+            format!(
+                "+{}",
+                render_set_operation_wrapped_expr(arg, query, catalog)
+            )
+        }
+        (OpExprKind::Negate, [arg]) => {
+            format!(
+                "-{}",
+                render_set_operation_wrapped_expr(arg, query, catalog)
+            )
+        }
+        (OpExprKind::BitNot, [arg]) => {
+            format!(
+                "~{}",
+                render_set_operation_wrapped_expr(arg, query, catalog)
+            )
+        }
+        (_, [left, right]) => format!(
+            "{} {} {}",
+            render_set_operation_wrapped_expr(left, query, catalog),
+            render_binary_operator(op),
+            render_set_operation_wrapped_expr(right, query, catalog)
+        ),
+        _ => format!("{op:?}"),
+    }
+}
+
 fn render_target_entry(target: &TargetEntry, query: &Query, catalog: &dyn CatalogLookup) -> String {
     let mut rendered = match &target.expr {
         Expr::Var(var) if join_using_var_needs_cast(var, target.sql_type, query) => format!(
@@ -441,6 +574,14 @@ fn render_target_entry(target: &TargetEntry, query: &Query, catalog: &dyn Catalo
             var_name(var, query, catalog).unwrap_or_else(|| format!("var{}", var.varattno)),
             render_sql_type(target.sql_type)
         ),
+        Expr::Const(Value::Null) if target.sql_type.kind == SqlTypeKind::Text => {
+            "NULL::text".into()
+        }
+        Expr::Const(Value::Text(_) | Value::TextRef(_, _))
+            if target.sql_type.kind == SqlTypeKind::Text =>
+        {
+            format!("{}::text", render_expr(&target.expr, query, catalog))
+        }
         _ => render_expr(&target.expr, query, catalog),
     };
     if target.name.eq_ignore_ascii_case("dat_at_local")
@@ -643,6 +784,14 @@ fn relation_alias_for_render(
     rte: &RangeTblEntry,
     relname: &str,
 ) -> Option<String> {
+    if rte
+        .alias
+        .as_deref()
+        .and_then(|alias| alias.rsplit('.').next())
+        .is_some_and(|alias_relname| alias_relname.eq_ignore_ascii_case(relname))
+    {
+        return None;
+    }
     let effective_colnames = rte_effective_colnames_for_query(query, index, catalog);
     let current_colnames = rte_current_visible_colnames(rte);
     if effective_colnames != current_colnames {
@@ -752,7 +901,12 @@ fn rte_is_user_aliased_relation(rte: &RangeTblEntry, catalog: &dyn CatalogLookup
     };
     catalog
         .class_row_by_oid(*relation_oid)
-        .is_some_and(|class| !alias.eq_ignore_ascii_case(&class.relname))
+        .is_some_and(|class| {
+            !alias
+                .rsplit('.')
+                .next()
+                .is_some_and(|alias_relname| alias_relname.eq_ignore_ascii_case(&class.relname))
+        })
 }
 
 fn rte_current_visible_colnames(rte: &RangeTblEntry) -> Vec<String> {
@@ -1648,6 +1802,24 @@ fn qualify_column(alias: &str, column: &str) -> String {
         quote_identifier_if_needed(alias),
         quote_identifier_if_needed(column)
     )
+}
+
+fn qualified_var_name(var: &Var, query: &Query, catalog: &dyn CatalogLookup) -> Option<String> {
+    let rtindex = var.varno.checked_sub(1)? + 1;
+    let rte = query.rtable.get(rtindex.saturating_sub(1))?;
+    let column_index = attrno_index(var.varattno)?;
+    let column_name = rte_column_name(query, rtindex, catalog, column_index)?;
+    let qualifier = match &rte.kind {
+        RangeTblEntryKind::Relation { relation_oid, .. } => {
+            relation_sql_name(*relation_oid, catalog).unwrap_or_else(|| rte.eref.aliasname.clone())
+        }
+        _ => rte.eref.aliasname.clone(),
+    };
+    Some(format!(
+        "{}.{}",
+        qualifier,
+        quote_identifier_if_needed(&column_name)
+    ))
 }
 
 fn relation_sql_name(relation_oid: u32, catalog: &dyn CatalogLookup) -> Option<String> {

@@ -398,6 +398,7 @@ pub enum Statement {
     AlterTableRename(AlterTableRenameStatement),
     AlterTableSetSchema(AlterRelationSetSchemaStatement),
     AlterViewSetSchema(AlterRelationSetSchemaStatement),
+    AlterMaterializedViewSetSchema(AlterRelationSetSchemaStatement),
     AlterViewOwner(AlterRelationOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterTableSetPersistence(AlterTableSetPersistenceStatement),
@@ -3413,12 +3414,14 @@ pub struct DropTypeStatement {
 pub struct DropViewStatement {
     pub if_exists: bool,
     pub view_names: Vec<String>,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropMaterializedViewStatement {
     pub if_exists: bool,
     pub view_names: Vec<String>,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

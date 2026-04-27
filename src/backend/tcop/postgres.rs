@@ -3660,6 +3660,10 @@ fn execute_streaming_select_statement(
                     }
                 }
             }
+            let succeeded = err.is_none();
+            state
+                .session
+                .finish_streaming_select_guard(&mut guard, succeeded);
             drop(guard);
 
             if let Some(e) = err {
@@ -5307,6 +5311,10 @@ fn psql_index_display_columns(
                 })
                 .unwrap_or_else(|| format!("expr{}", index + 1));
             expression_index += 1;
+            let expression_sql = base_relation
+                .as_ref()
+                .map(|relation| normalize_numeric_index_expr_sql(&expression_sql, &relation.desc))
+                .unwrap_or(expression_sql);
             if let Some((name, definition)) = function_call_index_expression(&expression_sql) {
                 return PsqlIndexDisplayColumn {
                     display_name: name,
@@ -5319,6 +5327,48 @@ fn psql_index_display_columns(
             }
         })
         .collect()
+}
+
+fn normalize_numeric_index_expr_sql(expr_sql: &str, desc: &RelationDesc) -> String {
+    let mut normalized = expr_sql.to_string();
+    for column in &desc.columns {
+        if column.sql_type.kind != SqlTypeKind::Numeric {
+            continue;
+        }
+        for op in ["<=", ">=", "<>", "=", "<", ">"] {
+            normalized = append_numeric_cast_to_integer_comparison(&normalized, &column.name, op);
+        }
+    }
+    normalized
+}
+
+fn append_numeric_cast_to_integer_comparison(sql: &str, column_name: &str, op: &str) -> String {
+    let pattern = format!("{column_name} {op} ");
+    let mut rest = sql;
+    let mut out = String::with_capacity(sql.len());
+    while let Some(pos) = rest.find(&pattern) {
+        out.push_str(&rest[..pos + pattern.len()]);
+        let value_start = pos + pattern.len();
+        let after_pattern = &rest[value_start..];
+        let mut literal_len = 0usize;
+        if after_pattern.starts_with('-') {
+            literal_len += 1;
+        }
+        literal_len += after_pattern[literal_len..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if literal_len == 0 || after_pattern[literal_len..].starts_with("::") {
+            rest = after_pattern;
+            continue;
+        }
+        out.push_str(&after_pattern[..literal_len]);
+        out.push_str("::numeric");
+        rest = &after_pattern[literal_len..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn function_call_index_expression(expr_sql: &str) -> Option<(String, String)> {
@@ -5966,7 +6016,7 @@ fn psql_get_viewdef_query(
     let catalog = session.catalog_lookup(db);
     let value = catalog
         .lookup_relation_by_oid(oid)
-        .filter(|relation| relation.relkind == 'v')
+        .filter(|relation| matches!(relation.relkind, 'v' | 'm'))
         .and_then(|relation| format_view_definition(oid, &relation.desc, &catalog).ok())
         .map(|definition| Value::Text(definition.into()))
         .unwrap_or(Value::Null);
@@ -6248,9 +6298,12 @@ pub(crate) fn format_psql_indexdef(
             db.describe_relation_by_oid(session.client_id, txn_ctx, index.index_meta.indrelid);
         let predicate =
             normalize_index_predicate_sql(predicate, base_relation.as_ref().map(|rel| &rel.desc));
-        definition.push_str(" WHERE (");
+        let predicate = base_relation
+            .as_ref()
+            .map(|relation| normalize_numeric_index_expr_sql(&predicate, &relation.desc))
+            .unwrap_or(predicate);
+        definition.push_str(" WHERE ");
         definition.push_str(&predicate);
-        definition.push(')');
     }
     definition
 }

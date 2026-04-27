@@ -211,7 +211,7 @@ fn parse_statement_with_options_inner(
         if matches!(
             stmt,
             Statement::Unsupported(UnsupportedStatement {
-                feature: "ROLE management",
+                feature: "ROLE management" | "ALTER DEFAULT PRIVILEGES",
                 ..
             })
         ) {
@@ -4225,6 +4225,8 @@ fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
         Some("SELECT form")
     } else if lowered.starts_with("delete from ") {
         Some("DELETE form")
+    } else if lowered.starts_with("alter default privileges ") {
+        Some("ALTER DEFAULT PRIVILEGES")
     } else if lowered.starts_with("prepare ") {
         Some("PREPARE")
     } else if lowered.starts_with("execute ") {
@@ -13201,6 +13203,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_view_set_schema_stmt => Ok(Statement::AlterViewSetSchema(
             build_alter_relation_set_schema(inner)?,
         )),
+        Rule::alter_materialized_view_set_schema_stmt => Ok(
+            Statement::AlterMaterializedViewSetSchema(build_alter_relation_set_schema(inner)?),
+        ),
         Rule::alter_schema_owner_stmt => Ok(Statement::AlterSchemaOwner(build_alter_schema_owner(
             inner,
         )?)),
@@ -14634,6 +14639,12 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
             Rule::merge_stmt => statement = Some(Statement::Merge(build_merge(part)?)),
             Rule::update_stmt => statement = Some(Statement::Update(build_update(part)?)),
             Rule::delete_stmt => statement = Some(Statement::Delete(build_delete(part)?)),
+            Rule::create_materialized_view_stmt => {
+                statement = Some(Statement::CreateTableAs(build_create_materialized_view(
+                    part,
+                )?));
+            }
+            Rule::create_table_stmt => statement = Some(build_create_table(part)?),
             _ => {}
         }
     }
@@ -15048,7 +15059,7 @@ fn build_values_statement(pair: Pair<'_, Rule>) -> Result<ValuesStatement, Parse
     })
 }
 
-fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
+pub(crate) fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
     SelectStatement {
         with_recursive: stmt.with_recursive,
         with: stmt.with,
@@ -15992,6 +16003,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let mut query_sql = None;
     let mut is_ctas = false;
     let mut if_not_exists = false;
+    let mut skip_data = false;
     for part in pair.into_inner() {
         let part = if part.as_rule() == Rule::create_table_tail {
             part.into_inner().next().ok_or(ParseError::UnexpectedEof)?
@@ -16057,6 +16069,15 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                             query = Some(parsed_query);
                             query_sql = parsed_sql;
                         }
+                        Rule::values_stmt => {
+                            query_sql = Some(inner.as_str().trim().to_string());
+                            query = Some(CreateTableAsQuery::Select(wrap_values_as_select(
+                                build_values_statement(inner)?,
+                            )));
+                        }
+                        Rule::matview_data_clause => {
+                            skip_data = inner.as_str().to_ascii_lowercase().contains("no");
+                        }
                         _ => {}
                     }
                 }
@@ -16091,7 +16112,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             query_sql,
             if_not_exists,
             object_type: TableAsObjectType::Table,
-            skip_data: false,
+            skip_data,
         }))
     } else {
         Ok(Statement::CreateTable(CreateTableStatement {
@@ -16122,6 +16143,13 @@ fn build_ctas_query(
         Rule::select_stmt => {
             let sql = pair.as_str().trim().to_string();
             Ok((CreateTableAsQuery::Select(build_select(pair)?), Some(sql)))
+        }
+        Rule::values_stmt => {
+            let sql = pair.as_str().trim().to_string();
+            Ok((
+                CreateTableAsQuery::Select(wrap_values_as_select(build_values_statement(pair)?)),
+                Some(sql),
+            ))
         }
         Rule::execute_prepared_stmt => {
             let execute = build_execute_statement(pair)?;
@@ -16200,6 +16228,12 @@ fn build_create_materialized_view(
             Rule::select_stmt => {
                 query_sql = Some(part.as_str().trim().to_string());
                 query = Some(CreateTableAsQuery::Select(build_select(part)?));
+            }
+            Rule::values_stmt => {
+                query_sql = Some(part.as_str().trim().to_string());
+                query = Some(CreateTableAsQuery::Select(wrap_values_as_select(
+                    build_values_statement(part)?,
+                )));
             }
             Rule::matview_data_clause => {
                 skip_data = part.as_str().to_ascii_lowercase().contains("no");
@@ -17977,6 +18011,7 @@ fn build_drop_index(pair: Pair<'_, Rule>) -> Result<DropIndexStatement, ParseErr
 fn build_drop_view(pair: Pair<'_, Rule>) -> Result<DropViewStatement, ParseError> {
     let mut if_exists = false;
     let mut view_names = Vec::new();
+    let mut cascade = false;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::if_exists_clause => if_exists = true,
@@ -17984,6 +18019,7 @@ fn build_drop_view(pair: Pair<'_, Rule>) -> Result<DropViewStatement, ParseError
                 view_names.extend(part.into_inner().map(build_identifier));
             }
             Rule::identifier => view_names.push(build_identifier(part)),
+            Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
             _ => {}
         }
     }
@@ -17993,6 +18029,7 @@ fn build_drop_view(pair: Pair<'_, Rule>) -> Result<DropViewStatement, ParseError
     Ok(DropViewStatement {
         if_exists,
         view_names,
+        cascade,
     })
 }
 
@@ -18001,6 +18038,7 @@ fn build_drop_materialized_view(
 ) -> Result<DropMaterializedViewStatement, ParseError> {
     let mut if_exists = false;
     let mut view_names = Vec::new();
+    let mut cascade = false;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::if_exists_clause => if_exists = true,
@@ -18008,6 +18046,7 @@ fn build_drop_materialized_view(
                 view_names.extend(part.into_inner().map(build_identifier));
             }
             Rule::identifier => view_names.push(build_identifier(part)),
+            Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
             _ => {}
         }
     }
@@ -18017,6 +18056,7 @@ fn build_drop_materialized_view(
     Ok(DropMaterializedViewStatement {
         if_exists,
         view_names,
+        cascade,
     })
 }
 

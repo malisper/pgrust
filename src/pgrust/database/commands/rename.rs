@@ -499,15 +499,17 @@ impl Database {
             &new_column_name,
             rename_stmt.only,
         )?;
+        let mut dependent_views = Vec::new();
         for target in &targets {
-            reject_relation_with_dependent_views(
+            dependent_views.extend(dependent_view_rewrites_for_relation(
                 self,
                 client_id,
                 Some((xid, cid)),
                 target.relation_oid,
-                "ALTER TABLE RENAME COLUMN on relation without dependent views",
-            )?;
+            )?);
         }
+        dependent_views.sort_by_key(|view| view.relation_oid);
+        dependent_views.dedup_by_key(|view| view.relation_oid);
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -530,6 +532,15 @@ impl Database {
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
         }
+        rewrite_dependent_views(
+            self,
+            client_id,
+            Some((xid, cid.saturating_add(10))),
+            &dependent_views,
+            xid,
+            cid.saturating_add(10),
+            catalog_effects,
+        )?;
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -680,6 +691,20 @@ impl Database {
         )
     }
 
+    pub(crate) fn execute_alter_materialized_view_set_schema_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterRelationSetSchemaStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_alter_relation_set_schema_stmt_with_search_path(
+            client_id,
+            alter_stmt,
+            configured_search_path,
+            'm',
+        )
+    }
+
     fn execute_alter_relation_set_schema_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -764,6 +789,28 @@ impl Database {
             cid,
             configured_search_path,
             'v',
+            catalog_effects,
+            temp_effects,
+        )
+    }
+
+    pub(crate) fn execute_alter_materialized_view_set_schema_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterRelationSetSchemaStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        self.execute_alter_relation_set_schema_stmt_in_transaction_with_search_path(
+            client_id,
+            alter_stmt,
+            xid,
+            cid,
+            configured_search_path,
+            'm',
             catalog_effects,
             temp_effects,
         )

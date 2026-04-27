@@ -167,8 +167,8 @@ use crate::backend::utils::misc::stack_depth;
 use crate::include::access::htup::TupleError;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::pgrust::database::{
-    AsyncNotifyRuntime, DatabaseStatsStore, LargeObjectRuntime, PendingNotification,
-    SequenceRuntime, SessionStatsState, TransactionWaiter,
+    AsyncNotifyRuntime, Database, DatabaseStatsStore, LargeObjectRuntime, PendingNotification,
+    SequenceRuntime, SessionStatsState, TempMutationEffect, TransactionWaiter,
 };
 use crate::pl::plpgsql::PlpgsqlFunctionCache;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
@@ -431,6 +431,9 @@ pub struct ExecutorContext {
     pub timed: bool,
     pub allow_side_effects: bool,
     pub pending_async_notifications: Vec<PendingNotification>,
+    pub catalog_effects: Vec<CatalogMutationEffect>,
+    pub temp_effects: Vec<TempMutationEffect>,
+    pub database: Option<Database>,
     pub pending_catalog_effects: Vec<CatalogMutationEffect>,
     pub pending_table_locks: Vec<RelFileLocator>,
     pub catalog: Option<VisibleCatalog>,
