@@ -1214,18 +1214,6 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'v',
         ),
         proc_row(
-            3352,
-            "pg_get_partkeydef",
-            TEXT_TYPE_OID,
-            &oid_argtypes(&[OID_TYPE_OID]),
-            "pg_get_partkeydef",
-            1,
-            false,
-            true,
-            'f',
-            's',
-        ),
-        proc_row(
             2079,
             "pg_table_is_visible",
             BOOL_TYPE_OID,
