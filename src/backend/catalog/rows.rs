@@ -6,14 +6,14 @@ use crate::backend::utils::cache::catcache::{CatCache, sql_type_oid};
 use crate::include::catalog::{
     BootstrapCatalogKind, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PgAggregateRow, PgAmRow,
     PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
-    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow,
-    PgForeignDataWrapperRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    bootstrap_composite_type_rows, builtin_type_row_by_oid, composite_array_type_row,
-    composite_type_row,
+    PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow,
+    PgDescriptionRow, PgForeignDataWrapperRow, PgForeignServerRow, PgIndexRow, PgInheritsRow,
+    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
+    PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_row_by_oid,
+    composite_array_type_row, composite_type_row,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -27,6 +27,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub partitioned_tables: Vec<PgPartitionedTableRow>,
     pub descriptions: Vec<PgDescriptionRow>,
     pub foreign_data_wrappers: Vec<PgForeignDataWrapperRow>,
+    pub foreign_servers: Vec<PgForeignServerRow>,
     pub indexes: Vec<PgIndexRow>,
     pub rewrites: Vec<PgRewriteRow>,
     pub triggers: Vec<PgTriggerRow>,
@@ -54,6 +55,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub procs: Vec<PgProcRow>,
     pub aggregates: Vec<PgAggregateRow>,
     pub casts: Vec<PgCastRow>,
+    pub conversions: Vec<PgConversionRow>,
     pub collations: Vec<PgCollationRow>,
     pub databases: Vec<PgDatabaseRow>,
     pub tablespaces: Vec<PgTablespaceRow>,
@@ -180,6 +182,7 @@ pub(crate) fn extend_physical_catalog_rows(
     target
         .foreign_data_wrappers
         .extend(source.foreign_data_wrappers);
+    target.foreign_servers.extend(source.foreign_servers);
     target.indexes.extend(source.indexes);
     target.rewrites.extend(source.rewrites);
     target.triggers.extend(source.triggers);
@@ -210,6 +213,7 @@ pub(crate) fn extend_physical_catalog_rows(
     target.procs.extend(source.procs);
     target.aggregates.extend(source.aggregates);
     target.casts.extend(source.casts);
+    target.conversions.extend(source.conversions);
     target.collations.extend(source.collations);
     target.databases.extend(source.databases);
     target.tablespaces.extend(source.tablespaces);
@@ -230,6 +234,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         partitioned_tables: catcache.partitioned_table_rows(),
         descriptions,
         foreign_data_wrappers: catcache.foreign_data_wrapper_rows(),
+        foreign_servers: catcache.foreign_server_rows(),
         indexes: catcache.index_rows(),
         rewrites: catcache.rewrite_rows(),
         triggers: catcache.trigger_rows(),
@@ -257,6 +262,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         procs: catcache.proc_rows(),
         aggregates: catcache.aggregate_rows(),
         casts: catcache.cast_rows(),
+        conversions: catcache.conversion_rows(),
         collations: catcache.collation_rows(),
         databases: catcache.database_rows(),
         tablespaces: catcache.tablespace_rows(),

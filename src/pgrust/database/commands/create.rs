@@ -22,9 +22,9 @@ use crate::backend::utils::misc::notices::{
 };
 use crate::include::catalog::{
     ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
-    BOOTSTRAP_SUPERUSER_OID, BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID,
-    PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgProcRow, RECORD_TYPE_OID, VOID_TYPE_OID,
+    BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_C_OID,
+    PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PgAggregateRow,
+    PgAuthIdRow, PgAuthMembersRow, PgProcRow, RECORD_TYPE_OID, VOID_TYPE_OID,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
@@ -2445,11 +2445,7 @@ impl Database {
         let existing_proc = catalog
             .proc_rows_by_name(&function_name)
             .into_iter()
-            .find(|row| {
-                row.pronamespace == namespace_oid
-                    && row.proargtypes == proargtypes
-                    && row.prokind == proc_kind
-            });
+            .find(|row| row.pronamespace == namespace_oid && row.proargtypes == proargtypes);
         if existing_proc.is_some() && !create_stmt.replace_existing {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "unique routine signature",
@@ -2486,7 +2482,7 @@ impl Database {
             oid: 0,
             proname: function_name.clone(),
             pronamespace: namespace_oid,
-            proowner: BOOTSTRAP_SUPERUSER_OID,
+            proowner: self.auth_state(client_id).current_user_oid(),
             proacl: None,
             prolang: language_row.oid,
             procost: create_stmt
@@ -2872,7 +2868,7 @@ impl Database {
             oid: 0,
             proname: aggregate_name.clone(),
             pronamespace: namespace_oid,
-            proowner: BOOTSTRAP_SUPERUSER_OID,
+            proowner: self.auth_state(client_id).current_user_oid(),
             proacl: None,
             prolang: PG_LANGUAGE_INTERNAL_OID,
             procost: 1.0,

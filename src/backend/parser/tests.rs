@@ -1485,8 +1485,10 @@ fn visible_catalog_without_text_input_cast(
                     && row.castmethod == 'i')
             })
             .collect(),
+        base.conversion_rows(),
         base.collation_rows(),
         base.foreign_data_wrapper_rows(),
+        base.foreign_server_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -1543,8 +1545,10 @@ fn visible_catalog_without_operator(
         base.proc_rows(),
         base.aggregate_rows(),
         base.cast_rows(),
+        base.conversion_rows(),
         base.collation_rows(),
         base.foreign_data_wrapper_rows(),
+        base.foreign_server_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -1615,8 +1619,10 @@ fn visible_catalog_with_extra_opclasses(
         base.proc_rows(),
         base.aggregate_rows(),
         base.cast_rows(),
+        base.conversion_rows(),
         base.collation_rows(),
         base.foreign_data_wrapper_rows(),
+        base.foreign_server_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -2342,6 +2348,24 @@ fn parse_statistics_ddl_statements() {
     ));
 
     assert!(matches!(
+        parse_statement("alter statistics tst owner to app_owner").unwrap(),
+        Statement::AlterStatistics(AlterStatisticsStatement {
+            if_exists: false,
+            statistics_name,
+            action: AlterStatisticsAction::OwnerTo { new_owner },
+        }) if statistics_name == "tst" && new_owner == "app_owner"
+    ));
+
+    assert!(matches!(
+        parse_statement("alter statistics tst set schema app_schema").unwrap(),
+        Statement::AlterStatistics(AlterStatisticsStatement {
+            if_exists: false,
+            statistics_name,
+            action: AlterStatisticsAction::SetSchema { new_schema },
+        }) if statistics_name == "tst" && new_schema == "app_schema"
+    ));
+
+    assert!(matches!(
         parse_statement("drop statistics if exists public.tst, tst2 cascade").unwrap(),
         Statement::DropStatistics(DropStatisticsStatement {
             if_exists: true,
@@ -2656,6 +2680,111 @@ fn parse_create_operator_class_hash_support() {
                 },
             ],
         })
+    );
+}
+
+#[test]
+fn parse_operator_family_and_class_alter_statements() {
+    assert_eq!(
+        parse_statement("create operator family alt_opf1 using hash").unwrap(),
+        Statement::CreateOperatorFamily(CreateOperatorFamilyStatement {
+            schema_name: None,
+            family_name: "alt_opf1".into(),
+            access_method: "hash".into(),
+        })
+    );
+    assert_eq!(
+        parse_statement("alter operator family alt_opf1 using hash owner to user1").unwrap(),
+        Statement::AlterOperatorFamily(AlterOperatorFamilyStatement {
+            schema_name: None,
+            family_name: "alt_opf1".into(),
+            access_method: "hash".into(),
+            action: AlterOperatorFamilyAction::OwnerTo {
+                new_owner: "user1".into(),
+            },
+        })
+    );
+    assert_eq!(
+        parse_statement("alter operator class alt_opc1 using hash set schema alt_nsp2").unwrap(),
+        Statement::AlterOperatorClass(AlterOperatorClassStatement {
+            schema_name: None,
+            opclass_name: "alt_opc1".into(),
+            access_method: "hash".into(),
+            action: AlterOperatorClassAction::SetSchema {
+                new_schema: "alt_nsp2".into(),
+            },
+        })
+    );
+    assert_eq!(
+        parse_statement("drop operator family if exists alt_opf1 using hash").unwrap(),
+        Statement::DropOperatorFamily(DropOperatorFamilyStatement {
+            if_exists: true,
+            schema_name: None,
+            family_name: "alt_opf1".into(),
+            access_method: "hash".into(),
+        })
+    );
+
+    let stmt =
+        parse_statement("create operator class alt_opc1 for type uuid using hash as storage uuid")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateOperatorClass(CreateOperatorClassStatement {
+            schema_name: None,
+            opclass_name: "alt_opc1".into(),
+            data_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Uuid)),
+            access_method: "hash".into(),
+            is_default: false,
+            items: vec![CreateOperatorClassItem::Storage {
+                storage_type: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Uuid)),
+            }],
+        })
+    );
+}
+
+#[test]
+fn parse_text_search_generic_statements() {
+    assert_eq!(
+        parse_statement("create text search dictionary alt_ts_dict1 (template=simple)").unwrap(),
+        Statement::CreateTextSearch(CreateTextSearchStatement {
+            kind: TextSearchObjectKind::Dictionary,
+            schema_name: None,
+            object_name: "alt_ts_dict1".into(),
+            parameters: vec![TextSearchParameter {
+                name: "template".into(),
+                value: "simple".into(),
+            }],
+        })
+    );
+    assert_eq!(
+        parse_statement("alter text search configuration alt_ts_conf1 owner to user1").unwrap(),
+        Statement::AlterTextSearch(AlterTextSearchStatement {
+            kind: TextSearchObjectKind::Configuration,
+            schema_name: None,
+            object_name: "alt_ts_conf1".into(),
+            action: AlterTextSearchAction::OwnerTo {
+                new_owner: "user1".into(),
+            },
+        })
+    );
+    assert_eq!(
+        parse_statement("alter text search parser alt_ts_prs1 set schema alt_nsp2").unwrap(),
+        Statement::AlterTextSearch(AlterTextSearchStatement {
+            kind: TextSearchObjectKind::Parser,
+            schema_name: None,
+            object_name: "alt_ts_prs1".into(),
+            action: AlterTextSearchAction::SetSchema {
+                new_schema: "alt_nsp2".into(),
+            },
+        })
+    );
+    let err =
+        parse_statement(r#"create text search template tstemp_case ("Init" = init_function)"#)
+            .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("parameter \"Init\" not recognized")
     );
 }
 
@@ -5753,6 +5882,20 @@ fn parse_drop_and_alter_procedure_statements() {
                 arg_types: vec!["text".into()],
             },
             action: AlterRoutineAction::Options(vec![AlterRoutineOption::Strict(true)]),
+        })
+    );
+    assert_eq!(
+        parse_statement("alter aggregate public.atest1(integer) owner to app_owner").unwrap(),
+        Statement::AlterRoutine(AlterRoutineStatement {
+            kind: RoutineKind::Aggregate,
+            signature: RoutineSignature {
+                schema_name: Some("public".into()),
+                routine_name: "atest1".into(),
+                arg_types: vec!["integer".into()],
+            },
+            action: AlterRoutineAction::OwnerTo {
+                new_owner: "app_owner".into()
+            },
         })
     );
     assert_eq!(
@@ -12614,6 +12757,18 @@ fn parse_create_drop_and_comment_on_conversion_statements() {
     };
     assert_eq!(comment.conversion_name, "myconv");
     assert_eq!(comment.comment.as_deref(), Some("hello"));
+    let Statement::AlterConversion(alter) =
+        parse_statement("alter conversion public.myconv owner to app_owner").unwrap()
+    else {
+        panic!("expected alter conversion");
+    };
+    assert_eq!(alter.conversion_name, "public.myconv");
+    assert_eq!(
+        alter.action,
+        AlterConversionAction::OwnerTo {
+            new_owner: "app_owner".into()
+        }
+    );
 }
 
 #[test]
@@ -12673,6 +12828,22 @@ fn parse_foreign_data_wrapper_statements() {
     assert_eq!(rename.fdw_name, "foo");
     assert_eq!(rename.new_name, "bar");
 
+    let Statement::CreateForeignServer(server) =
+        parse_statement("create server srv1 foreign data wrapper foo").unwrap()
+    else {
+        panic!("expected create foreign server");
+    };
+    assert_eq!(server.server_name, "srv1");
+    assert_eq!(server.fdw_name, "foo");
+
+    let Statement::AlterForeignServerRename(server_rename) =
+        parse_statement("alter server srv1 rename to srv2").unwrap()
+    else {
+        panic!("expected alter foreign server rename");
+    };
+    assert_eq!(server_rename.server_name, "srv1");
+    assert_eq!(server_rename.new_name, "srv2");
+
     let Statement::DropForeignDataWrapper(drop_stmt) =
         parse_statement("drop foreign data wrapper if exists foo cascade").unwrap()
     else {
@@ -12689,6 +12860,51 @@ fn parse_foreign_data_wrapper_statements() {
     };
     assert_eq!(comment.fdw_name, "foo");
     assert_eq!(comment.comment.as_deref(), Some("hello"));
+}
+
+#[test]
+fn parse_language_statements() {
+    let Statement::CreateLanguage(create) =
+        parse_statement("create language alt_lang handler plpgsql_call_handler").unwrap()
+    else {
+        panic!("expected create language");
+    };
+    assert_eq!(create.language_name, "alt_lang");
+    assert_eq!(create.handler_name, "plpgsql_call_handler");
+
+    let Statement::AlterLanguage(alter) =
+        parse_statement("alter language alt_lang owner to app_owner").unwrap()
+    else {
+        panic!("expected alter language");
+    };
+    assert_eq!(alter.language_name, "alt_lang");
+    assert_eq!(
+        alter.action,
+        AlterLanguageAction::OwnerTo {
+            new_owner: "app_owner".into()
+        }
+    );
+
+    let Statement::AlterLanguage(rename) =
+        parse_statement("alter language alt_lang rename to alt_lang2").unwrap()
+    else {
+        panic!("expected alter language rename");
+    };
+    assert_eq!(
+        rename.action,
+        AlterLanguageAction::Rename {
+            new_name: "alt_lang2".into()
+        }
+    );
+
+    let Statement::DropLanguage(drop_stmt) =
+        parse_statement("drop language if exists alt_lang cascade").unwrap()
+    else {
+        panic!("expected drop language");
+    };
+    assert!(drop_stmt.if_exists);
+    assert_eq!(drop_stmt.language_name, "alt_lang");
+    assert!(drop_stmt.cascade);
 }
 
 #[test]

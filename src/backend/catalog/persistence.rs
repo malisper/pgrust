@@ -313,6 +313,7 @@ fn physical_catalog_rows_empty(rows: &PhysicalCatalogRows) -> bool {
         && rows.inherits.is_empty()
         && rows.descriptions.is_empty()
         && rows.foreign_data_wrappers.is_empty()
+        && rows.foreign_servers.is_empty()
         && rows.indexes.is_empty()
         && rows.rewrites.is_empty()
         && rows.triggers.is_empty()
@@ -334,6 +335,7 @@ fn physical_catalog_rows_empty(rows: &PhysicalCatalogRows) -> bool {
         && rows.procs.is_empty()
         && rows.aggregates.is_empty()
         && rows.casts.is_empty()
+        && rows.conversions.is_empty()
         && rows.collations.is_empty()
         && rows.databases.is_empty()
         && rows.tablespaces.is_empty()
@@ -354,6 +356,7 @@ fn catalog_row_identity_matches(
         | BootstrapCatalogKind::PgTrigger
         | BootstrapCatalogKind::PgPolicy
         | BootstrapCatalogKind::PgStatisticExt
+        | BootstrapCatalogKind::PgConversion
         | BootstrapCatalogKind::PgProc
         | BootstrapCatalogKind::PgAggregate => catalog_value_eq(left.first(), right.first()),
         BootstrapCatalogKind::PgAttribute => {
