@@ -1,6 +1,56 @@
 use super::*;
 
 impl Database {
+    pub(crate) fn catalog_store_snapshot(
+        &self,
+        client_id: ClientId,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+    ) -> Result<crate::backend::catalog::store::CatalogStoreSnapshot, ExecError> {
+        let ctx = txn_ctx.map(|(xid, cid)| CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        });
+        self.catalog
+            .read()
+            .snapshot_for_command(ctx.as_ref())
+            .map_err(map_catalog_error)
+    }
+
+    pub(crate) fn restore_catalog_store_snapshot(
+        &self,
+        snapshot: crate::backend::catalog::store::CatalogStoreSnapshot,
+    ) {
+        self.catalog.write().restore_snapshot(snapshot);
+    }
+
+    pub(crate) fn restore_catalog_store_snapshot_for_savepoint(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        snapshot: crate::backend::catalog::store::CatalogStoreSnapshot,
+        aborted_effects: &[CatalogMutationEffect],
+    ) -> Result<CatalogMutationEffect, ExecError> {
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        self.catalog
+            .write()
+            .restore_snapshot_for_savepoint_rollback(snapshot, aborted_effects, &ctx)
+            .map_err(map_catalog_error)
+    }
+
     pub(crate) fn catalog_invalidation_from_effect(
         effect: &CatalogMutationEffect,
     ) -> CatalogInvalidation {

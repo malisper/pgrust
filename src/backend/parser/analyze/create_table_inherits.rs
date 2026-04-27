@@ -7,7 +7,8 @@ use super::create_table::{LoweredCreateTable, lower_create_table};
 use super::{
     BoundRelation, CatalogLookup, ColumnConstraint, ConstraintAttributes, CreateTableElement,
     CreateTableStatement, ParseError, PartitionColumnOverride, RawTypeName, TableConstraint,
-    TablePersistence, lower_partition_clause, validate_partitioned_index_backed_constraints,
+    TablePersistence, lower_partition_clause, validate_partitioned_check_constraints,
+    validate_partitioned_index_backed_constraints,
 };
 
 #[derive(Debug, Clone)]
@@ -30,12 +31,26 @@ pub fn lower_create_table_with_catalog(
     stmt_with_resolved_persistence.persistence = persistence;
     let stmt = &stmt_with_resolved_persistence;
 
+    if !stmt.inherits.is_empty() && stmt.partition_spec.is_some() && stmt.partition_of.is_none() {
+        return Err(ParseError::DetailedError {
+            message: "cannot create partitioned table as inheritance child".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+
     if stmt.inherits.is_empty() && stmt.partition_of.is_none() {
         let mut lowered = lower_create_table(stmt, catalog)?;
         let partition = lower_partition_clause(stmt, &lowered.relation_desc, catalog, persistence)?;
         lowered.partition_spec = partition.spec;
         lowered.partition_parent_oid = partition.parent_oid;
         lowered.partition_bound = partition.bound;
+        validate_partitioned_check_constraints(
+            &stmt.table_name,
+            lowered.partition_spec.as_ref(),
+            &lowered.check_actions,
+        )?;
         validate_partitioned_index_backed_constraints(
             &stmt.table_name,
             lowered.partition_spec.as_ref(),
@@ -109,6 +124,11 @@ pub fn lower_create_table_with_catalog(
     lowered.partition_spec = partition.spec;
     lowered.partition_parent_oid = partition.parent_oid;
     lowered.partition_bound = partition.bound;
+    validate_partitioned_check_constraints(
+        &stmt.table_name,
+        lowered.partition_spec.as_ref(),
+        &lowered.check_actions,
+    )?;
     validate_partitioned_index_backed_constraints(
         &stmt.table_name,
         lowered.partition_spec.as_ref(),
@@ -286,27 +306,45 @@ fn resolve_parent_relations(
         let parent = catalog
             .lookup_any_relation(parent_name)
             .ok_or_else(|| ParseError::UnknownTable(parent_name.clone()))?;
-        if !(parent.relkind == 'r' || allow_partitioned_parent && parent.relkind == 'p') {
+        if !allow_partitioned_parent && parent.relkind == 'p' {
+            return Err(ParseError::DetailedError {
+                message: format!("cannot inherit from partitioned table \"{parent_name}\""),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+        if allow_partitioned_parent && parent.relkind != 'p' {
+            return Err(ParseError::DetailedError {
+                message: format!("\"{parent_name}\" is not partitioned"),
+                detail: None,
+                hint: None,
+                sqlstate: "42809",
+            });
+        }
+        if !allow_partitioned_parent && parent.relkind != 'r' {
             return Err(ParseError::WrongObjectType {
                 name: parent_name.clone(),
-                expected: if allow_partitioned_parent {
-                    "partitioned table"
-                } else {
-                    "table"
-                },
+                expected: "table",
             });
         }
         if !seen.insert(parent.relation_oid) {
             return Err(ParseError::DuplicateTableName(parent_name.clone()));
         }
-        if allow_partitioned_parent
-            && relation_persistence_code(persistence) != parent.relpersistence
-        {
+        let child_persistence = relation_persistence_code(persistence);
+        if allow_partitioned_parent && child_persistence != parent.relpersistence {
             return Err(ParseError::DetailedError {
-                message: format!(
-                    "partition \"{}\" would have different persistence than partitioned table \"{}\"",
-                    stmt.table_name, parent_name
-                ),
+                message: partition_persistence_error(
+                    child_persistence,
+                    parent.relpersistence,
+                    parent_name,
+                )
+                .unwrap_or_else(|| {
+                    format!(
+                        "partition \"{}\" would have different persistence than partitioned table \"{}\"",
+                        stmt.table_name, parent_name
+                    )
+                }),
                 detail: None,
                 hint: None,
                 sqlstate: "42P16",
@@ -329,8 +367,20 @@ fn resolve_parent_relations(
 fn relation_persistence_code(persistence: TablePersistence) -> char {
     match persistence {
         TablePersistence::Permanent => 'p',
-        TablePersistence::Temporary => 't',
         TablePersistence::Unlogged => 'u',
+        TablePersistence::Temporary => 't',
+    }
+}
+
+fn partition_persistence_error(child: char, parent: char, parent_name: &str) -> Option<String> {
+    match (child, parent) {
+        ('p', 't') => Some(format!(
+            "cannot create a permanent relation as partition of temporary relation \"{parent_name}\""
+        )),
+        ('t', 'p') => Some(format!(
+            "cannot create a temporary relation as partition of permanent relation \"{parent_name}\""
+        )),
+        _ => None,
     }
 }
 

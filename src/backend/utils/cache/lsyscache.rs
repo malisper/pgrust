@@ -660,7 +660,9 @@ fn visible_type_oid_for_sql_type(
         .into_iter()
         .chain(dynamic_type_rows_for_search_path(db, search_path))
         .find(|row| {
-            row.sql_type.kind == sql_type.kind && row.sql_type.is_array == sql_type.is_array
+            row.oid != crate::include::catalog::UNKNOWN_TYPE_OID
+                && row.sql_type.kind == sql_type.kind
+                && row.sql_type.is_array == sql_type.is_array
         })
         .map(|row| row.oid)
 }

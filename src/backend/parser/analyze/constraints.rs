@@ -280,8 +280,8 @@ struct ResolvedPendingReferencedKey {
 fn table_persistence_code(persistence: TablePersistence) -> char {
     match persistence {
         TablePersistence::Permanent => 'p',
-        TablePersistence::Temporary => 't',
         TablePersistence::Unlogged => 'u',
+        TablePersistence::Temporary => 't',
     }
 }
 

@@ -57,8 +57,8 @@ pub fn resolve_unqualified_create_persistence(
     persistence: TablePersistence,
     configured_search_path: Option<&[String]>,
 ) -> Result<TablePersistence, ParseError> {
-    if persistence == TablePersistence::Temporary {
-        return Ok(TablePersistence::Temporary);
+    if persistence != TablePersistence::Permanent {
+        return Ok(persistence);
     }
 
     let Some(search_path) = configured_search_path else {

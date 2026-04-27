@@ -2,22 +2,28 @@ use serde::{Deserialize, Serialize};
 
 use super::collation::{default_collation_oid_for_type, strip_explicit_collation};
 use super::{
-    BoundRelation, CatalogLookup, CreateTableStatement, IndexBackedConstraintAction, ParseError,
-    PartitionStrategy, RawPartitionBoundSpec, RawPartitionRangeDatum, RawPartitionSpec, SqlType,
-    TablePersistence, bind_expr_with_outer_and_ctes, bind_scalar_expr_in_scope,
-    expr_contains_set_returning, infer_sql_expr_type, scope_for_relation, sql_type_name,
+    BoundRelation, CatalogLookup, CheckConstraintAction, CreateTableStatement,
+    IndexBackedConstraintAction, ParseError, PartitionStrategy, RawPartitionBoundSpec,
+    RawPartitionRangeDatum, RawPartitionSpec, SqlExpr, SqlType, SqlTypeKind, TablePersistence,
+    bind_expr_with_outer_and_ctes, bind_scalar_expr_in_scope, expr_contains_set_returning,
+    infer_sql_expr_type, scope_for_relation, sql_type_name,
 };
 use crate::backend::executor::{Value, cast_value};
 use crate::backend::parser::parse_expr;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
-    ANYARRAYOID, ANYMULTIRANGEOID, BPCHAR_TYPE_OID, BTREE_AM_OID, GIST_AM_OID, HASH_AM_OID,
-    PgPartitionedTableRow, RANGE_GIST_OPCLASS_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
-    builtin_range_spec_by_multirange_oid, builtin_range_spec_by_oid, default_btree_opclass_oid,
-    default_hash_opclass_oid, range_type_ref_for_sql_type,
+    ANYARRAYOID, ANYMULTIRANGEOID, ARRAY_BTREE_OPCLASS_OID, BPCHAR_TYPE_OID, BTREE_AM_OID,
+    HASH_AM_OID, INT4_TYPE_OID, OID_TYPE_OID, PgPartitionedTableRow, TEXT_TYPE_OID,
+    VARCHAR_TYPE_OID, builtin_range_spec_by_multirange_oid, builtin_range_spec_by_oid,
+    builtin_type_row_by_oid, default_btree_opclass_oid, default_hash_opclass_oid,
 };
-use crate::include::nodes::datum::{MultirangeTypeRef, MultirangeValue, RangeBound, RangeValue};
-use crate::include::nodes::primnodes::{Expr, RelationDesc, Var, attrno_index, user_attrno};
+use crate::include::nodes::datum::{
+    ArrayDimension, ArrayValue, MultirangeTypeRef, MultirangeValue, RangeBound, RangeValue,
+};
+use crate::include::nodes::primnodes::{
+    Expr, FuncExpr, RelationDesc, ScalarFunctionImpl, Var, attrno_index, expr_sql_type_hint,
+    user_attrno,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoweredPartitionSpec {
@@ -60,6 +66,7 @@ pub enum SerializedPartitionValue {
     TimeTz { time: i64, offset_seconds: i32 },
     Timestamp(i64),
     TimestampTz(i64),
+    Array(Box<SerializedPartitionArrayValue>),
     Range(Box<SerializedPartitionRangeValue>),
     Multirange(Box<SerializedPartitionMultirangeValue>),
 }
@@ -82,6 +89,14 @@ pub struct SerializedPartitionRangeValue {
 pub struct SerializedPartitionMultirangeValue {
     pub multirange_type_oid: u32,
     pub ranges: Vec<SerializedPartitionRangeValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerializedPartitionArrayValue {
+    pub element_type_oid: Option<u32>,
+    pub type_name: String,
+    pub dimensions: Vec<(i32, usize)>,
+    pub elements: Vec<SerializedPartitionValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,9 +150,16 @@ pub(crate) fn lower_partition_clause(
     }
 
     if !stmt.inherits.is_empty() {
-        return Err(ParseError::InvalidTableDefinition(
-            "cannot mix INHERITS with partition syntax".into(),
-        ));
+        return Err(ParseError::DetailedError {
+            message: if stmt.partition_spec.is_some() && stmt.partition_of.is_none() {
+                "cannot create partitioned table as inheritance child".into()
+            } else {
+                "cannot mix INHERITS with partition syntax".into()
+            },
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
     }
 
     let spec = stmt
@@ -163,17 +185,23 @@ pub(crate) fn lower_partition_clause(
         .lookup_any_relation(parent_name)
         .ok_or_else(|| ParseError::UnknownTable(parent_name.to_string()))?;
     if parent.relkind != 'p' {
-        return Err(ParseError::WrongObjectType {
-            name: parent_name.to_string(),
-            expected: "partitioned table",
+        return Err(ParseError::DetailedError {
+            message: format!("\"{parent_name}\" is not partitioned"),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
         });
     }
-    if relation_persistence_code(persistence) != parent.relpersistence {
+    let child_persistence = relation_persistence_code(persistence);
+    if child_persistence != parent.relpersistence {
         return Err(ParseError::DetailedError {
-            message: format!(
-                "partition \"{}\" would have different persistence than partitioned table \"{}\"",
-                stmt.table_name, parent_name
-            ),
+            message: partition_persistence_error(child_persistence, parent.relpersistence, parent_name)
+                .unwrap_or_else(|| {
+                    format!(
+                        "partition \"{}\" would have different persistence than partitioned table \"{}\"",
+                        stmt.table_name, parent_name
+                    )
+                }),
             detail: None,
             hint: None,
             sqlstate: "42P16",
@@ -246,6 +274,27 @@ pub(crate) fn validate_partitioned_index_backed_constraints(
     Ok(())
 }
 
+pub(crate) fn validate_partitioned_check_constraints(
+    relation_name: &str,
+    partition_spec: Option<&LoweredPartitionSpec>,
+    check_actions: &[CheckConstraintAction],
+) -> Result<(), ParseError> {
+    if partition_spec.is_none() {
+        return Ok(());
+    }
+    if check_actions.iter().any(|action| action.no_inherit) {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "cannot add NO INHERIT constraint to partitioned table \"{relation_name}\""
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn relation_partition_spec(
     relation: &BoundRelation,
 ) -> Result<LoweredPartitionSpec, ParseError> {
@@ -283,8 +332,9 @@ pub(crate) fn relation_partition_spec(
             };
             let raw = parse_expr(expr_sql)?;
             let bound = bind_expr_with_outer_and_ctes(&raw, &scope, &catalog, &[], None, &[])?;
-            let key_type = infer_sql_expr_type(&raw, &scope, &catalog, &[], None);
+            let inferred_key_type = infer_sql_expr_type(&raw, &scope, &catalog, &[], None);
             let (bound, _) = strip_explicit_collation(bound);
+            let key_type = expr_sql_type_hint(&bound).unwrap_or(inferred_key_type);
             key_exprs.push(bound);
             key_types.push(key_type);
             key_sqls.push(expr_sql.to_string());
@@ -444,6 +494,7 @@ pub(crate) fn partition_value_to_value(value: &SerializedPartitionValue) -> Valu
         SerializedPartitionValue::TimestampTz(v) => {
             Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(*v))
         }
+        SerializedPartitionValue::Array(array) => deserialize_partition_array_value(array),
         SerializedPartitionValue::Range(range) => deserialize_partition_range_value(range),
         SerializedPartitionValue::Multirange(multirange) => {
             deserialize_partition_multirange_value(multirange)
@@ -481,6 +532,13 @@ pub(crate) fn value_to_partition_value(
         },
         Value::Timestamp(v) => SerializedPartitionValue::Timestamp(v.0),
         Value::TimestampTz(v) => SerializedPartitionValue::TimestampTz(v.0),
+        Value::PgArray(array) => {
+            SerializedPartitionValue::Array(Box::new(serialize_partition_array_value(array)?))
+        }
+        Value::Array(values) => {
+            let array = ArrayValue::from_1d(values.clone());
+            SerializedPartitionValue::Array(Box::new(serialize_partition_array_value(&array)?))
+        }
         Value::Range(range) => {
             SerializedPartitionValue::Range(Box::new(serialize_partition_range_value(range)?))
         }
@@ -496,6 +554,52 @@ pub(crate) fn value_to_partition_value(
             )));
         }
     })
+}
+
+fn serialize_partition_array_value(
+    array: &ArrayValue,
+) -> Result<SerializedPartitionArrayValue, ParseError> {
+    let elements = array
+        .elements
+        .iter()
+        .map(value_to_partition_value)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SerializedPartitionArrayValue {
+        element_type_oid: array.element_type_oid,
+        type_name: partition_array_type_name(array.element_type_oid),
+        dimensions: array
+            .dimensions
+            .iter()
+            .map(|dimension| (dimension.lower_bound, dimension.length))
+            .collect(),
+        elements,
+    })
+}
+
+fn deserialize_partition_array_value(array: &SerializedPartitionArrayValue) -> Value {
+    Value::PgArray(ArrayValue {
+        element_type_oid: array.element_type_oid,
+        dimensions: array
+            .dimensions
+            .iter()
+            .map(|(lower_bound, length)| ArrayDimension {
+                lower_bound: *lower_bound,
+                length: *length,
+            })
+            .collect(),
+        elements: array
+            .elements
+            .iter()
+            .map(partition_value_to_value)
+            .collect(),
+    })
+}
+
+fn partition_array_type_name(element_type_oid: Option<u32>) -> String {
+    element_type_oid
+        .and_then(builtin_type_row_by_oid)
+        .map(|row| sql_type_name(SqlType::array_of(row.sql_type)))
+        .unwrap_or_else(|| "text[]".into())
 }
 
 fn serialize_partition_range_bound(
@@ -605,7 +709,7 @@ fn lower_partition_spec(
     }
     if spec.strategy == PartitionStrategy::List && spec.keys.len() != 1 {
         return Err(ParseError::DetailedError {
-            message: "cannot use list partition strategy with more than one column".into(),
+            message: "cannot use \"list\" partition strategy with more than one column".into(),
             detail: None,
             hint: None,
             sqlstate: "0A000",
@@ -622,14 +726,41 @@ fn lower_partition_spec(
     let scope = scope_for_relation(None, relation_desc);
 
     for key in &spec.keys {
+        if let Some(column_name) = simple_partition_key_column_name(&key.expr) {
+            let normalized = column_name.to_ascii_lowercase();
+            if is_system_column_name(&normalized) {
+                return Err(ParseError::DetailedError {
+                    message: format!("cannot use system column \"{column_name}\" in partition key"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P16",
+                });
+            }
+            if !relation_desc
+                .columns
+                .iter()
+                .any(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+            {
+                return Err(ParseError::DetailedError {
+                    message: format!(
+                        "column \"{column_name}\" named in partition key does not exist"
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42703",
+                });
+            }
+        }
+        validate_partition_key_raw_expr(&key.expr, catalog)?;
         let bound = bind_expr_with_outer_and_ctes(&key.expr, &scope, catalog, &[], None, &[])?;
         if expr_contains_set_returning(&bound) {
-            return Err(ParseError::FeatureNotSupported(
-                "set-returning functions are not allowed in partition key expressions".into(),
+            return Err(partition_key_error(
+                "set-returning functions are not allowed in partition key expressions",
             ));
         }
-        let key_type = infer_sql_expr_type(&key.expr, &scope, catalog, &[], None);
+        let inferred_key_type = infer_sql_expr_type(&key.expr, &scope, catalog, &[], None);
         let (bound, explicit_collation_oid) = strip_explicit_collation(bound);
+        let key_type = expr_sql_type_hint(&bound).unwrap_or(inferred_key_type);
         let simple_column_index = match &bound {
             Expr::Var(var) if var.varlevelsup == 0 && var.varno == 1 && var.varattno > 0 => {
                 attrno_index(var.varattno)
@@ -639,10 +770,27 @@ fn lower_partition_spec(
         if let Some(index) = simple_column_index
             && is_system_column_name(&relation_desc.columns[index].name)
         {
-            return Err(ParseError::InvalidTableDefinition(format!(
+            return Err(partition_key_error(format!(
                 "cannot use system column \"{}\" in partition key",
                 relation_desc.columns[index].name
             )));
+        }
+        if let Some(pseudo_name) = partition_key_pseudotype_name(key_type, &key.expr) {
+            return Err(partition_key_error(format!(
+                "partition key column {} has pseudo-type {pseudo_name}",
+                key_exprs.len() + 1
+            )));
+        }
+        if partition_expr_is_mutable(&bound, catalog) {
+            return Err(partition_key_error(
+                "functions in partition key expression must be marked IMMUTABLE",
+            ));
+        }
+        let planned = crate::backend::optimizer::fold_expr_constants(bound.clone())?;
+        if matches!(planned, Expr::Const(_)) || !expr_contains_var(&bound) {
+            return Err(partition_key_error(
+                "cannot use constant expression as partition key",
+            ));
         }
         let key_collation_oid = if let Some(collation_oid) = explicit_collation_oid {
             collation_oid
@@ -662,7 +810,10 @@ fn lower_partition_spec(
         if let Some(index) = simple_column_index {
             let column = &relation_desc.columns[index];
             if column.dropped {
-                return Err(ParseError::UnknownColumn(column.name.clone()));
+                return Err(partition_key_error(format!(
+                    "column \"{}\" named in partition key does not exist",
+                    column.name
+                )));
             }
             if column.generated.is_some() {
                 return Err(ParseError::DetailedError {
@@ -705,6 +856,7 @@ fn partition_opclass_for_key(
     catalog: &dyn CatalogLookup,
 ) -> Result<u32, ParseError> {
     let access_method = partition_access_method_oid(strategy, sql_type);
+    let access_method_name = partition_access_method_name(strategy);
     if let Some(name) = explicit_opclass {
         let normalized = super::normalize_catalog_lookup_name(name);
         return catalog
@@ -716,25 +868,41 @@ fn partition_opclass_for_key(
                     && opclass_accepts_type(row.opcintype, type_oid)
             })
             .map(|row| row.oid)
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "known partition operator class",
-                actual: name.to_string(),
+            .ok_or_else(|| ParseError::DetailedError {
+                message: format!(
+                    "operator class \"{name}\" does not exist for access method \"{access_method_name}\""
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
             });
     }
     default_opclass_for_partition_strategy(strategy, type_oid, sql_type).ok_or_else(|| {
-        ParseError::FeatureNotSupported(format!("partition key type {}", sql_type_name(sql_type)))
+        ParseError::DetailedError {
+            message: format!(
+                "data type {} has no default operator class for access method \"{access_method_name}\"",
+                sql_type_name(sql_type)
+            ),
+            detail: None,
+            hint: Some(format!(
+                "You must specify a {access_method_name} operator class or define a default {access_method_name} operator class for the data type."
+            )),
+            sqlstate: "42704",
+        }
     })
 }
 
-fn partition_access_method_oid(strategy: PartitionStrategy, sql_type: SqlType) -> u32 {
+fn partition_access_method_oid(strategy: PartitionStrategy, _sql_type: SqlType) -> u32 {
     match strategy {
         PartitionStrategy::Hash => HASH_AM_OID,
-        PartitionStrategy::List | PartitionStrategy::Range
-            if range_type_ref_for_sql_type(sql_type).is_some() =>
-        {
-            GIST_AM_OID
-        }
         PartitionStrategy::List | PartitionStrategy::Range => BTREE_AM_OID,
+    }
+}
+
+fn partition_access_method_name(strategy: PartitionStrategy) -> &'static str {
+    match strategy {
+        PartitionStrategy::Hash => "hash",
+        PartitionStrategy::List | PartitionStrategy::Range => "btree",
     }
 }
 
@@ -742,11 +910,473 @@ fn opclass_accepts_type(opcintype: u32, type_oid: u32) -> bool {
     opcintype == type_oid
         || opcintype == ANYARRAYOID
         || opcintype == ANYMULTIRANGEOID
+        || (opcintype == OID_TYPE_OID && type_oid == INT4_TYPE_OID)
         || (is_text_opclass_type(opcintype) && is_text_opclass_type(type_oid))
 }
 
 fn is_text_opclass_type(type_oid: u32) -> bool {
     matches!(type_oid, TEXT_TYPE_OID | VARCHAR_TYPE_OID | BPCHAR_TYPE_OID)
+}
+
+fn partition_key_error(message: impl Into<String>) -> ParseError {
+    ParseError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42P16",
+    }
+}
+
+fn simple_partition_key_column_name(expr: &SqlExpr) -> Option<&str> {
+    match expr {
+        SqlExpr::Column(name) if !name.contains('.') => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn validate_partition_key_raw_expr(
+    expr: &SqlExpr,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    if super::agg::expr_contains_agg(catalog, expr) {
+        return Err(partition_key_error(
+            "aggregate functions are not allowed in partition key expressions",
+        ));
+    }
+    if super::window::expr_contains_window(expr) {
+        return Err(partition_key_error(
+            "window functions are not allowed in partition key expressions",
+        ));
+    }
+    if raw_expr_any(expr, &is_subquery_expr) {
+        return Err(partition_key_error(
+            "cannot use subquery in partition key expression",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_partition_bound_raw_expr(
+    expr: &SqlExpr,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    if raw_expr_any(expr, &|expr| matches!(expr, SqlExpr::Column(_))) {
+        return Err(partition_bound_error(
+            "cannot use column reference in partition bound expression",
+        ));
+    }
+    if super::agg::expr_contains_agg(catalog, expr) {
+        return Err(partition_bound_error(
+            "aggregate functions are not allowed in partition bound",
+        ));
+    }
+    if super::window::expr_contains_window(expr) {
+        return Err(partition_bound_error(
+            "window functions are not allowed in partition bound",
+        ));
+    }
+    if raw_expr_any(expr, &is_subquery_expr) {
+        return Err(partition_bound_error(
+            "cannot use subquery in partition bound",
+        ));
+    }
+    Ok(())
+}
+
+fn partition_bound_error(message: impl Into<String>) -> ParseError {
+    ParseError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42P17",
+    }
+}
+
+fn is_subquery_expr(expr: &SqlExpr) -> bool {
+    matches!(
+        expr,
+        SqlExpr::ScalarSubquery(_)
+            | SqlExpr::ArraySubquery(_)
+            | SqlExpr::Exists(_)
+            | SqlExpr::InSubquery { .. }
+            | SqlExpr::QuantifiedSubquery { .. }
+    )
+}
+
+fn raw_expr_any(expr: &SqlExpr, predicate: &impl Fn(&SqlExpr) -> bool) -> bool {
+    if predicate(expr) {
+        return true;
+    }
+    match expr {
+        SqlExpr::Column(_)
+        | SqlExpr::Default
+        | SqlExpr::Const(_)
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
+        | SqlExpr::Random
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentCatalog
+        | SqlExpr::CurrentSchema
+        | SqlExpr::CurrentUser
+        | SqlExpr::SessionUser
+        | SqlExpr::CurrentRole
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. }
+        | SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
+        | SqlExpr::Exists(_) => false,
+        SqlExpr::FuncCall {
+            args,
+            order_by,
+            within_group,
+            filter,
+            ..
+        } => {
+            args.args()
+                .iter()
+                .any(|arg| raw_expr_any(&arg.value, predicate))
+                || order_by
+                    .iter()
+                    .any(|item| raw_expr_any(&item.expr, predicate))
+                || within_group.as_deref().is_some_and(|items| {
+                    items.iter().any(|item| raw_expr_any(&item.expr, predicate))
+                })
+                || filter
+                    .as_deref()
+                    .is_some_and(|expr| raw_expr_any(expr, predicate))
+        }
+        SqlExpr::InSubquery { expr, .. } => raw_expr_any(expr, predicate),
+        SqlExpr::QuantifiedSubquery { left, .. } => raw_expr_any(left, predicate),
+        SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
+            raw_expr_any(expr, predicate)
+        }
+        SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => {
+            elements.iter().any(|expr| raw_expr_any(expr, predicate))
+        }
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            raw_expr_any(array, predicate)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_deref()
+                        .is_some_and(|expr| raw_expr_any(expr, predicate))
+                        || subscript
+                            .upper
+                            .as_deref()
+                            .is_some_and(|expr| raw_expr_any(expr, predicate))
+                })
+        }
+        SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::Overlaps(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
+        | SqlExpr::QuantifiedArray {
+            left, array: right, ..
+        }
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonbExistsAny(left, right)
+        | SqlExpr::JsonbExistsAll(left, right)
+        | SqlExpr::JsonbPathExists(left, right)
+        | SqlExpr::JsonbPathMatch(left, right)
+        | SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::GeometryBinaryOp { left, right, .. }
+        | SqlExpr::AtTimeZone {
+            expr: left,
+            zone: right,
+        }
+        | SqlExpr::BinaryOperator { left, right, .. } => {
+            raw_expr_any(left, predicate) || raw_expr_any(right, predicate)
+        }
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            raw_expr_any(expr, predicate)
+                || raw_expr_any(pattern, predicate)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| raw_expr_any(expr, predicate))
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            arg.as_deref()
+                .is_some_and(|expr| raw_expr_any(expr, predicate))
+                || args.iter().any(|arm| {
+                    raw_expr_any(&arm.expr, predicate) || raw_expr_any(&arm.result, predicate)
+                })
+                || defresult
+                    .as_deref()
+                    .is_some_and(|expr| raw_expr_any(expr, predicate))
+        }
+        SqlExpr::Cast(inner, _)
+        | SqlExpr::Collate { expr: inner, .. }
+        | SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
+        | SqlExpr::Not(inner)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::Subscript { expr: inner, .. } => raw_expr_any(inner, predicate),
+        SqlExpr::Xml(xml) => xml.child_exprs().any(|expr| raw_expr_any(expr, predicate)),
+    }
+}
+
+fn partition_key_pseudotype_name(key_type: SqlType, raw_expr: &SqlExpr) -> Option<&'static str> {
+    if key_type.type_oid == crate::include::catalog::UNKNOWN_TYPE_OID
+        || matches!(
+            raw_expr,
+            SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+        )
+    {
+        return Some("unknown");
+    }
+    match key_type.kind {
+        SqlTypeKind::Record => Some("record"),
+        SqlTypeKind::Cstring => Some("cstring"),
+        _ => None,
+    }
+}
+
+fn partition_expr_is_mutable(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
+    match expr {
+        Expr::Func(func) => partition_func_is_mutable(func, catalog),
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|arg| partition_expr_is_mutable(arg, catalog)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| partition_expr_is_mutable(arg, catalog)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(|expr| partition_expr_is_mutable(expr, catalog))
+                || case_expr.args.iter().any(|arm| {
+                    partition_expr_is_mutable(&arm.expr, catalog)
+                        || partition_expr_is_mutable(&arm.result, catalog)
+                })
+                || partition_expr_is_mutable(&case_expr.defresult, catalog)
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => partition_expr_is_mutable(inner, catalog),
+        Expr::Coalesce(left, right) => {
+            partition_expr_is_mutable(left, catalog) || partition_expr_is_mutable(right, catalog)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            partition_expr_is_mutable(expr, catalog)
+                || partition_expr_is_mutable(pattern, catalog)
+                || escape
+                    .as_deref()
+                    .is_some_and(|expr| partition_expr_is_mutable(expr, catalog))
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|expr| partition_expr_is_mutable(expr, catalog)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| partition_expr_is_mutable(expr, catalog)),
+        Expr::ArraySubscript { array, subscripts } => {
+            partition_expr_is_mutable(array, catalog)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| partition_expr_is_mutable(expr, catalog))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| partition_expr_is_mutable(expr, catalog))
+                })
+        }
+        Expr::ScalarArrayOp(saop) => {
+            partition_expr_is_mutable(&saop.left, catalog)
+                || partition_expr_is_mutable(&saop.right, catalog)
+        }
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            partition_expr_is_mutable(left, catalog) || partition_expr_is_mutable(right, catalog)
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(|expr| partition_expr_is_mutable(expr, catalog)),
+        Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => true,
+        Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::Aggref(_)
+        | Expr::WindowFunc(_)
+        | Expr::SetReturning(_)
+        | Expr::SubLink(_)
+        | Expr::SubPlan(_)
+        | Expr::CaseTest(_)
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema => false,
+    }
+}
+
+fn partition_func_is_mutable(func: &FuncExpr, catalog: &dyn CatalogLookup) -> bool {
+    if func
+        .args
+        .iter()
+        .any(|arg| partition_expr_is_mutable(arg, catalog))
+    {
+        return true;
+    }
+    match func.implementation {
+        ScalarFunctionImpl::Builtin(builtin) => matches!(
+            builtin,
+            crate::include::nodes::primnodes::BuiltinScalarFunction::Random
+                | crate::include::nodes::primnodes::BuiltinScalarFunction::RandomNormal
+                | crate::include::nodes::primnodes::BuiltinScalarFunction::Now
+                | crate::include::nodes::primnodes::BuiltinScalarFunction::ClockTimestamp
+                | crate::include::nodes::primnodes::BuiltinScalarFunction::StatementTimestamp
+                | crate::include::nodes::primnodes::BuiltinScalarFunction::TransactionTimestamp
+        ),
+        ScalarFunctionImpl::UserDefined { proc_oid } => catalog
+            .proc_row_by_oid(proc_oid)
+            .is_some_and(|row| row.prosrc.to_ascii_lowercase().contains("random(")),
+    }
+}
+
+fn expr_contains_var(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(_) => true,
+        Expr::Func(func) => func.args.iter().any(expr_contains_var),
+        Expr::Op(op) => op.args.iter().any(expr_contains_var),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_var),
+        Expr::Case(case_expr) => {
+            case_expr.arg.as_deref().is_some_and(expr_contains_var)
+                || case_expr
+                    .args
+                    .iter()
+                    .any(|arm| expr_contains_var(&arm.expr) || expr_contains_var(&arm.result))
+                || expr_contains_var(&case_expr.defresult)
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_contains_var(inner),
+        Expr::Coalesce(left, right) => expr_contains_var(left) || expr_contains_var(right),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_var(expr)
+                || expr_contains_var(pattern)
+                || escape.as_deref().is_some_and(expr_contains_var)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_var),
+        Expr::Row { fields, .. } => fields.iter().any(|(_, expr)| expr_contains_var(expr)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_var(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript.lower.as_ref().is_some_and(expr_contains_var)
+                        || subscript.upper.as_ref().is_some_and(expr_contains_var)
+                })
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_var(&saop.left) || expr_contains_var(&saop.right)
+        }
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            expr_contains_var(left) || expr_contains_var(right)
+        }
+        Expr::Xml(xml) => xml.child_exprs().any(expr_contains_var),
+        Expr::SubLink(sublink) => sublink.testexpr.as_deref().is_some_and(expr_contains_var),
+        Expr::SubPlan(subplan) => {
+            subplan.testexpr.as_deref().is_some_and(expr_contains_var)
+                || subplan.args.iter().any(expr_contains_var)
+        }
+        Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::Aggref(_)
+        | Expr::WindowFunc(_)
+        | Expr::SetReturning(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
 }
 
 fn lower_partition_bound(
@@ -756,6 +1386,29 @@ fn lower_partition_bound(
     catalog: &dyn CatalogLookup,
 ) -> Result<PartitionBoundSpec, ParseError> {
     match (bound, parent_spec.strategy) {
+        (
+            RawPartitionBoundSpec::List {
+                is_default: true, ..
+            }
+            | RawPartitionBoundSpec::Range {
+                is_default: true, ..
+            },
+            PartitionStrategy::Hash,
+        ) => Err(ParseError::DetailedError {
+            message: "a hash-partitioned table may not have a default partition".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        }),
+        (
+            RawPartitionBoundSpec::List {
+                is_default: true, ..
+            },
+            PartitionStrategy::List,
+        ) => Ok(PartitionBoundSpec::List {
+            values: Vec::new(),
+            is_default: true,
+        }),
         (
             RawPartitionBoundSpec::List {
                 is_default: true, ..
@@ -773,9 +1426,13 @@ fn lower_partition_bound(
                 .ok_or_else(|| {
                     ParseError::InvalidTableDefinition("missing list partition key".into())
                 })?;
+            let key_name = parent_spec_key_names(parent_spec, parent_desc)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| "a".into());
             let lowered = values
                 .iter()
-                .map(|expr| evaluate_partition_bound_expr(expr, key_type, catalog))
+                .map(|expr| evaluate_partition_bound_expr(expr, key_type, &key_name, catalog))
                 .map(|result| result.and_then(|value| value_to_partition_value(&value)))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(PartitionBoundSpec::List {
@@ -792,13 +1449,19 @@ fn lower_partition_bound(
             PartitionStrategy::Range,
         ) => {
             let key_types = parent_spec_key_types(parent_spec, parent_desc);
-            if !*is_default && (from.len() != key_types.len() || to.len() != key_types.len()) {
-                return Err(ParseError::InvalidTableDefinition(
-                    "range partition bound arity does not match partition key".into(),
+            let key_names = parent_spec_key_names(parent_spec, parent_desc);
+            if !*is_default && from.len() != key_types.len() {
+                return Err(partition_bound_error(
+                    "FROM must specify exactly one value per partitioning column",
                 ));
             }
-            let from = lower_range_datums(from, &key_types, catalog)?;
-            let to = lower_range_datums(to, &key_types, catalog)?;
+            if !*is_default && to.len() != key_types.len() {
+                return Err(partition_bound_error(
+                    "TO must specify exactly one value per partitioning column",
+                ));
+            }
+            let from = lower_range_datums(from, &key_types, &key_names, catalog)?;
+            let to = lower_range_datums(to, &key_types, &key_names, catalog)?;
             Ok(PartitionBoundSpec::Range {
                 from,
                 to,
@@ -812,28 +1475,26 @@ fn lower_partition_bound(
                 remainder: *remainder,
             })
         }
-        (
-            RawPartitionBoundSpec::List {
-                is_default: true, ..
-            },
-            PartitionStrategy::Hash,
-        )
-        | (
-            RawPartitionBoundSpec::Range {
-                is_default: true, ..
-            },
-            PartitionStrategy::Hash,
-        ) => Err(ParseError::DetailedError {
-            message: "a hash-partitioned table may not have a default partition".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "42P17",
-        }),
         (RawPartitionBoundSpec::List { .. }, _)
         | (RawPartitionBoundSpec::Range { .. }, _)
-        | (RawPartitionBoundSpec::Hash { .. }, _) => Err(ParseError::InvalidTableDefinition(
-            "partition bound does not match parent partition strategy".into(),
-        )),
+        | (RawPartitionBoundSpec::Hash { .. }, _) => {
+            Err(invalid_bound_spec_error(parent_spec.strategy))
+        }
+    }
+}
+
+fn invalid_bound_spec_error(strategy: PartitionStrategy) -> ParseError {
+    partition_bound_error(format!(
+        "invalid bound specification for a {} partition",
+        partition_strategy_name_for_bound(strategy)
+    ))
+}
+
+fn partition_strategy_name_for_bound(strategy: PartitionStrategy) -> &'static str {
+    match strategy {
+        PartitionStrategy::List => "list",
+        PartitionStrategy::Range => "range",
+        PartitionStrategy::Hash => "hash",
     }
 }
 
@@ -843,8 +1504,10 @@ fn default_opclass_for_partition_strategy(
     sql_type: SqlType,
 ) -> Option<u32> {
     match strategy {
-        PartitionStrategy::List | PartitionStrategy::Range => default_btree_opclass_oid(type_oid)
-            .or_else(|| range_type_ref_for_sql_type(sql_type).map(|_| RANGE_GIST_OPCLASS_OID)),
+        PartitionStrategy::List | PartitionStrategy::Range if sql_type.is_array => {
+            Some(ARRAY_BTREE_OPCLASS_OID)
+        }
+        PartitionStrategy::List | PartitionStrategy::Range => default_btree_opclass_oid(type_oid),
         PartitionStrategy::Hash => default_hash_opclass_oid(type_oid),
     }
 }
@@ -852,7 +1515,7 @@ fn default_opclass_for_partition_strategy(
 fn validate_hash_partition_bound(modulus: i32, remainder: i32) -> Result<(), ParseError> {
     if modulus <= 0 {
         return Err(ParseError::DetailedError {
-            message: "modulus for hash partition must be a positive integer".into(),
+            message: "modulus for hash partition must be an integer value greater than zero".into(),
             detail: None,
             hint: None,
             sqlstate: "42P17",
@@ -880,16 +1543,30 @@ fn validate_hash_partition_bound(modulus: i32, remainder: i32) -> Result<(), Par
 fn lower_range_datums(
     values: &[RawPartitionRangeDatum],
     key_types: &[SqlType],
+    key_names: &[String],
     catalog: &dyn CatalogLookup,
 ) -> Result<Vec<PartitionRangeDatumValue>, ParseError> {
     values
         .iter()
         .zip(key_types.iter())
-        .map(|(value, key_type)| match value {
+        .enumerate()
+        .map(|(index, (value, key_type))| match value {
             RawPartitionRangeDatum::MinValue => Ok(PartitionRangeDatumValue::MinValue),
             RawPartitionRangeDatum::MaxValue => Ok(PartitionRangeDatumValue::MaxValue),
             RawPartitionRangeDatum::Value(expr) => {
-                evaluate_partition_bound_expr(expr, *key_type, catalog)
+                let key_name = key_names
+                    .get(index)
+                    .map(String::as_str)
+                    .unwrap_or("?column?");
+                evaluate_partition_bound_expr(expr, *key_type, key_name, catalog)
+                    .and_then(|value| {
+                        if matches!(value, Value::Null) {
+                            return Err(partition_bound_error(
+                                "cannot specify NULL in range bound",
+                            ));
+                        }
+                        Ok(value)
+                    })
                     .and_then(|value| value_to_partition_value(&value))
                     .map(PartitionRangeDatumValue::Value)
             }
@@ -910,22 +1587,64 @@ fn parent_spec_key_types(spec: &LoweredPartitionSpec, desc: &RelationDesc) -> Ve
         .collect()
 }
 
+fn parent_spec_key_names(spec: &LoweredPartitionSpec, desc: &RelationDesc) -> Vec<String> {
+    if !spec.key_sqls.is_empty() {
+        return spec.key_sqls.clone();
+    }
+    spec.partattrs
+        .iter()
+        .filter_map(|attnum| {
+            attrno_index(i32::from(*attnum)).and_then(|index| desc.columns.get(index))
+        })
+        .map(|column| column.name.clone())
+        .collect()
+}
+
 fn evaluate_partition_bound_expr(
     expr: &crate::backend::parser::SqlExpr,
     target: SqlType,
+    key_name: &str,
     catalog: &dyn CatalogLookup,
 ) -> Result<Value, ParseError> {
+    validate_partition_bound_raw_expr(expr, catalog)?;
     let (bound, _from_type) = bind_scalar_expr_in_scope(expr, &[], catalog)?;
-    let Expr::Const(value) = bound else {
-        return Err(ParseError::InvalidTableDefinition(
-            "partition bound values must be constant".into(),
+    if expr_contains_set_returning(&bound) {
+        return Err(partition_bound_error(
+            "set-returning functions are not allowed in partition bound",
         ));
+    }
+    let folded = crate::backend::optimizer::fold_expr_constants(bound)?;
+    let value = match folded {
+        Expr::Const(value) => value,
+        Expr::CurrentTimestamp { precision } => {
+            crate::backend::executor::current_timestamp_value(precision, true)
+        }
+        Expr::LocalTimestamp { precision } => {
+            crate::backend::executor::current_timestamp_value(precision, false)
+        }
+        _ => {
+            return Err(partition_bound_error(
+                "partition bound values must be constant",
+            ));
+        }
     };
-    cast_value(value, target).map_err(|_| {
-        ParseError::InvalidTableDefinition(
-            "partition bound value does not match partition key type".into(),
+    if matches!(target.kind, SqlTypeKind::Bool)
+        && matches!(
+            value,
+            Value::Int16(_) | Value::Int32(_) | Value::Int64(_) | Value::Numeric(_)
         )
-    })
+    {
+        return Err(partition_bound_cast_error(target, key_name));
+    }
+    cast_value(value, target).map_err(|_| partition_bound_cast_error(target, key_name))
+}
+
+fn partition_bound_cast_error(target: SqlType, key_name: &str) -> ParseError {
+    partition_bound_error(format!(
+        "specified value cannot be cast to type {} for column \"{}\"",
+        sql_type_name(target),
+        key_name
+    ))
 }
 
 fn ensure_matching_partition_shape(
@@ -976,8 +1695,20 @@ fn ensure_matching_partition_shape(
 fn relation_persistence_code(persistence: TablePersistence) -> char {
     match persistence {
         TablePersistence::Permanent => 'p',
-        TablePersistence::Temporary => 't',
         TablePersistence::Unlogged => 'u',
+        TablePersistence::Temporary => 't',
+    }
+}
+
+fn partition_persistence_error(child: char, parent: char, parent_name: &str) -> Option<String> {
+    match (child, parent) {
+        ('p', 't') => Some(format!(
+            "cannot create a permanent relation as partition of temporary relation \"{parent_name}\""
+        )),
+        ('t', 'p') => Some(format!(
+            "cannot create a temporary relation as partition of permanent relation \"{parent_name}\""
+        )),
+        _ => None,
     }
 }
 

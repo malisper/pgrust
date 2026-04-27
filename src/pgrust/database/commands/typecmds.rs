@@ -19,7 +19,7 @@ use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail,
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     CSTRING_TYPE_OID, DEPENDENCY_INTERNAL, FLOAT8_TYPE_OID, PG_CLASS_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgProcRow, builtin_range_specs,
+    PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgProcRow, UNKNOWN_TYPE_OID, builtin_range_specs,
 };
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, format_sql_type_name, is_system_column_name, map_catalog_error,
@@ -1601,6 +1601,18 @@ fn lower_create_composite_type_desc(
         }
 
         let sql_type = resolve_raw_type_name(&attribute.ty, catalog).map_err(ExecError::Parse)?;
+        if matches!(sql_type.kind, SqlTypeKind::Cstring) || sql_type.type_oid == UNKNOWN_TYPE_OID {
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: format!(
+                    "column \"{}\" has pseudo-type {}",
+                    attribute.name,
+                    crate::backend::parser::sql_type_name(sql_type)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            }));
+        }
         columns.push(column_desc(attribute.name.clone(), sql_type, true));
     }
     Ok(RelationDesc { columns })

@@ -675,6 +675,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableSetPersistence(ref alter_stmt) => self
+                .execute_alter_table_set_persistence_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterIndexRename(ref rename_stmt) => self
                 .execute_alter_index_rename_stmt_with_search_path(
                     client_id,
@@ -917,6 +923,9 @@ impl Database {
             Statement::Show(_)
             | Statement::Set(_)
             | Statement::Reset(_)
+            | Statement::Prepare(_)
+            | Statement::Execute(_)
+            | Statement::Deallocate(_)
             | Statement::AlterTableSet(_)
             | Statement::AlterIndexSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CreateRole(ref create_stmt) => {
@@ -1159,6 +1168,12 @@ impl Database {
                     comment_stmt,
                     configured_search_path,
                 ),
+            Statement::CommentOnColumn(ref comment_stmt) => self
+                .execute_comment_on_column_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    configured_search_path,
+                ),
             Statement::CommentOnView(ref comment_stmt) => self
                 .execute_comment_on_view_stmt_with_search_path(
                     client_id,
@@ -1173,12 +1188,6 @@ impl Database {
                 ),
             Statement::CommentOnType(ref comment_stmt) => self
                 .execute_comment_on_type_stmt_with_search_path(
-                    client_id,
-                    comment_stmt,
-                    configured_search_path,
-                ),
-            Statement::CommentOnColumn(ref comment_stmt) => self
-                .execute_comment_on_column_stmt_with_search_path(
                     client_id,
                     comment_stmt,
                     configured_search_path,
