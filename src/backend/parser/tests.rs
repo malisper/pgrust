@@ -3428,6 +3428,7 @@ fn parse_alter_table_constraint_statements() {
         stmt,
         Statement::AlterTableDropConstraint(AlterTableDropConstraintStatement {
             if_exists: false,
+            missing_ok: false,
             only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
@@ -3440,6 +3441,7 @@ fn parse_alter_table_constraint_statements() {
         stmt,
         Statement::AlterTableDropConstraint(AlterTableDropConstraintStatement {
             if_exists: false,
+            missing_ok: false,
             only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
@@ -4218,6 +4220,7 @@ fn parse_alter_table_drop_column_statement() {
         stmt,
         Statement::AlterTableDropColumn(AlterTableDropColumnStatement {
             if_exists: false,
+            missing_ok: false,
             only: false,
             table_name: "items".into(),
             column_name: "note".into(),
@@ -4820,6 +4823,7 @@ fn parse_grant_usage_on_foreign_data_wrapper_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnForeignDataWrapper,
+            columns: Vec::new(),
             object_names: vec!["foo".into()],
             grantee_names: vec!["regress_test_role".into()],
             with_grant_option: false,
@@ -4836,6 +4840,7 @@ fn parse_grant_usage_on_foreign_server_with_grant_option_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::UsageOnForeignServer,
+            columns: Vec::new(),
             object_names: vec!["s1".into()],
             grantee_names: vec!["regress_test_role".into()],
             with_grant_option: true,
@@ -5070,6 +5075,7 @@ fn parse_revoke_all_on_foreign_data_wrapper_statement() {
         stmt,
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnForeignDataWrapper,
+            columns: Vec::new(),
             object_names: vec!["foo".into()],
             grantee_names: vec!["regress_test_role".into()],
             cascade: false,
