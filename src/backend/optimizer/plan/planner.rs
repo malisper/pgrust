@@ -968,6 +968,41 @@ fn adjust_paths_for_srfs(
     adjust_paths_for_target_srfs(root, input_rel, target_list, catalog)
 }
 
+fn grouped_srf_targets(root: &PlannerInfo) -> Vec<TargetEntry> {
+    root.aggregate_group_by()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, expr)| {
+            if !expr_contains_set_returning(expr) {
+                return None;
+            }
+            let name = root
+                .parse
+                .target_list
+                .iter()
+                .find(|target| target.expr == *expr)
+                .map(|target| target.name.clone())
+                .unwrap_or_else(|| format!("group{}", index + 1));
+            Some(TargetEntry::new(
+                name,
+                expr.clone(),
+                expr_sql_type(expr),
+                index + 1,
+            ))
+        })
+        .collect()
+}
+
+fn target_list_needs_project_set_after_grouping(
+    root: &PlannerInfo,
+    target_list: &[TargetEntry],
+) -> bool {
+    let group_by = root.aggregate_group_by();
+    target_list
+        .iter()
+        .any(|target| expr_contains_set_returning(&target.expr) && !group_by.contains(&target.expr))
+}
+
 fn make_ordered_rel(
     root: &mut PlannerInfo,
     input_rel: RelOptInfo,
@@ -2228,6 +2263,10 @@ pub(super) fn grouping_planner(
     let processed_tlist = root.processed_tlist.clone();
     let has_target_srfs = root.parse.has_target_srfs;
     let postponed_srfs = query_has_postponed_srfs(root);
+    let grouped_srf_targets = grouped_srf_targets(root);
+    if !grouped_srf_targets.is_empty() {
+        current_rel = adjust_paths_for_srfs(root, current_rel, &grouped_srf_targets, catalog);
+    }
     if has_grouping {
         current_rel = make_aggregate_rel(root, current_rel, catalog);
     }
@@ -2253,8 +2292,10 @@ pub(super) fn grouping_planner(
         } else {
             processed_tlist.as_slice()
         };
-        current_rel = adjust_paths_for_srfs(root, current_rel, project_set_tlist, catalog);
-        projection_done = current_rel.reltarget == root.final_target;
+        if target_list_needs_project_set_after_grouping(root, project_set_tlist) {
+            current_rel = adjust_paths_for_srfs(root, current_rel, project_set_tlist, catalog);
+            projection_done = current_rel.reltarget == root.final_target;
+        }
     }
 
     if root.parse.distinct {
@@ -2312,7 +2353,10 @@ pub(super) fn grouping_planner(
         current_rel = make_ordered_rel(root, current_rel, catalog);
     }
 
-    if has_target_srfs && postponed_srfs {
+    if has_target_srfs
+        && postponed_srfs
+        && target_list_needs_project_set_after_grouping(root, &final_targets)
+    {
         current_rel = adjust_paths_for_srfs(root, current_rel, &final_targets, catalog);
         projection_done = current_rel.reltarget == root.final_target;
     }

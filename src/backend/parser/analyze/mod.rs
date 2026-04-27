@@ -362,6 +362,18 @@ fn build_sort_clause(
         .collect()
 }
 
+fn target_or_sort_clause_contains_srf(
+    target_list: &[TargetEntry],
+    sort_clause: &[SortGroupClause],
+) -> bool {
+    target_list
+        .iter()
+        .any(|target| expr_contains_set_returning(&target.expr))
+        || sort_clause
+            .iter()
+            .any(|clause| expr_contains_set_returning(&clause.expr))
+}
+
 fn order_entry_matches_sort_clause(entry: &OrderByEntry, clause: &SortGroupClause) -> bool {
     (entry.ressortgroupref != 0 && entry.ressortgroupref == clause.tle_sort_group_ref)
         || entry.expr == clause.expr
@@ -5265,9 +5277,19 @@ fn bind_select_query_with_outer(
                         },
                     )?;
                     let target_list = normalize_target_list(targets);
-                    let has_target_srfs = target_list
-                        .iter()
-                        .any(|target| expr_contains_set_returning(&target.expr));
+                    let has_target_srfs =
+                        target_or_sort_clause_contains_srf(&target_list, &sort_clause);
+                    if stmt.distinct
+                        && !stmt.distinct_on.is_empty()
+                        && target_list
+                            .iter()
+                            .any(|target| expr_contains_set_returning(&target.expr))
+                    {
+                        return Err(ParseError::FeatureNotSupportedMessage(
+                            "SELECT DISTINCT ON with set-returning functions is not supported"
+                                .into(),
+                        ));
+                    }
                     let window_clauses = take_window_clauses(&window_state);
 
                     let query = Query {
@@ -5361,9 +5383,18 @@ fn bind_select_query_with_outer(
                     normalize_target_list(targets)
                 };
 
-                let has_target_srfs = target_list
-                    .iter()
-                    .any(|target| expr_contains_set_returning(&target.expr));
+                let has_target_srfs =
+                    target_or_sort_clause_contains_srf(&target_list, &sort_clause);
+                if stmt.distinct
+                    && !stmt.distinct_on.is_empty()
+                    && target_list
+                        .iter()
+                        .any(|target| expr_contains_set_returning(&target.expr))
+                {
+                    return Err(ParseError::FeatureNotSupportedMessage(
+                        "SELECT DISTINCT ON with set-returning functions is not supported".into(),
+                    ));
+                }
                 let query = Query {
                     command_type: crate::include::executor::execdesc::CommandType::Select,
                     depends_on_row_security: false,

@@ -6799,6 +6799,19 @@ fn parse_top_level_values_with_order_limit_offset() {
 }
 
 #[test]
+fn build_plan_rejects_top_level_values_srf() {
+    let Statement::Values(values) = parse_statement("values (1, generate_series(1, 2))").unwrap()
+    else {
+        panic!("expected values statement");
+    };
+    assert!(matches!(
+        build_values_plan(&values, &catalog()),
+        Err(ParseError::FeatureNotSupportedMessage(message))
+            if message == "set-returning functions are not allowed in VALUES"
+    ));
+}
+
+#[test]
 fn parse_with_on_insert_update_delete() {
     assert!(matches!(
         parse_statement("with q as (select 1) insert into people (id) values ((select 1 from q))")
@@ -15403,6 +15416,46 @@ fn build_plan_for_select_list_generate_series_uses_project_set() {
         }
         other => panic!("expected project set plan, got {other:?}"),
     }
+}
+
+#[test]
+fn build_plan_rejects_nested_srf_in_from_function_args() {
+    let stmt = parse_select("select * from generate_series(1, generate_series(1, 3))").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::FeatureNotSupportedMessage(message))
+            if message == "set-returning functions must appear at top level of FROM"
+    ));
+}
+
+#[test]
+fn build_plan_for_order_by_only_generate_series_uses_project_set() {
+    fn plan_contains_project_set(plan: &Plan) -> bool {
+        match plan {
+            Plan::ProjectSet { .. } => true,
+            Plan::OrderBy { input, .. }
+            | Plan::IncrementalSort { input, .. }
+            | Plan::Projection { input, .. } => plan_contains_project_set(input),
+            _ => false,
+        }
+    }
+
+    let stmt =
+        parse_select("select id from people order by id, generate_series(1, 3) desc").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+
+    assert!(plan_contains_project_set(&plan), "plan was {plan:?}");
+}
+
+#[test]
+fn build_plan_rejects_distinct_on_with_target_srf_before_planning() {
+    let stmt =
+        parse_select("select distinct on (id) id, generate_series(1, 3) from people").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::FeatureNotSupportedMessage(message))
+            if message == "SELECT DISTINCT ON with set-returning functions is not supported"
+    ));
 }
 
 #[test]

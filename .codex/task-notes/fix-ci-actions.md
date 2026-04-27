@@ -25,6 +25,36 @@ query_repl.rs still has the existing unreachable-pattern warning during check.
 ---
 
 Goal:
+Fix cargo-test CI failures from the tsrf/subquery planning PR.
+
+Key decisions:
+Allow PostgreSQL-valid set-returning functions in GROUP BY instead of rejecting
+them during parse analysis.
+Keep filtered SubqueryScan lowering, but stop forcing visible SubqueryScan nodes
+for grouped/aggregate subqueries without filters so verbose EXPLAIN can render
+the same aggregate output shape PostgreSQL does.
+Remove the obsolete negative GROUP BY SRF unit test; the optimizer SRF test now
+covers the allowed case.
+
+Files touched:
+src/backend/parser/analyze/mod.rs
+src/backend/parser/tests.rs
+src/backend/optimizer/setrefs.rs
+
+Tests run:
+scripts/cargo_isolated.sh test --lib --quiet grouped_target_srf_uses_project_set_before_aggregate
+scripts/cargo_isolated.sh test --lib --quiet explain_verbose_lateral_aggregate_renders_pg_style_details
+scripts/cargo_isolated.sh test --lib --quiet srf
+scripts/cargo_isolated.sh check
+scripts/run_regression.sh --test tsrf --timeout 240 --jobs 1 --port 59450 --results-dir /tmp/diffs/tsrf-ci-fix
+scripts/cargo_isolated.sh test --lib --quiet
+
+Remaining:
+tsrf still has expected output diffs, but no regression errors or timeouts.
+
+---
+
+Goal:
 Fix follow-up CI failures after merging origin/perf-optimization into malisper/btree-index.
 
 Key decisions:

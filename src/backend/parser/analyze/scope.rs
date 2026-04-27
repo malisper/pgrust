@@ -226,6 +226,11 @@ pub(super) fn bind_values_rows(
                 .collect::<Result<Vec<_>, ParseError>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if bound_rows.iter().flatten().any(expr_contains_set_returning) {
+        return Err(ParseError::FeatureNotSupportedMessage(
+            "set-returning functions are not allowed in VALUES".into(),
+        ));
+    }
 
     let output_columns = column_types
         .iter()
@@ -1446,6 +1451,451 @@ fn validate_foreign_table_scan_handler(
     ))
 }
 
+fn nested_from_function_srf_error() -> ParseError {
+    ParseError::FeatureNotSupportedMessage(
+        "set-returning functions must appear at top level of FROM".into(),
+    )
+}
+
+fn reject_nested_from_function_srfs(
+    args: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(), ParseError> {
+    if args.iter().any(|arg| {
+        sql_expr_contains_set_returning_call(arg, scope, catalog, outer_scopes, grouped_outer, ctes)
+    }) {
+        return Err(nested_from_function_srf_error());
+    }
+    Ok(())
+}
+
+fn sql_expr_contains_set_returning_call(
+    expr: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> bool {
+    match expr {
+        SqlExpr::Column(_)
+        | SqlExpr::Default
+        | SqlExpr::Const(_)
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
+        | SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
+        | SqlExpr::Exists(_)
+        | SqlExpr::Random
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentCatalog
+        | SqlExpr::CurrentSchema
+        | SqlExpr::CurrentUser
+        | SqlExpr::SessionUser
+        | SqlExpr::CurrentRole
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. } => false,
+        SqlExpr::FuncCall {
+            name,
+            args,
+            order_by,
+            within_group,
+            func_variadic,
+            filter,
+            over,
+            ..
+        } => {
+            root_call_returns_set(
+                name,
+                args.args(),
+                *func_variadic,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) || args.args().iter().any(|arg| {
+                sql_expr_contains_set_returning_call(
+                    &arg.value,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            }) || order_by.iter().any(|item| {
+                sql_expr_contains_set_returning_call(
+                    &item.expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            }) || within_group.as_deref().is_some_and(|items| {
+                items.iter().any(|item| {
+                    sql_expr_contains_set_returning_call(
+                        &item.expr,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                })
+            }) || filter.as_deref().is_some_and(|expr| {
+                sql_expr_contains_set_returning_call(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            }) || over.as_ref().is_some_and(|spec| {
+                raw_window_spec_contains_set_returning_call(
+                    spec,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            })
+        }
+        SqlExpr::InSubquery { expr, .. } => sql_expr_contains_set_returning_call(
+            expr,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        ),
+        SqlExpr::QuantifiedSubquery { left, .. } => sql_expr_contains_set_returning_call(
+            left,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        ),
+        SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => elements.iter().any(|expr| {
+            sql_expr_contains_set_returning_call(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        }),
+        SqlExpr::BinaryOperator { left, right, .. }
+        | SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
+        | SqlExpr::QuantifiedArray {
+            left, array: right, ..
+        }
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonbExistsAny(left, right)
+        | SqlExpr::JsonbExistsAll(left, right)
+        | SqlExpr::JsonbPathExists(left, right)
+        | SqlExpr::JsonbPathMatch(left, right)
+        | SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::Overlaps(left, right) => {
+            sql_expr_contains_set_returning_call(
+                left,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) || sql_expr_contains_set_returning_call(
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        }
+        SqlExpr::AtTimeZone { expr, zone } => {
+            sql_expr_contains_set_returning_call(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) || sql_expr_contains_set_returning_call(
+                zone,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        }
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            sql_expr_contains_set_returning_call(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) || sql_expr_contains_set_returning_call(
+                pattern,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) || escape.as_deref().is_some_and(|expr| {
+                sql_expr_contains_set_returning_call(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            })
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            arg.as_deref().is_some_and(|expr| {
+                sql_expr_contains_set_returning_call(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            }) || args.iter().any(|arm| {
+                sql_expr_contains_set_returning_call(
+                    &arm.expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                ) || sql_expr_contains_set_returning_call(
+                    &arm.result,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            }) || defresult.as_deref().is_some_and(|expr| {
+                sql_expr_contains_set_returning_call(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            })
+        }
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            sql_expr_contains_set_returning_call(
+                array,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) || subscripts.iter().any(|subscript| {
+                subscript.lower.as_deref().is_some_and(|expr| {
+                    sql_expr_contains_set_returning_call(
+                        expr,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                }) || subscript.upper.as_deref().is_some_and(|expr| {
+                    sql_expr_contains_set_returning_call(
+                        expr,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                })
+            })
+        }
+        SqlExpr::Cast(inner, _)
+        | SqlExpr::Collate { expr: inner, .. }
+        | SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
+        | SqlExpr::Not(inner)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::PrefixOperator { expr: inner, .. }
+        | SqlExpr::FieldSelect { expr: inner, .. }
+        | SqlExpr::Subscript { expr: inner, .. } => sql_expr_contains_set_returning_call(
+            inner,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        ),
+        SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            sql_expr_contains_set_returning_call(
+                left,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) || sql_expr_contains_set_returning_call(
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        }
+        SqlExpr::Xml(xml) => xml.child_exprs().any(|expr| {
+            sql_expr_contains_set_returning_call(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        }),
+    }
+}
+
+fn raw_window_spec_contains_set_returning_call(
+    spec: &RawWindowSpec,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> bool {
+    spec.partition_by.iter().any(|expr| {
+        sql_expr_contains_set_returning_call(
+            expr,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )
+    }) || spec.order_by.iter().any(|item| {
+        sql_expr_contains_set_returning_call(
+            &item.expr,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )
+    }) || spec.frame.as_deref().is_some_and(|frame| {
+        raw_window_frame_bound_contains_set_returning_call(
+            &frame.start_bound,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        ) || raw_window_frame_bound_contains_set_returning_call(
+            &frame.end_bound,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )
+    })
+}
+
+fn raw_window_frame_bound_contains_set_returning_call(
+    bound: &RawWindowFrameBound,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> bool {
+    match bound {
+        RawWindowFrameBound::OffsetPreceding(expr) | RawWindowFrameBound::OffsetFollowing(expr) => {
+            sql_expr_contains_set_returning_call(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        }
+        RawWindowFrameBound::UnboundedPreceding
+        | RawWindowFrameBound::CurrentRow
+        | RawWindowFrameBound::UnboundedFollowing => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn bind_function_from_item_with_ctes(
     name: &str,
@@ -1459,6 +1909,15 @@ fn bind_function_from_item_with_ctes(
     ctes: &[BoundCte],
 ) -> Result<(AnalyzedFrom, BoundScope, bool), ParseError> {
     let args = lower_named_table_function_args(name, args)?;
+    let call_scope = empty_scope();
+    reject_nested_from_function_srfs(
+        &args,
+        &call_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
     if resolve_json_record_function(name).is_some() {
         let bound = bind_json_record_from_item(
             name,
@@ -1471,7 +1930,6 @@ fn bind_function_from_item_with_ctes(
         )?;
         return Ok(bound);
     }
-    let call_scope = empty_scope();
     let actual_types = args
         .iter()
         .map(|arg| {

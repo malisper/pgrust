@@ -14,8 +14,8 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::plannodes::{AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AggAccum, BuiltinScalarFunction, Expr, ParamKind, ProjectSetTarget, ScalarFunctionImpl,
-    SetReturningCall, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
+    AggAccum, BuiltinScalarFunction, Expr, ParamKind, ProjectSetTarget, QueryColumn,
+    ScalarFunctionImpl, SetReturningCall, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
     SqlJsonTableColumnKind, SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SubPlan,
     TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind, attrno_index,
     set_returning_call_exprs,
@@ -1775,6 +1775,15 @@ fn push_verbose_plan_details(
                 render_verbose_expr(predicate, &input_names, ctx)
             ));
         }
+        Plan::SubqueryScan { filter, .. } => {
+            if let Some(filter) = filter {
+                let output_names = verbose_plan_output_exprs(plan, ctx, true);
+                lines.push(format!(
+                    "{prefix}Filter: {}",
+                    render_verbose_expr(filter, &output_names, ctx)
+                ));
+            }
+        }
         Plan::WindowAgg { input, clause, .. } => {
             let input_names = verbose_plan_output_exprs(input, ctx, true);
             if !clause.spec.partition_by.is_empty() {
@@ -2199,6 +2208,28 @@ fn qualified_base_scan_output_exprs(
         .collect()
 }
 
+fn qualified_subquery_scan_output_exprs(
+    scan_name: Option<&str>,
+    output_columns: &[QueryColumn],
+) -> Vec<String> {
+    match scan_name {
+        Some(scan_name) => output_columns
+            .iter()
+            .map(|column| {
+                format!(
+                    "{}.{}",
+                    quote_explain_identifier(scan_name),
+                    quote_explain_identifier(&column.name)
+                )
+            })
+            .collect(),
+        None => output_columns
+            .iter()
+            .map(|column| quote_explain_identifier(&column.name))
+            .collect(),
+    }
+}
+
 fn qualified_scan_output_exprs_with_context(
     relation_name: &str,
     desc: &crate::include::nodes::primnodes::RelationDesc,
@@ -2329,8 +2360,12 @@ fn plan_join_output_exprs(
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
-        | Plan::LockRows { input, .. }
-        | Plan::SubqueryScan { input, .. } => plan_join_output_exprs(input, ctx, for_parent_ref),
+        | Plan::LockRows { input, .. } => plan_join_output_exprs(input, ctx, for_parent_ref),
+        Plan::SubqueryScan {
+            scan_name,
+            output_columns,
+            ..
+        } => qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns),
         Plan::Projection { input, targets, .. } => {
             let input_names = plan_join_output_exprs(input, ctx, true);
             targets
@@ -2538,8 +2573,12 @@ fn verbose_plan_output_exprs(
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
-        | Plan::LockRows { input, .. }
-        | Plan::SubqueryScan { input, .. } => verbose_plan_output_exprs(input, ctx, for_parent_ref),
+        | Plan::LockRows { input, .. } => verbose_plan_output_exprs(input, ctx, for_parent_ref),
+        Plan::SubqueryScan {
+            scan_name,
+            output_columns,
+            ..
+        } => qualified_subquery_scan_output_exprs(scan_name.as_deref(), output_columns),
         Plan::Projection { input, targets, .. } => {
             let input_names = plan_join_output_exprs(input, ctx, true);
             targets
@@ -3411,11 +3450,15 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         | Plan::BitmapHeapScan { .. }
         | Plan::Limit { .. }
         | Plan::LockRows { .. }
-        | Plan::SubqueryScan { .. }
         | Plan::CteScan { .. }
         | Plan::WorkTableScan { .. }
         | Plan::RecursiveUnion { .. }
         | Plan::SetOp { .. } => {}
+        Plan::SubqueryScan { filter, .. } => {
+            if let Some(filter) = filter {
+                collect_direct_expr_subplans(filter, &mut found);
+            }
+        }
         Plan::Hash { hash_keys, .. } => {
             for expr in hash_keys {
                 collect_direct_expr_subplans(expr, &mut found);

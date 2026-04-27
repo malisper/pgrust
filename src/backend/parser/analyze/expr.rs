@@ -50,8 +50,9 @@ use self::subquery::{
     bind_quantified_array_expr, bind_quantified_subquery_expr, bind_row_compare_subquery_expr,
     bind_scalar_subquery_expr,
 };
+use self::targets::bind_set_returning_expr_from_parts;
+pub(super) use self::targets::root_call_returns_set;
 pub(crate) use self::targets::{BoundSelectTargets, bind_select_targets};
-use self::targets::{bind_set_returning_expr_from_parts, root_call_returns_set};
 use super::multiranges::{
     bind_maybe_multirange_arithmetic, bind_maybe_multirange_comparison,
     bind_maybe_multirange_contains, bind_maybe_multirange_over_position,
@@ -1410,16 +1411,29 @@ fn bind_visible_outer_aggregate_call(
             resolved.func_variadic,
         )
     };
+    let raise_levels = visible_scope.levelsup;
     Ok(Some(Expr::Aggref(Box::new(
         crate::include::nodes::primnodes::Aggref {
             aggfnoid,
             aggtype,
             aggvariadic,
             aggdistinct: distinct,
-            direct_args: coerced_direct_args,
-            args: coerced_args,
-            aggorder: bound_order_by,
-            aggfilter: bound_filter,
+            direct_args: coerced_direct_args
+                .into_iter()
+                .map(|expr| raise_expr_varlevels(expr, raise_levels))
+                .collect(),
+            args: coerced_args
+                .into_iter()
+                .map(|expr| raise_expr_varlevels(expr, raise_levels))
+                .collect(),
+            aggorder: bound_order_by
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                    expr: raise_expr_varlevels(item.expr, raise_levels),
+                    ..item
+                })
+                .collect(),
+            aggfilter: bound_filter.map(|expr| raise_expr_varlevels(expr, raise_levels)),
             agglevelsup: visible_scope.levelsup,
             aggno,
         },

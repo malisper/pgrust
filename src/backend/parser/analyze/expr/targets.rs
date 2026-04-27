@@ -321,7 +321,7 @@ pub(super) fn bind_set_returning_expr_from_parts(
     ))
 }
 
-pub(super) fn root_call_returns_set(
+pub(crate) fn root_call_returns_set(
     name: &str,
     args: &[SqlFunctionArg],
     func_variadic: bool,
