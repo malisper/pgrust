@@ -2,10 +2,13 @@ use super::agg_output_special::*;
 use super::expr::{raise_expr_varlevels, resolve_bound_field_select_type};
 use super::*;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
+use crate::include::catalog::CONSTRAINT_PRIMARY;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
-use crate::include::nodes::primnodes::{OpExprKind, WindowFuncKind, set_returning_call_exprs};
+use crate::include::nodes::primnodes::{
+    AttrNumber, OpExprKind, WindowFuncKind, set_returning_call_exprs,
+};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 #[derive(Debug, Clone)]
 struct GroupedAggCteContext {
@@ -15,6 +18,31 @@ struct GroupedAggCteContext {
 
 thread_local! {
     static GROUPED_AGG_CTE_CONTEXT: RefCell<Vec<GroupedAggCteContext>> = const { RefCell::new(Vec::new()) };
+    static FUNCTIONAL_GROUPING_CONSTRAINT_CONTEXT: RefCell<Vec<BTreeSet<u32>>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn with_functional_grouping_constraint_tracking<T>(
+    f: impl FnOnce() -> Result<T, ParseError>,
+) -> Result<(T, Vec<u32>), ParseError> {
+    FUNCTIONAL_GROUPING_CONSTRAINT_CONTEXT.with(|stack| stack.borrow_mut().push(BTreeSet::new()));
+    let result = f();
+    let constraint_oids = FUNCTIONAL_GROUPING_CONSTRAINT_CONTEXT.with(|stack| {
+        stack
+            .borrow_mut()
+            .pop()
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    });
+    result.map(|value| (value, constraint_oids))
+}
+
+fn record_functional_grouping_constraint(constraint_oid: u32) {
+    FUNCTIONAL_GROUPING_CONSTRAINT_CONTEXT.with(|stack| {
+        if let Some(current) = stack.borrow_mut().last_mut() {
+            current.insert(constraint_oid);
+        }
+    });
 }
 
 pub(super) fn with_grouped_agg_cte_context<T>(
@@ -1651,13 +1679,20 @@ pub(super) fn bind_agg_output_expr_in_clause(
                             });
                     }
                 };
-            for (i, gk) in group_by_exprs.iter().enumerate() {
-                if let SqlExpr::Column(gk_name) = gk
-                    && let Ok(gk_index) = resolve_column(input_scope, gk_name)
-                    && gk_index == col_index
-                {
-                    return Ok(grouped_key_expr(group_key_exprs, i));
-                }
+            if column_is_functionally_grouped_by_primary_key(
+                input_scope,
+                catalog,
+                col_index,
+                group_by_exprs,
+                group_key_exprs,
+            ) {
+                return bind_grouped_plain_expr(
+                    expr,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                );
             }
             Err(build_ungrouped_column_error(
                 input_scope,
@@ -3618,6 +3653,103 @@ fn bind_grouped_array_membership_expr(
         left_expr
     };
     Ok(Expr::op_auto(op, vec![left_expr, right_expr]))
+}
+
+fn column_is_functionally_grouped_by_primary_key(
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    col_index: usize,
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
+) -> bool {
+    let Some(column) = input_scope.columns.get(col_index) else {
+        return false;
+    };
+    for relation_oid in source_relation_oids(column) {
+        let grouped_attnos = grouped_source_attnos_for_relation(
+            input_scope,
+            relation_oid,
+            group_by_exprs,
+            group_key_exprs,
+        );
+
+        for row in catalog
+            .constraint_rows_for_relation(relation_oid)
+            .into_iter()
+            .filter(|row| row.contype == CONSTRAINT_PRIMARY)
+        {
+            let Some(pk_attnums) = row.conkey else {
+                continue;
+            };
+            if pk_attnums
+                .into_iter()
+                .all(|pk_attno| grouped_attnos.contains(&(pk_attno as AttrNumber)))
+            {
+                record_functional_grouping_constraint(row.oid);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn source_relation_oids(column: &ScopeColumn) -> BTreeSet<u32> {
+    let mut relation_oids = column
+        .source_columns
+        .iter()
+        .map(|(relation_oid, _)| *relation_oid)
+        .collect::<BTreeSet<_>>();
+    if let Some(relation_oid) = column.source_relation_oid {
+        relation_oids.insert(relation_oid);
+    }
+    relation_oids
+}
+
+fn source_attnos_for_relation(column: &ScopeColumn, relation_oid: u32) -> BTreeSet<AttrNumber> {
+    let mut attnos = column
+        .source_columns
+        .iter()
+        .filter_map(|(source_relation_oid, attno)| {
+            (*source_relation_oid == relation_oid).then_some(*attno)
+        })
+        .collect::<BTreeSet<_>>();
+    if column.source_relation_oid == Some(relation_oid)
+        && let Some(attno) = column.source_attno
+    {
+        attnos.insert(attno);
+    }
+    attnos
+}
+
+fn grouped_source_attnos_for_relation(
+    input_scope: &BoundScope,
+    relation_oid: u32,
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
+) -> BTreeSet<AttrNumber> {
+    let mut grouped_attnos = BTreeSet::new();
+
+    for group_expr in group_by_exprs {
+        if let SqlExpr::Column(name) = group_expr
+            && let Ok(index) = resolve_column(input_scope, name)
+            && let Some(column) = input_scope.columns.get(index)
+        {
+            grouped_attnos.extend(source_attnos_for_relation(column, relation_oid));
+        }
+    }
+
+    for group_key in group_key_exprs {
+        if let Some(column) = input_scope
+            .output_exprs
+            .iter()
+            .position(|output_expr| output_expr == group_key)
+            .and_then(|index| input_scope.columns.get(index))
+        {
+            grouped_attnos.extend(source_attnos_for_relation(column, relation_oid));
+        }
+    }
+
+    grouped_attnos
 }
 
 fn build_ungrouped_column_error(

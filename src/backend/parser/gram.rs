@@ -18989,6 +18989,7 @@ fn build_alter_table_drop_constraint(
 ) -> Result<AlterTableDropConstraintStatement, ParseError> {
     let mut if_exists = false;
     let mut only = false;
+    let mut cascade = false;
     let mut parts = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -19000,6 +19001,7 @@ fn build_alter_table_drop_constraint(
                 parts.push(parsed_table_name);
             }
             Rule::identifier => parts.push(build_identifier(part)),
+            Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
             _ => {}
         }
     }
@@ -19009,6 +19011,7 @@ fn build_alter_table_drop_constraint(
         only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        cascade,
     })
 }
 

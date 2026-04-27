@@ -2451,6 +2451,8 @@ impl Session {
                     | Statement::Move(_)
                     | Statement::ClosePortal(_)
                     | Statement::CopyTo(_)
+                    | Statement::Prepare(_)
+                    | Statement::Execute(_)
             ) {
                 // Portal commands are session-level operations that may own executor state
                 // across statements, so route them through the outer session command match.
@@ -8129,7 +8131,7 @@ impl Session {
             | Statement::Fetch(_)
             | Statement::Move(_)
             | Statement::ClosePortal(_) => {
-                unreachable!("portal commands are handled in Session::execute")
+                unreachable!("session commands are handled in Session::execute")
             }
         };
 

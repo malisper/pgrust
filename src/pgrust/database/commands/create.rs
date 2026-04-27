@@ -3755,7 +3755,11 @@ impl Database {
             configured_search_path,
         )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let plan = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?.plan_tree;
+        let (planned_stmt, referenced_constraint_oids) =
+            crate::backend::parser::analyze::with_functional_grouping_constraint_tracking(|| {
+                crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)
+            })?;
+        let plan = planned_stmt.plan_tree;
         let (analyzed_query, _) = analyze_select_query_with_outer(
             &create_stmt.query,
             &catalog,
@@ -3960,6 +3964,7 @@ impl Database {
                 String::new(),
                 canonical_query_sql,
                 &referenced_relation_oids.into_iter().collect::<Vec<_>>(),
+                &referenced_constraint_oids,
                 crate::backend::catalog::store::RuleOwnerDependency::Internal,
                 &rule_ctx,
             )

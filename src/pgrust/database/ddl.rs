@@ -486,6 +486,7 @@ pub(crate) fn rewrite_dependent_views(
                 String::new(),
                 sql,
                 &referenced,
+                &[],
                 crate::backend::catalog::store::RuleOwnerDependency::Internal,
                 &create_ctx,
             )

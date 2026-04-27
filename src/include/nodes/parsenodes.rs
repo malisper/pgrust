@@ -2418,6 +2418,7 @@ pub struct AlterTableDropConstraintStatement {
     pub only: bool,
     pub table_name: String,
     pub constraint_name: String,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
