@@ -7,6 +7,7 @@ use rand::random;
 
 use crate::backend::access::transam::xact::TransactionId;
 use crate::backend::access::transam::xlog::{Lsn, WAL_SEG_SIZE_BYTES};
+use crate::backend::utils::crc32c;
 use crate::backend::utils::misc::checkpoint::CheckpointConfig;
 use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
 

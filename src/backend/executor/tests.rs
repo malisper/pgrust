@@ -9,6 +9,7 @@ use crate::backend::parser::{
     analyze_select_query_with_outer, parse_select,
 };
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
+use crate::backend::utils::crc32c;
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
 use crate::include::catalog::{CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};

@@ -9,6 +9,11 @@ codegen-backend = true
 [profile.dev]
 codegen-backend = "cranelift"
 
+[profile.test]
+# :HACK: rustc_codegen_cranelift still aborts this workspace's database
+# tests on aarch64 macOS; keep tests on LLVM while dev builds use Cranelift.
+codegen-backend = "llvm"
+
 [target.aarch64-apple-darwin]
 linker = "scripts/macos-rust-lld-linker.sh"
 

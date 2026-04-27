@@ -18,6 +18,7 @@ use super::value_io::format_array_text;
 use crate::backend::executor::jsonb::render_jsonb_bytes;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind};
+use crate::backend::utils::crc32c;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::utils::time::datetime::{
