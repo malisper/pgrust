@@ -479,7 +479,19 @@ pub(crate) fn execute_explain(
         EitherExplainTarget::CreateTableAs(create_table_as) => (
             create_query_desc(
                 crate::backend::parser::pg_plan_query_with_config(
-                    &create_table_as.query,
+                    match &create_table_as.query {
+                        crate::include::nodes::parsenodes::CreateTableAsQuery::Select(query) => {
+                            query
+                        }
+                        crate::include::nodes::parsenodes::CreateTableAsQuery::Execute(name) => {
+                            return Err(ExecError::Parse(ParseError::DetailedError {
+                                message: format!("prepared statement \"{name}\" does not exist"),
+                                detail: None,
+                                hint: None,
+                                sqlstate: "26000",
+                            }));
+                        }
+                    },
                     catalog,
                     planner_config,
                 )?,

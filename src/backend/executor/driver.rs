@@ -181,6 +181,9 @@ fn execute_statement_with_source(
         | Statement::SetTransaction(_)
         | Statement::SetConstraints(_)
         | Statement::Reset(_)
+        | Statement::Prepare(_)
+        | Statement::Execute(_)
+        | Statement::Deallocate(_)
         | Statement::SetRole(_)
         | Statement::ResetRole(_)
         | Statement::AlterTableAlterConstraint(_)
@@ -228,6 +231,7 @@ fn execute_statement_with_source(
         }
         Statement::AlterTableRename(_)
         | Statement::AlterTableSetSchema(_)
+        | Statement::AlterTableSetPersistence(_)
         | Statement::AlterIndexRename(_)
         | Statement::AlterIndexAttachPartition(_)
         | Statement::AlterViewRename(_)
@@ -291,7 +295,7 @@ fn execute_statement_with_source(
             expected: "ALTER SCHEMA OWNER handled by database/session layer",
             actual: "ALTER SCHEMA OWNER".into(),
         })),
-        Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+        Statement::CommentOnTable(_) | Statement::CommentOnColumn(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON TABLE handled by database/session layer",
             actual: "COMMENT ON TABLE".into(),
         })),
@@ -318,10 +322,6 @@ fn execute_statement_with_source(
         Statement::CommentOnType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON TYPE handled by database/session layer",
             actual: "COMMENT ON TYPE".into(),
-        })),
-        Statement::CommentOnColumn(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "COMMENT ON COLUMN handled by database/session layer",
-            actual: "COMMENT ON COLUMN".into(),
         })),
         Statement::CommentOnConstraint(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON CONSTRAINT handled by database/session layer",
@@ -631,6 +631,9 @@ pub fn execute_readonly_statement_with_config(
         Statement::Show(_)
         | Statement::Set(_)
         | Statement::Reset(_)
+        | Statement::Prepare(_)
+        | Statement::Execute(_)
+        | Statement::Deallocate(_)
         | Statement::AlterTableSet(_)
         | Statement::AlterTableReset(_)
         | Statement::AlterTableSetSchema(_)
@@ -662,10 +665,12 @@ pub fn execute_readonly_statement_with_config(
             Ok(StatementResult::AffectedRows(0))
         }
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
-        Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "read-only statement",
-            actual: "COMMENT ON TABLE".into(),
-        })),
+        Statement::CommentOnTable(_) | Statement::CommentOnColumn(_) => {
+            Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "read-only statement",
+                actual: "COMMENT ON TABLE".into(),
+            }))
+        }
         Statement::CommentOnView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "COMMENT ON VIEW".into(),
@@ -689,10 +694,6 @@ pub fn execute_readonly_statement_with_config(
         Statement::CommentOnType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "COMMENT ON TYPE".into(),
-        })),
-        Statement::CommentOnColumn(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "read-only statement",
-            actual: "COMMENT ON COLUMN".into(),
         })),
         Statement::CommentOnConstraint(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

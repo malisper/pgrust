@@ -7,7 +7,8 @@ use crate::backend::rewrite::load_view_return_select;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::nodes::parsenodes::{
-    DropMaterializedViewStatement, RefreshMaterializedViewStatement, TableAsObjectType,
+    CreateTableAsQuery, DropMaterializedViewStatement, RefreshMaterializedViewStatement,
+    TableAsObjectType,
 };
 use crate::include::nodes::primnodes::QueryColumn;
 use std::collections::{HashMap, HashSet};
@@ -77,10 +78,21 @@ impl Database {
                 actual: "missing SELECT text".into(),
             })
         })?;
+        let select_query = match &create_stmt.query {
+            CreateTableAsQuery::Select(query) => query,
+            CreateTableAsQuery::Execute(name) => {
+                return Err(ExecError::Parse(ParseError::DetailedError {
+                    message: format!("prepared statement \"{name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "26000",
+                }));
+            }
+        };
         let (columns, column_names) = if create_stmt.skip_data {
-            describe_select_query_without_planning(&create_stmt.query, &catalog)?
+            describe_select_query_without_planning(select_query, &catalog)?
         } else {
-            let planned_stmt = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?;
+            let planned_stmt = crate::backend::parser::pg_plan_query(select_query, &catalog)?;
             (planned_stmt.columns(), planned_stmt.column_names())
         };
         validate_matview_column_names(create_stmt, columns.len())?;
@@ -96,7 +108,7 @@ impl Database {
                 cid,
                 Arc::clone(&interrupts),
                 &catalog,
-                Statement::Select(create_stmt.query.clone()),
+                Statement::Select(select_query.clone()),
                 false,
             )?;
             let create_cid = select_result.next_command_id.max(cid);
@@ -135,7 +147,7 @@ impl Database {
 
         let mut referenced_relation_oids = std::collections::BTreeSet::new();
         collect_direct_relation_oids_from_select(
-            &create_stmt.query,
+            select_query,
             &catalog,
             &mut Vec::new(),
             &mut referenced_relation_oids,

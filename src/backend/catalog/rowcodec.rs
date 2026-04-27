@@ -1409,22 +1409,12 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Int32(row.relfrozenxid as i32),
         row.relpartbound
             .map_or(Value::Null, |value| Value::Text(value.into())),
-        row.reloptions.map_or(Value::Null, |values| {
-            Value::PgArray(ArrayValue::from_1d(
-                values
-                    .into_iter()
-                    .map(|value| Value::Text(value.into()))
-                    .collect(),
-            ))
-        }),
-        row.relacl.map_or(Value::Null, |values| {
-            Value::PgArray(ArrayValue::from_1d(
-                values
-                    .into_iter()
-                    .map(|value| Value::Text(value.into()))
-                    .collect(),
-            ))
-        }),
+        row.reloptions
+            .map(|values| Value::PgArray(text_array_value(values)))
+            .unwrap_or(Value::Null),
+        row.relacl
+            .map(|values| Value::PgArray(text_array_value(values)))
+            .unwrap_or(Value::Null),
         Value::InternalChar(row.relreplident as u8),
         Value::Int32(row.reloftype as i32),
     ]
