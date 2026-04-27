@@ -89,7 +89,7 @@ fn reject_restricted_views_in_from_item(
         FromItem::Alias { source, .. } | FromItem::Lateral(source) => {
             reject_restricted_views_in_from_item(source, catalog)
         }
-        FromItem::Values { .. } | FromItem::FunctionCall { .. } => Ok(()),
+        FromItem::Values { .. } | FromItem::FunctionCall { .. } | FromItem::JsonTable(_) => Ok(()),
     }
 }
 

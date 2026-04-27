@@ -960,6 +960,108 @@ pub enum JsonTableFunction {
     JsonbArrayElementsText,
 }
 
+// Legacy PostgreSQL JSON SRFs are represented by `JsonTableFunction` above.
+// SQL/JSON JSON_TABLE uses the separate planned structures below so the two
+// table-function families do not acquire misleading shared semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlJsonTablePassingArg {
+    pub name: String,
+    pub expr: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlJsonTableColumn {
+    pub name: String,
+    pub sql_type: SqlType,
+    pub kind: SqlJsonTableColumnKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SqlJsonTableColumnKind {
+    Ordinality,
+    Scalar {
+        path: String,
+        on_empty: SqlJsonTableBehavior,
+        on_error: SqlJsonTableBehavior,
+    },
+    Formatted {
+        path: String,
+        format_json: bool,
+        wrapper: SqlJsonTableWrapper,
+        quotes: SqlJsonTableQuotes,
+        on_empty: SqlJsonTableBehavior,
+        on_error: SqlJsonTableBehavior,
+    },
+    Exists {
+        path: String,
+        on_error: SqlJsonTableBehavior,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SqlJsonTableBehavior {
+    Null,
+    Error,
+    Empty,
+    EmptyArray,
+    EmptyObject,
+    Default(Expr),
+    True,
+    False,
+    Unknown,
+}
+
+impl SqlJsonTableBehavior {
+    fn map_exprs(self, map: &mut impl FnMut(Expr) -> Expr) -> Self {
+        match self {
+            SqlJsonTableBehavior::Default(expr) => SqlJsonTableBehavior::Default(map(expr)),
+            other => other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlJsonTableWrapper {
+    Unspecified,
+    Without,
+    Conditional,
+    Unconditional,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlJsonTableQuotes {
+    Unspecified,
+    Keep,
+    Omit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SqlJsonTablePlan {
+    PathScan {
+        path: String,
+        path_name: String,
+        column_indexes: Vec<usize>,
+        error_on_error: bool,
+        child: Option<Box<SqlJsonTablePlan>>,
+    },
+    SiblingJoin {
+        left: Box<SqlJsonTablePlan>,
+        right: Box<SqlJsonTablePlan>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlJsonTable {
+    pub context: Expr,
+    pub root_path: String,
+    pub root_path_name: String,
+    pub passing: Vec<SqlJsonTablePassingArg>,
+    pub columns: Vec<SqlJsonTableColumn>,
+    pub plan: SqlJsonTablePlan,
+    pub output_columns: Vec<QueryColumn>,
+    pub on_error: SqlJsonTableBehavior,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JsonRecordFunction {
     PopulateRecord,
@@ -1052,6 +1154,7 @@ pub enum SetReturningCall {
         output_columns: Vec<QueryColumn>,
         with_ordinality: bool,
     },
+    SqlJsonTable(SqlJsonTable),
     JsonRecordFunction {
         func_oid: u32,
         func_variadic: bool,
@@ -1127,6 +1230,7 @@ impl SetReturningCall {
             | SetReturningCall::GenerateSubscripts { output_columns, .. }
             | SetReturningCall::Unnest { output_columns, .. }
             | SetReturningCall::JsonTableFunction { output_columns, .. }
+            | SetReturningCall::SqlJsonTable(SqlJsonTable { output_columns, .. })
             | SetReturningCall::JsonRecordFunction { output_columns, .. }
             | SetReturningCall::RegexTableFunction { output_columns, .. }
             | SetReturningCall::StringTableFunction { output_columns, .. }
@@ -1157,6 +1261,10 @@ impl SetReturningCall {
                 output_columns: existing,
                 ..
             }
+            | SetReturningCall::SqlJsonTable(SqlJsonTable {
+                output_columns: existing,
+                ..
+            })
             | SetReturningCall::JsonRecordFunction {
                 output_columns: existing,
                 ..
@@ -1239,6 +1347,7 @@ impl SetReturningCall {
             | SetReturningCall::UserDefined {
                 with_ordinality, ..
             } => *with_ordinality,
+            SetReturningCall::SqlJsonTable(_) => false,
         }
     }
 
@@ -1358,6 +1467,9 @@ impl SetReturningCall {
                 output_columns,
                 with_ordinality,
             },
+            SetReturningCall::SqlJsonTable(table) => {
+                SetReturningCall::SqlJsonTable(map_sql_json_table_exprs(table, &mut map))
+            }
             SetReturningCall::JsonRecordFunction {
                 func_oid,
                 func_variadic,
@@ -1432,6 +1544,165 @@ impl SetReturningCall {
                 with_ordinality,
             },
         }
+    }
+
+    pub fn try_map_exprs<E>(self, mut map: impl FnMut(Expr) -> Result<Expr, E>) -> Result<Self, E> {
+        Ok(match self {
+            SetReturningCall::SqlJsonTable(table) => {
+                SetReturningCall::SqlJsonTable(try_map_sql_json_table_exprs(table, &mut map)?)
+            }
+            other => other.map_exprs(|expr| map(expr).ok().expect("fallible mapper failed")),
+        })
+    }
+}
+
+fn try_map_sql_json_table_exprs<E>(
+    table: SqlJsonTable,
+    map: &mut impl FnMut(Expr) -> Result<Expr, E>,
+) -> Result<SqlJsonTable, E> {
+    Ok(SqlJsonTable {
+        context: map(table.context)?,
+        passing: table
+            .passing
+            .into_iter()
+            .map(|arg| {
+                Ok(SqlJsonTablePassingArg {
+                    name: arg.name,
+                    expr: map(arg.expr)?,
+                })
+            })
+            .collect::<Result<Vec<_>, E>>()?,
+        columns: table
+            .columns
+            .into_iter()
+            .map(|column| {
+                Ok(SqlJsonTableColumn {
+                    name: column.name,
+                    sql_type: column.sql_type,
+                    kind: try_map_sql_json_table_column_kind(column.kind, map)?,
+                })
+            })
+            .collect::<Result<Vec<_>, E>>()?,
+        on_error: try_map_sql_json_behavior(table.on_error, map)?,
+        root_path: table.root_path,
+        root_path_name: table.root_path_name,
+        plan: table.plan,
+        output_columns: table.output_columns,
+    })
+}
+
+fn try_map_sql_json_table_column_kind<E>(
+    kind: SqlJsonTableColumnKind,
+    map: &mut impl FnMut(Expr) -> Result<Expr, E>,
+) -> Result<SqlJsonTableColumnKind, E> {
+    Ok(match kind {
+        SqlJsonTableColumnKind::Ordinality => SqlJsonTableColumnKind::Ordinality,
+        SqlJsonTableColumnKind::Scalar {
+            path,
+            on_empty,
+            on_error,
+        } => SqlJsonTableColumnKind::Scalar {
+            path,
+            on_empty: try_map_sql_json_behavior(on_empty, map)?,
+            on_error: try_map_sql_json_behavior(on_error, map)?,
+        },
+        SqlJsonTableColumnKind::Formatted {
+            path,
+            format_json,
+            wrapper,
+            quotes,
+            on_empty,
+            on_error,
+        } => SqlJsonTableColumnKind::Formatted {
+            path,
+            format_json,
+            wrapper,
+            quotes,
+            on_empty: try_map_sql_json_behavior(on_empty, map)?,
+            on_error: try_map_sql_json_behavior(on_error, map)?,
+        },
+        SqlJsonTableColumnKind::Exists { path, on_error } => SqlJsonTableColumnKind::Exists {
+            path,
+            on_error: try_map_sql_json_behavior(on_error, map)?,
+        },
+    })
+}
+
+fn try_map_sql_json_behavior<E>(
+    behavior: SqlJsonTableBehavior,
+    map: &mut impl FnMut(Expr) -> Result<Expr, E>,
+) -> Result<SqlJsonTableBehavior, E> {
+    Ok(match behavior {
+        SqlJsonTableBehavior::Default(expr) => SqlJsonTableBehavior::Default(map(expr)?),
+        other => other,
+    })
+}
+
+fn map_sql_json_table_exprs(
+    table: SqlJsonTable,
+    map: &mut impl FnMut(Expr) -> Expr,
+) -> SqlJsonTable {
+    SqlJsonTable {
+        context: map(table.context),
+        passing: table
+            .passing
+            .into_iter()
+            .map(|arg| SqlJsonTablePassingArg {
+                name: arg.name,
+                expr: map(arg.expr),
+            })
+            .collect(),
+        columns: table
+            .columns
+            .into_iter()
+            .map(|column| SqlJsonTableColumn {
+                name: column.name,
+                sql_type: column.sql_type,
+                kind: map_sql_json_table_column_kind(column.kind, map),
+            })
+            .collect(),
+        on_error: table.on_error.map_exprs(map),
+        root_path: table.root_path,
+        root_path_name: table.root_path_name,
+        plan: table.plan,
+        output_columns: table.output_columns,
+    }
+}
+
+fn map_sql_json_table_column_kind(
+    kind: SqlJsonTableColumnKind,
+    map: &mut impl FnMut(Expr) -> Expr,
+) -> SqlJsonTableColumnKind {
+    match kind {
+        SqlJsonTableColumnKind::Ordinality => SqlJsonTableColumnKind::Ordinality,
+        SqlJsonTableColumnKind::Scalar {
+            path,
+            on_empty,
+            on_error,
+        } => SqlJsonTableColumnKind::Scalar {
+            path,
+            on_empty: on_empty.map_exprs(map),
+            on_error: on_error.map_exprs(map),
+        },
+        SqlJsonTableColumnKind::Formatted {
+            path,
+            format_json,
+            wrapper,
+            quotes,
+            on_empty,
+            on_error,
+        } => SqlJsonTableColumnKind::Formatted {
+            path,
+            format_json,
+            wrapper,
+            quotes,
+            on_empty: on_empty.map_exprs(map),
+            on_error: on_error.map_exprs(map),
+        },
+        SqlJsonTableColumnKind::Exists { path, on_error } => SqlJsonTableColumnKind::Exists {
+            path,
+            on_error: on_error.map_exprs(map),
+        },
     }
 }
 
@@ -2298,6 +2569,36 @@ pub fn set_returning_call_exprs(call: &SetReturningCall) -> Vec<&Expr> {
         | SetReturningCall::StringTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => args.iter().collect(),
+        SetReturningCall::SqlJsonTable(table) => {
+            let mut exprs = Vec::with_capacity(1 + table.passing.len());
+            exprs.push(&table.context);
+            exprs.extend(table.passing.iter().map(|arg| &arg.expr));
+            for column in &table.columns {
+                match &column.kind {
+                    SqlJsonTableColumnKind::Scalar {
+                        on_empty, on_error, ..
+                    }
+                    | SqlJsonTableColumnKind::Formatted {
+                        on_empty, on_error, ..
+                    } => {
+                        push_sql_json_behavior_expr(on_empty, &mut exprs);
+                        push_sql_json_behavior_expr(on_error, &mut exprs);
+                    }
+                    SqlJsonTableColumnKind::Exists { on_error, .. } => {
+                        push_sql_json_behavior_expr(on_error, &mut exprs);
+                    }
+                    SqlJsonTableColumnKind::Ordinality => {}
+                }
+            }
+            push_sql_json_behavior_expr(&table.on_error, &mut exprs);
+            exprs
+        }
+    }
+}
+
+fn push_sql_json_behavior_expr<'a>(behavior: &'a SqlJsonTableBehavior, exprs: &mut Vec<&'a Expr>) {
+    if let SqlJsonTableBehavior::Default(expr) = behavior {
+        exprs.push(expr);
     }
 }
 

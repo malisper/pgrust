@@ -1940,6 +1940,7 @@ fn lower_set_returning_call(
             output_columns,
             with_ordinality,
         },
+        sql @ SetReturningCall::SqlJsonTable(_) => sql.map_exprs(|arg| lower_expr(ctx, arg, mode)),
     }
 }
 
@@ -2162,6 +2163,9 @@ fn fix_set_returning_call_upper_exprs(
             output_columns,
             with_ordinality,
         },
+        sql @ SetReturningCall::SqlJsonTable(_) => {
+            sql.map_exprs(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
+        }
     }
 }
 
@@ -2909,6 +2913,9 @@ fn validate_set_returning_call(
         | SetReturningCall::UserDefined { args, .. } => args
             .iter()
             .for_each(|arg| validate_executable_expr(arg, plan_node, field, allowed_exec_params)),
+        SetReturningCall::SqlJsonTable(_) => set_returning_call_exprs(call)
+            .iter()
+            .for_each(|arg| validate_executable_expr(arg, plan_node, field, allowed_exec_params)),
     }
 }
 
@@ -3421,6 +3428,9 @@ fn validate_planner_set_returning_call(
         | SetReturningCall::StringTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => args
+            .iter()
+            .for_each(|arg| validate_planner_expr(arg, path_node, field)),
+        SetReturningCall::SqlJsonTable(_) => set_returning_call_exprs(call)
             .iter()
             .for_each(|arg| validate_planner_expr(arg, path_node, field)),
     }

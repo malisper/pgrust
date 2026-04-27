@@ -5,8 +5,10 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::PgPartitionedTableRow;
 use crate::include::nodes::primnodes::{
-    AttrNumber, ColumnDesc, JoinType, JsonRecordFunction, SELF_ITEM_POINTER_ATTR_NO,
-    TABLE_OID_ATTR_NO, Var, expr_sql_type_hint, user_attrno,
+    AttrNumber, ColumnDesc, JoinType, JsonRecordFunction, SELF_ITEM_POINTER_ATTR_NO, SqlJsonTable,
+    SqlJsonTableBehavior, SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePassingArg,
+    SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, TABLE_OID_ATTR_NO, Var,
+    expr_sql_type_hint, user_attrno,
 };
 
 #[derive(Debug, Clone)]
@@ -610,6 +612,7 @@ fn from_item_is_lateral(item: &FromItem) -> bool {
     match item {
         FromItem::Lateral(_) => true,
         FromItem::FunctionCall { .. } => true,
+        FromItem::JsonTable(_) => true,
         FromItem::Alias { source, .. } => from_item_is_lateral(source),
         _ => false,
     }
@@ -729,6 +732,13 @@ pub(super) fn bind_from_item_with_ctes(
             )?;
             Ok((plan, scope))
         }
+        FromItem::JsonTable(table) => bind_sql_json_table_from_item_with_ctes(
+            table,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        ),
         FromItem::DerivedTable(select) => {
             let visible_agg_scope = current_visible_aggregate_scope();
             let (plan, _) = analyze_select_query_with_outer(
@@ -895,6 +905,487 @@ pub(super) fn bind_from_item_with_ctes(
                 matches!(source.as_ref(), FromItem::Alias { .. }),
             )
         }
+    }
+}
+
+struct SqlJsonTableBindState {
+    columns: Vec<SqlJsonTableColumn>,
+    output_columns: Vec<QueryColumn>,
+    seen_names: std::collections::BTreeSet<String>,
+    next_path_id: usize,
+    error_on_error: bool,
+}
+
+impl SqlJsonTableBindState {
+    fn new(error_on_error: bool) -> Self {
+        Self {
+            columns: Vec::new(),
+            output_columns: Vec::new(),
+            seen_names: std::collections::BTreeSet::new(),
+            next_path_id: 0,
+            error_on_error,
+        }
+    }
+
+    fn remember_name(&mut self, name: &str) -> Result<(), ParseError> {
+        if self.seen_names.insert(name.to_ascii_lowercase()) {
+            Ok(())
+        } else {
+            Err(ParseError::DetailedError {
+                message: format!("duplicate JSON_TABLE column or path name: {name}"),
+                detail: None,
+                hint: None,
+                sqlstate: "42710",
+            })
+        }
+    }
+
+    fn next_path_name(&mut self) -> String {
+        let name = format!("json_table_path_{}", self.next_path_id);
+        self.next_path_id += 1;
+        name
+    }
+
+    fn push_column(
+        &mut self,
+        name: String,
+        sql_type: SqlType,
+        kind: SqlJsonTableColumnKind,
+    ) -> Result<usize, ParseError> {
+        self.remember_name(&name)?;
+        let index = self.columns.len();
+        self.output_columns.push(QueryColumn {
+            name: name.clone(),
+            sql_type,
+            wire_type_oid: None,
+        });
+        self.columns.push(SqlJsonTableColumn {
+            name,
+            sql_type,
+            kind,
+        });
+        Ok(index)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_sql_json_table_from_item_with_ctes(
+    table: &JsonTableExpr,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
+    let empty_scope = empty_scope();
+    let context = bind_expr_with_outer_and_ctes(
+        &table.context,
+        &empty_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let passing = table
+        .passing
+        .iter()
+        .map(|arg| {
+            bind_expr_with_outer_and_ctes(
+                &arg.expr,
+                &empty_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+            .map(|expr| SqlJsonTablePassingArg {
+                name: arg.name.clone(),
+                expr,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let on_error = bind_sql_json_table_top_behavior(table.on_error.as_ref())?;
+    let error_on_error = matches!(on_error, SqlJsonTableBehavior::Error);
+    let mut state = SqlJsonTableBindState::new(error_on_error);
+    let root_path_name = table
+        .root_path
+        .name
+        .clone()
+        .unwrap_or_else(|| state.next_path_name());
+    state.remember_name(&root_path_name)?;
+    let plan = bind_sql_json_table_column_group(
+        &table.columns,
+        table.root_path.path.clone(),
+        root_path_name.clone(),
+        &mut state,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let sql_table = SqlJsonTable {
+        context,
+        root_path: table.root_path.path.clone(),
+        root_path_name,
+        passing,
+        columns: state.columns,
+        plan,
+        output_columns: state.output_columns.clone(),
+        on_error,
+    };
+    let desc = RelationDesc {
+        columns: state
+            .output_columns
+            .iter()
+            .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+            .collect(),
+    };
+    let scope = scope_for_relation(Some("json_table"), &desc);
+    Ok((
+        AnalyzedFrom::function(SetReturningCall::SqlJsonTable(sql_table)),
+        scope,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_sql_json_table_column_group(
+    columns: &[JsonTableColumn],
+    path: String,
+    path_name: String,
+    state: &mut SqlJsonTableBindState,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<SqlJsonTablePlan, ParseError> {
+    let mut column_indexes = Vec::new();
+    let mut nested_plans = Vec::new();
+    let mut ordinality_found = false;
+    for column in columns {
+        match column {
+            JsonTableColumn::Ordinality { name } => {
+                if ordinality_found {
+                    return Err(ParseError::DetailedError {
+                        message: "only one FOR ORDINALITY column is allowed".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42601",
+                    });
+                }
+                ordinality_found = true;
+                let index = state.push_column(
+                    name.clone(),
+                    SqlType::new(SqlTypeKind::Int4),
+                    SqlJsonTableColumnKind::Ordinality,
+                )?;
+                column_indexes.push(index);
+            }
+            JsonTableColumn::Regular {
+                name,
+                type_name,
+                path,
+                format_json,
+                wrapper,
+                quotes,
+                on_empty,
+                on_error,
+            } => {
+                let sql_type = resolve_raw_type_name(type_name, catalog)?;
+                let path_text = bind_sql_json_table_column_path(name, path, state)?;
+                let on_empty = bind_sql_json_table_behavior(
+                    on_empty.as_ref().unwrap_or(&JsonTableBehavior::Null),
+                    sql_type,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                let on_error = bind_sql_json_table_behavior(
+                    on_error.as_ref().unwrap_or(&JsonTableBehavior::Null),
+                    sql_type,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                let planned_wrapper = sql_json_table_wrapper(*wrapper);
+                let planned_quotes = sql_json_table_quotes(*quotes);
+                if matches!(
+                    planned_wrapper,
+                    SqlJsonTableWrapper::Conditional | SqlJsonTableWrapper::Unconditional
+                ) && matches!(planned_quotes, SqlJsonTableQuotes::Omit)
+                {
+                    return Err(ParseError::DetailedError {
+                        message: "OMIT QUOTES cannot be specified when WITH WRAPPER is used".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42601",
+                    });
+                }
+                let formatted_column = *format_json
+                    || sql_json_table_column_is_formatted(sql_type)
+                    || !matches!(planned_wrapper, SqlJsonTableWrapper::Unspecified)
+                    || !matches!(planned_quotes, SqlJsonTableQuotes::Unspecified);
+                validate_sql_json_table_regular_behavior(
+                    name,
+                    &on_empty,
+                    "EMPTY",
+                    formatted_column,
+                )?;
+                validate_sql_json_table_regular_behavior(
+                    name,
+                    &on_error,
+                    "ERROR",
+                    formatted_column,
+                )?;
+                let kind = if formatted_column {
+                    SqlJsonTableColumnKind::Formatted {
+                        path: path_text,
+                        format_json: *format_json,
+                        wrapper: planned_wrapper,
+                        quotes: planned_quotes,
+                        on_empty,
+                        on_error,
+                    }
+                } else {
+                    SqlJsonTableColumnKind::Scalar {
+                        path: path_text,
+                        on_empty,
+                        on_error,
+                    }
+                };
+                let index = state.push_column(name.clone(), sql_type, kind)?;
+                column_indexes.push(index);
+            }
+            JsonTableColumn::Exists {
+                name,
+                type_name,
+                path,
+                on_error,
+            } => {
+                let sql_type = resolve_raw_type_name(type_name, catalog)?;
+                let path_text = bind_sql_json_table_column_path(name, path, state)?;
+                let on_error = bind_sql_json_table_behavior(
+                    on_error.as_ref().unwrap_or(&JsonTableBehavior::False),
+                    sql_type,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                validate_sql_json_table_exists_behavior(name, &on_error, "ERROR")?;
+                let index = state.push_column(
+                    name.clone(),
+                    sql_type,
+                    SqlJsonTableColumnKind::Exists {
+                        path: path_text,
+                        on_error,
+                    },
+                )?;
+                column_indexes.push(index);
+            }
+            JsonTableColumn::Nested { path, columns } => {
+                let path_name = path.name.clone().unwrap_or_else(|| state.next_path_name());
+                state.remember_name(&path_name)?;
+                nested_plans.push(bind_sql_json_table_column_group(
+                    columns,
+                    path.path.clone(),
+                    path_name,
+                    state,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?);
+            }
+        }
+    }
+    Ok(SqlJsonTablePlan::PathScan {
+        path,
+        path_name,
+        column_indexes,
+        error_on_error: state.error_on_error,
+        child: fold_sql_json_table_siblings(nested_plans).map(Box::new),
+    })
+}
+
+fn fold_sql_json_table_siblings(mut plans: Vec<SqlJsonTablePlan>) -> Option<SqlJsonTablePlan> {
+    if plans.is_empty() {
+        return None;
+    }
+    let mut plan = plans.remove(0);
+    for next in plans {
+        plan = SqlJsonTablePlan::SiblingJoin {
+            left: Box::new(plan),
+            right: Box::new(next),
+        };
+    }
+    Some(plan)
+}
+
+fn bind_sql_json_table_column_path(
+    column_name: &str,
+    path: &Option<JsonTablePathSpec>,
+    state: &mut SqlJsonTableBindState,
+) -> Result<String, ParseError> {
+    if let Some(path) = path {
+        if let Some(name) = &path.name {
+            state.remember_name(name)?;
+        }
+        Ok(path.path.clone())
+    } else {
+        Ok(format!("$.{}", serde_json::to_string(column_name).unwrap()))
+    }
+}
+
+fn bind_sql_json_table_top_behavior(
+    behavior: Option<&JsonTableBehavior>,
+) -> Result<SqlJsonTableBehavior, ParseError> {
+    match behavior.unwrap_or(&JsonTableBehavior::Empty) {
+        JsonTableBehavior::Empty => Ok(SqlJsonTableBehavior::Empty),
+        JsonTableBehavior::EmptyArray => Ok(SqlJsonTableBehavior::EmptyArray),
+        JsonTableBehavior::Error => Ok(SqlJsonTableBehavior::Error),
+        _ => Err(ParseError::DetailedError {
+            message: "invalid ON ERROR behavior".into(),
+            detail: Some(
+                "Only EMPTY [ ARRAY ] or ERROR is allowed in the top-level ON ERROR clause.".into(),
+            ),
+            hint: None,
+            sqlstate: "42601",
+        }),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_sql_json_table_behavior(
+    behavior: &JsonTableBehavior,
+    target_type: SqlType,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<SqlJsonTableBehavior, ParseError> {
+    Ok(match behavior {
+        JsonTableBehavior::Null => SqlJsonTableBehavior::Null,
+        JsonTableBehavior::Error => SqlJsonTableBehavior::Error,
+        JsonTableBehavior::Empty => SqlJsonTableBehavior::Empty,
+        JsonTableBehavior::EmptyArray => SqlJsonTableBehavior::EmptyArray,
+        JsonTableBehavior::EmptyObject => SqlJsonTableBehavior::EmptyObject,
+        JsonTableBehavior::True => SqlJsonTableBehavior::True,
+        JsonTableBehavior::False => SqlJsonTableBehavior::False,
+        JsonTableBehavior::Unknown => SqlJsonTableBehavior::Unknown,
+        JsonTableBehavior::Default(expr) => {
+            let scope = empty_scope();
+            let raw_type = infer_sql_expr_type_with_ctes(
+                expr,
+                &scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let bound = bind_expr_with_outer_and_ctes(
+                expr,
+                &scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            SqlJsonTableBehavior::Default(coerce_bound_expr(bound, raw_type, target_type))
+        }
+    })
+}
+
+fn sql_json_table_column_is_formatted(sql_type: SqlType) -> bool {
+    sql_type.is_array
+        || matches!(
+            sql_type.kind,
+            SqlTypeKind::Json | SqlTypeKind::Jsonb | SqlTypeKind::Record | SqlTypeKind::Composite
+        )
+}
+
+fn validate_sql_json_table_regular_behavior(
+    column_name: &str,
+    behavior: &SqlJsonTableBehavior,
+    target: &'static str,
+    formatted: bool,
+) -> Result<(), ParseError> {
+    let valid = if formatted {
+        matches!(
+            behavior,
+            SqlJsonTableBehavior::Error
+                | SqlJsonTableBehavior::Null
+                | SqlJsonTableBehavior::EmptyArray
+                | SqlJsonTableBehavior::EmptyObject
+                | SqlJsonTableBehavior::Default(_)
+        )
+    } else {
+        matches!(
+            behavior,
+            SqlJsonTableBehavior::Error
+                | SqlJsonTableBehavior::Null
+                | SqlJsonTableBehavior::Default(_)
+        )
+    };
+    if valid {
+        return Ok(());
+    }
+    let detail = if formatted {
+        format!(
+            "Only ERROR, NULL, EMPTY ARRAY, EMPTY OBJECT, or DEFAULT expression is allowed in ON {target} for formatted columns."
+        )
+    } else {
+        format!(
+            "Only ERROR, NULL, or DEFAULT expression is allowed in ON {target} for scalar columns."
+        )
+    };
+    Err(ParseError::DetailedError {
+        message: format!("invalid ON {target} behavior for column \"{column_name}\""),
+        detail: Some(detail),
+        hint: None,
+        sqlstate: "42601",
+    })
+}
+
+fn validate_sql_json_table_exists_behavior(
+    column_name: &str,
+    behavior: &SqlJsonTableBehavior,
+    target: &'static str,
+) -> Result<(), ParseError> {
+    if matches!(
+        behavior,
+        SqlJsonTableBehavior::Error
+            | SqlJsonTableBehavior::True
+            | SqlJsonTableBehavior::False
+            | SqlJsonTableBehavior::Unknown
+    ) {
+        return Ok(());
+    }
+    Err(ParseError::DetailedError {
+        message: format!("invalid ON {target} behavior for column \"{column_name}\""),
+        detail: Some(format!(
+            "Only ERROR, TRUE, FALSE, or UNKNOWN is allowed in ON {target} for EXISTS columns."
+        )),
+        hint: None,
+        sqlstate: "42601",
+    })
+}
+
+fn sql_json_table_wrapper(wrapper: JsonTableWrapper) -> SqlJsonTableWrapper {
+    match wrapper {
+        JsonTableWrapper::Unspecified => SqlJsonTableWrapper::Unspecified,
+        JsonTableWrapper::Without => SqlJsonTableWrapper::Without,
+        JsonTableWrapper::Conditional => SqlJsonTableWrapper::Conditional,
+        JsonTableWrapper::Unconditional => SqlJsonTableWrapper::Unconditional,
+    }
+}
+
+fn sql_json_table_quotes(quotes: JsonTableQuotes) -> SqlJsonTableQuotes {
+    match quotes {
+        JsonTableQuotes::Unspecified => SqlJsonTableQuotes::Unspecified,
+        JsonTableQuotes::Keep => SqlJsonTableQuotes::Keep,
+        JsonTableQuotes::Omit => SqlJsonTableQuotes::Omit,
     }
 }
 
@@ -2866,13 +3357,30 @@ fn apply_relation_alias(
         .filter_map(|(index, column)| (!column.hidden).then_some(index))
         .collect::<Vec<_>>();
     if column_aliases.len() > visible_positions.len() {
-        return Err(ParseError::UnexpectedToken {
-            expected: "table alias column count to match source columns",
-            actual: format!(
+        let actual = if plan.rtable.last().is_some_and(|rte| {
+            matches!(
+                rte.kind,
+                RangeTblEntryKind::Function {
+                    call: SetReturningCall::SqlJsonTable(_),
+                    ..
+                }
+            )
+        }) {
+            format!(
+                "JSON_TABLE function has {} columns available but {} columns specified",
+                visible_positions.len(),
+                column_aliases.len(),
+            )
+        } else {
+            format!(
                 "table \"{alias}\" has {} columns available but {} columns specified",
                 visible_positions.len(),
                 column_aliases.len(),
-            ),
+            )
+        };
+        return Err(ParseError::UnexpectedToken {
+            expected: "table alias column count to match source columns",
+            actual,
         });
     }
 

@@ -339,6 +339,12 @@ pub(super) fn explicit_text_input_cast_exists(
     catalog: &dyn CatalogLookup,
     target: SqlType,
 ) -> bool {
+    if target.type_oid != 0
+        && let Some(domain) = catalog.domain_by_type_oid(target.type_oid)
+        && let Some(base_oid) = catalog.type_oid_for_sql_type(domain.sql_type)
+    {
+        return base_oid == TEXT_TYPE_OID || catalog_text_input_cast_exists(catalog, base_oid);
+    }
     let Some(target_oid) = catalog_builtin_type_oid(catalog, target) else {
         return false;
     };

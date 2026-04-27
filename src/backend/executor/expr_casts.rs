@@ -3758,30 +3758,45 @@ fn enforce_domain_check(
     ty: SqlType,
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<Value, ExecError> {
+    if matches!(value, Value::Null) {
+        return Ok(value);
+    }
     let Some(catalog) = catalog else {
         return Ok(value);
     };
     let Some(check) = catalog.domain_check_by_type_oid(ty.type_oid) else {
         return Ok(value);
     };
-    let Some(limit) = parse_upper_less_than_domain_check(&check) else {
-        return Ok(value);
-    };
-    if domain_upper_less_than_limit(&value, limit) {
+    if let Some(limit) = parse_upper_less_than_domain_check(&check) {
+        if domain_upper_less_than_limit(&value, limit) {
+            return Ok(value);
+        }
+        return Err(domain_check_violation(ty, catalog));
+    }
+    if let Some(disallowed) = parse_not_equal_domain_check(&check)
+        && !domain_value_equals(&value, &disallowed)
+    {
         return Ok(value);
     }
+    if parse_not_equal_domain_check(&check).is_some() {
+        return Err(domain_check_violation(ty, catalog));
+    }
+    Ok(value)
+}
+
+fn domain_check_violation(ty: SqlType, catalog: &dyn CatalogLookup) -> ExecError {
     let domain_name = catalog
         .type_by_oid(ty.type_oid)
         .map(|row| row.typname)
         .unwrap_or_else(|| ty.type_oid.to_string());
-    Err(ExecError::DetailedError {
+    ExecError::DetailedError {
         message: format!(
             "value for domain {domain_name} violates check constraint \"{domain_name}_check\""
         ),
         detail: None,
         hint: None,
         sqlstate: "23514",
-    })
+    }
 }
 
 fn parse_upper_less_than_domain_check(check: &str) -> Option<i64> {
@@ -3795,6 +3810,54 @@ fn parse_upper_less_than_domain_check(check: &str) -> Option<i64> {
         .strip_prefix("upper(value)<")?;
     let number = rest.strip_suffix(')')?;
     number.parse().ok()
+}
+
+fn parse_not_equal_domain_check(check: &str) -> Option<Value> {
+    let (left, right) = check.split_once("<>")?;
+    let left = left
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '(' && *ch != ')')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if left != "value" {
+        return None;
+    }
+    parse_domain_check_literal(right.trim())
+}
+
+fn parse_domain_check_literal(input: &str) -> Option<Value> {
+    let input = input.trim().trim_end_matches(';').trim();
+    if let Some(rest) = input.strip_prefix('\'') {
+        let mut value = String::new();
+        let mut chars = rest.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    chars.next();
+                    value.push('\'');
+                    continue;
+                }
+                return Some(Value::Text(CompactString::from_owned(value)));
+            }
+            value.push(ch);
+        }
+        return None;
+    }
+    let token = input
+        .split(|ch: char| ch.is_whitespace() || ch == ')' || ch == ':')
+        .next()?;
+    token.parse::<i64>().ok().map(Value::Int64)
+}
+
+fn domain_value_equals(value: &Value, expected: &Value) -> bool {
+    match (value, expected) {
+        (Value::Text(left), Value::Text(right)) => left.as_str() == right.as_str(),
+        (Value::TextRef(_, _), Value::Text(right)) => value.as_text() == Some(right.as_str()),
+        (Value::Int16(left), Value::Int64(right)) => i64::from(*left) == *right,
+        (Value::Int32(left), Value::Int64(right)) => i64::from(*left) == *right,
+        (Value::Int64(left), Value::Int64(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn domain_upper_less_than_limit(value: &Value, limit: i64) -> bool {
@@ -5358,7 +5421,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             _ => Ok(Value::Record(record)),
         },
     }?;
-    Ok(apply_time_precision(result, ty.time_precision()))
+    let result = apply_time_precision(result, ty.time_precision());
+    enforce_domain_check(result, ty, catalog)
 }
 
 fn bytea_to_signed_int(bytes: &[u8], width: usize, ty: &'static str) -> Result<i64, ExecError> {

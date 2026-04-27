@@ -1371,9 +1371,16 @@ pub struct ExplainStatement {
     pub buffers: bool,
     pub costs: bool,
     pub summary: bool,
+    pub format: ExplainFormat,
     pub timing: bool,
     pub verbose: bool,
     pub statement: Box<Statement>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplainFormat {
+    Text,
+    Json,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1614,6 +1621,7 @@ pub enum FromItem {
         func_variadic: bool,
         with_ordinality: bool,
     },
+    JsonTable(JsonTableExpr),
     Lateral(Box<FromItem>),
     DerivedTable(Box<SelectStatement>),
     Join {
@@ -1657,6 +1665,82 @@ pub struct AliasColumnDef {
 pub struct SqlFunctionArg {
     pub name: Option<String>,
     pub value: SqlExpr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonTableExpr {
+    pub context: SqlExpr,
+    pub root_path: JsonTablePathSpec,
+    pub passing: Vec<JsonTablePassingArg>,
+    pub columns: Vec<JsonTableColumn>,
+    pub on_error: Option<JsonTableBehavior>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonTablePathSpec {
+    pub path: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonTablePassingArg {
+    pub expr: SqlExpr,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JsonTableColumn {
+    Ordinality {
+        name: String,
+    },
+    Regular {
+        name: String,
+        type_name: RawTypeName,
+        path: Option<JsonTablePathSpec>,
+        format_json: bool,
+        wrapper: JsonTableWrapper,
+        quotes: JsonTableQuotes,
+        on_empty: Option<JsonTableBehavior>,
+        on_error: Option<JsonTableBehavior>,
+    },
+    Exists {
+        name: String,
+        type_name: RawTypeName,
+        path: Option<JsonTablePathSpec>,
+        on_error: Option<JsonTableBehavior>,
+    },
+    Nested {
+        path: JsonTablePathSpec,
+        columns: Vec<JsonTableColumn>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JsonTableBehavior {
+    Null,
+    Error,
+    Empty,
+    EmptyArray,
+    EmptyObject,
+    Default(SqlExpr),
+    True,
+    False,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonTableWrapper {
+    Unspecified,
+    Without,
+    Conditional,
+    Unconditional,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonTableQuotes {
+    Unspecified,
+    Keep,
+    Omit,
 }
 
 impl SqlFunctionArg {

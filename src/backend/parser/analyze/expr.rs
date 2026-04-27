@@ -5138,7 +5138,8 @@ fn is_user_defined_base_type_oid(type_oid: u32, catalog: &dyn CatalogLookup) -> 
     type_oid != 0
         && builtin_type_name_for_oid(type_oid).is_none()
         && catalog.type_by_oid(type_oid).is_some_and(|row| {
-            !row.sql_type.is_array
+            row.typtype == 'b'
+                && !row.sql_type.is_array
                 && !row.sql_type.is_range()
                 && !row.sql_type.is_multirange()
                 && matches!(row.sql_type.kind, SqlTypeKind::Text)

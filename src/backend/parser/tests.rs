@@ -9725,6 +9725,12 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create table ctas_opts with (fillfactor=70) as select 1").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, .. }) if table_name == "ctas_opts")
     );
     assert!(
+        matches!(parse_statement("create temp table json_table_test(js) as (values ('1'), ('[]'))").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, column_names, persistence: TablePersistence::Temporary, query: CreateTableAsQuery::Select(SelectStatement { from: Some(FromItem::Values { .. }), .. }), .. }) if table_name == "json_table_test" && column_names == vec!["js"])
+    );
+    assert!(
+        matches!(parse_statement("CREATE TEMP TABLE json_table_test (js) AS\n\t(VALUES\n\t\t('1'),\n\t\t('[]'),\n\t\t('{}'),\n\t\t('[1, 1.23, \"2\", \"aaaaaaa\", \"foo\", null, false, true, {\"aaa\": 123}, \"[1,2]\", \"\\\"str\\\"\"]')\n\t)").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, column_names, persistence: TablePersistence::Temporary, query: CreateTableAsQuery::Select(SelectStatement { from: Some(FromItem::Values { .. }), .. }), .. }) if table_name == "json_table_test" && column_names == vec!["js"])
+    );
+    assert!(
         matches!(
             parse_statement("create materialized view if not exists mv_items(id, name) as select id, name from people with no data").unwrap(),
             Statement::CreateTableAs(CreateTableAsStatement {

@@ -2,7 +2,9 @@ use super::exec_expr::{
     eval_native_builtin_scalar_value_call, eval_string_to_table_rows, normalize_array_value,
 };
 use super::expr_date::add_interval_to_local_timestamp;
-use super::expr_json::{eval_json_record_set_returning_function, eval_json_table_function};
+use super::expr_json::{
+    eval_json_record_set_returning_function, eval_json_table_function, eval_sql_json_table,
+};
 use super::expr_txid::eval_txid_snapshot_xip_values;
 use super::pg_regex::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows};
 use super::sqlfunc::execute_user_defined_sql_set_returning_function;
@@ -59,6 +61,7 @@ pub(crate) fn eval_set_returning_call(
         SetReturningCall::JsonTableFunction { kind, args, .. } => {
             eval_json_table_function(*kind, args, slot, ctx)
         }
+        SetReturningCall::SqlJsonTable(table) => eval_sql_json_table(table, slot, ctx),
         SetReturningCall::JsonRecordFunction {
             kind,
             args,
@@ -497,6 +500,7 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &str {
             }
         },
         SetReturningCall::JsonRecordFunction { kind, .. } => kind.name(),
+        SetReturningCall::SqlJsonTable(_) => "json_table",
         SetReturningCall::RegexTableFunction { kind, .. } => match kind {
             crate::include::nodes::primnodes::RegexTableFunction::Matches => "regexp_matches",
             crate::include::nodes::primnodes::RegexTableFunction::SplitToTable => {

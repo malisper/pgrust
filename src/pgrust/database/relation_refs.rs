@@ -280,6 +280,11 @@ fn collect_rels_from_set_returning_call(
                 collect_rels_from_expr(arg, rels);
             }
         }
+        crate::include::nodes::primnodes::SetReturningCall::SqlJsonTable(_) => {
+            for arg in set_returning_call_exprs(call) {
+                collect_rels_from_expr(arg, rels);
+            }
+        }
     }
 }
 
@@ -458,68 +463,7 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_expr(expr, rels);
             }
         }
-        Plan::FunctionScan { call, .. } => match call {
-            crate::include::nodes::primnodes::SetReturningCall::GenerateSeries {
-                start,
-                stop,
-                step,
-                timezone,
-                ..
-            } => {
-                collect_rels_from_expr(start, rels);
-                collect_rels_from_expr(stop, rels);
-                collect_rels_from_expr(step, rels);
-                if let Some(timezone) = timezone {
-                    collect_rels_from_expr(timezone, rels);
-                }
-            }
-            crate::include::nodes::primnodes::SetReturningCall::GenerateSubscripts {
-                array,
-                dimension,
-                reverse,
-                ..
-            } => {
-                collect_rels_from_expr(array, rels);
-                collect_rels_from_expr(dimension, rels);
-                if let Some(reverse) = reverse {
-                    collect_rels_from_expr(reverse, rels);
-                }
-            }
-            crate::include::nodes::primnodes::SetReturningCall::PartitionTree { relid, .. }
-            | crate::include::nodes::primnodes::SetReturningCall::PartitionAncestors {
-                relid,
-                ..
-            } => {
-                collect_rels_from_expr(relid, rels);
-            }
-            crate::include::nodes::primnodes::SetReturningCall::PgLockStatus { .. } => {}
-            crate::include::nodes::primnodes::SetReturningCall::TxidSnapshotXip { arg, .. } => {
-                collect_rels_from_expr(arg, rels);
-            }
-            crate::include::nodes::primnodes::SetReturningCall::Unnest { args, .. }
-            | crate::include::nodes::primnodes::SetReturningCall::JsonTableFunction {
-                args, ..
-            }
-            | crate::include::nodes::primnodes::SetReturningCall::JsonRecordFunction {
-                args, ..
-            }
-            | crate::include::nodes::primnodes::SetReturningCall::RegexTableFunction {
-                args, ..
-            }
-            | crate::include::nodes::primnodes::SetReturningCall::StringTableFunction {
-                args,
-                ..
-            }
-            | crate::include::nodes::primnodes::SetReturningCall::TextSearchTableFunction {
-                args,
-                ..
-            }
-            | crate::include::nodes::primnodes::SetReturningCall::UserDefined { args, .. } => {
-                for arg in args {
-                    collect_rels_from_expr(arg, rels);
-                }
-            }
-        },
+        Plan::FunctionScan { call, .. } => collect_rels_from_set_returning_call(call, rels),
         Plan::SubqueryScan { input, .. } => {
             collect_rels_from_plan(input, rels);
         }
@@ -547,76 +491,7 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                         collect_rels_from_expr(&entry.expr, rels);
                     }
                     crate::include::nodes::primnodes::ProjectSetTarget::Set { call, .. } => {
-                        match call {
-                            crate::include::nodes::primnodes::SetReturningCall::GenerateSeries {
-                                start,
-                                stop,
-                                step,
-                                timezone,
-                                ..
-                            } => {
-                                collect_rels_from_expr(start, rels);
-                                collect_rels_from_expr(stop, rels);
-                                collect_rels_from_expr(step, rels);
-                                if let Some(timezone) = timezone {
-                                    collect_rels_from_expr(timezone, rels);
-                                }
-                            }
-                            crate::include::nodes::primnodes::SetReturningCall::GenerateSubscripts {
-                                array,
-                                dimension,
-                                reverse,
-                                ..
-                            } => {
-                                collect_rels_from_expr(array, rels);
-                                collect_rels_from_expr(dimension, rels);
-                                if let Some(reverse) = reverse {
-                                    collect_rels_from_expr(reverse, rels);
-                                }
-                            }
-                            crate::include::nodes::primnodes::SetReturningCall::PartitionTree {
-                                relid, ..
-                            }
-                            | crate::include::nodes::primnodes::SetReturningCall::PartitionAncestors {
-                                relid, ..
-                            } => {
-                                collect_rels_from_expr(relid, rels);
-                            }
-                            crate::include::nodes::primnodes::SetReturningCall::PgLockStatus {
-                                ..
-                            } => {}
-                            crate::include::nodes::primnodes::SetReturningCall::TxidSnapshotXip {
-                                arg,
-                                ..
-                            } => {
-                                collect_rels_from_expr(arg, rels);
-                            }
-                            crate::include::nodes::primnodes::SetReturningCall::Unnest {
-                                args, ..
-                            }
-                            | crate::include::nodes::primnodes::SetReturningCall::JsonTableFunction {
-                                args, ..
-                            }
-                            | crate::include::nodes::primnodes::SetReturningCall::JsonRecordFunction {
-                                args, ..
-                            }
-                            | crate::include::nodes::primnodes::SetReturningCall::RegexTableFunction {
-                                args, ..
-                            }
-                            | crate::include::nodes::primnodes::SetReturningCall::StringTableFunction {
-                                args, ..
-                            }
-                            | crate::include::nodes::primnodes::SetReturningCall::TextSearchTableFunction {
-                                args, ..
-                            }
-                            | crate::include::nodes::primnodes::SetReturningCall::UserDefined {
-                                args, ..
-                            } => {
-                                for arg in args {
-                                    collect_rels_from_expr(arg, rels);
-                                }
-                            }
-                        }
+                        collect_rels_from_set_returning_call(call, rels);
                     }
                 }
             }
@@ -810,6 +685,9 @@ fn collect_direct_relation_oids_from_from_item(
                 collect_direct_relation_oids_from_sql_expr(&arg.value, catalog, visible_ctes, rels);
             }
         }
+        FromItem::JsonTable(table) => {
+            collect_direct_relation_oids_from_json_table(table, catalog, visible_ctes, rels);
+        }
         FromItem::Lateral(source) => {
             collect_direct_relation_oids_from_from_item(source, catalog, visible_ctes, rels);
         }
@@ -831,6 +709,91 @@ fn collect_direct_relation_oids_from_from_item(
         FromItem::Alias { source, .. } => {
             collect_direct_relation_oids_from_from_item(source, catalog, visible_ctes, rels);
         }
+    }
+}
+
+fn collect_direct_relation_oids_from_json_table(
+    table: &crate::include::nodes::parsenodes::JsonTableExpr,
+    catalog: &dyn CatalogLookup,
+    visible_ctes: &mut Vec<String>,
+    rels: &mut BTreeSet<u32>,
+) {
+    collect_direct_relation_oids_from_sql_expr(&table.context, catalog, visible_ctes, rels);
+    for passing in &table.passing {
+        collect_direct_relation_oids_from_sql_expr(&passing.expr, catalog, visible_ctes, rels);
+    }
+    if let Some(behavior) = &table.on_error {
+        collect_direct_relation_oids_from_json_table_behavior(
+            behavior,
+            catalog,
+            visible_ctes,
+            rels,
+        );
+    }
+    for column in &table.columns {
+        collect_direct_relation_oids_from_json_table_column(column, catalog, visible_ctes, rels);
+    }
+}
+
+fn collect_direct_relation_oids_from_json_table_column(
+    column: &crate::include::nodes::parsenodes::JsonTableColumn,
+    catalog: &dyn CatalogLookup,
+    visible_ctes: &mut Vec<String>,
+    rels: &mut BTreeSet<u32>,
+) {
+    match column {
+        crate::include::nodes::parsenodes::JsonTableColumn::Ordinality { .. } => {}
+        crate::include::nodes::parsenodes::JsonTableColumn::Regular {
+            on_empty, on_error, ..
+        } => {
+            if let Some(behavior) = on_empty {
+                collect_direct_relation_oids_from_json_table_behavior(
+                    behavior,
+                    catalog,
+                    visible_ctes,
+                    rels,
+                );
+            }
+            if let Some(behavior) = on_error {
+                collect_direct_relation_oids_from_json_table_behavior(
+                    behavior,
+                    catalog,
+                    visible_ctes,
+                    rels,
+                );
+            }
+        }
+        crate::include::nodes::parsenodes::JsonTableColumn::Exists { on_error, .. } => {
+            if let Some(behavior) = on_error {
+                collect_direct_relation_oids_from_json_table_behavior(
+                    behavior,
+                    catalog,
+                    visible_ctes,
+                    rels,
+                );
+            }
+        }
+        crate::include::nodes::parsenodes::JsonTableColumn::Nested { columns, .. } => {
+            for child in columns {
+                collect_direct_relation_oids_from_json_table_column(
+                    child,
+                    catalog,
+                    visible_ctes,
+                    rels,
+                );
+            }
+        }
+    }
+}
+
+fn collect_direct_relation_oids_from_json_table_behavior(
+    behavior: &crate::include::nodes::parsenodes::JsonTableBehavior,
+    catalog: &dyn CatalogLookup,
+    visible_ctes: &mut Vec<String>,
+    rels: &mut BTreeSet<u32>,
+) {
+    if let crate::include::nodes::parsenodes::JsonTableBehavior::Default(expr) = behavior {
+        collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
     }
 }
 

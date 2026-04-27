@@ -150,6 +150,11 @@ impl AnalyzedFrom {
 
     pub(super) fn function(call: SetReturningCall) -> Self {
         let output_columns = call.output_columns().to_vec();
+        let relation_name = if matches!(call, SetReturningCall::SqlJsonTable(_)) {
+            "json_table"
+        } else {
+            "function_call"
+        };
         let desc = RelationDesc {
             columns: output_columns
                 .iter()
@@ -160,7 +165,7 @@ impl AnalyzedFrom {
             rtable: vec![RangeTblEntry {
                 alias: None,
                 alias_preserves_source_names: false,
-                eref: rte_eref("function_call", &output_columns),
+                eref: rte_eref(relation_name, &output_columns),
                 desc,
                 inh: false,
                 security_quals: Vec::new(),

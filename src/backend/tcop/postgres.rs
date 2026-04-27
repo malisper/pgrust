@@ -3936,7 +3936,7 @@ fn execute_psql_describe_query(
     // instead of implementing LEFT JOIN, format_type, regex operators,
     // COLLATE, publications, inheritance footers, and related describe-only
     // catalog features in the main SQL engine.
-    let lower = sql.to_ascii_lowercase();
+    let lower = sql.trim_start().to_ascii_lowercase();
     if lower.contains("from pg_catalog.pg_class c")
         && lower.contains("left join pg_catalog.pg_namespace n on n.oid = c.relnamespace")
         && lower.contains("operator(pg_catalog.~)")
@@ -3969,6 +3969,13 @@ fn execute_psql_describe_query(
         && lower.contains("conrelid")
     {
         return psql_describe_constraints_query(db, session, sql);
+    }
+    if lower.starts_with("select nspname, relname, relkind,")
+        && lower.contains("pg_catalog.pg_get_viewdef(c.oid, true)")
+        && lower.contains("from pg_catalog.pg_class c")
+        && lower.contains("where c.oid = ")
+    {
+        return psql_get_create_view_query(db, session, sql);
     }
     if lower.starts_with("select pg_catalog.pg_get_viewdef(")
         && (lower.contains("::pg_catalog.oid") || lower.contains("::pg_catalog.regclass"))
@@ -6062,6 +6069,39 @@ fn psql_get_viewdef_query(
     Some((vec![QueryColumn::text("pg_get_viewdef")], vec![vec![value]]))
 }
 
+fn psql_get_create_view_query(
+    db: &Database,
+    session: &Session,
+    sql: &str,
+) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
+    let oid = extract_unquoted_u32_after(sql, "where c.oid = ")?;
+    let catalog = session.catalog_lookup(db);
+    let relation = catalog
+        .lookup_relation_by_oid(oid)
+        .filter(|relation| matches!(relation.relkind, 'v' | 'm'))?;
+    let class = catalog.class_row_by_oid(oid)?;
+    let namespace = catalog.namespace_row_by_oid(relation.namespace_oid)?;
+    let definition = format_view_definition(oid, &relation.desc, &catalog).ok()?;
+    Some((
+        vec![
+            QueryColumn::text("nspname"),
+            QueryColumn::text("relname"),
+            QueryColumn::text("relkind"),
+            QueryColumn::text("pg_get_viewdef"),
+            QueryColumn::text("reloptions"),
+            QueryColumn::text("checkoption"),
+        ],
+        vec![vec![
+            Value::Text(namespace.nspname.into()),
+            Value::Text(class.relname.into()),
+            Value::Text(relation.relkind.to_string().into()),
+            Value::Text(definition.into()),
+            Value::Text("{}".into()),
+            Value::Null,
+        ]],
+    ))
+}
+
 fn psql_col_description_query(
     db: &Database,
     session: &Session,
@@ -6404,6 +6444,18 @@ fn extract_quoted_oid_with_markers(sql: &str, markers: &[&str]) -> Option<u32> {
     extract_quoted_literal_with_markers(sql, markers)?
         .parse::<u32>()
         .ok()
+}
+
+fn extract_unquoted_u32_after(sql: &str, marker: &str) -> Option<u32> {
+    let lower = sql.to_ascii_lowercase();
+    let start = lower.find(marker)? + marker.len();
+    let rest = sql[start..].trim_start();
+    let len = rest
+        .as_bytes()
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    (len > 0).then(|| rest[..len].parse::<u32>().ok())?
 }
 
 fn extract_col_description_attnum(sql: &str) -> Option<i32> {
@@ -7435,6 +7487,22 @@ fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem
         crate::backend::parser::FromItem::FunctionCall { args, .. } => args
             .iter()
             .any(|arg| raw_expr_contains_pg_notify(&arg.value)),
+        crate::backend::parser::FromItem::JsonTable(table) => {
+            raw_expr_contains_pg_notify(&table.context)
+                || table
+                    .passing
+                    .iter()
+                    .any(|arg| raw_expr_contains_pg_notify(&arg.expr))
+                || table
+                    .columns
+                    .iter()
+                    .any(raw_json_table_column_contains_pg_notify)
+                || matches!(
+                    &table.on_error,
+                    Some(crate::backend::parser::JsonTableBehavior::Default(expr))
+                        if raw_expr_contains_pg_notify(expr)
+                )
+        }
         crate::backend::parser::FromItem::Lateral(inner)
         | crate::backend::parser::FromItem::Alias { source: inner, .. } => {
             raw_from_item_contains_pg_notify(inner)
@@ -7459,6 +7527,31 @@ fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem
                     | crate::backend::parser::JoinConstraint::Natural => false,
                 }
         }
+    }
+}
+
+fn raw_json_table_column_contains_pg_notify(
+    column: &crate::backend::parser::JsonTableColumn,
+) -> bool {
+    match column {
+        crate::backend::parser::JsonTableColumn::Regular {
+            on_empty, on_error, ..
+        } => {
+            matches!(
+                on_empty,
+                Some(crate::backend::parser::JsonTableBehavior::Default(expr))
+                    if raw_expr_contains_pg_notify(expr)
+            ) || matches!(
+                on_error,
+                Some(crate::backend::parser::JsonTableBehavior::Default(expr))
+                    if raw_expr_contains_pg_notify(expr)
+            )
+        }
+        crate::backend::parser::JsonTableColumn::Nested { columns, .. } => {
+            columns.iter().any(raw_json_table_column_contains_pg_notify)
+        }
+        crate::backend::parser::JsonTableColumn::Ordinality { .. }
+        | crate::backend::parser::JsonTableColumn::Exists { .. } => false,
     }
 }
 
@@ -10573,6 +10666,53 @@ ORDER BY 1, 2;";
             rows,
             vec![vec![Value::Text(" SELECT id\n   FROM widgets;".into())]]
         );
+    }
+
+    #[test]
+    fn psql_get_create_view_query_handles_sql_json_table_keywords() {
+        let db = Database::open(temp_dir("describe_viewdef_json_table"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(
+            1,
+            "create domain jsonb_test_domain as text check (value <> 'foo')",
+        )
+        .unwrap();
+        db.execute(
+            1,
+            "create view jsonb_table_view2 as \
+             select * from json_table(\
+                'null'::jsonb, '$[*]' passing 1 + 2 as a, '\"foo\"'::json as \"b c\" \
+                columns (\
+                    \"int\" int path '$', \
+                    text text path '$', \
+                    \"char(4)\" char(4) path '$', \
+                    bool bool path '$', \
+                    \"numeric\" numeric path '$', \
+                    \"domain\" jsonb_test_domain path '$'))",
+        )
+        .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("jsonb_table_view2")
+            .unwrap();
+        let catalog = session.catalog_lookup(&db);
+        let relation = catalog.lookup_relation_by_oid(entry.relation_oid).unwrap();
+        let definition = format_view_definition(entry.relation_oid, &relation.desc, &catalog)
+            .expect("JSON_TABLE view definition should deparse");
+        assert!(definition.contains("\"int\" integer PATH '$'"));
+        let sql = format!(
+            "SELECT nspname, relname, relkind, \
+             pg_catalog.pg_get_viewdef(c.oid, true), \
+             pg_catalog.array_remove(pg_catalog.array_remove(c.reloptions,'check_option=local'),'check_option=cascaded') AS reloptions, \
+             CASE WHEN 'check_option=local' = ANY (c.reloptions) THEN 'LOCAL'::text \
+             WHEN 'check_option=cascaded' = ANY (c.reloptions) THEN 'CASCADED'::text ELSE NULL END AS checkoption \
+             FROM pg_catalog.pg_class c \
+             LEFT JOIN pg_catalog.pg_namespace n \
+             ON c.relnamespace = n.oid WHERE c.oid = {}",
+            entry.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(rows.len(), 1);
     }
 
     #[test]

@@ -352,6 +352,7 @@ fn query_references_local_cte(
                     | SetReturningCall::StringTableFunction { args, .. }
                     | SetReturningCall::TextSearchTableFunction { args, .. }
                     | SetReturningCall::UserDefined { args, .. } => args.iter().collect(),
+                    SetReturningCall::SqlJsonTable(_) => set_returning_call_exprs(call),
                 };
                 if let Some(name) = args
                     .into_iter()
