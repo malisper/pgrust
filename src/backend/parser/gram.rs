@@ -22385,7 +22385,7 @@ fn build_array_literal_elements(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, Pa
 
 fn build_func_call_name(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
     match pair.as_rule() {
-        Rule::func_call_name => {
+        Rule::func_call_name | Rule::regular_func_call_name => {
             build_func_call_name(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
         }
         Rule::identifier => Ok(build_identifier(pair)),
