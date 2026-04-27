@@ -953,6 +953,98 @@ fn nth_included_frame_row_index(
     Ok(None)
 }
 
+fn included_frame_value_is_non_null(
+    ctx: &mut ExecutorContext,
+    value_expr: &crate::include::nodes::primnodes::Expr,
+    clause: &WindowClause,
+    partition_rows: &mut [PreparedWindowRow],
+    row_index: usize,
+    candidate: usize,
+) -> Result<bool, ExecError> {
+    if !row_is_included_by_frame_exclusion(clause, partition_rows, row_index, candidate)? {
+        return Ok(false);
+    }
+    let value = evaluate_window_expr_on_row(ctx, &mut partition_rows[candidate], value_expr)?;
+    Ok(!matches!(value, Value::Null))
+}
+
+fn first_non_null_included_frame_row_index(
+    ctx: &mut ExecutorContext,
+    value_expr: &crate::include::nodes::primnodes::Expr,
+    clause: &WindowClause,
+    partition_rows: &mut [PreparedWindowRow],
+    row_index: usize,
+    frame_start: usize,
+    frame_end: usize,
+) -> Result<Option<usize>, ExecError> {
+    for candidate in frame_start..frame_end {
+        if included_frame_value_is_non_null(
+            ctx,
+            value_expr,
+            clause,
+            partition_rows,
+            row_index,
+            candidate,
+        )? {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn last_non_null_included_frame_row_index(
+    ctx: &mut ExecutorContext,
+    value_expr: &crate::include::nodes::primnodes::Expr,
+    clause: &WindowClause,
+    partition_rows: &mut [PreparedWindowRow],
+    row_index: usize,
+    frame_start: usize,
+    frame_end: usize,
+) -> Result<Option<usize>, ExecError> {
+    for candidate in (frame_start..frame_end).rev() {
+        if included_frame_value_is_non_null(
+            ctx,
+            value_expr,
+            clause,
+            partition_rows,
+            row_index,
+            candidate,
+        )? {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn nth_non_null_included_frame_row_index(
+    ctx: &mut ExecutorContext,
+    value_expr: &crate::include::nodes::primnodes::Expr,
+    clause: &WindowClause,
+    partition_rows: &mut [PreparedWindowRow],
+    row_index: usize,
+    frame_start: usize,
+    frame_end: usize,
+    nth: usize,
+) -> Result<Option<usize>, ExecError> {
+    let mut seen = 0usize;
+    for candidate in frame_start..frame_end {
+        if included_frame_value_is_non_null(
+            ctx,
+            value_expr,
+            clause,
+            partition_rows,
+            row_index,
+            candidate,
+        )? {
+            seen += 1;
+            if seen == nth {
+                return Ok(Some(candidate));
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn advance_window_aggregate(
     ctx: &mut ExecutorContext,
     state: &mut AccumState,
@@ -1225,23 +1317,63 @@ fn evaluate_offset_window(
             BuiltinWindowFunction::Lead => i128::from(offset),
             _ => panic!("non-offset window function routed to lag/lead path"),
         };
-        let target_index = row_index as i128 + direction;
-        let value = if target_index < 0 || target_index >= partition_rows.len() as i128 {
-            if let Some(default_expr) = func.args.get(2) {
-                evaluate_window_expr_on_row(ctx, &mut partition_rows[row_index], default_expr)?
-            } else {
-                Value::Null
-            }
-        } else {
-            evaluate_window_expr_on_row(
+        let target_index = if func.ignore_nulls {
+            offset_window_ignore_nulls_target_index(
                 ctx,
-                &mut partition_rows[target_index as usize],
                 value_expr,
+                partition_rows,
+                row_index,
+                direction,
             )?
+        } else {
+            let target_index = row_index as i128 + direction;
+            (target_index >= 0 && target_index < partition_rows.len() as i128)
+                .then_some(target_index as usize)
+        };
+        let value = match target_index {
+            Some(target_index) => {
+                evaluate_window_expr_on_row(ctx, &mut partition_rows[target_index], value_expr)?
+            }
+            None => {
+                if let Some(default_expr) = func.args.get(2) {
+                    evaluate_window_expr_on_row(ctx, &mut partition_rows[row_index], default_expr)?
+                } else {
+                    Value::Null
+                }
+            }
         };
         values.push(value);
     }
     Ok(values)
+}
+
+fn offset_window_ignore_nulls_target_index(
+    ctx: &mut ExecutorContext,
+    value_expr: &crate::include::nodes::primnodes::Expr,
+    partition_rows: &mut [PreparedWindowRow],
+    row_index: usize,
+    direction: i128,
+) -> Result<Option<usize>, ExecError> {
+    if direction == 0 {
+        let value = evaluate_window_expr_on_row(ctx, &mut partition_rows[row_index], value_expr)?;
+        return Ok((!matches!(value, Value::Null)).then_some(row_index));
+    }
+
+    let step = direction.signum();
+    let mut remaining = direction.unsigned_abs();
+    let mut candidate = row_index as i128;
+    while remaining > 0 {
+        candidate += step;
+        if candidate < 0 || candidate >= partition_rows.len() as i128 {
+            return Ok(None);
+        }
+        let value =
+            evaluate_window_expr_on_row(ctx, &mut partition_rows[candidate as usize], value_expr)?;
+        if !matches!(value, Value::Null) {
+            remaining -= 1;
+        }
+    }
+    Ok(Some(candidate as usize))
 }
 
 fn evaluate_value_window(
@@ -1262,6 +1394,17 @@ fn evaluate_value_window(
         let (frame_start, frame_end) =
             evaluate_window_frame(ctx, clause, partition_rows, row_index)?;
         let frame_row_index = match builtin {
+            BuiltinWindowFunction::FirstValue if func.ignore_nulls => {
+                first_non_null_included_frame_row_index(
+                    ctx,
+                    value_expr,
+                    clause,
+                    partition_rows,
+                    row_index,
+                    frame_start,
+                    frame_end,
+                )?
+            }
             BuiltinWindowFunction::FirstValue => first_included_frame_row_index(
                 clause,
                 partition_rows,
@@ -1269,6 +1412,17 @@ fn evaluate_value_window(
                 frame_start,
                 frame_end,
             )?,
+            BuiltinWindowFunction::LastValue if func.ignore_nulls => {
+                last_non_null_included_frame_row_index(
+                    ctx,
+                    value_expr,
+                    clause,
+                    partition_rows,
+                    row_index,
+                    frame_start,
+                    frame_end,
+                )?
+            }
             BuiltinWindowFunction::LastValue => last_included_frame_row_index(
                 clause,
                 partition_rows,
@@ -1283,14 +1437,27 @@ fn evaluate_value_window(
                     values.push(Value::Null);
                     continue;
                 };
-                nth_included_frame_row_index(
-                    clause,
-                    partition_rows,
-                    row_index,
-                    frame_start,
-                    frame_end,
-                    offset,
-                )?
+                if func.ignore_nulls {
+                    nth_non_null_included_frame_row_index(
+                        ctx,
+                        value_expr,
+                        clause,
+                        partition_rows,
+                        row_index,
+                        frame_start,
+                        frame_end,
+                        offset,
+                    )?
+                } else {
+                    nth_included_frame_row_index(
+                        clause,
+                        partition_rows,
+                        row_index,
+                        frame_start,
+                        frame_end,
+                        offset,
+                    )?
+                }
             }
             _ => panic!("non-value window function routed to value path"),
         };

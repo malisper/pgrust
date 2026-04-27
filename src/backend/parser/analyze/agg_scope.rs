@@ -734,6 +734,7 @@ fn analyze_expr_internal(
             func_variadic,
             filter,
             over,
+            ..
         } => {
             let is_aggregate = over.is_none()
                 && aggregate_call_matches_catalog(catalog, name, args, within_group.as_deref());

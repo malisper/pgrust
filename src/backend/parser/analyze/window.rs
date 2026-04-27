@@ -1,10 +1,10 @@
 use super::*;
 use crate::include::nodes::parsenodes::{
-    RawWindowFrame, RawWindowFrameBound, WindowFrameExclusion, WindowFrameMode,
+    RawWindowFrame, RawWindowFrameBound, WindowFrameExclusion, WindowFrameMode, WindowNullTreatment,
 };
 use crate::include::nodes::primnodes::{
-    WindowClause, WindowFrame, WindowFrameBound, WindowFrameOffset, WindowFuncExpr, WindowFuncKind,
-    WindowSpec, expr_sql_type_hint,
+    BuiltinWindowFunction, WindowClause, WindowFrame, WindowFrameBound, WindowFrameOffset,
+    WindowFuncExpr, WindowFuncKind, WindowSpec, expr_sql_type_hint,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -815,6 +815,7 @@ pub(super) fn register_window_expr(
     kind: WindowFuncKind,
     args: Vec<Expr>,
     result_type: SqlType,
+    ignore_nulls: bool,
 ) -> Expr {
     let mut state = state.borrow_mut();
     let winref = match state.clauses.iter().position(|clause| clause.spec == spec) {
@@ -835,7 +836,61 @@ pub(super) fn register_window_expr(
         winno,
         args,
         result_type,
+        ignore_nulls,
     };
     state.clauses[winref - 1].functions.push(expr.clone());
     Expr::WindowFunc(Box::new(expr))
+}
+
+pub(super) fn reject_aggregate_null_treatment(
+    null_treatment: Option<WindowNullTreatment>,
+) -> Result<(), ParseError> {
+    if null_treatment.is_some() {
+        return Err(ParseError::DetailedError {
+            message: "aggregate functions do not accept RESPECT/IGNORE NULLS".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn reject_function_null_treatment(
+    name: &str,
+    null_treatment: Option<WindowNullTreatment>,
+) -> Result<(), ParseError> {
+    if null_treatment.is_some() {
+        return Err(function_null_treatment_error(name));
+    }
+    Ok(())
+}
+
+pub(super) fn window_ignore_nulls_for_builtin(
+    func: BuiltinWindowFunction,
+    null_treatment: Option<WindowNullTreatment>,
+) -> Result<bool, ParseError> {
+    let Some(null_treatment) = null_treatment else {
+        return Ok(false);
+    };
+    if !matches!(
+        func,
+        BuiltinWindowFunction::Lag
+            | BuiltinWindowFunction::Lead
+            | BuiltinWindowFunction::FirstValue
+            | BuiltinWindowFunction::LastValue
+            | BuiltinWindowFunction::NthValue
+    ) {
+        return Err(function_null_treatment_error(func.name()));
+    }
+    Ok(matches!(null_treatment, WindowNullTreatment::Ignore))
+}
+
+fn function_null_treatment_error(name: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!("function {name} does not allow RESPECT/IGNORE NULLS"),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
 }

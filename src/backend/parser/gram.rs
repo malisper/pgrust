@@ -19797,6 +19797,7 @@ fn simple_func_call(name: impl Into<String>, args: Vec<SqlFunctionArg>) -> SqlEx
         distinct: false,
         func_variadic: false,
         filter: None,
+        null_treatment: None,
         over: None,
     }
 }
@@ -20181,6 +20182,7 @@ fn build_json_arrayagg_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, Pars
         distinct: false,
         func_variadic: false,
         filter: filter.map(Box::new),
+        null_treatment: None,
         over,
     };
     Ok(cast_json_returning(expr, returning))
@@ -20242,6 +20244,7 @@ fn build_json_objectagg_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, Par
         distinct: false,
         func_variadic: false,
         filter: filter.map(Box::new),
+        null_treatment: None,
         over,
     };
     Ok(cast_json_returning(expr, returning))
@@ -23282,6 +23285,7 @@ fn build_func_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     let mut is_star = false;
     let mut distinct = false;
     let mut filter = None;
+    let mut null_treatment = None;
     let mut over = None;
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -23303,6 +23307,9 @@ fn build_func_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             }
             Rule::agg_filter_clause => {
                 filter = Some(build_agg_filter_clause(part)?);
+            }
+            Rule::window_null_treatment => {
+                null_treatment = Some(build_window_null_treatment(part));
             }
             Rule::over_clause => {
                 over = Some(build_over_clause(part)?);
@@ -23356,6 +23363,7 @@ fn build_func_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         && within_group.is_none()
         && !distinct
         && filter.is_none()
+        && null_treatment.is_none()
         && over.is_none()
     {
         return Ok(SqlExpr::Random);
@@ -23368,8 +23376,23 @@ fn build_func_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         distinct,
         func_variadic: !is_star && parsed_args.func_variadic,
         filter: filter.map(Box::new),
+        null_treatment,
         over,
     })
+}
+
+fn build_window_null_treatment(
+    pair: Pair<'_, Rule>,
+) -> crate::backend::parser::WindowNullTreatment {
+    let text = pair.as_str().trim_start();
+    if text
+        .get(.."ignore".len())
+        .is_some_and(|keyword| keyword.eq_ignore_ascii_case("ignore"))
+    {
+        crate::backend::parser::WindowNullTreatment::Ignore
+    } else {
+        crate::backend::parser::WindowNullTreatment::Respect
+    }
 }
 
 fn build_within_group_clause(pair: Pair<'_, Rule>) -> Result<Vec<OrderByItem>, ParseError> {

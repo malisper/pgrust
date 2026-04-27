@@ -14093,6 +14093,7 @@ fn parse_hypothetical_within_group_call() {
             func_variadic: false,
             filter: None,
             over: None,
+            ..
         } if name == "rank"
             && args.args().len() == 1
             && order_by.is_empty()
@@ -16714,6 +16715,7 @@ fn parse_dml_returning_targets() {
                         func_variadic: false,
                         filter: None,
                         over: None,
+                        null_treatment: None,
                     },
                 },
             ]
@@ -16745,6 +16747,7 @@ fn parse_dml_returning_targets() {
                         func_variadic: false,
                         filter: None,
                         over: None,
+                        null_treatment: None,
                     },
                 },
             ]

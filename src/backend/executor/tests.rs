@@ -5850,6 +5850,32 @@ fn bool_and_every_and_bool_or_match_pg_null_semantics() {
         &base,
         &txns,
         INVALID_TRANSACTION_ID,
+        "select x, nth_value(x, 2) ignore nulls over w
+         from generate_series(1, 5) g(x)
+         window w as (order by x rows between 2 preceding and 2 following exclude current row)
+         order by x",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int32(3)],
+                    vec![Value::Int32(2), Value::Int32(3)],
+                    vec![Value::Int32(3), Value::Int32(2)],
+                    vec![Value::Int32(4), Value::Int32(3)],
+                    vec![Value::Int32(5), Value::Int32(4)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
         "select bool_and(v), bool_or(v) from (values (null), (null)) as t(v)",
     )
     .unwrap()
@@ -16738,6 +16764,160 @@ fn window_lag_and_lead_support_offsets_defaults_and_nulls() {
             );
         }
         other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_functions_support_respect_and_ignore_nulls() {
+    let base = temp_dir("window_respect_ignore_nulls");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select name, id,
+                lag(id) respect nulls over (order by name),
+                lag(id) ignore nulls over (order by name),
+                lead(id) ignore nulls over (order by name),
+                first_value(id) ignore nulls over w,
+                last_value(id) ignore nulls over w,
+                nth_value(id, 2) ignore nulls over w
+         from (values
+                ('a', null::int4),
+                ('b', 10),
+                ('c', null::int4),
+                ('d', 20),
+                ('e', 30)
+              ) v(name, id)
+         window w as (order by name rows between 2 preceding and 2 following)
+         order by name",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Text("a".into()),
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                        Value::Int32(10),
+                        Value::Int32(10),
+                        Value::Int32(10),
+                        Value::Null,
+                    ],
+                    vec![
+                        Value::Text("b".into()),
+                        Value::Int32(10),
+                        Value::Null,
+                        Value::Null,
+                        Value::Int32(20),
+                        Value::Int32(10),
+                        Value::Int32(20),
+                        Value::Int32(20),
+                    ],
+                    vec![
+                        Value::Text("c".into()),
+                        Value::Null,
+                        Value::Int32(10),
+                        Value::Int32(10),
+                        Value::Int32(20),
+                        Value::Int32(10),
+                        Value::Int32(30),
+                        Value::Int32(20),
+                    ],
+                    vec![
+                        Value::Text("d".into()),
+                        Value::Int32(20),
+                        Value::Null,
+                        Value::Int32(10),
+                        Value::Int32(30),
+                        Value::Int32(10),
+                        Value::Int32(30),
+                        Value::Int32(20),
+                    ],
+                    vec![
+                        Value::Text("e".into()),
+                        Value::Int32(30),
+                        Value::Int32(20),
+                        Value::Int32(20),
+                        Value::Null,
+                        Value::Int32(20),
+                        Value::Int32(30),
+                        Value::Int32(30),
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select row_number() ignore nulls over () from (values (1)) v(x)",
+    )
+    .unwrap_err()
+    {
+        ExecError::Parse(ParseError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "function row_number does not allow RESPECT/IGNORE NULLS"
+            );
+        }
+        other => panic!("expected null-treatment rejection, got {other:?}"),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select sum(x) respect nulls over () from (values (1)) v(x)",
+    )
+    .unwrap_err()
+    {
+        ExecError::Parse(ParseError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "aggregate functions do not accept RESPECT/IGNORE NULLS"
+            );
+        }
+        other => panic!("expected aggregate null-treatment rejection, got {other:?}"),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select abs(x) ignore nulls from (values (1)) v(x)",
+    )
+    .unwrap_err()
+    {
+        ExecError::Parse(ParseError::DetailedError { message, .. }) => {
+            assert_eq!(message, "function abs does not allow RESPECT/IGNORE NULLS");
+        }
+        other => panic!("expected scalar null-treatment rejection, got {other:?}"),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select sum(x) respect nulls from (values (1)) v(x)",
+    )
+    .unwrap_err()
+    {
+        ExecError::Parse(ParseError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "aggregate functions do not accept RESPECT/IGNORE NULLS"
+            );
+        }
+        other => panic!("expected plain aggregate null-treatment rejection, got {other:?}"),
     }
 }
 

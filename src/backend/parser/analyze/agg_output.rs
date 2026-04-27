@@ -625,6 +625,7 @@ fn bind_grouped_window_agg_call(
         kind,
         coerced_args,
         result_type,
+        false,
     ))
 }
 
@@ -888,6 +889,7 @@ fn bind_grouped_window_func_call(
     name: &str,
     args: &[SqlFunctionArg],
     func_variadic: bool,
+    null_treatment: Option<WindowNullTreatment>,
     over: &RawWindowSpec,
     group_by_exprs: &[SqlExpr],
     group_key_exprs: &[Expr],
@@ -948,6 +950,7 @@ fn bind_grouped_window_func_call(
         )
     })?;
     if let Some(window_impl) = resolved.window_impl {
+        let ignore_nulls = window_ignore_nulls_for_builtin(window_impl, null_treatment)?;
         if args.iter().any(|arg| arg.name.is_some()) {
             return Err(ParseError::FeatureNotSupported(
                 "named arguments are not supported for window functions".into(),
@@ -985,9 +988,11 @@ fn bind_grouped_window_func_call(
             WindowFuncKind::Builtin(window_impl),
             coerced_args,
             resolved.result_type,
+            ignore_nulls,
         ));
     }
     if resolved.prokind == 'a' {
+        reject_aggregate_null_treatment(null_treatment)?;
         if let Some(agg_impl) = resolved.agg_impl {
             return bind_grouped_window_agg_call(
                 agg_impl,
@@ -1322,6 +1327,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             distinct,
             func_variadic,
             filter,
+            null_treatment,
             over,
         } => {
             let (direct_args, aggregate_args, aggregate_order_by) =
@@ -1337,6 +1343,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             }
             if let Some(func) = resolve_builtin_aggregate(name) {
                 reject_explicit_empty_aggregate_call(name, args)?;
+                reject_aggregate_null_treatment(*null_treatment)?;
                 if let Some(raw_over) = over {
                     return bind_grouped_window_agg_call(
                         func,
@@ -1617,6 +1624,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     name,
                     args.args(),
                     *func_variadic,
+                    *null_treatment,
                     raw_over,
                     group_by_exprs,
                     group_key_exprs,
@@ -1628,6 +1636,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     n_keys,
                 )
             } else if name.eq_ignore_ascii_case("generate_series") {
+                reject_function_null_treatment(name, *null_treatment)?;
                 bind_grouped_generate_series_srf(
                     name,
                     args.args(),
@@ -1643,6 +1652,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     n_keys,
                 )
             } else {
+                reject_function_null_treatment(name, *null_treatment)?;
                 bind_grouped_func_call(
                     name,
                     args.args(),
