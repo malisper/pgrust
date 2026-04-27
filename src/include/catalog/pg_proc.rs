@@ -1214,6 +1214,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'v',
         ),
         proc_row(
+            2079,
+            "pg_table_is_visible",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_table_is_visible",
+            1,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
             1299,
             "now",
             TIMESTAMPTZ_TYPE_OID,
@@ -1539,6 +1551,28 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
                 true,
                 'f',
                 'v',
+            )
+        },
+        PgProcRow {
+            prorows: 3.0,
+            proallargtypes: Some(vec![TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            proargmodes: Some(vec![b'i', b'o', b'o']),
+            proargnames: Some(vec![
+                "options_array".into(),
+                "option_name".into(),
+                "option_value".into(),
+            ]),
+            ..proc_row(
+                2289,
+                "pg_options_to_table",
+                RECORD_TYPE_OID,
+                &oid_argtypes(&[TEXT_ARRAY_TYPE_OID]),
+                "pg_options_to_table",
+                1,
+                true,
+                false,
+                'f',
+                's',
             )
         },
         proc_row(
@@ -4638,6 +4672,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            1282,
+            "quote_ident",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "quote_ident",
+            1,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
             6242,
             "quote_literal",
             TEXT_TYPE_OID,
@@ -6090,6 +6136,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'v',
         ),
     ];
+    rows.extend(foreign_privilege_proc_rows());
     rows.extend(pg_proc_alias_pair_rows());
     rows.extend(aggregate_support_proc_rows());
     rows.extend(aggregate_transition_proc_rows(&rows));
@@ -7255,6 +7302,99 @@ fn catalog_only_type_io_proc_rows() -> Vec<PgProcRow> {
         }
     }
     rows
+}
+
+fn foreign_privilege_proc_rows() -> Vec<PgProcRow> {
+    [
+        (
+            3000,
+            "has_foreign_data_wrapper_privilege",
+            &[NAME_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_foreign_data_wrapper_privilege_name_name",
+        ),
+        (
+            3001,
+            "has_foreign_data_wrapper_privilege",
+            &[NAME_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_foreign_data_wrapper_privilege_name_id",
+        ),
+        (
+            3002,
+            "has_foreign_data_wrapper_privilege",
+            &[OID_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_foreign_data_wrapper_privilege_id_name",
+        ),
+        (
+            3003,
+            "has_foreign_data_wrapper_privilege",
+            &[OID_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_foreign_data_wrapper_privilege_id_id",
+        ),
+        (
+            3004,
+            "has_foreign_data_wrapper_privilege",
+            &[TEXT_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_foreign_data_wrapper_privilege_name",
+        ),
+        (
+            3005,
+            "has_foreign_data_wrapper_privilege",
+            &[OID_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_foreign_data_wrapper_privilege_id",
+        ),
+        (
+            3006,
+            "has_server_privilege",
+            &[NAME_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_server_privilege_name_name",
+        ),
+        (
+            3007,
+            "has_server_privilege",
+            &[NAME_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_server_privilege_name_id",
+        ),
+        (
+            3008,
+            "has_server_privilege",
+            &[OID_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_server_privilege_id_name",
+        ),
+        (
+            3009,
+            "has_server_privilege",
+            &[OID_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_server_privilege_id_id",
+        ),
+        (
+            3010,
+            "has_server_privilege",
+            &[TEXT_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_server_privilege_name",
+        ),
+        (
+            3011,
+            "has_server_privilege",
+            &[OID_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_server_privilege_id",
+        ),
+    ]
+    .into_iter()
+    .map(|(oid, proname, argtypes, prosrc)| {
+        proc_row(
+            oid,
+            proname,
+            BOOL_TYPE_OID,
+            &oid_argtypes(argtypes),
+            prosrc,
+            argtypes.len() as i16,
+            false,
+            false,
+            'f',
+            's',
+        )
+    })
+    .collect()
 }
 
 fn pg_proc_alias_pair_rows() -> Vec<PgProcRow> {
@@ -9673,6 +9813,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_settings_get_flags",
             BuiltinScalarFunction::PgSettingsGetFlags,
         ),
+        ("pg_get_partkeydef", BuiltinScalarFunction::PgGetPartKeyDef),
+        (
+            "pg_table_is_visible",
+            BuiltinScalarFunction::PgTableIsVisible,
+        ),
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),
         ("cash_words", BuiltinScalarFunction::CashWords),
@@ -10563,6 +10708,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("to_regnamespace", BuiltinScalarFunction::ToRegNamespace),
         ("to_regcollation", BuiltinScalarFunction::ToRegCollation),
         ("format_type", BuiltinScalarFunction::FormatType),
+        (
+            "has_foreign_data_wrapper_privilege",
+            BuiltinScalarFunction::HasForeignDataWrapperPrivilege,
+        ),
+        (
+            "has_server_privilege",
+            BuiltinScalarFunction::HasServerPrivilege,
+        ),
         ("regproc_to_text", BuiltinScalarFunction::RegProcToText),
         ("regprocout", BuiltinScalarFunction::RegProcToText),
         ("regclass_to_text", BuiltinScalarFunction::RegClassToText),
@@ -10590,6 +10743,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("regroleout", BuiltinScalarFunction::RegRoleToText),
         ("ascii", BuiltinScalarFunction::Ascii),
         ("chr", BuiltinScalarFunction::Chr),
+        ("quote_ident", BuiltinScalarFunction::QuoteIdent),
         ("quote_literal", BuiltinScalarFunction::QuoteLiteral),
         ("bpchar_to_text", BuiltinScalarFunction::BpcharToText),
         ("bpchartotext", BuiltinScalarFunction::BpcharToText),

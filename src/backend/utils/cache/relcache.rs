@@ -512,6 +512,7 @@ impl RelCache {
                     desc.attislocal = attr.attislocal;
                     desc.attacl = attr.attacl.clone();
                     desc.collation_oid = attr.attcollation;
+                    desc.fdw_options = attr.attfdwoptions.clone();
                     desc.identity =
                         crate::include::nodes::parsenodes::ColumnIdentityKind::from_catalog_char(
                             attr.attidentity,
@@ -1361,6 +1362,8 @@ mod tests {
             rows.collations,
             rows.foreign_data_wrappers,
             rows.foreign_servers,
+            rows.foreign_tables,
+            rows.user_mappings,
             rows.databases,
             rows.tablespaces,
             rows.statistics,

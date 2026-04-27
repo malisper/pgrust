@@ -1,4 +1,5 @@
 use super::super::*;
+use super::foreign_data_wrapper::alter_option_map;
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
@@ -178,8 +179,57 @@ impl Database {
             }));
         }
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
-        let _column_name =
+        let column_name =
             validate_alter_table_alter_column_options(&relation.desc, &alter_stmt.column_name)?;
+        if relation.relkind == 'f' {
+            let crate::backend::parser::AlterColumnOptionsAction::Fdw(options) = &alter_stmt.action
+            else {
+                return Ok(StatementResult::AffectedRows(0));
+            };
+            let existing = self
+                .backend_catcache(client_id, Some((xid, cid)))
+                .map_err(map_catalog_error)?
+                .attributes_by_relid(relation.relation_oid)
+                .and_then(|rows| {
+                    rows.iter()
+                        .find(|row| {
+                            !row.attisdropped && row.attname.eq_ignore_ascii_case(&column_name)
+                        })
+                        .and_then(|row| row.attfdwoptions.clone())
+                })
+                .or_else(|| {
+                    relation
+                        .desc
+                        .columns
+                        .iter()
+                        .find(|column| {
+                            !column.dropped && column.name.eq_ignore_ascii_case(&column_name)
+                        })
+                        .and_then(|column| column.fdw_options.clone())
+                });
+            let fdw_options = alter_option_map(existing, options)?;
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid,
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .alter_table_set_column_fdw_options_mvcc(
+                    relation.relation_oid,
+                    &column_name,
+                    fdw_options,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            _catalog_effects.push(effect);
+            return Ok(StatementResult::AffectedRows(0));
+        }
 
         // :HACK: PostgreSQL stores column-level SET/RESET options in pg_attribute.attoptions.
         // pgrust does not model attoptions yet, so for now we validate and accept the syntax
@@ -224,6 +274,7 @@ impl Database {
         let action = match alter_stmt.action {
             crate::backend::parser::AlterColumnOptionsAction::Set(_) => "ALTER COLUMN ... SET",
             crate::backend::parser::AlterColumnOptionsAction::Reset(_) => "ALTER COLUMN ... RESET",
+            crate::backend::parser::AlterColumnOptionsAction::Fdw(_) => "ALTER COLUMN ... OPTIONS",
         };
         let detail = if relation.relkind == 'I' {
             "This operation is not supported for partitioned indexes."

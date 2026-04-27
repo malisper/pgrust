@@ -82,6 +82,10 @@ fn generated_columns_to_drop_for_column(
     Ok(dependent_indices.into_iter().collect())
 }
 
+fn relation_basename(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
 impl Database {
     pub(crate) fn execute_alter_table_drop_column_stmt_with_search_path(
         &self,
@@ -161,18 +165,31 @@ impl Database {
                 actual: drop_stmt.column_name.clone(),
             }));
         }
-        let column_index = relation
-            .desc
-            .columns
-            .iter()
-            .enumerate()
-            .find_map(|(index, column)| {
-                (!column.dropped && column.name.eq_ignore_ascii_case(&drop_stmt.column_name))
-                    .then_some(index)
-            })
-            .ok_or_else(|| {
-                ExecError::Parse(ParseError::UnknownColumn(drop_stmt.column_name.clone()))
-            })?;
+        let column_index =
+            match relation
+                .desc
+                .columns
+                .iter()
+                .enumerate()
+                .find_map(|(index, column)| {
+                    (!column.dropped && column.name.eq_ignore_ascii_case(&drop_stmt.column_name))
+                        .then_some(index)
+                }) {
+                Some(index) => index,
+                None if drop_stmt.missing_ok => {
+                    push_notice(format!(
+                        "column \"{}\" of relation \"{}\" does not exist, skipping",
+                        drop_stmt.column_name,
+                        relation_basename(&drop_stmt.table_name)
+                    ));
+                    return Ok(StatementResult::AffectedRows(0));
+                }
+                None => {
+                    return Err(ExecError::Parse(ParseError::UnknownColumn(
+                        drop_stmt.column_name.clone(),
+                    )));
+                }
+            };
         let dependent_generated_indices =
             generated_columns_to_drop_for_column(&catalog, &relation, column_index)?;
         let relation_display_name = display_relation_name(&catalog, &relation);

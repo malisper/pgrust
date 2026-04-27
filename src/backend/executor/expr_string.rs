@@ -1062,6 +1062,7 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
 
 fn quote_identifier(identifier: &str) -> String {
     if !identifier.is_empty()
+        && !matches!(identifier, "user")
         && identifier.chars().enumerate().all(|(idx, ch)| {
             if idx == 0 {
                 ch == '_' || ch.is_ascii_lowercase()
@@ -2289,6 +2290,18 @@ pub(super) fn eval_quote_literal_function(values: &[Value]) -> Result<Value, Exe
         return Ok(Value::Null);
     }
     Ok(Value::Text(CompactString::from_owned(quote_literal_text(
+        &value_output_text(value)?,
+    ))))
+}
+
+pub(super) fn eval_quote_ident_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    Ok(Value::Text(CompactString::from_owned(quote_identifier(
         &value_output_text(value)?,
     ))))
 }

@@ -7,21 +7,22 @@ use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
     build_pg_rules_rows, build_pg_stat_all_tables_rows, build_pg_stat_io_rows,
     build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
-    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
+    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_user_mappings_rows,
+    build_pg_views_rows,
 };
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
-    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgEnumRow,
-    PgForeignDataWrapperRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTsConfigMapRow,
-    PgTsConfigRow, PgTsDictRow, PgTsTemplateRow, PgTypeRow, bootstrap_pg_aggregate_rows,
-    bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
-    bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_template_rows, builtin_range_rows,
-    builtin_type_rows, synthetic_range_proc_rows_by_name,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PgAggregateRow, PgAmprocRow, PgAuthIdRow,
+    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow,
+    PgDependRow, PgEnumRow, PgForeignDataWrapperRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgRangeRow,
+    PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsTemplateRow, PgTypeRow,
+    bootstrap_pg_aggregate_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_database_rows, bootstrap_pg_enum_rows,
+    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, bootstrap_pg_ts_config_map_rows,
+    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_template_rows,
+    builtin_range_rows, builtin_type_rows, synthetic_range_proc_rows_by_name,
 };
 use crate::pgrust::database::DatabaseStatsStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -98,18 +99,33 @@ impl VisibleCatalog {
     }
 
     pub fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {
-        if let Some(catcache) = &self.catcache {
-            return catcache.constraint_rows_for_relation(relation_oid);
-        }
+        let mut rows = self
+            .catcache
+            .as_ref()
+            .map(|catcache| catcache.constraint_rows_for_relation(relation_oid))
+            .unwrap_or_default();
         let Some((name, entry)) = self
             .relcache
             .entries()
             .find(|(_, entry)| entry.relation_oid == relation_oid)
         else {
-            return Vec::new();
+            return rows;
         };
         let relname = name.rsplit('.').next().unwrap_or(name);
-        derived_pg_constraint_rows(relation_oid, relname, entry.namespace_oid, &entry.desc)
+        for derived in
+            derived_pg_constraint_rows(relation_oid, relname, entry.namespace_oid, &entry.desc)
+        {
+            if rows.iter().any(|row| {
+                row.oid == derived.oid
+                    || (row.contype == CONSTRAINT_NOTNULL
+                        && row.conrelid == derived.conrelid
+                        && row.conkey == derived.conkey)
+            }) {
+                continue;
+            }
+            rows.push(derived);
+        }
+        rows
     }
 
     pub fn constraint_rows(&self) -> Vec<PgConstraintRow> {
@@ -201,6 +217,13 @@ impl VisibleCatalog {
             .and_then(|catcache| catcache.class_by_oid(oid).cloned())
     }
 
+    pub fn class_rows(&self) -> Vec<PgClassRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.class_rows())
+            .unwrap_or_default()
+    }
+
     pub fn proc_rows(&self) -> Vec<PgProcRow> {
         self.catcache
             .as_ref()
@@ -238,6 +261,34 @@ impl VisibleCatalog {
                 .into_iter()
                 .find(|row| row.oid == oid)
         })
+    }
+
+    pub fn foreign_data_wrapper_rows(&self) -> Vec<PgForeignDataWrapperRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.foreign_data_wrapper_rows())
+            .unwrap_or_default()
+    }
+
+    pub fn foreign_server_rows(&self) -> Vec<crate::include::catalog::PgForeignServerRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.foreign_server_rows())
+            .unwrap_or_default()
+    }
+
+    pub fn foreign_table_rows(&self) -> Vec<crate::include::catalog::PgForeignTableRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.foreign_table_rows())
+            .unwrap_or_default()
+    }
+
+    pub fn user_mapping_rows(&self) -> Vec<crate::include::catalog::PgUserMappingRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.user_mapping_rows())
+            .unwrap_or_default()
     }
 
     pub fn auth_members_rows(&self) -> Vec<PgAuthMembersRow> {
@@ -686,6 +737,10 @@ impl CatalogLookup for VisibleCatalog {
             .unwrap_or_default()
     }
 
+    fn class_rows(&self) -> Vec<PgClassRow> {
+        VisibleCatalog::class_rows(self)
+    }
+
     fn partitioned_table_row(&self, relation_oid: u32) -> Option<PgPartitionedTableRow> {
         self.catcache
             .as_ref()
@@ -736,6 +791,22 @@ impl CatalogLookup for VisibleCatalog {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn foreign_data_wrapper_rows(&self) -> Vec<PgForeignDataWrapperRow> {
+        VisibleCatalog::foreign_data_wrapper_rows(self)
+    }
+
+    fn foreign_server_rows(&self) -> Vec<crate::include::catalog::PgForeignServerRow> {
+        VisibleCatalog::foreign_server_rows(self)
+    }
+
+    fn foreign_table_rows(&self) -> Vec<crate::include::catalog::PgForeignTableRow> {
+        VisibleCatalog::foreign_table_rows(self)
+    }
+
+    fn user_mapping_rows(&self) -> Vec<crate::include::catalog::PgUserMappingRow> {
+        VisibleCatalog::user_mapping_rows(self)
     }
 
     fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
@@ -816,6 +887,18 @@ impl CatalogLookup for VisibleCatalog {
             catcache.class_rows(),
             catcache.attribute_rows(),
             catcache.statistic_rows(),
+        )
+    }
+
+    fn pg_user_mappings_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        let Some(catcache) = &self.catcache else {
+            return Vec::new();
+        };
+        build_pg_user_mappings_rows(
+            catcache.authid_rows(),
+            catcache.foreign_server_rows(),
+            catcache.user_mapping_rows(),
+            self.current_user_oid(),
         )
     }
 
@@ -997,6 +1080,8 @@ mod tests {
             base.collation_rows(),
             base.foreign_data_wrapper_rows(),
             base.foreign_server_rows(),
+            base.foreign_table_rows(),
+            base.user_mapping_rows(),
             base.database_rows(),
             base.tablespace_rows(),
             base.statistic_rows(),

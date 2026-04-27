@@ -1869,7 +1869,7 @@ fn column_attnums_for_names(
 
 impl Database {
     #[allow(clippy::too_many_arguments)]
-    fn install_create_table_constraints_in_transaction(
+    pub(crate) fn install_create_table_constraints_in_transaction(
         &self,
         client_id: ClientId,
         xid: TransactionId,

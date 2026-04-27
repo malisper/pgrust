@@ -80,6 +80,7 @@ pub struct ColumnDesc {
     pub generated: Option<ColumnGeneratedKind>,
     pub identity: Option<crate::include::nodes::parsenodes::ColumnIdentityKind>,
     pub missing_default_value: Option<Value>,
+    pub fdw_options: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,6 +375,8 @@ pub enum BuiltinScalarFunction {
     Version,
     PgBackendPid,
     PgPartitionRoot,
+    PgGetPartKeyDef,
+    PgTableIsVisible,
     GetDatabaseEncoding,
     UnicodeVersion,
     UnicodeAssigned,
@@ -473,6 +476,8 @@ pub enum BuiltinScalarFunction {
     ToRegNamespace,
     ToRegCollation,
     FormatType,
+    HasForeignDataWrapperPrivilege,
+    HasServerPrivilege,
     RegProcToText,
     RegClassToText,
     RegTypeToText,
@@ -585,6 +590,7 @@ pub enum BuiltinScalarFunction {
     Ascii,
     Chr,
     ParseIdent,
+    QuoteIdent,
     QuoteLiteral,
     Replace,
     SplitPart,
@@ -648,7 +654,6 @@ pub enum BuiltinScalarFunction {
     PgGetFunctionDef,
     PgGetFunctionResult,
     PgGetExpr,
-    PgGetPartKeyDef,
     PgGetConstraintDef,
     PgGetPartitionConstraintDef,
     PgGetIndexDef,

@@ -356,16 +356,25 @@ fn execute_statement_with_source(
             actual: "COMMENT ON CONVERSION".into(),
         })),
         Statement::CommentOnForeignDataWrapper(_)
+        | Statement::CommentOnForeignServer(_)
         | Statement::CreateForeignDataWrapper(_)
         | Statement::CreateForeignServer(_)
-        | Statement::AlterForeignServerRename(_)
         | Statement::CreateLanguage(_)
         | Statement::AlterLanguage(_)
         | Statement::DropLanguage(_)
         | Statement::CreateForeignTable(_)
+        | Statement::ImportForeignSchema(_)
+        | Statement::CreateUserMapping(_)
         | Statement::AlterForeignDataWrapper(_)
         | Statement::AlterForeignDataWrapperOwner(_)
         | Statement::AlterForeignDataWrapperRename(_)
+        | Statement::AlterForeignServer(_)
+        | Statement::AlterForeignServerOwner(_)
+        | Statement::AlterForeignServerRename(_)
+        | Statement::AlterForeignTableOptions(_)
+        | Statement::AlterUserMapping(_)
+        | Statement::DropForeignServer(_)
+        | Statement::DropUserMapping(_)
         | Statement::DropForeignDataWrapper(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "FOREIGN DATA WRAPPER handled by database/session layer",

@@ -1412,7 +1412,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::TxidStatus => args.len() == 1,
             BuiltinScalarFunction::PgGetTriggerDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgTriggerDepth => args.is_empty(),
-            BuiltinScalarFunction::PgPartitionRoot => args.len() == 1,
+            BuiltinScalarFunction::PgPartitionRoot
+            | BuiltinScalarFunction::PgGetPartKeyDef
+            | BuiltinScalarFunction::PgTableIsVisible => args.len() == 1,
             BuiltinScalarFunction::DatePart | BuiltinScalarFunction::Extract => args.len() == 2,
             BuiltinScalarFunction::DateTrunc => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::DateBin => args.len() == 3,
@@ -1501,7 +1503,6 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgGetFunctionResult
             | BuiltinScalarFunction::PgFunctionIsVisible => args.len() == 1,
             BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
-            BuiltinScalarFunction::PgGetPartKeyDef => args.len() == 1,
             BuiltinScalarFunction::PgGetConstraintDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgGetPartitionConstraintDef => args.len() == 1,
             BuiltinScalarFunction::PgGetIndexDef => matches!(args.len(), 1 | 3),
@@ -1635,6 +1636,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::ToBin
             | BuiltinScalarFunction::ToOct
             | BuiltinScalarFunction::ToHex
+            | BuiltinScalarFunction::QuoteIdent
             | BuiltinScalarFunction::QuoteLiteral
             | BuiltinScalarFunction::BitcastIntegerToFloat4
             | BuiltinScalarFunction::BitcastBigintToFloat8
@@ -1711,6 +1713,8 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::HashMacAddr8Extended
             | BuiltinScalarFunction::Div
             | BuiltinScalarFunction::Mod => args.len() == 2,
+            BuiltinScalarFunction::HasForeignDataWrapperPrivilege
+            | BuiltinScalarFunction::HasServerPrivilege => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::Float8Accum | BuiltinScalarFunction::Float8Combine => {
                 args.len() == 2
             }
@@ -2725,6 +2729,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_filenode_relation",
             BuiltinScalarFunction::PgFilenodeRelation,
         ),
+        ("pg_get_partkeydef", BuiltinScalarFunction::PgGetPartKeyDef),
+        (
+            "pg_table_is_visible",
+            BuiltinScalarFunction::PgTableIsVisible,
+        ),
         ("pg_my_temp_schema", BuiltinScalarFunction::PgMyTempSchema),
         (
             "pg_rust_internal_binary_coercible",
@@ -3473,6 +3482,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("unistr", BuiltinScalarFunction::Unistr),
         ("ascii", BuiltinScalarFunction::Ascii),
         ("chr", BuiltinScalarFunction::Chr),
+        ("quote_ident", BuiltinScalarFunction::QuoteIdent),
         ("quote_literal", BuiltinScalarFunction::QuoteLiteral),
         ("replace", BuiltinScalarFunction::Replace),
         ("split_part", BuiltinScalarFunction::SplitPart),
@@ -3505,6 +3515,14 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("to_regnamespace", BuiltinScalarFunction::ToRegNamespace),
         ("to_regcollation", BuiltinScalarFunction::ToRegCollation),
         ("format_type", BuiltinScalarFunction::FormatType),
+        (
+            "has_foreign_data_wrapper_privilege",
+            BuiltinScalarFunction::HasForeignDataWrapperPrivilege,
+        ),
+        (
+            "has_server_privilege",
+            BuiltinScalarFunction::HasServerPrivilege,
+        ),
         ("regproc_to_text", BuiltinScalarFunction::RegProcToText),
         ("regprocout", BuiltinScalarFunction::RegProcToText),
         ("regclass_to_text", BuiltinScalarFunction::RegClassToText),
@@ -4264,6 +4282,8 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::CurrentDatabase
             | BuiltinScalarFunction::PgBackendPid
             | BuiltinScalarFunction::PgPartitionRoot
+            | BuiltinScalarFunction::PgGetPartKeyDef
+            | BuiltinScalarFunction::PgTableIsVisible
             | BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::CurrVal
             | BuiltinScalarFunction::SetVal
@@ -4277,7 +4297,6 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetFunctionDef
             | BuiltinScalarFunction::PgGetFunctionResult
             | BuiltinScalarFunction::PgGetExpr
-            | BuiltinScalarFunction::PgGetPartKeyDef
             | BuiltinScalarFunction::PgGetConstraintDef
             | BuiltinScalarFunction::PgGetPartitionConstraintDef
             | BuiltinScalarFunction::PgGetIndexDef

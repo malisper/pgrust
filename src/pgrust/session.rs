@@ -3543,9 +3543,11 @@ impl Session {
                 for column in &alter_stmt.columns {
                     let single_stmt = AlterTableAddColumnStatement {
                         if_exists: alter_stmt.if_exists,
+                        missing_ok: false,
                         only: alter_stmt.only,
                         table_name: alter_stmt.table_name.clone(),
                         column: column.clone(),
+                        fdw_options: None,
                     };
                     result = if self.active_txn.is_some() {
                         self.execute_in_transaction(
@@ -5541,6 +5543,9 @@ impl Session {
             Statement::CommentOnForeignDataWrapper(ref comment_stmt) => {
                 db.execute_comment_on_foreign_data_wrapper_stmt(client_id, comment_stmt)
             }
+            Statement::CommentOnForeignServer(ref comment_stmt) => {
+                db.execute_comment_on_foreign_server_stmt(client_id, comment_stmt)
+            }
             Statement::CommentOnPublication(ref comment_stmt) => {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
@@ -5596,9 +5601,6 @@ impl Session {
             Statement::CreateForeignServer(ref create_stmt) => {
                 db.execute_create_foreign_server_stmt(client_id, create_stmt)
             }
-            Statement::AlterForeignServerRename(ref alter_stmt) => {
-                db.execute_alter_foreign_server_rename_stmt(client_id, alter_stmt)
-            }
             Statement::CreateLanguage(ref create_stmt) => {
                 db.execute_create_language_stmt(client_id, create_stmt)
             }
@@ -5607,6 +5609,9 @@ impl Session {
             }
             Statement::DropLanguage(ref drop_stmt) => {
                 db.execute_drop_language_stmt(client_id, drop_stmt)
+            }
+            Statement::CreateUserMapping(ref create_stmt) => {
+                db.execute_create_user_mapping_stmt(client_id, create_stmt)
             }
             Statement::CreateForeignTable(ref create_stmt) => {
                 let search_path = self.configured_search_path();
@@ -5619,6 +5624,9 @@ impl Session {
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
                 )
+            }
+            Statement::ImportForeignSchema(ref import_stmt) => {
+                db.execute_import_foreign_schema_stmt(client_id, import_stmt)
             }
             Statement::AlterForeignDataWrapper(ref alter_stmt) => {
                 let search_path = self.configured_search_path();
@@ -5634,8 +5642,38 @@ impl Session {
             Statement::AlterForeignDataWrapperRename(ref alter_stmt) => {
                 db.execute_alter_foreign_data_wrapper_rename_stmt(client_id, alter_stmt)
             }
+            Statement::AlterForeignServer(ref alter_stmt) => {
+                db.execute_alter_foreign_server_stmt(client_id, alter_stmt)
+            }
+            Statement::AlterForeignServerOwner(ref alter_stmt) => {
+                db.execute_alter_foreign_server_owner_stmt(client_id, alter_stmt)
+            }
+            Statement::AlterForeignServerRename(ref alter_stmt) => {
+                db.execute_alter_foreign_server_rename_stmt(client_id, alter_stmt)
+            }
+            Statement::AlterForeignTableOptions(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_foreign_table_options_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterUserMapping(ref alter_stmt) => {
+                db.execute_alter_user_mapping_stmt(client_id, alter_stmt)
+            }
             Statement::DropForeignDataWrapper(ref drop_stmt) => {
                 db.execute_drop_foreign_data_wrapper_stmt(client_id, drop_stmt)
+            }
+            Statement::DropForeignServer(ref drop_stmt) => {
+                db.execute_drop_foreign_server_stmt(client_id, drop_stmt)
+            }
+            Statement::DropUserMapping(ref drop_stmt) => {
+                db.execute_drop_user_mapping_stmt(client_id, drop_stmt)
             }
             Statement::CreatePublication(ref create_stmt) => {
                 let search_path = self.configured_search_path();
@@ -6285,9 +6323,11 @@ impl Session {
                         db,
                         Statement::AlterTableAddColumn(AlterTableAddColumnStatement {
                             if_exists: alter_stmt.if_exists,
+                            missing_ok: false,
                             only: alter_stmt.only,
                             table_name: alter_stmt.table_name.clone(),
                             column: column.clone(),
+                            fdw_options: None,
                         }),
                         _statement_lock_scope_id,
                     );
@@ -7171,7 +7211,7 @@ impl Session {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
                     .lookup_any_relation(&comment_stmt.table_name)
-                    .filter(|relation| matches!(relation.relkind, 'r' | 'p'))
+                    .filter(|relation| matches!(relation.relkind, 'r' | 'p' | 'f'))
                     .ok_or_else(|| ExecError::DetailedError {
                         message: format!("relation \"{}\" does not exist", comment_stmt.table_name),
                         detail: None,
@@ -7194,7 +7234,7 @@ impl Session {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
                     .lookup_any_relation(&comment_stmt.table_name)
-                    .filter(|relation| matches!(relation.relkind, 'r' | 'p'))
+                    .filter(|relation| matches!(relation.relkind, 'r' | 'p' | 'f'))
                     .ok_or_else(|| ExecError::DetailedError {
                         message: format!("relation \"{}\" does not exist", comment_stmt.table_name),
                         detail: None,

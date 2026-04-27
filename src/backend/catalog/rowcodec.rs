@@ -11,12 +11,13 @@ use crate::include::catalog::{
     BootstrapCatalogKind, PG_STATISTIC_RELATION_OID, PG_STATISTIC_ROWTYPE_OID, PgAggregateRow,
     PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
     PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow,
-    PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgForeignServerRow, PgIndexRow,
-    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
-    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
-    PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows, pg_type_desc,
+    PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow,
+    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
+    PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow, bootstrap_composite_type_rows,
+    builtin_type_rows, pg_type_desc,
 };
 use crate::include::nodes::datetime::TimestampTzADT;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, RecordValue, Value};
@@ -192,6 +193,18 @@ pub(crate) fn catalog_row_values_for_kind(
             .iter()
             .cloned()
             .map(pg_foreign_server_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgUserMapping => rows
+            .user_mappings
+            .iter()
+            .cloned()
+            .map(pg_user_mapping_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgForeignTable => rows
+            .foreign_tables
+            .iter()
+            .cloned()
+            .map(pg_foreign_table_row_values)
             .collect(),
         BootstrapCatalogKind::PgIndex => rows
             .indexes
@@ -845,6 +858,27 @@ pub(crate) fn pg_foreign_server_row_from_values(
         srvversion: nullable_text(&values[5])?,
         srvacl: nullable_text_array(&values[6])?,
         srvoptions: nullable_text_array(&values[7])?,
+    })
+}
+
+pub(crate) fn pg_user_mapping_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgUserMappingRow, CatalogError> {
+    Ok(PgUserMappingRow {
+        oid: expect_oid(&values[0])?,
+        umuser: expect_oid(&values[1])?,
+        umserver: expect_oid(&values[2])?,
+        umoptions: nullable_text_array(&values[3])?,
+    })
+}
+
+pub(crate) fn pg_foreign_table_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgForeignTableRow, CatalogError> {
+    Ok(PgForeignTableRow {
+        ftrelid: expect_oid(&values[0])?,
+        ftserver: expect_oid(&values[1])?,
+        ftoptions: nullable_text_array(&values[2])?,
     })
 }
 
@@ -1584,16 +1618,33 @@ fn pg_foreign_server_row_values(row: PgForeignServerRow) -> Vec<Value> {
         Value::Text(row.srvname.into()),
         Value::Int32(row.srvowner as i32),
         Value::Int32(row.srvfdw as i32),
-        row.srvtype
-            .map(|value| Value::Text(value.into()))
-            .unwrap_or(Value::Null),
-        row.srvversion
-            .map(|value| Value::Text(value.into()))
-            .unwrap_or(Value::Null),
+        nullable_text_value(row.srvtype),
+        nullable_text_value(row.srvversion),
         row.srvacl
             .map(|values| Value::PgArray(text_array_value(values)))
             .unwrap_or(Value::Null),
         row.srvoptions
+            .map(|values| Value::PgArray(text_array_value(values)))
+            .unwrap_or(Value::Null),
+    ]
+}
+
+fn pg_user_mapping_row_values(row: PgUserMappingRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Int32(row.umuser as i32),
+        Value::Int32(row.umserver as i32),
+        row.umoptions
+            .map(|values| Value::PgArray(text_array_value(values)))
+            .unwrap_or(Value::Null),
+    ]
+}
+
+fn pg_foreign_table_row_values(row: PgForeignTableRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.ftrelid as i32),
+        Value::Int32(row.ftserver as i32),
+        row.ftoptions
             .map(|values| Value::PgArray(text_array_value(values)))
             .unwrap_or(Value::Null),
     ]

@@ -352,6 +352,12 @@ impl Database {
                 actual: "system catalog".into(),
             }));
         }
+        if relation.relkind == 'f' && alter_stmt.using_expr.is_some() {
+            return Err(ExecError::Parse(ParseError::WrongObjectType {
+                name: alter_stmt.table_name.clone(),
+                expected: "table",
+            }));
+        }
         reject_typed_table_ddl(&relation, "alter column type of")?;
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
         let targets = collect_alter_column_type_targets(
@@ -414,6 +420,9 @@ impl Database {
             trigger_depth: 0,
         };
         for target in &targets {
+            if target.relation.relkind == 'f' {
+                continue;
+            }
             let rewritten_rows = rewrite_heap_rows_for_alter_column_type(
                 self,
                 &target.relation,

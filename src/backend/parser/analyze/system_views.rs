@@ -200,6 +200,17 @@ pub(super) fn bind_builtin_system_view(
         SyntheticSystemViewKind::PgRules => catalog.pg_rules_rows(),
         SyntheticSystemViewKind::PgStats => catalog.pg_stats_rows(),
         SyntheticSystemViewKind::PgSettings => catalog.pg_settings_rows(),
+        SyntheticSystemViewKind::PgUserMappings => catalog.pg_user_mappings_rows(),
+        SyntheticSystemViewKind::PgRoles => catalog
+            .authid_rows()
+            .into_iter()
+            .map(|row| {
+                vec![
+                    Value::Text(row.rolname.into()),
+                    Value::Int64(i64::from(row.oid)),
+                ]
+            })
+            .collect(),
         SyntheticSystemViewKind::PgStatActivity => catalog.pg_stat_activity_rows(),
         SyntheticSystemViewKind::PgStatAllTables => catalog.pg_stat_all_tables_rows(),
         SyntheticSystemViewKind::PgStatUserTables => catalog.pg_stat_user_tables_rows(),
@@ -218,6 +229,67 @@ pub(super) fn bind_builtin_system_view(
         }
         SyntheticSystemViewKind::InformationSchemaTriggers => {
             information_schema_trigger_rows(catalog)
+        }
+        SyntheticSystemViewKind::InformationSchemaForeignDataWrappers => {
+            crate::backend::utils::cache::system_views::build_information_schema_foreign_data_wrappers_rows(
+                catalog.authid_rows(),
+                catalog.foreign_data_wrapper_rows(),
+            )
+        }
+        SyntheticSystemViewKind::InformationSchemaForeignDataWrapperOptions => {
+            crate::backend::utils::cache::system_views::build_information_schema_foreign_data_wrapper_options_rows(
+                catalog.foreign_data_wrapper_rows(),
+            )
+        }
+        SyntheticSystemViewKind::InformationSchemaForeignServers => {
+            crate::backend::utils::cache::system_views::build_information_schema_foreign_servers_rows(
+                catalog.authid_rows(),
+                catalog.foreign_data_wrapper_rows(),
+                catalog.foreign_server_rows(),
+            )
+        }
+        SyntheticSystemViewKind::InformationSchemaForeignServerOptions => {
+            crate::backend::utils::cache::system_views::build_information_schema_foreign_server_options_rows(
+                catalog.foreign_server_rows(),
+            )
+        }
+        SyntheticSystemViewKind::InformationSchemaUserMappings => {
+            crate::backend::utils::cache::system_views::build_information_schema_user_mappings_rows(
+                catalog.authid_rows(),
+                catalog.foreign_server_rows(),
+                catalog.user_mapping_rows(),
+            )
+        }
+        SyntheticSystemViewKind::InformationSchemaUserMappingOptions => {
+            crate::backend::utils::cache::system_views::build_information_schema_user_mapping_options_rows(
+                catalog.authid_rows(),
+                catalog.foreign_server_rows(),
+                catalog.user_mapping_rows(),
+                catalog.current_user_oid(),
+            )
+        }
+        SyntheticSystemViewKind::InformationSchemaUsagePrivileges
+        | SyntheticSystemViewKind::InformationSchemaRoleUsageGrants => {
+            crate::backend::utils::cache::system_views::build_information_schema_usage_privileges_rows(
+                catalog.authid_rows(),
+                catalog.foreign_data_wrapper_rows(),
+                catalog.foreign_server_rows(),
+            )
+        }
+        SyntheticSystemViewKind::InformationSchemaForeignTables => {
+            crate::backend::utils::cache::system_views::build_information_schema_foreign_tables_rows(
+                catalog.namespace_rows(),
+                catalog.class_rows(),
+                catalog.foreign_server_rows(),
+                catalog.foreign_table_rows(),
+            )
+        }
+        SyntheticSystemViewKind::InformationSchemaForeignTableOptions => {
+            crate::backend::utils::cache::system_views::build_information_schema_foreign_table_options_rows(
+                catalog.namespace_rows(),
+                catalog.class_rows(),
+                catalog.foreign_table_rows(),
+            )
         }
     };
     build_values_view(name, view.output_columns(), rows)

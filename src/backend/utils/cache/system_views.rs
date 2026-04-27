@@ -5,8 +5,9 @@ use crate::backend::rewrite::format_stored_rule_definition;
 use crate::backend::utils::cache::system_view_registry::synthetic_system_views;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, NAME_TYPE_OID, PG_LANGUAGE_INTERNAL_OID, PgAmRow, PgAttributeRow,
-    PgAuthIdRow, PgClassRow, PgIndexRow, PgNamespaceRow, PgPolicyRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PolicyCommand,
+    PgAuthIdRow, PgClassRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow,
+    PgIndexRow, PgNamespaceRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
+    PgUserMappingRow, PolicyCommand,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::pgrust::database::DatabaseStatsStore;
@@ -18,6 +19,7 @@ const STATISTIC_KIND_MCELEM: i16 = 4;
 const STATISTIC_KIND_DECHIST: i16 = 5;
 const STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM: i16 = 6;
 const STATISTIC_KIND_BOUNDS_HISTOGRAM: i16 = 7;
+const REGRESSION_DATABASE_NAME: &str = "regression";
 
 #[derive(Debug, Clone)]
 pub(crate) struct CopyProgressSnapshot {
@@ -829,6 +831,519 @@ pub(crate) fn build_pg_stat_user_functions_rows(
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
     rows.into_iter().map(|(_, _, row)| row).collect()
+}
+
+pub(crate) fn build_pg_user_mappings_rows(
+    authids: Vec<PgAuthIdRow>,
+    foreign_servers: Vec<PgForeignServerRow>,
+    user_mappings: Vec<PgUserMappingRow>,
+    current_user_oid: u32,
+) -> Vec<Vec<Value>> {
+    let roles = authids
+        .into_iter()
+        .map(|row| (row.oid, (row.rolname, row.rolsuper)))
+        .collect::<BTreeMap<_, _>>();
+    let current_user_super = roles
+        .get(&current_user_oid)
+        .map(|(_, rolsuper)| *rolsuper)
+        .unwrap_or(current_user_oid == BOOTSTRAP_SUPERUSER_OID);
+    let servers = foreign_servers
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut rows = user_mappings
+        .into_iter()
+        .filter_map(|mapping| {
+            let server = servers.get(&mapping.umserver)?;
+            let usename = if mapping.umuser == 0 {
+                "public".to_string()
+            } else {
+                roles
+                    .get(&mapping.umuser)
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| format!("unknown (OID={})", mapping.umuser))
+            };
+            let show_options = current_user_super
+                || (mapping.umuser != 0 && mapping.umuser == current_user_oid)
+                || (mapping.umuser == 0 && server.srvowner == current_user_oid);
+            let umoptions = if show_options {
+                mapping.umoptions.map(|options| {
+                    Value::Array(
+                        options
+                            .into_iter()
+                            .map(|option| Value::Text(option.into()))
+                            .collect(),
+                    )
+                })
+            } else {
+                None
+            }
+            .unwrap_or(Value::Null);
+            Some((
+                server.srvname.clone(),
+                usename.clone(),
+                vec![
+                    Value::Int64(i64::from(mapping.oid)),
+                    Value::Int64(i64::from(server.oid)),
+                    Value::Text(server.srvname.clone().into()),
+                    Value::Int64(i64::from(mapping.umuser)),
+                    Value::Text(usename.into()),
+                    umoptions,
+                ],
+            ))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    rows.into_iter().map(|(_, _, row)| row).collect()
+}
+
+fn role_maps(authids: Vec<PgAuthIdRow>) -> (BTreeMap<u32, String>, BTreeMap<u32, bool>) {
+    let mut names = BTreeMap::new();
+    let mut superusers = BTreeMap::new();
+    for role in authids {
+        names.insert(role.oid, role.rolname.clone());
+        superusers.insert(role.oid, role.rolsuper);
+    }
+    (names, superusers)
+}
+
+fn role_name(role_names: &BTreeMap<u32, String>, oid: u32) -> String {
+    role_names
+        .get(&oid)
+        .cloned()
+        .unwrap_or_else(|| format!("unknown (OID={oid})"))
+}
+
+fn yes_or_no_value(value: bool) -> Value {
+    Value::Text(if value { "YES" } else { "NO" }.into())
+}
+
+fn option_pairs(options: Option<Vec<String>>) -> Vec<(String, Value)> {
+    options
+        .unwrap_or_default()
+        .into_iter()
+        .map(|option| {
+            option
+                .split_once('=')
+                .map(|(name, value)| (name.to_string(), Value::Text(value.into())))
+                .unwrap_or((option, Value::Null))
+        })
+        .collect()
+}
+
+pub(crate) fn build_information_schema_foreign_data_wrappers_rows(
+    authids: Vec<PgAuthIdRow>,
+    wrappers: Vec<PgForeignDataWrapperRow>,
+) -> Vec<Vec<Value>> {
+    let (role_names, _) = role_maps(authids);
+    let mut rows = wrappers
+        .into_iter()
+        .map(|wrapper| {
+            (
+                wrapper.fdwname.clone(),
+                vec![
+                    Value::Text(REGRESSION_DATABASE_NAME.into()),
+                    Value::Text(wrapper.fdwname.into()),
+                    Value::Text(role_name(&role_names, wrapper.fdwowner).into()),
+                    Value::Null,
+                    Value::Text("c".into()),
+                ],
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    rows.into_iter().map(|(_, row)| row).collect()
+}
+
+pub(crate) fn build_information_schema_foreign_data_wrapper_options_rows(
+    wrappers: Vec<PgForeignDataWrapperRow>,
+) -> Vec<Vec<Value>> {
+    let mut rows = wrappers
+        .into_iter()
+        .flat_map(|wrapper| {
+            option_pairs(wrapper.fdwoptions)
+                .into_iter()
+                .map(move |(option_name, option_value)| {
+                    (
+                        wrapper.fdwname.clone(),
+                        option_name.clone(),
+                        vec![
+                            Value::Text(REGRESSION_DATABASE_NAME.into()),
+                            Value::Text(wrapper.fdwname.clone().into()),
+                            Value::Text(option_name.into()),
+                            option_value,
+                        ],
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    rows.into_iter().map(|(_, _, row)| row).collect()
+}
+
+pub(crate) fn build_information_schema_foreign_servers_rows(
+    authids: Vec<PgAuthIdRow>,
+    wrappers: Vec<PgForeignDataWrapperRow>,
+    servers: Vec<PgForeignServerRow>,
+) -> Vec<Vec<Value>> {
+    let (role_names, _) = role_maps(authids);
+    let wrappers = wrappers
+        .into_iter()
+        .map(|row| (row.oid, row.fdwname))
+        .collect::<BTreeMap<_, _>>();
+    let mut rows = servers
+        .into_iter()
+        .filter_map(|server| {
+            let wrapper_name = wrappers.get(&server.srvfdw)?.clone();
+            Some((
+                server.srvname.clone(),
+                vec![
+                    Value::Text(REGRESSION_DATABASE_NAME.into()),
+                    Value::Text(server.srvname.into()),
+                    Value::Text(REGRESSION_DATABASE_NAME.into()),
+                    Value::Text(wrapper_name.into()),
+                    server
+                        .srvtype
+                        .map(|value| Value::Text(value.into()))
+                        .unwrap_or(Value::Null),
+                    server
+                        .srvversion
+                        .map(|value| Value::Text(value.into()))
+                        .unwrap_or(Value::Null),
+                    Value::Text(role_name(&role_names, server.srvowner).into()),
+                ],
+            ))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    rows.into_iter().map(|(_, row)| row).collect()
+}
+
+pub(crate) fn build_information_schema_foreign_server_options_rows(
+    servers: Vec<PgForeignServerRow>,
+) -> Vec<Vec<Value>> {
+    let mut rows = servers
+        .into_iter()
+        .flat_map(|server| {
+            option_pairs(server.srvoptions)
+                .into_iter()
+                .map(move |(option_name, option_value)| {
+                    (
+                        server.srvname.clone(),
+                        option_name.clone(),
+                        vec![
+                            Value::Text(REGRESSION_DATABASE_NAME.into()),
+                            Value::Text(server.srvname.clone().into()),
+                            Value::Text(option_name.into()),
+                            option_value,
+                        ],
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    rows.into_iter().map(|(_, _, row)| row).collect()
+}
+
+pub(crate) fn build_information_schema_user_mappings_rows(
+    authids: Vec<PgAuthIdRow>,
+    servers: Vec<PgForeignServerRow>,
+    mappings: Vec<PgUserMappingRow>,
+) -> Vec<Vec<Value>> {
+    let (role_names, _) = role_maps(authids);
+    let servers = servers
+        .into_iter()
+        .map(|row| (row.oid, row.srvname))
+        .collect::<BTreeMap<_, _>>();
+    let mut rows = mappings
+        .into_iter()
+        .filter_map(|mapping| {
+            let server_name = servers.get(&mapping.umserver)?.clone();
+            let auth_name = if mapping.umuser == 0 {
+                "PUBLIC".to_string()
+            } else {
+                role_name(&role_names, mapping.umuser)
+            };
+            Some((
+                auth_name.to_ascii_lowercase(),
+                server_name.clone(),
+                vec![
+                    Value::Text(auth_name.into()),
+                    Value::Text(REGRESSION_DATABASE_NAME.into()),
+                    Value::Text(server_name.into()),
+                ],
+            ))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    rows.into_iter().map(|(_, _, row)| row).collect()
+}
+
+pub(crate) fn build_information_schema_user_mapping_options_rows(
+    authids: Vec<PgAuthIdRow>,
+    servers: Vec<PgForeignServerRow>,
+    mappings: Vec<PgUserMappingRow>,
+    current_user_oid: u32,
+) -> Vec<Vec<Value>> {
+    let (role_names, superusers) = role_maps(authids);
+    let current_user_super = superusers
+        .get(&current_user_oid)
+        .copied()
+        .unwrap_or(current_user_oid == BOOTSTRAP_SUPERUSER_OID);
+    let servers = servers
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    let mut rows = mappings
+        .into_iter()
+        .flat_map(|mapping| {
+            let Some(server) = servers.get(&mapping.umserver).cloned() else {
+                return Vec::new();
+            };
+            let auth_name = if mapping.umuser == 0 {
+                "PUBLIC".to_string()
+            } else {
+                role_name(&role_names, mapping.umuser)
+            };
+            let show_options = current_user_super
+                || (mapping.umuser != 0 && mapping.umuser == current_user_oid)
+                || (mapping.umuser == 0 && server.srvowner == current_user_oid);
+            option_pairs(mapping.umoptions)
+                .into_iter()
+                .map(|(option_name, option_value)| {
+                    (
+                        auth_name.to_ascii_lowercase(),
+                        server.srvname.clone(),
+                        option_name.clone(),
+                        vec![
+                            Value::Text(auth_name.clone().into()),
+                            Value::Text(REGRESSION_DATABASE_NAME.into()),
+                            Value::Text(server.srvname.clone().into()),
+                            Value::Text(option_name.into()),
+                            if show_options {
+                                option_value
+                            } else {
+                                Value::Null
+                            },
+                        ],
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    rows.into_iter().map(|(_, _, _, row)| row).collect()
+}
+
+fn parse_usage_acl_item(item: &str) -> Option<(String, String, bool)> {
+    let (grantee, rest) = item.split_once('=')?;
+    let (privileges, grantor) = rest.split_once('/')?;
+    let mut chars = privileges.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == 'U' {
+            let grantable = matches!(chars.peek(), Some('*'));
+            return Some((grantee.to_string(), grantor.to_string(), grantable));
+        }
+    }
+    None
+}
+
+fn usage_privilege_row(
+    grantor: String,
+    grantee: String,
+    object_name: String,
+    object_type: &'static str,
+    is_grantable: bool,
+) -> Vec<Value> {
+    vec![
+        Value::Text(grantor.into()),
+        Value::Text(
+            if grantee.is_empty() {
+                "PUBLIC".into()
+            } else {
+                grantee
+            }
+            .into(),
+        ),
+        Value::Text(REGRESSION_DATABASE_NAME.into()),
+        Value::Text("".into()),
+        Value::Text(object_name.into()),
+        Value::Text(object_type.into()),
+        Value::Text("USAGE".into()),
+        yes_or_no_value(is_grantable),
+    ]
+}
+
+pub(crate) fn build_information_schema_usage_privileges_rows(
+    authids: Vec<PgAuthIdRow>,
+    wrappers: Vec<PgForeignDataWrapperRow>,
+    servers: Vec<PgForeignServerRow>,
+) -> Vec<Vec<Value>> {
+    let (role_names, _) = role_maps(authids);
+    let mut rows = Vec::new();
+    for wrapper in wrappers {
+        let owner = role_name(&role_names, wrapper.fdwowner);
+        rows.push((
+            wrapper.fdwname.clone(),
+            owner.clone(),
+            usage_privilege_row(
+                owner.clone(),
+                owner,
+                wrapper.fdwname.clone(),
+                "FOREIGN DATA WRAPPER",
+                true,
+            ),
+        ));
+        for acl in wrapper.fdwacl.unwrap_or_default() {
+            if let Some((grantee, grantor, grantable)) = parse_usage_acl_item(&acl) {
+                rows.push((
+                    wrapper.fdwname.clone(),
+                    grantee.clone(),
+                    usage_privilege_row(
+                        grantor,
+                        grantee,
+                        wrapper.fdwname.clone(),
+                        "FOREIGN DATA WRAPPER",
+                        grantable,
+                    ),
+                ));
+            }
+        }
+    }
+    for server in servers {
+        let owner = role_name(&role_names, server.srvowner);
+        rows.push((
+            server.srvname.clone(),
+            owner.clone(),
+            usage_privilege_row(
+                owner.clone(),
+                owner,
+                server.srvname.clone(),
+                "FOREIGN SERVER",
+                true,
+            ),
+        ));
+        for acl in server.srvacl.unwrap_or_default() {
+            if let Some((grantee, grantor, grantable)) = parse_usage_acl_item(&acl) {
+                rows.push((
+                    server.srvname.clone(),
+                    grantee.clone(),
+                    usage_privilege_row(
+                        grantor,
+                        grantee,
+                        server.srvname.clone(),
+                        "FOREIGN SERVER",
+                        grantable,
+                    ),
+                ));
+            }
+        }
+    }
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    rows.into_iter().map(|(_, _, row)| row).collect()
+}
+
+pub(crate) fn build_information_schema_foreign_tables_rows(
+    namespaces: Vec<PgNamespaceRow>,
+    classes: Vec<PgClassRow>,
+    servers: Vec<PgForeignServerRow>,
+    foreign_tables: Vec<PgForeignTableRow>,
+) -> Vec<Vec<Value>> {
+    let namespaces = namespaces
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<BTreeMap<_, _>>();
+    let classes = classes
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    let servers = servers
+        .into_iter()
+        .map(|row| (row.oid, row.srvname))
+        .collect::<BTreeMap<_, _>>();
+    let mut rows = foreign_tables
+        .into_iter()
+        .filter_map(|foreign_table| {
+            let class = classes.get(&foreign_table.ftrelid)?;
+            if class.relkind != 'f' {
+                return None;
+            }
+            let schema_name = namespaces.get(&class.relnamespace)?.clone();
+            let server_name = servers.get(&foreign_table.ftserver)?.clone();
+            Some((
+                schema_name.clone(),
+                class.relname.clone(),
+                vec![
+                    Value::Text(REGRESSION_DATABASE_NAME.into()),
+                    Value::Text(schema_name.into()),
+                    Value::Text(class.relname.clone().into()),
+                    Value::Text(REGRESSION_DATABASE_NAME.into()),
+                    Value::Text(server_name.into()),
+                ],
+            ))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    rows.into_iter().map(|(_, _, row)| row).collect()
+}
+
+pub(crate) fn build_information_schema_foreign_table_options_rows(
+    namespaces: Vec<PgNamespaceRow>,
+    classes: Vec<PgClassRow>,
+    foreign_tables: Vec<PgForeignTableRow>,
+) -> Vec<Vec<Value>> {
+    let namespaces = namespaces
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<BTreeMap<_, _>>();
+    let classes = classes
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    let mut rows = foreign_tables
+        .into_iter()
+        .flat_map(|foreign_table| {
+            let Some(class) = classes.get(&foreign_table.ftrelid).cloned() else {
+                return Vec::new();
+            };
+            if class.relkind != 'f' {
+                return Vec::new();
+            }
+            let Some(schema_name) = namespaces.get(&class.relnamespace).cloned() else {
+                return Vec::new();
+            };
+            option_pairs(foreign_table.ftoptions)
+                .into_iter()
+                .map(|(option_name, option_value)| {
+                    (
+                        schema_name.clone(),
+                        class.relname.clone(),
+                        option_name.clone(),
+                        vec![
+                            Value::Text(REGRESSION_DATABASE_NAME.into()),
+                            Value::Text(schema_name.clone().into()),
+                            Value::Text(class.relname.clone().into()),
+                            Value::Text(option_name.into()),
+                            option_value,
+                        ],
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    rows.into_iter().map(|(_, _, _, row)| row).collect()
 }
 
 pub(crate) fn build_pg_stat_io_rows(stats: &DatabaseStatsStore) -> Vec<Vec<Value>> {

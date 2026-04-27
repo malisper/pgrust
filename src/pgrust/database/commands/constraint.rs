@@ -220,6 +220,9 @@ pub(super) fn validate_not_null_rows(
     cid: CommandId,
     interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
 ) -> Result<(), ExecError> {
+    if relation.relkind == 'f' {
+        return Ok(());
+    }
     let datetime_config = crate::backend::utils::misc::guc_datetime::DateTimeConfig::default();
     let mut ctx = ddl_executor_context(
         db,
@@ -258,6 +261,9 @@ pub(super) fn validate_check_rows(
     cid: CommandId,
     interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
 ) -> Result<(), ExecError> {
+    if relation.relkind == 'f' {
+        return Ok(());
+    }
     let expr = crate::backend::parser::bind_check_constraint_expr(
         expr_sql,
         Some(relation_name),
@@ -1868,17 +1874,26 @@ impl Database {
         };
         ensure_constraint_relation(self, client_id, &relation, &drop_stmt.table_name)?;
         let rows = catalog.constraint_rows_for_relation(relation.relation_oid);
-        let row = find_constraint_row(&rows, &drop_stmt.constraint_name)
-            .cloned()
-            .ok_or_else(|| {
-                ExecError::Parse(ParseError::UnexpectedToken {
+        let row = match find_constraint_row(&rows, &drop_stmt.constraint_name).cloned() {
+            Some(row) => row,
+            None if drop_stmt.missing_ok => {
+                push_notice(format!(
+                    "constraint \"{}\" of relation \"{}\" does not exist, skipping",
+                    drop_stmt.constraint_name,
+                    relation_basename(&drop_stmt.table_name)
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            None => {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
                     expected: "existing table constraint",
                     actual: format!(
                         "constraint \"{}\" does not exist",
                         drop_stmt.constraint_name
                     ),
-                })
-            })?;
+                }));
+            }
+        };
         if drop_stmt.cascade {
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "ALTER TABLE DROP CONSTRAINT CASCADE".into(),

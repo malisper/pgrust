@@ -12,21 +12,21 @@ use crate::include::catalog::{
 use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
     AliasColumnDef, AliasColumnSpec, AlterAggregateRenameStatement, AlterColumnExpressionAction,
-    AlterColumnIdentityAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
-    AlterTableTriggerTarget, AlterTriggerRenameStatement, AlterTypeSetOptionsStatement,
-    CastContext, ColumnConstraint, ColumnGeneratedKind, ColumnIdentityKind,
-    CommentOnAggregateStatement, CommentOnColumnStatement, CommentOnFunctionStatement,
-    CommentOnOperatorStatement, CommentOnTypeStatement, CommentOnViewStatement,
-    CompositeTypeAttributeDef, CreateAggregateStatement, CreateBaseTypeOption,
-    CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement, CreateCompositeTypeStatement,
-    CreateShellTypeStatement, CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement,
-    DropCastStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
-    ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef, InsertSource, InsertStatement,
-    JoinTreeNode, OverridingKind, PartitionStrategy, PublicationObjectSpec, PublicationOption,
-    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
-    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
-    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
-    TriggerReferencingSpec, TriggerTiming, ViewCheckOption,
+    AlterColumnIdentityAction, AlterGenericOptionAction, AlterTableTriggerMode,
+    AlterTableTriggerStateStatement, AlterTableTriggerTarget, AlterTriggerRenameStatement,
+    AlterTypeSetOptionsStatement, CastContext, ColumnConstraint, ColumnGeneratedKind,
+    ColumnIdentityKind, CommentOnAggregateStatement, CommentOnColumnStatement,
+    CommentOnFunctionStatement, CommentOnOperatorStatement, CommentOnTypeStatement,
+    CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
+    CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement,
+    CreateCompositeTypeStatement, CreateShellTypeStatement, CreateTriggerStatement,
+    CreateTypeStatement, DropAggregateStatement, DropCastStatement, DropTriggerStatement,
+    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef,
+    InsertSource, InsertStatement, JoinTreeNode, OverridingKind, PartitionStrategy,
+    PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
+    RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
+    SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec,
+    TriggerLevel, TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -1625,6 +1625,8 @@ fn visible_catalog_without_text_input_cast(
         base.collation_rows(),
         base.foreign_data_wrapper_rows(),
         base.foreign_server_rows(),
+        base.foreign_table_rows(),
+        base.user_mapping_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -1685,6 +1687,8 @@ fn visible_catalog_without_operator(
         base.collation_rows(),
         base.foreign_data_wrapper_rows(),
         base.foreign_server_rows(),
+        base.foreign_table_rows(),
+        base.user_mapping_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -1759,6 +1763,8 @@ fn visible_catalog_with_extra_opclasses(
         base.collation_rows(),
         base.foreign_data_wrapper_rows(),
         base.foreign_server_rows(),
+        base.foreign_table_rows(),
+        base.user_mapping_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -3149,6 +3155,7 @@ fn parse_alter_table_add_column_statement() {
         stmt,
         Statement::AlterTableAddColumn(AlterTableAddColumnStatement {
             if_exists: false,
+            missing_ok: false,
             only: false,
             table_name: "items".into(),
             column: ColumnDef {
@@ -3162,6 +3169,7 @@ fn parse_alter_table_add_column_statement() {
                 compression: None,
                 constraints: vec![],
             },
+            fdw_options: None,
         })
     );
 }
@@ -3421,6 +3429,7 @@ fn parse_alter_table_constraint_statements() {
         stmt,
         Statement::AlterTableDropConstraint(AlterTableDropConstraintStatement {
             if_exists: false,
+            missing_ok: false,
             only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
@@ -3434,6 +3443,7 @@ fn parse_alter_table_constraint_statements() {
         stmt,
         Statement::AlterTableDropConstraint(AlterTableDropConstraintStatement {
             if_exists: false,
+            missing_ok: false,
             only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
@@ -3446,6 +3456,7 @@ fn parse_alter_table_constraint_statements() {
         stmt,
         Statement::AlterTableDropConstraint(AlterTableDropConstraintStatement {
             if_exists: false,
+            missing_ok: false,
             only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
@@ -4226,6 +4237,7 @@ fn parse_alter_table_drop_column_statement() {
         stmt,
         Statement::AlterTableDropColumn(AlterTableDropColumnStatement {
             if_exists: false,
+            missing_ok: false,
             only: false,
             table_name: "items".into(),
             column_name: "note".into(),
@@ -4238,6 +4250,7 @@ fn parse_alter_table_drop_column_statement() {
         stmt,
         Statement::AlterTableDropColumn(AlterTableDropColumnStatement {
             if_exists: false,
+            missing_ok: false,
             only: false,
             table_name: "items".into(),
             column_name: "note".into(),
@@ -4833,6 +4846,39 @@ fn parse_grant_usage_on_type_statement() {
 }
 
 #[test]
+fn parse_grant_usage_on_foreign_data_wrapper_statement() {
+    let stmt =
+        parse_statement("grant usage on foreign data wrapper foo to regress_test_role").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnForeignDataWrapper,
+            columns: Vec::new(),
+            object_names: vec!["foo".into()],
+            grantee_names: vec!["regress_test_role".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_usage_on_foreign_server_with_grant_option_statement() {
+    let stmt =
+        parse_statement("grant usage on foreign server s1 to regress_test_role with grant option")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnForeignServer,
+            columns: Vec::new(),
+            object_names: vec!["s1".into()],
+            grantee_names: vec!["regress_test_role".into()],
+            with_grant_option: true,
+        })
+    );
+}
+
+#[test]
 fn parse_grant_select_on_table_statement() {
     let stmt = parse_statement("grant select on uaccount to public").unwrap();
     assert_eq!(
@@ -5046,6 +5092,22 @@ fn parse_revoke_usage_on_type_statement() {
             columns: Vec::new(),
             object_names: vec!["custom_t".into()],
             grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_all_on_foreign_data_wrapper_statement() {
+    let stmt =
+        parse_statement("revoke all on foreign data wrapper foo from regress_test_role").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::AllPrivilegesOnForeignDataWrapper,
+            columns: Vec::new(),
+            object_names: vec!["foo".into()],
+            grantee_names: vec!["regress_test_role".into()],
             cascade: false,
         })
     );
@@ -13153,6 +13215,10 @@ fn parse_foreign_data_wrapper_statements() {
     assert_eq!(alter.validator_name, Some(None));
     assert_eq!(alter.options.len(), 3);
 
+    let err = parse_statement("alter foreign data wrapper foo;").unwrap_err();
+    assert_eq!(err.to_string(), "syntax error at or near \";\"");
+    assert!(err.position().is_some());
+
     let Statement::AlterForeignDataWrapperOwner(owner) =
         parse_statement("alter foreign data wrapper foo owner to regress_test_role").unwrap()
     else {
@@ -13201,6 +13267,210 @@ fn parse_foreign_data_wrapper_statements() {
     };
     assert_eq!(comment.fdw_name, "foo");
     assert_eq!(comment.comment.as_deref(), Some("hello"));
+
+    let Statement::CommentOnForeignServer(comment) =
+        parse_statement("comment on server srv is 'foreign server'").unwrap()
+    else {
+        panic!("expected comment on server");
+    };
+    assert_eq!(comment.server_name, "srv");
+    assert_eq!(comment.comment.as_deref(), Some("foreign server"));
+
+    let Statement::CreateForeignServer(create_server) = parse_statement(
+        "create server if not exists srv type 'postgres' version '17' foreign data wrapper foo options (host 'localhost', dbname 'regression')",
+    )
+    .unwrap() else {
+        panic!("expected create server");
+    };
+    assert!(create_server.if_not_exists);
+    assert_eq!(create_server.server_name, "srv");
+    assert_eq!(create_server.fdw_name, "foo");
+    assert_eq!(create_server.server_type.as_deref(), Some("postgres"));
+    assert_eq!(create_server.version.as_deref(), Some("17"));
+    assert_eq!(
+        create_server.options,
+        vec![
+            RelOption {
+                name: "host".into(),
+                value: "localhost".into(),
+            },
+            RelOption {
+                name: "dbname".into(),
+                value: "regression".into(),
+            },
+        ]
+    );
+
+    let Statement::AlterForeignServer(alter_server) =
+        parse_statement("alter server srv version null options (set host '127.0.0.1')").unwrap()
+    else {
+        panic!("expected alter server");
+    };
+    assert_eq!(alter_server.server_name, "srv");
+    assert_eq!(alter_server.version, Some(None));
+    assert_eq!(alter_server.options.len(), 1);
+    assert_eq!(
+        alter_server.options[0].action,
+        AlterGenericOptionAction::Set
+    );
+    assert_eq!(alter_server.options[0].name, "host");
+    assert_eq!(alter_server.options[0].value.as_deref(), Some("127.0.0.1"));
+
+    let err = parse_statement("alter server srv;").unwrap_err();
+    assert_eq!(err.to_string(), "syntax error at or near \";\"");
+    assert!(err.position().is_some());
+
+    let Statement::CreateForeignTable(create_table) = parse_statement(
+        "create foreign table ft (a int options (column_name 'remote_a') not null, b text) server srv options (table_name 'remote_ft')",
+    )
+    .unwrap() else {
+        panic!("expected create foreign table");
+    };
+    assert_eq!(create_table.create_table.table_name, "ft");
+    assert_eq!(create_table.server_name, "srv");
+    assert_eq!(
+        create_table.options,
+        vec![RelOption {
+            name: "table_name".into(),
+            value: "remote_ft".into(),
+        }]
+    );
+    assert_eq!(
+        create_table.column_options,
+        vec![(
+            "a".into(),
+            vec![RelOption {
+                name: "column_name".into(),
+                value: "remote_a".into(),
+            }]
+        )]
+    );
+    assert_eq!(create_table.create_table.elements.len(), 2);
+
+    let Statement::AlterTableAddColumn(add_column) = parse_statement(
+        "alter foreign table ft add column if not exists c int options (column_name 'remote_c')",
+    )
+    .unwrap() else {
+        panic!("expected alter foreign table add column");
+    };
+    assert!(add_column.missing_ok);
+    assert_eq!(add_column.table_name, "ft");
+    assert_eq!(add_column.column.name, "c");
+    assert_eq!(
+        add_column.fdw_options,
+        Some(vec![RelOption {
+            name: "column_name".into(),
+            value: "remote_c".into(),
+        }])
+    );
+
+    let Statement::AlterTableAlterColumnOptions(column_options) =
+        parse_statement("alter foreign table ft alter column c options (add p1 'v1', set p2 'v2')")
+            .unwrap()
+    else {
+        panic!("expected alter foreign table column options");
+    };
+    assert_eq!(column_options.table_name, "ft");
+    assert_eq!(column_options.column_name, "c");
+    let AlterColumnOptionsAction::Fdw(options) = column_options.action else {
+        panic!("expected fdw column options action");
+    };
+    assert_eq!(options.len(), 2);
+    assert_eq!(options[0].action, AlterGenericOptionAction::Add);
+    assert_eq!(options[1].action, AlterGenericOptionAction::Set);
+
+    let Statement::AlterTableAddColumn(add_column) = parse_statement(
+        "alter foreign table ft add column b text options (column_name 'remote_b')",
+    )
+    .unwrap() else {
+        panic!("expected alter foreign table add column without missing_ok");
+    };
+    assert!(!add_column.missing_ok);
+    assert_eq!(
+        add_column.fdw_options,
+        Some(vec![RelOption {
+            name: "column_name".into(),
+            value: "remote_b".into(),
+        }])
+    );
+
+    let Statement::AlterForeignTableOptions(table_options) = parse_statement(
+        "alter foreign table ft options (drop delimiter, set quote '~', add escape '@')",
+    )
+    .unwrap() else {
+        panic!("expected alter foreign table options");
+    };
+    assert_eq!(table_options.table_name, "ft");
+    assert_eq!(table_options.options.len(), 3);
+    assert_eq!(
+        table_options.options[0].action,
+        AlterGenericOptionAction::Drop
+    );
+    assert_eq!(
+        table_options.options[1].action,
+        AlterGenericOptionAction::Set
+    );
+    assert_eq!(
+        table_options.options[2].action,
+        AlterGenericOptionAction::Add
+    );
+
+    let Statement::AlterTableRenameColumn(rename_column) =
+        parse_statement("alter foreign table if exists ft rename c1 to c2").unwrap()
+    else {
+        panic!("expected alter foreign table rename column");
+    };
+    assert!(rename_column.if_exists);
+    assert_eq!(rename_column.table_name, "ft");
+    assert_eq!(rename_column.column_name, "c1");
+    assert_eq!(rename_column.new_column_name, "c2");
+
+    let Statement::CreateUserMapping(create_mapping) = parse_statement(
+        "create user mapping if not exists for current_user server srv options (user 'alice')",
+    )
+    .unwrap() else {
+        panic!("expected create user mapping");
+    };
+    assert!(create_mapping.if_not_exists);
+    assert_eq!(create_mapping.user, UserMappingUser::CurrentUser);
+    assert_eq!(create_mapping.server_name, "srv");
+    assert_eq!(
+        create_mapping.options,
+        vec![RelOption {
+            name: "user".into(),
+            value: "alice".into(),
+        }]
+    );
+
+    let Statement::DropUserMapping(drop_mapping) =
+        parse_statement("drop user mapping if exists for public server srv").unwrap()
+    else {
+        panic!("expected drop user mapping");
+    };
+    assert!(drop_mapping.if_exists);
+    assert_eq!(drop_mapping.user, UserMappingUser::Public);
+    assert_eq!(drop_mapping.server_name, "srv");
+
+    let Statement::ImportForeignSchema(import_schema) = parse_statement(
+        "import foreign schema remote_schema except (t1, t2) from server srv into public options (sample 'true')",
+    )
+    .unwrap() else {
+        panic!("expected import foreign schema");
+    };
+    assert_eq!(import_schema.remote_schema, "remote_schema");
+    assert_eq!(
+        import_schema.restriction,
+        ImportForeignSchemaRestriction::Except(vec!["t1".into(), "t2".into()])
+    );
+    assert_eq!(import_schema.server_name, "srv");
+    assert_eq!(import_schema.local_schema, "public");
+    assert_eq!(
+        import_schema.options,
+        vec![RelOption {
+            name: "sample".into(),
+            value: "true".into(),
+        }]
+    );
 }
 
 #[test]

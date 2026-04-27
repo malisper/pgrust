@@ -800,9 +800,11 @@ impl Database {
                         client_id,
                         &AlterTableAddColumnStatement {
                             if_exists: alter_stmt.if_exists,
+                            missing_ok: false,
                             only: alter_stmt.only,
                             table_name: alter_stmt.table_name.clone(),
                             column: column.clone(),
+                            fdw_options: None,
                         },
                         configured_search_path,
                     );
@@ -1336,6 +1338,9 @@ impl Database {
             Statement::CommentOnForeignDataWrapper(ref comment_stmt) => {
                 self.execute_comment_on_foreign_data_wrapper_stmt(client_id, comment_stmt)
             }
+            Statement::CommentOnForeignServer(ref comment_stmt) => {
+                self.execute_comment_on_foreign_server_stmt(client_id, comment_stmt)
+            }
             Statement::CommentOnPublication(ref comment_stmt) => self
                 .execute_comment_on_publication_stmt_with_search_path(
                     client_id,
@@ -1357,9 +1362,6 @@ impl Database {
             Statement::CreateForeignServer(ref create_stmt) => {
                 self.execute_create_foreign_server_stmt(client_id, create_stmt)
             }
-            Statement::AlterForeignServerRename(ref alter_stmt) => {
-                self.execute_alter_foreign_server_rename_stmt(client_id, alter_stmt)
-            }
             Statement::CreateLanguage(ref create_stmt) => {
                 self.execute_create_language_stmt(client_id, create_stmt)
             }
@@ -1368,6 +1370,9 @@ impl Database {
             }
             Statement::DropLanguage(ref drop_stmt) => {
                 self.execute_drop_language_stmt(client_id, drop_stmt)
+            }
+            Statement::CreateUserMapping(ref create_stmt) => {
+                self.execute_create_user_mapping_stmt(client_id, create_stmt)
             }
             Statement::CreateForeignTable(ref create_stmt) => {
                 let xid = self.txns.write().begin();
@@ -1386,6 +1391,9 @@ impl Database {
                 guard.disarm();
                 result
             }
+            Statement::ImportForeignSchema(ref import_stmt) => {
+                self.execute_import_foreign_schema_stmt(client_id, import_stmt)
+            }
             Statement::AlterForeignDataWrapper(ref alter_stmt) => self
                 .execute_alter_foreign_data_wrapper_stmt_with_search_path(
                     client_id,
@@ -1398,8 +1406,32 @@ impl Database {
             Statement::AlterForeignDataWrapperRename(ref alter_stmt) => {
                 self.execute_alter_foreign_data_wrapper_rename_stmt(client_id, alter_stmt)
             }
+            Statement::AlterForeignServer(ref alter_stmt) => {
+                self.execute_alter_foreign_server_stmt(client_id, alter_stmt)
+            }
+            Statement::AlterForeignServerOwner(ref alter_stmt) => {
+                self.execute_alter_foreign_server_owner_stmt(client_id, alter_stmt)
+            }
+            Statement::AlterForeignServerRename(ref alter_stmt) => {
+                self.execute_alter_foreign_server_rename_stmt(client_id, alter_stmt)
+            }
+            Statement::AlterForeignTableOptions(ref alter_stmt) => self
+                .execute_alter_foreign_table_options_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterUserMapping(ref alter_stmt) => {
+                self.execute_alter_user_mapping_stmt(client_id, alter_stmt)
+            }
             Statement::DropForeignDataWrapper(ref drop_stmt) => {
                 self.execute_drop_foreign_data_wrapper_stmt(client_id, drop_stmt)
+            }
+            Statement::DropForeignServer(ref drop_stmt) => {
+                self.execute_drop_foreign_server_stmt(client_id, drop_stmt)
+            }
+            Statement::DropUserMapping(ref drop_stmt) => {
+                self.execute_drop_user_mapping_stmt(client_id, drop_stmt)
             }
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let visible_catalog =

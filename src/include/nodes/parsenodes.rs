@@ -355,8 +355,9 @@ pub enum Statement {
     DropTextSearchConfiguration(DropTextSearchConfigurationStatement),
     CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
     CreateForeignServer(CreateForeignServerStatement),
-    AlterForeignServerRename(AlterForeignServerRenameStatement),
     CreateForeignTable(CreateForeignTableStatement),
+    ImportForeignSchema(ImportForeignSchemaStatement),
+    CreateUserMapping(CreateUserMappingStatement),
     CreateIndex(CreateIndexStatement),
     CreateOperator(CreateOperatorStatement),
     CreateOperatorClass(CreateOperatorClassStatement),
@@ -417,6 +418,7 @@ pub enum Statement {
     AlterTableAttachPartition(AlterTableAttachPartitionStatement),
     AlterTableDetachPartition(AlterTableDetachPartitionStatement),
     AlterTableTriggerState(AlterTableTriggerStateStatement),
+    AlterForeignTableOptions(AlterForeignTableOptionsStatement),
     AlterPublication(AlterPublicationStatement),
     AlterOperator(AlterOperatorStatement),
     AlterAggregateRename(AlterAggregateRenameStatement),
@@ -436,6 +438,7 @@ pub enum Statement {
     CommentOnDomain(CommentOnDomainStatement),
     CommentOnConversion(CommentOnConversionStatement),
     CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
+    CommentOnForeignServer(CommentOnForeignServerStatement),
     CommentOnPublication(CommentOnPublicationStatement),
     CommentOnStatistics(CommentOnStatisticsStatement),
     CommentOnAggregate(CommentOnAggregateStatement),
@@ -467,6 +470,8 @@ pub enum Statement {
     ReindexIndex(ReindexIndexStatement),
     DropDomain(DropDomainStatement),
     DropForeignDataWrapper(DropForeignDataWrapperStatement),
+    DropForeignServer(DropForeignServerStatement),
+    DropUserMapping(DropUserMappingStatement),
     DropView(DropViewStatement),
     DropMaterializedView(DropMaterializedViewStatement),
     DropRule(DropRuleStatement),
@@ -479,6 +484,10 @@ pub enum Statement {
     AlterForeignDataWrapper(AlterForeignDataWrapperStatement),
     AlterForeignDataWrapperOwner(AlterForeignDataWrapperOwnerStatement),
     AlterForeignDataWrapperRename(AlterForeignDataWrapperRenameStatement),
+    AlterForeignServer(AlterForeignServerStatement),
+    AlterForeignServerOwner(AlterForeignServerOwnerStatement),
+    AlterForeignServerRename(AlterForeignServerRenameStatement),
+    AlterUserMapping(AlterUserMappingStatement),
     DropRole(DropRoleStatement),
     SetRole(SetRoleStatement),
     ResetRole(ResetRoleStatement),
@@ -2492,9 +2501,11 @@ pub struct AlterSequenceStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableAddColumnStatement {
     pub if_exists: bool,
+    pub missing_ok: bool,
     pub only: bool,
     pub table_name: String,
     pub column: ColumnDef,
+    pub fdw_options: Option<Vec<RelOption>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2516,6 +2527,7 @@ pub struct AlterTableAddConstraintStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableDropColumnStatement {
     pub if_exists: bool,
+    pub missing_ok: bool,
     pub only: bool,
     pub table_name: String,
     pub column_name: String,
@@ -2525,6 +2537,7 @@ pub struct AlterTableDropColumnStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableDropConstraintStatement {
     pub if_exists: bool,
+    pub missing_ok: bool,
     pub only: bool,
     pub table_name: String,
     pub constraint_name: String,
@@ -2613,6 +2626,7 @@ pub struct AlterTableAlterColumnStorageStatement {
 pub enum AlterColumnOptionsAction {
     Set(Vec<RelOption>),
     Reset(Vec<String>),
+    Fdw(Vec<AlterGenericOption>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2750,6 +2764,14 @@ pub struct AlterTableDropNotNullStatement {
     pub only: bool,
     pub table_name: String,
     pub column_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterForeignTableOptionsStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub options: Vec<AlterGenericOption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3074,6 +3096,12 @@ pub struct CommentOnForeignDataWrapperStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnForeignServerStatement {
+    pub server_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateConversionStatement {
     pub conversion_name: String,
     pub for_encoding: String,
@@ -3092,8 +3120,12 @@ pub struct CreateForeignDataWrapperStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateForeignServerStatement {
+    pub if_not_exists: bool,
     pub server_name: String,
     pub fdw_name: String,
+    pub server_type: Option<String>,
+    pub version: Option<String>,
+    pub options: Vec<RelOption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3159,15 +3191,43 @@ pub struct DropLanguageStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AlterForeignServerRenameStatement {
-    pub server_name: String,
-    pub new_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateForeignTableStatement {
     pub create_table: CreateTableStatement,
     pub server_name: String,
+    pub options: Vec<RelOption>,
+    pub column_options: Vec<(String, Vec<RelOption>)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportForeignSchemaRestriction {
+    All,
+    LimitTo(Vec<String>),
+    Except(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportForeignSchemaStatement {
+    pub remote_schema: String,
+    pub restriction: ImportForeignSchemaRestriction,
+    pub server_name: String,
+    pub local_schema: String,
+    pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserMappingUser {
+    CurrentUser,
+    User,
+    Public,
+    Role(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateUserMappingStatement {
+    pub if_not_exists: bool,
+    pub user: UserMappingUser,
+    pub server_name: String,
+    pub options: Vec<RelOption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3323,6 +3383,10 @@ pub enum GrantObjectPrivilege {
     ExecuteOnFunction,
     ExecuteOnProcedure,
     ExecuteOnRoutine,
+    UsageOnForeignDataWrapper,
+    UsageOnForeignServer,
+    AllPrivilegesOnForeignDataWrapper,
+    AllPrivilegesOnForeignServer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3435,6 +3499,7 @@ pub struct DropTableStatement {
     pub if_exists: bool,
     pub table_names: Vec<String>,
     pub cascade: bool,
+    pub foreign_table: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3489,6 +3554,20 @@ pub struct DropForeignDataWrapperStatement {
     pub if_exists: bool,
     pub fdw_name: String,
     pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropForeignServerStatement {
+    pub if_exists: bool,
+    pub server_name: String,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropUserMappingStatement {
+    pub if_exists: bool,
+    pub user: UserMappingUser,
+    pub server_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3551,6 +3630,32 @@ pub struct AlterForeignDataWrapperOwnerStatement {
 pub struct AlterForeignDataWrapperRenameStatement {
     pub fdw_name: String,
     pub new_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterForeignServerStatement {
+    pub server_name: String,
+    pub version: Option<Option<String>>,
+    pub options: Vec<AlterGenericOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterForeignServerOwnerStatement {
+    pub server_name: String,
+    pub new_owner: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterForeignServerRenameStatement {
+    pub server_name: String,
+    pub new_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterUserMappingStatement {
+    pub user: UserMappingUser,
+    pub server_name: String,
+    pub options: Vec<AlterGenericOption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1967,6 +1967,17 @@ impl Database {
                 sqlstate: "0A000",
             });
         }
+        if entry.relkind == 'f' {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot create index on relation \"{}\"",
+                    create_stmt.table_name
+                ),
+                detail: Some("This operation is not supported for foreign tables.".into()),
+                hint: None,
+                sqlstate: "42809",
+            });
+        }
         if !matches!(entry.relkind, 'r' | 'p' | 'm') {
             return Err(ExecError::Parse(ParseError::WrongObjectType {
                 name: create_stmt.table_name.clone(),

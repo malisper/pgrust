@@ -23,15 +23,16 @@ use crate::backend::catalog::rowcodec::{
     pg_constraint_row_from_values, pg_conversion_row_from_values, pg_database_row_from_values,
     pg_depend_row_from_values, pg_description_row_from_values,
     pg_foreign_data_wrapper_row_from_values, pg_foreign_server_row_from_values,
-    pg_index_row_from_values, pg_inherits_row_from_values, pg_language_row_from_values,
-    pg_opclass_row_from_values, pg_operator_row_from_values, pg_opfamily_row_from_values,
-    pg_partitioned_table_row_from_values, pg_policy_row_from_values, pg_proc_row_from_values,
-    pg_publication_namespace_row_from_values, pg_publication_rel_row_from_values,
-    pg_publication_row_from_values, pg_rewrite_row_from_values,
+    pg_foreign_table_row_from_values, pg_index_row_from_values, pg_inherits_row_from_values,
+    pg_language_row_from_values, pg_opclass_row_from_values, pg_operator_row_from_values,
+    pg_opfamily_row_from_values, pg_partitioned_table_row_from_values, pg_policy_row_from_values,
+    pg_proc_row_from_values, pg_publication_namespace_row_from_values,
+    pg_publication_rel_row_from_values, pg_publication_row_from_values, pg_rewrite_row_from_values,
     pg_statistic_ext_data_row_from_values, pg_statistic_ext_row_from_values,
     pg_statistic_row_from_values, pg_tablespace_row_from_values, pg_trigger_row_from_values,
     pg_ts_config_map_row_from_values, pg_ts_config_row_from_values, pg_ts_dict_row_from_values,
     pg_ts_parser_row_from_values, pg_ts_template_row_from_values, pg_type_row_from_values,
+    pg_user_mapping_row_from_values,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
@@ -360,6 +361,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 desc.attinhcount = attr.attinhcount;
                 desc.attislocal = attr.attislocal;
                 desc.collation_oid = attr.attcollation;
+                desc.fdw_options = attr.attfdwoptions.clone();
                 desc.identity =
                     crate::include::nodes::parsenodes::ColumnIdentityKind::from_catalog_char(
                         attr.attidentity,
@@ -959,6 +961,18 @@ fn append_catalog_kind_rows(
             rows.foreign_servers = values
                 .into_iter()
                 .map(pg_foreign_server_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgUserMapping => {
+            rows.user_mappings = values
+                .into_iter()
+                .map(pg_user_mapping_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgForeignTable => {
+            rows.foreign_tables = values
+                .into_iter()
+                .map(pg_foreign_table_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
         BootstrapCatalogKind::PgIndex => {
@@ -1690,6 +1704,8 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         descriptions: description_rows,
         foreign_data_wrappers: Vec::new(),
         foreign_servers: Vec::new(),
+        foreign_tables: Vec::new(),
+        user_mappings: Vec::new(),
         indexes: index_rows,
         rewrites: rewrite_rows,
         triggers: Vec::new(),
@@ -2403,6 +2419,8 @@ fn load_physical_catalog_rows_visible_legacy(
         descriptions: description_rows,
         foreign_data_wrappers: Vec::new(),
         foreign_servers: Vec::new(),
+        foreign_tables: Vec::new(),
+        user_mappings: Vec::new(),
         indexes: index_rows,
         rewrites: rewrite_rows,
         triggers: Vec::new(),

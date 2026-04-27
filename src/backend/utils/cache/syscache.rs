@@ -744,6 +744,8 @@ fn merge_catcaches(shared: CatCache, local: CatCache) -> CatCache {
         local.collation_rows(),
         local.foreign_data_wrapper_rows(),
         local.foreign_server_rows(),
+        local.foreign_table_rows(),
+        local.user_mapping_rows(),
         shared.database_rows(),
         shared.tablespace_rows(),
         local.statistic_rows(),
@@ -1159,6 +1161,7 @@ impl CatalogStore {
             .collect::<BTreeMap<_, _>>();
         let mut columns = Vec::with_capacity(attributes.len());
         for attr in attributes {
+            let fdw_options = attr.attfdwoptions.clone();
             let sql_type = self
                 .search_sys_cache1(ctx, SysCacheId::TypeOid, oid_key(attr.atttypid))?
                 .into_iter()
@@ -1183,6 +1186,7 @@ impl CatalogStore {
             desc.attstattarget = attr.attstattarget;
             desc.attinhcount = attr.attinhcount;
             desc.attislocal = attr.attislocal;
+            desc.fdw_options = fdw_options;
             desc.generated =
                 crate::include::nodes::parsenodes::ColumnGeneratedKind::from_catalog_char(
                     attr.attgenerated,
@@ -1441,6 +1445,7 @@ pub(crate) fn relation_id_get_relation_db(
 
     let mut columns = Vec::with_capacity(attributes.len());
     for attr in attributes {
+        let fdw_options = attr.attfdwoptions.clone();
         let sql_type = search_sys_cache1_db(
             db,
             client_id,
@@ -1470,6 +1475,7 @@ pub(crate) fn relation_id_get_relation_db(
         desc.attstattarget = attr.attstattarget;
         desc.attinhcount = attr.attinhcount;
         desc.attislocal = attr.attislocal;
+        desc.fdw_options = fdw_options;
         desc.generated = crate::include::nodes::parsenodes::ColumnGeneratedKind::from_catalog_char(
             attr.attgenerated,
         );

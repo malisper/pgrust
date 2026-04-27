@@ -17,6 +17,7 @@ use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
     ensure_class_rows, ensure_depend_rows, ensure_namespace_rows, ensure_rewrite_rows,
 };
+use crate::backend::utils::misc::notices::push_notice;
 use crate::include::access::htup::{AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID,
@@ -76,7 +77,7 @@ pub(super) fn lookup_heap_relation_for_ddl(
     name: &str,
 ) -> Result<BoundRelation, ExecError> {
     match catalog.lookup_any_relation(name) {
-        Some(entry) if entry.relkind == 'r' => Ok(entry),
+        Some(entry) if matches!(entry.relkind, 'r' | 'f') => Ok(entry),
         Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
             name: name.to_string(),
             expected: "table",
@@ -108,13 +109,17 @@ pub(super) fn lookup_heap_relation_for_alter_table(
     name: &str,
     if_exists: bool,
 ) -> Result<Option<BoundRelation>, ExecError> {
-    match lookup_heap_relation_for_ddl(catalog, name) {
-        Ok(relation) => Ok(Some(relation)),
-        Err(ExecError::Parse(ParseError::TableDoesNotExist(_))) if if_exists => Ok(None),
-        Err(ExecError::Parse(ParseError::TableDoesNotExist(_))) => {
-            Err(ExecError::Parse(ParseError::UnknownTable(name.to_string())))
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'r' | 'f') => Ok(Some(entry)),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table",
+        })),
+        None if if_exists => {
+            push_notice(format!(r#"relation "{name}" does not exist, skipping"#));
+            Ok(None)
         }
-        Err(err) => Err(err),
+        None => Err(ExecError::Parse(ParseError::UnknownTable(name.to_string()))),
     }
 }
 
@@ -124,12 +129,15 @@ pub(super) fn lookup_table_or_partitioned_table_for_alter_table(
     if_exists: bool,
 ) -> Result<Option<BoundRelation>, ExecError> {
     match catalog.lookup_any_relation(name) {
-        Some(entry) if matches!(entry.relkind, 'r' | 'p') => Ok(Some(entry)),
+        Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'f') => Ok(Some(entry)),
         Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
             name: name.to_string(),
             expected: "table",
         })),
-        None if if_exists => Ok(None),
+        None if if_exists => {
+            push_notice(format!(r#"relation "{name}" does not exist, skipping"#));
+            Ok(None)
+        }
         None => Err(ExecError::Parse(ParseError::UnknownTable(name.to_string()))),
     }
 }
@@ -217,6 +225,7 @@ fn auth_catalog_for_ddl(
 pub(super) fn relation_kind_name(relkind: char) -> &'static str {
     match relkind {
         'c' => "type",
+        'f' => "foreign table",
         'm' => "materialized view",
         'p' => "partitioned table",
         'S' => "sequence",
@@ -1993,6 +2002,8 @@ pub(super) fn validate_alter_table_alter_column_type(
     new_column.not_null_primary_key_owned = current_column.not_null_primary_key_owned;
     new_column.attrdef_oid = current_column.attrdef_oid;
     new_column.default_expr = current_column.default_expr.clone();
+    new_column.default_sequence_oid = current_column.default_sequence_oid;
+    new_column.fdw_options = current_column.fdw_options.clone();
     new_column.generated = current_column.generated;
     new_column.missing_default_value = if current_column.default_sequence_oid.is_some() {
         None

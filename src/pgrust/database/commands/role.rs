@@ -1072,6 +1072,22 @@ fn owned_object_drop_priority(kind: OwnedObjectKind) -> u8 {
     }
 }
 
+fn acl_item_depends_on_role(item: &str, role_names: &BTreeSet<&str>) -> bool {
+    let Some((grantee, rest)) = item.split_once('=') else {
+        return false;
+    };
+    let Some((_, grantor)) = rest.split_once('/') else {
+        return false;
+    };
+    (!grantee.is_empty() && role_names.contains(grantee)) || role_names.contains(grantor)
+}
+
+fn acl_depends_on_role(acl: Option<&[String]>, role_names: &BTreeSet<&str>) -> bool {
+    acl.unwrap_or_default()
+        .iter()
+        .any(|item| acl_item_depends_on_role(item, role_names))
+}
+
 fn shared_role_dependency_details_for_roles(
     db: &Database,
     client_id: ClientId,
@@ -1088,6 +1104,10 @@ fn shared_role_dependency_details_for_roles(
         .iter()
         .map(|row| (row.oid, row.rolname.as_str()))
         .collect::<BTreeMap<_, _>>();
+    let target_role_names = role_oids
+        .iter()
+        .filter_map(|oid| role_names.get(oid).copied())
+        .collect::<BTreeSet<_>>();
 
     let mut details = auth_catalog
         .memberships()
@@ -1105,6 +1125,29 @@ fn shared_role_dependency_details_for_roles(
             ))
         })
         .collect::<Vec<_>>();
+
+    let catcache = db
+        .txn_backend_catcache(client_id, xid, cid)
+        .map_err(map_role_catalog_error)?;
+    for wrapper in catcache.foreign_data_wrapper_rows() {
+        if role_oids.contains(&wrapper.fdwowner) {
+            details.push(format!("owner of foreign-data wrapper {}", wrapper.fdwname));
+        }
+        if acl_depends_on_role(wrapper.fdwacl.as_deref(), &target_role_names) {
+            details.push(format!(
+                "privileges for foreign-data wrapper {}",
+                wrapper.fdwname
+            ));
+        }
+    }
+    for server in catcache.foreign_server_rows() {
+        if role_oids.contains(&server.srvowner) {
+            details.push(format!("owner of server {}", server.srvname));
+        }
+        if acl_depends_on_role(server.srvacl.as_deref(), &target_role_names) {
+            details.push(format!("privileges for foreign server {}", server.srvname));
+        }
+    }
 
     details.sort();
     details.dedup();

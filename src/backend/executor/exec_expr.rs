@@ -95,11 +95,11 @@ use super::expr_string::{
     eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
     eval_pg_rust_test_pt_in_widget, eval_pg_rust_test_widget_in, eval_pg_rust_test_widget_out,
     eval_pg_size_bytes_function, eval_pg_size_pretty_function, eval_position_function,
-    eval_quote_literal_function, eval_repeat_function, eval_replace_function,
-    eval_reverse_function, eval_right_function, eval_rpad_function, eval_set_bit_bytes,
-    eval_set_byte, eval_sha224_function, eval_sha256_function, eval_sha384_function,
-    eval_sha512_function, eval_split_part_function, eval_strpos_function, eval_text_overlay,
-    eval_text_starts_with_function, eval_text_substring, eval_to_bin_function,
+    eval_quote_ident_function, eval_quote_literal_function, eval_repeat_function,
+    eval_replace_function, eval_reverse_function, eval_right_function, eval_rpad_function,
+    eval_set_bit_bytes, eval_set_byte, eval_sha224_function, eval_sha256_function,
+    eval_sha384_function, eval_sha512_function, eval_split_part_function, eval_strpos_function,
+    eval_text_overlay, eval_text_starts_with_function, eval_text_substring, eval_to_bin_function,
     eval_to_char_float4_function, eval_to_char_function, eval_to_hex_function,
     eval_to_number_function, eval_to_oct_function, eval_translate_function, eval_trim_function,
     eval_unicode_assigned_function, eval_unicode_is_normalized_function,
@@ -128,8 +128,8 @@ use crate::backend::executor::jsonb::{
 use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, LoweredPartitionSpec, ParseError, PartitionBoundSpec, PartitionRangeDatumValue,
-    SerializedPartitionValue, SqlType, SqlTypeKind, SubqueryComparisonOp,
-    deserialize_partition_bound, partition_value_to_value,
+    PartitionStrategy, SerializedPartitionValue, SqlType, SqlTypeKind, SubqueryComparisonOp,
+    deserialize_partition_bound, partition_value_to_value, relation_partition_spec,
 };
 use crate::backend::rewrite::{format_stored_rule_definition_with_catalog, format_view_definition};
 use crate::backend::statistics::{
@@ -1975,6 +1975,152 @@ fn eval_format_type_function(
         typmod,
         catalog_lookup(ctx),
     ))
+}
+
+#[derive(Clone, Copy)]
+enum ForeignPrivilegeKind {
+    ForeignDataWrapper,
+    Server,
+}
+
+fn eval_has_foreign_privilege_function(
+    kind: ForeignPrivilegeKind,
+    values: &[Value],
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let ctx = ctx.ok_or_else(|| ExecError::DetailedError {
+        message: "foreign privilege lookup requires executor context".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let catalog = ctx
+        .catalog
+        .as_ref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "foreign privilege lookup requires a visible catalog".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    let (role_oid, object_value, privilege_value) = match values {
+        [object_value, privilege_value] => (ctx.current_user_oid, object_value, privilege_value),
+        [role_value, object_value, privilege_value] => (
+            foreign_privilege_role_oid(role_value, catalog)?,
+            object_value,
+            privilege_value,
+        ),
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "has foreign privilege arguments",
+                actual: format!("{} arguments", values.len()),
+            }));
+        }
+    };
+    if !privilege_value
+        .as_text()
+        .is_some_and(|privilege| privilege.eq_ignore_ascii_case("USAGE"))
+    {
+        return Ok(Value::Bool(false));
+    }
+    let authids = CatalogLookup::authid_rows(catalog);
+    let auth_members = CatalogLookup::auth_members_rows(catalog);
+    let Some(role) = authids.iter().find(|role| role.oid == role_oid) else {
+        return Ok(Value::Bool(false));
+    };
+    if role.rolsuper {
+        return Ok(Value::Bool(true));
+    }
+    let Some((owner_oid, acl)) = foreign_privilege_object_acl(kind, object_value, catalog)? else {
+        return Ok(Value::Bool(false));
+    };
+    if crate::backend::catalog::role_memberships::has_effective_membership(
+        role_oid,
+        owner_oid,
+        &authids,
+        &auth_members,
+    ) {
+        return Ok(Value::Bool(true));
+    }
+    let effective_names = authids
+        .iter()
+        .filter(|candidate| {
+            crate::backend::catalog::role_memberships::has_effective_membership(
+                role_oid,
+                candidate.oid,
+                &authids,
+                &auth_members,
+            )
+        })
+        .map(|role| role.rolname.as_str())
+        .chain(std::iter::once(""))
+        .collect::<Vec<_>>();
+    Ok(Value::Bool(acl.unwrap_or_default().iter().any(|item| {
+        let Some((grantee, rest)) = item.split_once('=') else {
+            return false;
+        };
+        let Some((privileges, _)) = rest.split_once('/') else {
+            return false;
+        };
+        effective_names.contains(&grantee) && privileges.contains('U')
+    })))
+}
+
+fn foreign_privilege_role_oid(
+    value: &Value,
+    catalog: &dyn CatalogLookup,
+) -> Result<u32, ExecError> {
+    if let Some(role_name) = value.as_text() {
+        return CatalogLookup::authid_rows(catalog)
+            .into_iter()
+            .find(|role| role.rolname == role_name)
+            .map(|role| role.oid)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("role \"{role_name}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            });
+    }
+    oid_arg_to_u32(value, "has foreign privilege")
+}
+
+fn foreign_privilege_object_acl(
+    kind: ForeignPrivilegeKind,
+    value: &Value,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<(u32, Option<Vec<String>>)>, ExecError> {
+    match kind {
+        ForeignPrivilegeKind::ForeignDataWrapper => {
+            let rows = CatalogLookup::foreign_data_wrapper_rows(catalog);
+            Ok(if let Some(name) = value.as_text() {
+                rows.into_iter()
+                    .find(|row| row.fdwname.eq_ignore_ascii_case(name))
+                    .map(|row| (row.fdwowner, row.fdwacl))
+            } else {
+                let oid = oid_arg_to_u32(value, "has_foreign_data_wrapper_privilege")?;
+                rows.into_iter()
+                    .find(|row| row.oid == oid)
+                    .map(|row| (row.fdwowner, row.fdwacl))
+            })
+        }
+        ForeignPrivilegeKind::Server => {
+            let rows = CatalogLookup::foreign_server_rows(catalog);
+            Ok(if let Some(name) = value.as_text() {
+                rows.into_iter()
+                    .find(|row| row.srvname.eq_ignore_ascii_case(name))
+                    .map(|row| (row.srvowner, row.srvacl))
+            } else {
+                let oid = oid_arg_to_u32(value, "has_server_privilege")?;
+                rows.into_iter()
+                    .find(|row| row.oid == oid)
+                    .map(|row| (row.srvowner, row.srvacl))
+            })
+        }
+    }
 }
 
 fn ensure_builtin_side_effects_allowed(
@@ -4872,6 +5018,28 @@ fn eval_pg_partition_root(values: &[Value], ctx: &ExecutorContext) -> Result<Val
     }
 }
 
+fn eval_pg_table_is_visible(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [value] => {
+            let relation_oid = oid_arg_to_u32(value, "pg_table_is_visible")?;
+            let catalog = executor_catalog(ctx)?;
+            let Some(class_row) = catalog.class_row_by_oid(relation_oid) else {
+                return Ok(Value::Null);
+            };
+            Ok(Value::Bool(
+                catalog
+                    .lookup_any_relation(&class_row.relname)
+                    .is_some_and(|relation| relation.relation_oid == relation_oid),
+            ))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_table_is_visible(oid)",
+            actual: format!("PgTableIsVisible({} args)", values.len()),
+        })),
+    }
+}
+
 fn sequence_runtime(
     ctx: &ExecutorContext,
 ) -> Result<&crate::pgrust::database::SequenceRuntime, ExecError> {
@@ -6744,6 +6912,24 @@ fn eval_plpgsql_builtin_function(
             eval_to_reg_object_function(&values, SqlTypeKind::RegCollation, None)
         }
         BuiltinScalarFunction::FormatType => eval_format_type_function(&values, None),
+        BuiltinScalarFunction::HasForeignDataWrapperPrivilege => {
+            eval_has_foreign_privilege_function(
+                ForeignPrivilegeKind::ForeignDataWrapper,
+                &values,
+                None,
+            )
+        }
+        BuiltinScalarFunction::HasServerPrivilege => {
+            eval_has_foreign_privilege_function(ForeignPrivilegeKind::Server, &values, None)
+        }
+        BuiltinScalarFunction::PgGetPartKeyDef | BuiltinScalarFunction::PgTableIsVisible => {
+            Err(ExecError::DetailedError {
+                message: "catalog helper requires executor context".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })
+        }
         BuiltinScalarFunction::RegProcToText => {
             eval_reg_object_to_text(&values[0], SqlTypeKind::RegProc, None)
         }
@@ -6762,6 +6948,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::RegCollationToText => {
             eval_reg_object_to_text(&values[0], SqlTypeKind::RegCollation, None)
         }
+        BuiltinScalarFunction::QuoteIdent => eval_quote_ident_function(&values),
         BuiltinScalarFunction::QuoteLiteral => eval_quote_literal_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
         BuiltinScalarFunction::Strpos => eval_strpos_function(&values),
@@ -7022,7 +7209,6 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::PgGetFunctionDef
         | BuiltinScalarFunction::PgGetFunctionResult
         | BuiltinScalarFunction::PgGetExpr
-        | BuiltinScalarFunction::PgGetPartKeyDef
         | BuiltinScalarFunction::PgGetPartitionConstraintDef
         | BuiltinScalarFunction::PgGetStatisticsObjDef
         | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
@@ -8865,6 +9051,8 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::TestCanonicalizePath => eval_test_canonicalize_path(&values),
         BuiltinScalarFunction::TestRelpath => Ok(Value::Null),
         BuiltinScalarFunction::PgPartitionRoot => eval_pg_partition_root(&values, ctx),
+        BuiltinScalarFunction::PgGetPartKeyDef => eval_pg_get_partkeydef(&values, ctx),
+        BuiltinScalarFunction::PgTableIsVisible => eval_pg_table_is_visible(&values, ctx),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
         BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(&values, ctx),
         BuiltinScalarFunction::PgGetFunctionArguments => {
@@ -8879,7 +9067,6 @@ pub(crate) fn eval_builtin_function(
         }
         BuiltinScalarFunction::PgGetIndexDef => eval_pg_get_indexdef(&values, ctx),
         BuiltinScalarFunction::PgGetRuleDef => eval_pg_get_ruledef(&values, ctx),
-        BuiltinScalarFunction::PgGetPartKeyDef => eval_pg_get_partkeydef(&values, ctx),
         BuiltinScalarFunction::PgGetViewDef => eval_pg_get_viewdef(&values, ctx),
         BuiltinScalarFunction::PgGetTriggerDef => eval_pg_get_triggerdef(&values, ctx),
         BuiltinScalarFunction::PgTriggerDepth => Ok(Value::Int32(ctx.trigger_depth as i32)),
@@ -9109,10 +9296,21 @@ pub(crate) fn eval_builtin_function(
             eval_to_reg_object_function(&values, SqlTypeKind::RegCollation, Some(ctx))
         }
         BuiltinScalarFunction::FormatType => eval_format_type_function(&values, Some(ctx)),
+        BuiltinScalarFunction::HasForeignDataWrapperPrivilege => {
+            eval_has_foreign_privilege_function(
+                ForeignPrivilegeKind::ForeignDataWrapper,
+                &values,
+                Some(ctx),
+            )
+        }
+        BuiltinScalarFunction::HasServerPrivilege => {
+            eval_has_foreign_privilege_function(ForeignPrivilegeKind::Server, &values, Some(ctx))
+        }
         BuiltinScalarFunction::RegClassToText => eval_regclass_to_text_function(&values, Some(ctx)),
         BuiltinScalarFunction::RegTypeToText => eval_regtype_to_text_function(&values, Some(ctx)),
         BuiltinScalarFunction::RegRoleToText => eval_regrole_to_text_function(&values, Some(ctx)),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
+        BuiltinScalarFunction::QuoteIdent => eval_quote_ident_function(&values),
         BuiltinScalarFunction::QuoteLiteral => eval_quote_literal_function(&values),
         BuiltinScalarFunction::Replace => eval_replace_function(&values),
         BuiltinScalarFunction::SplitPart => eval_split_part_function(&values),
