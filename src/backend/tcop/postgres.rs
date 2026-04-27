@@ -3743,9 +3743,13 @@ fn execute_streaming_select_statement(
                 }
             }
             let succeeded = err.is_none();
-            state
+            if let Err(finish_err) = state
                 .session
-                .finish_streaming_select_guard(db, &mut guard, succeeded);
+                .finish_streaming_select_guard(db, &mut guard, succeeded)
+                && err.is_none()
+            {
+                err = Some(finish_err);
+            }
             drop(guard);
 
             if let Some(e) = err {

@@ -39,6 +39,7 @@ use crate::pgrust::database::{
     SequenceData, SequenceRuntime, default_sequence_name_base, format_nextval_default_oid,
     initial_sequence_state, resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
 };
+use crate::pl::plpgsql::validate_create_function_body;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CreatedOwnedSequence {
@@ -3028,6 +3029,10 @@ impl Database {
             proargmodes.as_deref(),
             &callable_arg_oids,
         )?;
+        if language_row.oid == PG_LANGUAGE_PLPGSQL_OID {
+            validate_create_function_body(&create_stmt.body, !output_args.is_empty())
+                .map_err(ExecError::Parse)?;
+        }
         let existing_proc = catalog
             .proc_rows_by_name(&function_name)
             .into_iter()

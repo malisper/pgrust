@@ -43,6 +43,7 @@ pub struct CompiledFunction {
     pub(crate) name: String,
     pub(crate) proconfig: Option<Vec<String>>,
     pub(crate) parameter_slots: Vec<CompiledFunctionSlot>,
+    pub(crate) context_arg_type_names: Vec<String>,
     pub(crate) output_slots: Vec<CompiledOutputSlot>,
     pub(crate) body: CompiledBlock,
     pub(crate) return_contract: FunctionReturnContract,
@@ -630,6 +631,7 @@ pub(crate) fn compile_do_function(
         name: "inline_code_block".into(),
         proconfig: None,
         parameter_slots: Vec::new(),
+        context_arg_type_names: Vec::new(),
         output_slots: Vec::new(),
         body,
         return_contract,
@@ -739,10 +741,15 @@ pub(crate) fn compile_function_from_proc(
 
     let return_contract = function_return_contract(row, catalog, &output_slots)?;
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
+    let context_arg_type_names = parameter_slots
+        .iter()
+        .map(|slot| crate::backend::parser::analyze::sql_type_name(slot.ty))
+        .collect();
     Ok(CompiledFunction {
         name: row.proname.clone(),
         proconfig: row.proconfig.clone(),
         parameter_slots,
+        context_arg_type_names,
         output_slots,
         body,
         return_contract,
@@ -786,6 +793,7 @@ pub(crate) fn compile_trigger_function_from_proc(
         name: row.proname.clone(),
         proconfig: row.proconfig.clone(),
         parameter_slots: Vec::new(),
+        context_arg_type_names: Vec::new(),
         output_slots: Vec::new(),
         body,
         return_contract,
@@ -1247,6 +1255,22 @@ fn compile_return_stmt(
         (FunctionReturnContract::Trigger { .. }, Some(_)) => Err(ParseError::FeatureNotSupported(
             "trigger RETURN expressions must be NEW, OLD, or NULL".into(),
         )),
+        (
+            FunctionReturnContract::Scalar {
+                output_slot: Some(_),
+                ..
+            }
+            | FunctionReturnContract::FixedRow {
+                uses_output_vars: true,
+                ..
+            },
+            Some(_),
+        ) => Err(ParseError::DetailedError {
+            message: "RETURN cannot have a parameter in function with OUT parameters".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        }),
         (FunctionReturnContract::Scalar { setof: false, .. }, Some(expr)) => {
             Ok(CompiledStmt::Return {
                 expr: Some(compile_expr_text(expr, catalog, env)?),
@@ -1296,6 +1320,12 @@ fn compile_return_next_stmt(
             "RETURN NEXT is not valid in trigger functions".into(),
         )),
         (FunctionReturnContract::Scalar { setof: true, .. }, Some(expr)) => {
+            Ok(CompiledStmt::ReturnNext {
+                expr: Some(compile_expr_text(expr, catalog, env)?),
+            })
+        }
+        (FunctionReturnContract::FixedRow { setof: true, .. }, Some(expr))
+        | (FunctionReturnContract::AnonymousRecord { setof: true }, Some(expr)) => {
             Ok(CompiledStmt::ReturnNext {
                 expr: Some(compile_expr_text(expr, catalog, env)?),
             })
