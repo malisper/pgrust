@@ -31,6 +31,7 @@ mod expr_txid;
 mod expr_xml;
 mod fmgr;
 mod foreign_keys;
+pub(crate) mod function_guc;
 pub(crate) mod hashjoin;
 pub(crate) mod jsonb;
 pub(crate) mod jsonpath;

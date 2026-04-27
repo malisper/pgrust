@@ -714,8 +714,15 @@ pub(crate) fn pg_operator_row_from_values(
 
 pub(crate) fn pg_proc_row_from_values(values: Vec<Value>) -> Result<PgProcRow, CatalogError> {
     let has_added_proc_columns = values.len() > 24;
+    let has_proconfig_column = values.len() > 28;
     let prosrc_index = if has_added_proc_columns { 24 } else { 23 };
-    let proacl_index = if has_added_proc_columns { 27 } else { 24 };
+    let proacl_index = if has_proconfig_column {
+        28
+    } else if has_added_proc_columns {
+        27
+    } else {
+        24
+    };
     Ok(PgProcRow {
         oid: expect_oid(&values[0])?,
         proname: expect_text(&values[1])?,
@@ -756,6 +763,11 @@ pub(crate) fn pg_proc_row_from_values(values: Vec<Value>) -> Result<PgProcRow, C
             .map(nullable_text)
             .transpose()?
             .flatten(),
+        proconfig: if has_proconfig_column {
+            nullable_text_array(&values[27])?
+        } else {
+            None
+        },
         proacl: values
             .get(proacl_index)
             .map(nullable_text_array)
@@ -1711,6 +1723,7 @@ fn pg_proc_row_values(row: PgProcRow) -> Vec<Value> {
         Value::Text(row.prosrc.into()),
         nullable_text_value(row.probin),
         nullable_text_value(row.prosqlbody),
+        nullable_array_value(row.proconfig.map(text_array_value)),
         nullable_array_value(row.proacl.map(text_array_value)),
     ]
 }

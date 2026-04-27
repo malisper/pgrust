@@ -496,6 +496,8 @@ fn run_statement(
         | Statement::Notify(_)
         | Statement::Listen(_)
         | Statement::Unlisten(_)
+        | Statement::Load(_)
+        | Statement::Discard(_)
         | Statement::CopyFrom(_)
         | Statement::CopyTo(_)
         | Statement::CreatePublication(_)
@@ -1540,6 +1542,7 @@ fn run_statement(
         | Statement::Commit
         | Statement::Rollback
         | Statement::Savepoint(_)
+        | Statement::ReleaseSavepoint(_)
         | Statement::RollbackTo(_) => {
             Ok(StatementResult::AffectedRows(0))
         }

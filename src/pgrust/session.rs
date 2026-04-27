@@ -30,12 +30,12 @@ use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{
     AlterTableAddColumnStatement, CallStatement, CatalogLookup, CopyFormat as ParserCopyFormat,
     CopyFromStatement, CopyOptions as ParserCopyOptions, CopySource, CopyToDestination,
-    CopyToSource, CopyToStatement, CreateTableAsQuery, CreateTableAsStatement, CteBody,
-    DeallocateStatement, DetachPartitionMode, ExecuteStatement, ParseError, ParseOptions,
-    PrepareStatement, PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert,
-    bind_insert_prepared, bind_insert_with_outer_scopes_and_ctes, bind_update,
-    bound_cte_from_query_rows, pg_plan_query_with_config, pg_plan_query_with_outer_scopes_and_ctes,
-    plan_merge,
+    CopyToSource, CopyToStatement, CreateFunctionStatement, CreateTableAsQuery,
+    CreateTableAsStatement, CteBody, DeallocateStatement, DetachPartitionMode, DiscardTarget,
+    ExecuteStatement, ParseError, ParseOptions, PrepareStatement, PreparedInsert, SelectStatement,
+    Statement, bind_delete, bind_insert, bind_insert_prepared,
+    bind_insert_with_outer_scopes_and_ctes, bind_update, bound_cte_from_query_rows,
+    pg_plan_query_with_config, pg_plan_query_with_outer_scopes_and_ctes, plan_merge,
 };
 use crate::backend::rewrite::relation_has_row_security;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
@@ -43,7 +43,8 @@ use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::backend::utils::misc::checkpoint::is_checkpoint_guc;
 use crate::backend::utils::misc::guc::{
-    is_postgres_guc, normalize_guc_name, plpgsql_guc_default_value,
+    is_postgres_guc, normalize_function_guc_assignment, normalize_guc_name,
+    plpgsql_guc_default_value,
 };
 use crate::backend::utils::misc::guc_datetime::{
     DateTimeConfig, default_datestyle, default_datetime_config, default_intervalstyle,
@@ -488,7 +489,16 @@ struct ActiveTransaction {
     pending_async_notifications: Vec<PendingNotification>,
     dynamic_type_snapshot: DynamicTypeSnapshot,
     savepoints: Vec<SavepointState>,
-    local_guc_snapshot: Option<(HashMap<String, String>, DateTimeConfig)>,
+    guc_start_state: GucState,
+    guc_commit_state: GucState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GucState {
+    gucs: HashMap<String, String>,
+    datetime_config: DateTimeConfig,
+    stats_fetch_consistency: StatsFetchConsistency,
+    track_functions: TrackFunctionsSetting,
 }
 
 #[derive(Clone)]
@@ -500,6 +510,8 @@ struct SavepointState {
     prior_catalog_invalidation_len: usize,
     temp_effect_len: usize,
     sequence_effect_len: usize,
+    guc_effective_state: GucState,
+    guc_commit_state: GucState,
 }
 
 #[derive(Debug, Clone)]
@@ -513,6 +525,7 @@ pub struct Session {
     pub(crate) temp_backend_id: crate::pgrust::database::TempBackendId,
     active_txn: Option<ActiveTransaction>,
     gucs: HashMap<String, String>,
+    plpgsql_loaded: bool,
     datetime_config: DateTimeConfig,
     reset_datetime_config: DateTimeConfig,
     interrupts: Arc<InterruptState>,
@@ -1077,6 +1090,7 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         "default_toast_compression" => Some("pglz"),
         "default_transaction_isolation" => Some("read committed"),
         "transaction_isolation" => Some("read committed"),
+        "vacuum_cost_delay" => Some("0"),
         "track_counts" => Some("on"),
         "track_functions" => Some("none"),
         "stats_fetch_consistency" => Some("cache"),
@@ -1238,6 +1252,7 @@ impl Session {
             temp_backend_id,
             active_txn: None,
             gucs: HashMap::new(),
+            plpgsql_loaded: false,
             datetime_config: datetime_config.clone(),
             reset_datetime_config: datetime_config,
             interrupts: Arc::new(InterruptState::new()),
@@ -1492,6 +1507,41 @@ impl Session {
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
         }
+    }
+
+    pub(crate) fn track_activities_enabled(&self) -> bool {
+        self.gucs
+            .get("track_activities")
+            .map(|value| parse_bool_guc(value).unwrap_or(true))
+            .unwrap_or(true)
+    }
+
+    pub(crate) fn compute_query_id_enabled(&self) -> bool {
+        self.gucs
+            .get("compute_query_id")
+            .map(|value| parse_bool_guc(value).unwrap_or(false))
+            .unwrap_or(false)
+    }
+
+    fn check_function_bodies_enabled(&self) -> bool {
+        self.gucs
+            .get("check_function_bodies")
+            .map(|value| parse_bool_guc(value).unwrap_or(true))
+            .unwrap_or(true)
+    }
+
+    fn validate_create_function_config(
+        &self,
+        stmt: &CreateFunctionStatement,
+    ) -> Result<(), ExecError> {
+        let error_on_invalid = self.check_function_bodies_enabled();
+        for option in &stmt.config {
+            if let crate::backend::parser::AlterRoutineOption::SetConfig { name, value } = option {
+                normalize_function_guc_assignment(name, value, true, error_on_invalid)
+                    .map_err(ExecError::Parse)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn session_replication_role(&self) -> SessionReplicationRole {
@@ -1860,6 +1910,7 @@ impl Session {
         db: &Database,
         options: &crate::backend::parser::TransactionOptions,
     ) -> ActiveTransaction {
+        let guc_state = self.capture_guc_state();
         ActiveTransaction {
             xid: None,
             started_at_usecs:
@@ -1884,8 +1935,37 @@ impl Session {
             pending_async_notifications: Vec::new(),
             dynamic_type_snapshot: db.dynamic_type_snapshot(),
             savepoints: Vec::new(),
-            local_guc_snapshot: None,
+            guc_start_state: guc_state.clone(),
+            guc_commit_state: guc_state,
         }
+    }
+
+    fn capture_guc_state(&self) -> GucState {
+        let stats_state = self.stats_state.read();
+        GucState {
+            gucs: self.gucs.clone(),
+            datetime_config: self.datetime_config.clone(),
+            stats_fetch_consistency: stats_state.fetch_consistency,
+            track_functions: stats_state.track_functions,
+        }
+    }
+
+    fn install_guc_state(&mut self, state: GucState) {
+        self.gucs = state.gucs;
+        self.datetime_config = state.datetime_config;
+        let mut stats_state = self.stats_state.write();
+        stats_state.set_fetch_consistency(state.stats_fetch_consistency);
+        stats_state.set_track_functions(state.track_functions);
+    }
+
+    fn restore_guc_state(&mut self, db: &Database, state: GucState) {
+        if self.capture_guc_state() == state {
+            return;
+        }
+        self.install_guc_state(state);
+        db.install_row_security_enabled(self.client_id, self.row_security_enabled());
+        db.install_session_replication_role(self.client_id, self.session_replication_role());
+        db.plan_cache.invalidate_all();
     }
 
     fn ensure_active_xid(&mut self, db: &Database) -> TransactionId {
@@ -2072,6 +2152,8 @@ impl Session {
                 | Statement::Notify(_)
                 | Statement::Listen(_)
                 | Statement::Unlisten(_)
+                | Statement::Load(_)
+                | Statement::Discard(_)
                 | Statement::SetSessionAuthorization(_)
                 | Statement::ResetSessionAuthorization(_)
                 | Statement::SetRole(_)
@@ -2084,6 +2166,7 @@ impl Session {
                 | Statement::Commit
                 | Statement::Rollback
                 | Statement::Savepoint(_)
+                | Statement::ReleaseSavepoint(_)
                 | Statement::RollbackTo(_)
         )
     }
@@ -2306,10 +2389,12 @@ impl Session {
         for rel in held_locks {
             db.table_locks.unlock_table(rel, self.client_id);
         }
-        if let Some((gucs, datetime_config)) = txn.local_guc_snapshot {
-            self.gucs = gucs;
-            self.datetime_config = datetime_config;
-        }
+        let guc_state = if result.is_ok() {
+            txn.guc_commit_state
+        } else {
+            txn.guc_start_state
+        };
+        self.restore_guc_state(db, guc_state);
         crate::backend::utils::time::snapmgr::clear_transaction_snapshot_override(
             db,
             self.client_id,
@@ -2464,6 +2549,7 @@ impl Session {
                     | Statement::Commit
                     | Statement::Rollback
                     | Statement::Savepoint(_)
+                    | Statement::ReleaseSavepoint(_)
                     | Statement::RollbackTo(_)
             )
         {
@@ -2553,6 +2639,7 @@ impl Session {
                     }
                     result
                 } else {
+                    self.validate_create_function_config(create_stmt)?;
                     let search_path = self.configured_search_path();
                     db.execute_create_function_stmt_with_search_path(
                         self.client_id,
@@ -4445,6 +4532,8 @@ impl Session {
                 }
                 result.map(|_| StatementResult::AffectedRows(0))
             }
+            Statement::Load(ref load_stmt) => self.apply_load(load_stmt),
+            Statement::Discard(ref discard_stmt) => self.apply_discard(db, discard_stmt.target),
             Statement::Begin(ref options) => {
                 if self.active_txn.is_some() {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -4491,14 +4580,12 @@ impl Session {
                 for rel in held_locks {
                     db.table_locks.unlock_table(rel, self.client_id);
                 }
-                if let Some((gucs, datetime_config)) = txn.local_guc_snapshot {
-                    self.gucs = gucs;
-                    self.datetime_config = datetime_config;
-                }
+                self.restore_guc_state(db, txn.guc_start_state);
                 self.portals.drop_transaction_portals(false);
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::Savepoint(ref name) => {
+                let guc_effective_state = self.capture_guc_state();
                 let Some(txn) = self.active_txn.as_mut() else {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "active transaction",
@@ -4516,15 +4603,16 @@ impl Session {
                     prior_catalog_invalidation_len: txn.prior_cmd_catalog_invalidations.len(),
                     temp_effect_len: txn.temp_effects.len(),
                     sequence_effect_len: txn.sequence_effects.len(),
+                    guc_effective_state,
+                    guc_commit_state: txn.guc_commit_state.clone(),
                 });
                 Ok(StatementResult::AffectedRows(0))
             }
-            Statement::RollbackTo(ref name) => {
+            Statement::ReleaseSavepoint(ref name) => {
                 let Some(txn) = self.active_txn.as_mut() else {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "active transaction",
-                        actual: "ROLLBACK TO SAVEPOINT can only be used in transaction blocks"
-                            .into(),
+                        actual: "RELEASE SAVEPOINT can only be used in transaction blocks".into(),
                     }));
                 };
                 let Some(index) = txn
@@ -4539,66 +4627,99 @@ impl Session {
                         sqlstate: "3B001",
                     });
                 };
-                let savepoint = txn.savepoints[index].clone();
-                let aborted_catalog_effects =
-                    txn.catalog_effects[savepoint.catalog_effect_len..].to_vec();
-                let aborted_prior_invalidations = txn.prior_cmd_catalog_invalidations
-                    [savepoint.prior_catalog_invalidation_len..]
-                    .to_vec();
-                let aborted_current_invalidations = txn.current_cmd_catalog_invalidations.clone();
-                let aborted_temp_effects = txn.temp_effects[savepoint.temp_effect_len..].to_vec();
-                let aborted_sequence_effects =
-                    txn.sequence_effects[savepoint.sequence_effect_len..].to_vec();
-                let rollback_catalog_ctx = (!aborted_catalog_effects.is_empty())
-                    .then(|| {
-                        txn.xid.map(|xid| {
-                            let cid = txn.next_command_id;
-                            txn.next_command_id = txn.next_command_id.saturating_add(1);
-                            (xid, cid)
+                txn.savepoints.truncate(index);
+                Ok(StatementResult::AffectedRows(0))
+            }
+            Statement::RollbackTo(ref name) => {
+                let client_id = self.client_id;
+                let (dynamic_type_snapshot, guc_effective_state) = {
+                    let Some(txn) = self.active_txn.as_mut() else {
+                        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "active transaction",
+                            actual: "ROLLBACK TO SAVEPOINT can only be used in transaction blocks"
+                                .into(),
+                        }));
+                    };
+                    let Some(index) = txn
+                        .savepoints
+                        .iter()
+                        .rposition(|savepoint| savepoint.name.eq_ignore_ascii_case(name))
+                    else {
+                        return Err(ExecError::DetailedError {
+                            message: format!("savepoint \"{name}\" does not exist"),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "3B001",
+                        });
+                    };
+                    let savepoint = txn.savepoints[index].clone();
+                    let aborted_catalog_effects =
+                        txn.catalog_effects[savepoint.catalog_effect_len..].to_vec();
+                    let aborted_prior_invalidations = txn.prior_cmd_catalog_invalidations
+                        [savepoint.prior_catalog_invalidation_len..]
+                        .to_vec();
+                    let aborted_current_invalidations =
+                        txn.current_cmd_catalog_invalidations.clone();
+                    let aborted_temp_effects =
+                        txn.temp_effects[savepoint.temp_effect_len..].to_vec();
+                    let aborted_sequence_effects =
+                        txn.sequence_effects[savepoint.sequence_effect_len..].to_vec();
+                    let rollback_catalog_ctx = (!aborted_catalog_effects.is_empty())
+                        .then(|| {
+                            txn.xid.map(|xid| {
+                                let cid = txn.next_command_id;
+                                txn.next_command_id = txn.next_command_id.saturating_add(1);
+                                (xid, cid)
+                            })
                         })
-                    })
-                    .flatten();
-                db.finalize_aborted_catalog_effects(&aborted_catalog_effects);
-                db.finalize_aborted_temp_effects(self.client_id, &aborted_temp_effects);
-                db.finalize_aborted_sequence_effects(&aborted_sequence_effects);
-                let repair_effect = if let Some((xid, cid)) = rollback_catalog_ctx {
-                    db.restore_catalog_store_snapshot_for_savepoint(
-                        self.client_id,
-                        xid,
-                        cid,
-                        savepoint.catalog_snapshot,
-                        &aborted_catalog_effects,
-                    )?
-                } else {
-                    db.restore_catalog_store_snapshot(savepoint.catalog_snapshot);
-                    CatalogMutationEffect::default()
-                };
-                db.finalize_aborted_local_catalog_invalidations(
-                    self.client_id,
-                    &aborted_prior_invalidations,
-                    &aborted_current_invalidations,
-                );
-                txn.catalog_effects.truncate(savepoint.catalog_effect_len);
-                txn.prior_cmd_catalog_invalidations
-                    .truncate(savepoint.prior_catalog_invalidation_len);
-                txn.current_cmd_catalog_invalidations.clear();
-                txn.temp_effects.truncate(savepoint.temp_effect_len);
-                txn.sequence_effects.truncate(savepoint.sequence_effect_len);
-                let repair_invalidation =
-                    Database::catalog_invalidation_from_effect(&repair_effect);
-                if !repair_invalidation.is_empty() {
-                    db.finalize_command_end_local_catalog_invalidations(
-                        self.client_id,
-                        std::slice::from_ref(&repair_invalidation),
+                        .flatten();
+                    db.finalize_aborted_catalog_effects(&aborted_catalog_effects);
+                    db.finalize_aborted_temp_effects(client_id, &aborted_temp_effects);
+                    db.finalize_aborted_sequence_effects(&aborted_sequence_effects);
+                    let repair_effect = if let Some((xid, cid)) = rollback_catalog_ctx {
+                        db.restore_catalog_store_snapshot_for_savepoint(
+                            client_id,
+                            xid,
+                            cid,
+                            savepoint.catalog_snapshot,
+                            &aborted_catalog_effects,
+                        )?
+                    } else {
+                        db.restore_catalog_store_snapshot(savepoint.catalog_snapshot);
+                        CatalogMutationEffect::default()
+                    };
+                    db.finalize_aborted_local_catalog_invalidations(
+                        client_id,
+                        &aborted_prior_invalidations,
+                        &aborted_current_invalidations,
                     );
+                    txn.catalog_effects.truncate(savepoint.catalog_effect_len);
                     txn.prior_cmd_catalog_invalidations
-                        .push(repair_invalidation);
-                    txn.catalog_effects.push(repair_effect);
-                }
-                let snapshot = savepoint.dynamic_type_snapshot;
-                db.restore_dynamic_type_snapshot(&snapshot);
-                txn.savepoints.truncate(index + 1);
-                txn.failed = false;
+                        .truncate(savepoint.prior_catalog_invalidation_len);
+                    txn.current_cmd_catalog_invalidations.clear();
+                    txn.temp_effects.truncate(savepoint.temp_effect_len);
+                    txn.sequence_effects.truncate(savepoint.sequence_effect_len);
+                    let repair_invalidation =
+                        Database::catalog_invalidation_from_effect(&repair_effect);
+                    if !repair_invalidation.is_empty() {
+                        db.finalize_command_end_local_catalog_invalidations(
+                            client_id,
+                            std::slice::from_ref(&repair_invalidation),
+                        );
+                        txn.prior_cmd_catalog_invalidations
+                            .push(repair_invalidation);
+                        txn.catalog_effects.push(repair_effect);
+                    }
+                    txn.guc_commit_state = savepoint.guc_commit_state.clone();
+                    txn.savepoints.truncate(index + 1);
+                    txn.failed = false;
+                    (
+                        savepoint.dynamic_type_snapshot,
+                        savepoint.guc_effective_state,
+                    )
+                };
+                db.restore_dynamic_type_snapshot(&dynamic_type_snapshot);
+                self.restore_guc_state(db, guc_effective_state);
                 Ok(StatementResult::AffectedRows(0))
             }
             _ => {
@@ -4925,6 +5046,7 @@ impl Session {
             transaction_lock_scope_id,
             search_path.as_deref(),
             &datetime_config,
+            &self.effective_gucs_for_execution(),
             snapshot_override,
             self.planner_config(),
             Arc::clone(&self.random_state),
@@ -4960,25 +5082,7 @@ impl Session {
         query: &SelectStatement,
         options: CursorOptions,
     ) -> Result<(), ExecError> {
-        if self.active_txn.is_none() {
-            if options.holdable {
-                // :HACK: PostgreSQL permits DECLARE CURSOR WITH HOLD outside
-                // an explicit transaction by materializing the cursor across
-                // the implicit transaction boundary. Model that case here
-                // until portal commands share the normal autocommit path.
-                self.active_txn = Some(self.active_transaction_without_xid(db));
-                self.stats_state.write().begin_top_level_xact();
-                let result =
-                    self.declare_cursor_in_active_txn(db, name, source_text, query, options);
-                let result = result.and_then(|_| {
-                    self.validate_constraints_for_active_txn(db, false)?;
-                    Ok(StatementResult::AffectedRows(0))
-                });
-                let txn = self.active_txn.take().unwrap();
-                let result = self.finalize_taken_transaction(db, txn, result);
-                self.portals.drop_transaction_portals(result.is_ok());
-                return result.map(|_| ());
-            }
+        if self.active_txn.is_none() && !options.holdable {
             return Err(ExecError::Parse(ParseError::DetailedError {
                 message: "DECLARE CURSOR can only be used in transaction blocks".into(),
                 detail: None,
@@ -7651,6 +7755,7 @@ impl Session {
                 result
             }
             Statement::CreateFunction(ref create_stmt) => {
+                self.validate_create_function_config(create_stmt)?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_function_stmt_in_transaction_with_search_path(
@@ -8211,8 +8316,12 @@ impl Session {
             | Statement::Commit
             | Statement::Rollback
             | Statement::Savepoint(_)
+            | Statement::ReleaseSavepoint(_)
             | Statement::RollbackTo(_) => {
                 unreachable!("handled in Session::execute")
+            }
+            Statement::Load(_) | Statement::Discard(_) => {
+                unreachable!("handled outside transaction executor")
             }
             Statement::DeclareCursor(_)
             | Statement::Fetch(_)
@@ -8237,26 +8346,71 @@ impl Session {
         stmt: &crate::backend::parser::SetStatement,
     ) -> Result<StatementResult, ExecError> {
         let name = normalize_guc_name(&stmt.name);
-        if !is_postgres_guc(&name) {
-            return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
-                name,
-            )));
-        }
-        if is_checkpoint_guc(&name) || is_autovacuum_guc(&name) {
+        let is_builtin = is_postgres_guc(&name);
+        if !is_builtin {
+            if !name.contains('.') {
+                return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
+                    name,
+                )));
+            }
+            validate_custom_guc_for_set(&name, self.plpgsql_loaded)?;
+        } else if is_checkpoint_guc(&name) || is_autovacuum_guc(&name) {
             return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(name)));
         }
-        if stmt.is_local
-            && let Some(txn) = self.active_txn.as_mut()
-            && txn.local_guc_snapshot.is_none()
-        {
-            txn.local_guc_snapshot = Some((self.gucs.clone(), self.datetime_config.clone()));
+
+        if stmt.is_local && self.active_txn.is_none() {
+            crate::backend::utils::misc::notices::push_warning(
+                "SET LOCAL can only be used in transaction blocks",
+            );
+            return Ok(StatementResult::AffectedRows(0));
         }
-        if let Some(value) = &stmt.value {
-            self.apply_guc_value(&stmt.name, value)?;
+
+        let mut effective_state = self.capture_guc_state();
+        let normalized = if let Some(value) = &stmt.value {
+            apply_guc_value_to_state(&mut effective_state, &stmt.name, value)?
         } else {
-            self.reset_guc(&name);
+            if is_builtin {
+                reset_guc_in_state(&mut effective_state, &name, &self.reset_datetime_config);
+            } else {
+                effective_state.gucs.insert(name.clone(), String::new());
+            }
+            name
+        };
+
+        let mut commit_state = if stmt.is_local {
+            None
+        } else {
+            self.active_txn
+                .as_ref()
+                .map(|txn| txn.guc_commit_state.clone())
+        };
+        if let Some(commit_state) = commit_state.as_mut() {
+            if let Some(value) = &stmt.value {
+                apply_guc_value_to_state(commit_state, &stmt.name, value)?;
+            } else if !is_builtin {
+                commit_state.gucs.insert(normalized.clone(), String::new());
+            } else {
+                reset_guc_in_state(commit_state, &normalized, &self.reset_datetime_config);
+            }
         }
-        self.after_guc_change(db, &name);
+
+        if normalized == "transaction_isolation"
+            && let Some(value) = &stmt.value
+        {
+            let level = crate::backend::parser::TransactionIsolationLevel::parse(value)
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnrecognizedParameter(value.clone()))
+                })?;
+            self.set_active_transaction_isolation(level)?;
+        }
+
+        self.install_guc_state(effective_state);
+        if let Some(commit_state) = commit_state
+            && let Some(txn) = self.active_txn.as_mut()
+        {
+            txn.guc_commit_state = commit_state;
+        }
+        self.after_guc_change(db, &normalized);
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -8287,54 +8441,68 @@ impl Session {
     ) -> Result<StatementResult, ExecError> {
         if let Some(name) = &stmt.name {
             let normalized = normalize_guc_name(name);
-            if !is_postgres_guc(&normalized) {
+            let is_builtin = is_postgres_guc(&normalized);
+            if !is_builtin && !self.gucs.contains_key(&normalized) {
                 return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
                     normalized,
                 )));
             }
-            if is_checkpoint_guc(&normalized) || is_autovacuum_guc(&normalized) {
+            if is_builtin && (is_checkpoint_guc(&normalized) || is_autovacuum_guc(&normalized)) {
                 return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(
                     normalized,
                 )));
             }
-            self.reset_guc(&normalized);
+            let mut effective_state = self.capture_guc_state();
+            if is_builtin {
+                reset_guc_in_state(
+                    &mut effective_state,
+                    &normalized,
+                    &self.reset_datetime_config,
+                );
+            } else {
+                effective_state
+                    .gucs
+                    .insert(normalized.clone(), String::new());
+            }
+            let mut commit_state = self
+                .active_txn
+                .as_ref()
+                .map(|txn| txn.guc_commit_state.clone());
+            if let Some(commit_state) = commit_state.as_mut() {
+                if is_builtin {
+                    reset_guc_in_state(commit_state, &normalized, &self.reset_datetime_config);
+                } else {
+                    commit_state.gucs.insert(normalized.clone(), String::new());
+                }
+            }
+            self.install_guc_state(effective_state);
+            if let Some(commit_state) = commit_state
+                && let Some(txn) = self.active_txn.as_mut()
+            {
+                txn.guc_commit_state = commit_state;
+            }
             self.after_guc_change(db, &normalized);
         } else {
-            self.gucs.clear();
-            self.guc_reset_datestyle();
-            self.guc_reset_intervalstyle();
-            self.guc_reset_timezone();
-            self.guc_reset_max_stack_depth();
-            self.datetime_config.xml = Default::default();
-            self.stats_state
-                .write()
-                .set_fetch_consistency(StatsFetchConsistency::Cache);
+            let mut effective_state = self.capture_guc_state();
+            reset_all_gucs_in_state(&mut effective_state, &self.reset_datetime_config);
+            let mut commit_state = self
+                .active_txn
+                .as_ref()
+                .map(|txn| txn.guc_commit_state.clone());
+            if let Some(commit_state) = commit_state.as_mut() {
+                reset_all_gucs_in_state(commit_state, &self.reset_datetime_config);
+            }
+            self.install_guc_state(effective_state);
+            if let Some(commit_state) = commit_state
+                && let Some(txn) = self.active_txn.as_mut()
+            {
+                txn.guc_commit_state = commit_state;
+            }
             db.install_row_security_enabled(self.client_id, true);
             db.install_session_replication_role(self.client_id, self.session_replication_role());
             db.plan_cache.invalidate_all();
         }
         Ok(StatementResult::AffectedRows(0))
-    }
-
-    fn reset_guc(&mut self, normalized: &str) {
-        match normalized {
-            "datestyle" => self.guc_reset_datestyle(),
-            "intervalstyle" => self.guc_reset_intervalstyle(),
-            "timezone" => self.guc_reset_timezone(),
-            "max_stack_depth" => self.guc_reset_max_stack_depth(),
-            "xmlbinary" => self.datetime_config.xml.binary = Default::default(),
-            "xmloption" => self.datetime_config.xml.option = Default::default(),
-            "stats_fetch_consistency" => self
-                .stats_state
-                .write()
-                .set_fetch_consistency(StatsFetchConsistency::Cache),
-            "track_functions" => self
-                .stats_state
-                .write()
-                .set_track_functions(TrackFunctionsSetting::None),
-            _ => {}
-        }
-        self.gucs.remove(normalized);
     }
 
     fn after_guc_change(&self, db: &Database, normalized: &str) {
@@ -8370,7 +8538,7 @@ impl Session {
                 actual: stmt.name.clone(),
             }));
         }
-        if !is_postgres_guc(&name) {
+        if !is_postgres_guc(&name) && !self.gucs.contains_key(&name) {
             return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
                 name,
             )));
@@ -8435,7 +8603,10 @@ impl Session {
             ),
             _ => (
                 stmt.name.clone(),
-                self.gucs.get(&name).cloned().unwrap_or_else(fallback_value),
+                format_guc_show_value(
+                    &name,
+                    self.gucs.get(&name).cloned().unwrap_or_else(fallback_value),
+                ),
             ),
         };
 
@@ -8446,6 +8617,77 @@ impl Session {
             column_names: vec![column_name],
             rows: vec![vec![Value::Text(value.into())]],
         })
+    }
+
+    fn apply_load(
+        &mut self,
+        stmt: &crate::backend::parser::LoadStatement,
+    ) -> Result<StatementResult, ExecError> {
+        if stmt.filename.eq_ignore_ascii_case("plpgsql") {
+            let removed = self
+                .gucs
+                .keys()
+                .filter(|name| name.starts_with("plpgsql.") && !is_postgres_guc(name))
+                .cloned()
+                .collect::<Vec<_>>();
+            for name in &removed {
+                self.gucs.remove(name);
+                if let Some(txn) = self.active_txn.as_mut() {
+                    txn.guc_commit_state.gucs.remove(name);
+                }
+                crate::backend::utils::misc::notices::push_backend_notice(
+                    "WARNING",
+                    "01000",
+                    format!("invalid configuration parameter name \"{name}\", removing it"),
+                    Some("\"plpgsql\" is now a reserved prefix.".into()),
+                    None,
+                );
+            }
+            self.plpgsql_loaded = true;
+        }
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn apply_discard(
+        &mut self,
+        db: &Database,
+        target: DiscardTarget,
+    ) -> Result<StatementResult, ExecError> {
+        if self.active_txn.is_some() {
+            let stmt = match target {
+                DiscardTarget::All => "DISCARD ALL",
+                DiscardTarget::Temp => "DISCARD TEMP",
+            };
+            return Err(ExecError::Parse(ParseError::ActiveSqlTransaction(stmt)));
+        }
+
+        match target {
+            DiscardTarget::Temp => {
+                db.cleanup_client_temp_relations(self.client_id);
+            }
+            DiscardTarget::All => {
+                self.close_all_cursors();
+                db.cleanup_client_temp_relations(self.client_id);
+                db.async_notify_runtime.disconnect(self.client_id);
+                db.advisory_locks.unlock_all_session(self.client_id);
+                db.row_locks.unlock_all_session(self.client_id);
+
+                let mut state = self.capture_guc_state();
+                reset_all_gucs_in_state(&mut state, &self.reset_datetime_config);
+                self.install_guc_state(state);
+                db.install_row_security_enabled(self.client_id, true);
+                db.install_session_replication_role(
+                    self.client_id,
+                    self.session_replication_role(),
+                );
+                db.plan_cache.invalidate_all();
+
+                self.auth.reset_session_authorization();
+                db.install_auth_state(self.client_id, self.auth.clone());
+            }
+        }
+
+        Ok(StatementResult::AffectedRows(0))
     }
 
     fn apply_checkpoint(&mut self, db: &Database) -> Result<StatementResult, ExecError> {
@@ -8498,163 +8740,14 @@ impl Session {
     }
 
     fn apply_guc_value(&mut self, name: &str, value: &str) -> Result<(), ExecError> {
-        let normalized = normalize_guc_name(name);
-        if !is_postgres_guc(&normalized) {
-            return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
-                normalized,
-            )));
+        let mut state = self.capture_guc_state();
+        let normalized = apply_guc_value_to_state(&mut state, name, value)?;
+        if normalized == "transaction_isolation" {
+            let level = crate::backend::parser::TransactionIsolationLevel::parse(value)
+                .ok_or_else(|| ExecError::Parse(ParseError::UnrecognizedParameter(value.into())))?;
+            self.set_active_transaction_isolation(level)?;
         }
-        if is_checkpoint_guc(&normalized) || is_autovacuum_guc(&normalized) {
-            return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(
-                normalized,
-            )));
-        }
-        let mut stored_value = value.to_string();
-        match normalized.as_str() {
-            "datestyle" => {
-                let Some((date_style_format, date_order)) = parse_datestyle_with_fallback(
-                    value,
-                    self.datetime_config.date_style_format,
-                    self.datetime_config.date_order,
-                ) else {
-                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
-                        value.to_string(),
-                    )));
-                };
-                self.datetime_config.date_style_format = date_style_format;
-                self.datetime_config.date_order = date_order;
-            }
-            "intervalstyle" => {
-                let Some(interval_style) = parse_intervalstyle(value) else {
-                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
-                        value.to_string(),
-                    )));
-                };
-                self.datetime_config.interval_style = interval_style;
-                stored_value = format_intervalstyle(interval_style).to_string();
-            }
-            "timezone" => {
-                let Some(time_zone) = parse_timezone(value) else {
-                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
-                        value.to_string(),
-                    )));
-                };
-                self.datetime_config.time_zone = time_zone;
-            }
-            "statement_timeout" => {
-                parse_statement_timeout(value)?;
-            }
-            "default_transaction_isolation" => {
-                let level = crate::backend::parser::TransactionIsolationLevel::parse(value)
-                    .ok_or_else(|| {
-                        ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
-                    })?;
-                stored_value = level.as_str().to_string();
-            }
-            "transaction_isolation" => {
-                let level = crate::backend::parser::TransactionIsolationLevel::parse(value)
-                    .ok_or_else(|| {
-                        ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
-                    })?;
-                self.set_active_transaction_isolation(level)?;
-                stored_value = level.as_str().to_string();
-            }
-            "xmlbinary" => {
-                let Some(binary) = parse_xmlbinary(value) else {
-                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
-                        value.to_string(),
-                    )));
-                };
-                self.datetime_config.xml.binary = binary;
-            }
-            "xmloption" => {
-                let Some(option) = parse_xmloption(value) else {
-                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
-                        value.to_string(),
-                    )));
-                };
-                self.datetime_config.xml.option = option;
-            }
-            "max_stack_depth" => {
-                self.datetime_config.max_stack_depth_kb = parse_max_stack_depth(value)?;
-            }
-            "stats_fetch_consistency" => {
-                let Some(fetch_consistency) = StatsFetchConsistency::parse(value) else {
-                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
-                        value.to_string(),
-                    )));
-                };
-                self.stats_state
-                    .write()
-                    .set_fetch_consistency(fetch_consistency);
-            }
-            "track_functions" => {
-                let Some(track_functions) = TrackFunctionsSetting::parse(value) else {
-                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
-                        value.to_string(),
-                    )));
-                };
-                self.stats_state
-                    .write()
-                    .set_track_functions(track_functions);
-            }
-            "row_security"
-            | "enable_partitionwise_join"
-            | "enable_seqscan"
-            | "enable_indexscan"
-            | "enable_indexonlyscan"
-            | "enable_bitmapscan"
-            | "enable_hashagg"
-            | "enable_sort" => {
-                parse_bool_guc(value).ok_or_else(|| {
-                    ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
-                })?;
-            }
-            "session_replication_role" => {
-                if !matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "origin" | "replica" | "local"
-                ) {
-                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
-                        value.to_string(),
-                    )));
-                }
-                stored_value = value.to_ascii_lowercase();
-            }
-            "default_toast_compression" => {
-                stored_value = parse_default_toast_compression_guc_value(value)?.to_string();
-            }
-            "plpgsql.check_asserts" | "plpgsql.print_strict_params" => {
-                let bool_value = parse_bool_guc(value).ok_or_else(|| {
-                    ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
-                })?;
-                stored_value = if bool_value { "on" } else { "off" }.to_string();
-            }
-            "plpgsql.variable_conflict" => {
-                stored_value = match value.trim().to_ascii_lowercase().as_str() {
-                    "error" | "use_variable" | "use_column" => value.trim().to_ascii_lowercase(),
-                    _ => {
-                        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
-                            value.to_string(),
-                        )));
-                    }
-                };
-            }
-            "plpgsql.extra_warnings" | "plpgsql.extra_errors" => {
-                stored_value = parse_plpgsql_extra_checks(value)?;
-            }
-            "restrict_nonsystem_relation_kind" => {
-                let normalized_value = value.trim().trim_matches('\'').to_ascii_lowercase();
-                if !normalized_value.is_empty() && normalized_value != "view" {
-                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
-                        value.to_string(),
-                    )));
-                }
-                stored_value = normalized_value;
-            }
-            _ => {}
-        }
-        self.gucs.insert(normalized, stored_value);
+        self.install_guc_state(state);
         Ok(())
     }
 
@@ -10369,6 +10462,361 @@ fn copy_to_feature_error(message: &'static str) -> ExecError {
 fn copy_query_looks_like_select_into(sql: &str) -> bool {
     let lowered = sql.trim_start().to_ascii_lowercase();
     lowered.starts_with("select ") && lowered.contains(" into ")
+}
+
+fn apply_guc_value_to_state(
+    state: &mut GucState,
+    name: &str,
+    value: &str,
+) -> Result<String, ExecError> {
+    let normalized = normalize_guc_name(name);
+    let is_builtin = is_postgres_guc(&normalized);
+    if !is_builtin {
+        validate_custom_guc_for_set(&normalized, false)?;
+        state.gucs.insert(normalized.clone(), value.to_string());
+        return Ok(normalized);
+    }
+    if is_checkpoint_guc(&normalized) || is_autovacuum_guc(&normalized) {
+        return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(
+            normalized,
+        )));
+    }
+
+    let mut stored_value = value.to_string();
+    match normalized.as_str() {
+        "datestyle" => {
+            let Some((date_style_format, date_order)) = parse_datestyle_with_fallback(
+                value,
+                state.datetime_config.date_style_format,
+                state.datetime_config.date_order,
+            ) else {
+                return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                    value.to_string(),
+                )));
+            };
+            state.datetime_config.date_style_format = date_style_format;
+            state.datetime_config.date_order = date_order;
+        }
+        "intervalstyle" => {
+            let Some(interval_style) = parse_intervalstyle(value) else {
+                return Err(ExecError::DetailedError {
+                    message: format!("invalid value for parameter \"IntervalStyle\": \"{value}\""),
+                    detail: None,
+                    hint: Some(
+                        "Available values: postgres, postgres_verbose, sql_standard, iso_8601."
+                            .into(),
+                    ),
+                    sqlstate: "22023",
+                });
+            };
+            state.datetime_config.interval_style = interval_style;
+            stored_value = format_intervalstyle(interval_style).to_string();
+        }
+        "timezone" => {
+            let Some(time_zone) = parse_timezone(value) else {
+                return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                    value.to_string(),
+                )));
+            };
+            state.datetime_config.time_zone = time_zone;
+        }
+        "statement_timeout" => {
+            parse_statement_timeout(value)?;
+        }
+        "vacuum_cost_delay" => {
+            parse_vacuum_cost_delay_ms(value)?;
+        }
+        "seq_page_cost" => {
+            let parsed = value.parse::<f64>().map_err(|_| ExecError::DetailedError {
+                message: format!("invalid value for parameter \"seq_page_cost\": \"{value}\""),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            })?;
+            if !parsed.is_finite() {
+                return Err(ExecError::DetailedError {
+                    message: format!("invalid value for parameter \"seq_page_cost\": \"{value}\""),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22023",
+                });
+            }
+        }
+        "default_transaction_isolation" | "transaction_isolation" => {
+            let level = crate::backend::parser::TransactionIsolationLevel::parse(value)
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
+                })?;
+            stored_value = level.as_str().to_string();
+        }
+        "xmlbinary" => {
+            let Some(binary) = parse_xmlbinary(value) else {
+                return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                    value.to_string(),
+                )));
+            };
+            state.datetime_config.xml.binary = binary;
+        }
+        "xmloption" => {
+            let Some(option) = parse_xmloption(value) else {
+                return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                    value.to_string(),
+                )));
+            };
+            state.datetime_config.xml.option = option;
+        }
+        "max_stack_depth" => {
+            state.datetime_config.max_stack_depth_kb = parse_max_stack_depth(value)?;
+        }
+        "stats_fetch_consistency" => {
+            let Some(fetch_consistency) = StatsFetchConsistency::parse(value) else {
+                return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                    value.to_string(),
+                )));
+            };
+            state.stats_fetch_consistency = fetch_consistency;
+        }
+        "track_functions" => {
+            let Some(track_functions) = TrackFunctionsSetting::parse(value) else {
+                return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                    value.to_string(),
+                )));
+            };
+            state.track_functions = track_functions;
+        }
+        "row_security"
+        | "enable_partitionwise_join"
+        | "enable_seqscan"
+        | "enable_indexscan"
+        | "enable_indexonlyscan"
+        | "enable_bitmapscan"
+        | "enable_hashagg"
+        | "enable_sort" => {
+            parse_bool_guc(value).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
+            })?;
+        }
+        "session_replication_role" => {
+            if !matches!(
+                value.to_ascii_lowercase().as_str(),
+                "origin" | "replica" | "local"
+            ) {
+                return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                    value.to_string(),
+                )));
+            }
+            stored_value = value.to_ascii_lowercase();
+        }
+        "default_toast_compression" => {
+            stored_value = parse_default_toast_compression_guc_value(value)?.to_string();
+        }
+        "default_with_oids" => {
+            let bool_value = parse_bool_guc(value).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
+            })?;
+            if bool_value {
+                return Err(ExecError::Parse(
+                    ParseError::TablesDeclaredWithOidsNotSupported,
+                ));
+            }
+            stored_value = "off".to_string();
+        }
+        "plpgsql.check_asserts" | "plpgsql.print_strict_params" => {
+            let bool_value = parse_bool_guc(value).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
+            })?;
+            stored_value = if bool_value { "on" } else { "off" }.to_string();
+        }
+        "plpgsql.variable_conflict" => {
+            stored_value = match value.trim().to_ascii_lowercase().as_str() {
+                "error" | "use_variable" | "use_column" => value.trim().to_ascii_lowercase(),
+                _ => {
+                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                        value.to_string(),
+                    )));
+                }
+            };
+        }
+        "plpgsql.extra_warnings" | "plpgsql.extra_errors" => {
+            stored_value = parse_plpgsql_extra_checks(value)?;
+        }
+        "restrict_nonsystem_relation_kind" => {
+            let normalized_value = value.trim().trim_matches('\'').to_ascii_lowercase();
+            if !normalized_value.is_empty() && normalized_value != "view" {
+                return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                    value.to_string(),
+                )));
+            }
+            stored_value = normalized_value;
+        }
+        _ => {}
+    }
+    state.gucs.insert(normalized.clone(), stored_value);
+    Ok(normalized)
+}
+
+fn validate_custom_guc_for_set(normalized: &str, plpgsql_loaded: bool) -> Result<(), ExecError> {
+    if plpgsql_loaded && normalized.starts_with("plpgsql.") {
+        return Err(ExecError::DetailedError {
+            message: format!("invalid configuration parameter name \"{normalized}\""),
+            detail: Some("\"plpgsql\" is a reserved prefix.".into()),
+            hint: None,
+            sqlstate: "42602",
+        });
+    }
+    if !is_valid_custom_guc_name(normalized) {
+        return Err(ExecError::DetailedError {
+            message: format!("invalid configuration parameter name \"{normalized}\""),
+            detail: Some(
+                "Custom parameter names must be two or more simple identifiers separated by dots."
+                    .into(),
+            ),
+            hint: None,
+            sqlstate: "42602",
+        });
+    }
+    Ok(())
+}
+
+fn is_valid_custom_guc_name(normalized: &str) -> bool {
+    let mut parts = normalized.split('.');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    if !is_simple_guc_name_part(first) {
+        return false;
+    }
+    let mut count = 1usize;
+    for part in parts {
+        count += 1;
+        if !is_simple_guc_name_part(part) {
+            return false;
+        }
+    }
+    count >= 2
+}
+
+fn is_simple_guc_name_part(part: &str) -> bool {
+    let mut chars = part.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_lowercase()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_lowercase() || ch.is_ascii_digit())
+}
+
+fn parse_vacuum_cost_delay_ms(value: &str) -> Result<f64, ExecError> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("default") {
+        return Ok(0.0);
+    }
+    let split_at = trimmed
+        .find(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .unwrap_or(trimmed.len());
+    let (number, suffix) = trimmed.split_at(split_at);
+    let parsed = number
+        .parse::<f64>()
+        .map_err(|_| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string())))?;
+    if !parsed.is_finite() {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+    let ms = match suffix.trim().to_ascii_lowercase().as_str() {
+        "" | "ms" => parsed,
+        "s" => parsed * 1000.0,
+        "us" => parsed / 1000.0,
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                value.to_string(),
+            )));
+        }
+    };
+    if !(0.0..=100.0).contains(&ms) {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "{} ms is outside the valid range for parameter \"vacuum_cost_delay\" (0 ms .. 100 ms)",
+                format_guc_number(ms)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    Ok(ms)
+}
+
+fn format_vacuum_cost_delay(value: &str) -> String {
+    let Ok(ms) = parse_vacuum_cost_delay_ms(value) else {
+        return value.to_string();
+    };
+    if ms == 0.0 {
+        return "0".into();
+    }
+    if ms.fract() == 0.0 {
+        format!("{}ms", ms as i64)
+    } else {
+        format!("{}us", (ms * 1000.0).round() as i64)
+    }
+}
+
+fn format_guc_number(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_guc_show_value(name: &str, value: String) -> String {
+    match name {
+        "vacuum_cost_delay" => format_vacuum_cost_delay(&value),
+        _ => value,
+    }
+}
+
+fn reset_guc_in_state(
+    state: &mut GucState,
+    normalized: &str,
+    reset_datetime_config: &DateTimeConfig,
+) {
+    match normalized {
+        "datestyle" => {
+            state.datetime_config.date_style_format = reset_datetime_config.date_style_format;
+            state.datetime_config.date_order = reset_datetime_config.date_order;
+        }
+        "intervalstyle" => {
+            state.datetime_config.interval_style = parse_intervalstyle(default_intervalstyle())
+                .expect("default IntervalStyle must parse");
+        }
+        "timezone" => {
+            state.datetime_config.time_zone = reset_datetime_config.time_zone.clone();
+        }
+        "max_stack_depth" => {
+            state.datetime_config.max_stack_depth_kb = reset_datetime_config.max_stack_depth_kb;
+        }
+        "xmlbinary" => state.datetime_config.xml.binary = Default::default(),
+        "xmloption" => state.datetime_config.xml.option = Default::default(),
+        "stats_fetch_consistency" => state.stats_fetch_consistency = StatsFetchConsistency::Cache,
+        "track_functions" => state.track_functions = TrackFunctionsSetting::None,
+        _ => {}
+    }
+    state.gucs.remove(normalized);
+}
+
+fn reset_all_gucs_in_state(state: &mut GucState, reset_datetime_config: &DateTimeConfig) {
+    state.gucs.clear();
+    state.datetime_config.date_style_format = reset_datetime_config.date_style_format;
+    state.datetime_config.date_order = reset_datetime_config.date_order;
+    state.datetime_config.interval_style =
+        parse_intervalstyle(default_intervalstyle()).expect("default IntervalStyle must parse");
+    state.datetime_config.time_zone = reset_datetime_config.time_zone.clone();
+    state.datetime_config.max_stack_depth_kb = reset_datetime_config.max_stack_depth_kb;
+    state.datetime_config.xml = Default::default();
+    state.stats_fetch_consistency = StatsFetchConsistency::Cache;
+    state.track_functions = TrackFunctionsSetting::None;
 }
 
 fn parse_statement_timeout(value: &str) -> Result<Option<Duration>, ExecError> {

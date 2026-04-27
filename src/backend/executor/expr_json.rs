@@ -533,6 +533,7 @@ pub(crate) fn eval_json_record_set_returning_function(
 pub(crate) fn eval_json_builtin_function(
     func: BuiltinScalarFunction,
     values: &[Value],
+    result_type: Option<SqlType>,
     func_variadic: bool,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
     catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
@@ -555,6 +556,33 @@ pub(crate) fn eval_json_builtin_function(
                     datetime_config,
                 )?)))
             }
+            BuiltinScalarFunction::SqlJsonConstructor => {
+                eval_sql_json_constructor(values.first().unwrap_or(&Value::Null), result_type)
+            }
+            BuiltinScalarFunction::SqlJsonScalar => {
+                let value = values.first().cloned().unwrap_or(Value::Null);
+                let result = if matches!(value, Value::Null) {
+                    Value::Null
+                } else {
+                    Value::Json(CompactString::from_owned(value_to_json_text(
+                        &value,
+                        false,
+                        datetime_config,
+                        catalog,
+                    )))
+                };
+                coerce_sql_json_return_value(result, result_type)
+            }
+            BuiltinScalarFunction::SqlJsonSerialize => {
+                eval_sql_json_serialize(values.first().unwrap_or(&Value::Null), result_type)
+            }
+            BuiltinScalarFunction::SqlJsonObject => {
+                eval_sql_json_object(values, result_type, datetime_config, catalog)
+            }
+            BuiltinScalarFunction::SqlJsonArray => {
+                eval_sql_json_array(values, result_type, datetime_config, catalog)
+            }
+            BuiltinScalarFunction::SqlJsonIsJson => eval_sql_json_is_json(values),
             BuiltinScalarFunction::ArrayToJson => {
                 let value = values.first().cloned().unwrap_or(Value::Null);
                 let pretty = values
@@ -952,6 +980,12 @@ pub(crate) fn eval_json_builtin_function(
     match func {
         BuiltinScalarFunction::ToJson
         | BuiltinScalarFunction::ToJsonb
+        | BuiltinScalarFunction::SqlJsonConstructor
+        | BuiltinScalarFunction::SqlJsonScalar
+        | BuiltinScalarFunction::SqlJsonSerialize
+        | BuiltinScalarFunction::SqlJsonObject
+        | BuiltinScalarFunction::SqlJsonArray
+        | BuiltinScalarFunction::SqlJsonIsJson
         | BuiltinScalarFunction::ArrayToJson
         | BuiltinScalarFunction::RowToJson
         | BuiltinScalarFunction::JsonBuildArray
@@ -1573,6 +1607,233 @@ fn variadic_args(
     }
 }
 
+fn coerce_sql_json_return_value(
+    value: Value,
+    result_type: Option<SqlType>,
+) -> Result<Value, ExecError> {
+    let Some(result_type) = result_type else {
+        return Ok(value);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = match &value {
+        Value::Json(text) => text.to_string(),
+        Value::Jsonb(bytes) => render_jsonb_bytes(bytes)?,
+        Value::Text(text) => text.to_string(),
+        Value::TextRef(_, _) => value.as_text().unwrap().to_string(),
+        other => value_to_json_text(
+            other,
+            false,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            None,
+        ),
+    };
+    match result_type.kind {
+        SqlTypeKind::Json => Ok(Value::Json(CompactString::from_owned(text))),
+        SqlTypeKind::Jsonb => Ok(Value::Jsonb(parse_jsonb_text(&text)?)),
+        SqlTypeKind::Bytea => Ok(Value::Bytea(text.into_bytes())),
+        SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char => {
+            Ok(Value::Text(CompactString::from_owned(text)))
+        }
+        _ => Err(ExecError::DetailedError {
+            message: format!(
+                "cannot use type {} in RETURNING clause of SQL/JSON constructor",
+                format!("{:?}", result_type.kind).to_ascii_lowercase()
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        }),
+    }
+}
+
+fn eval_sql_json_constructor(
+    value: &Value,
+    result_type: Option<SqlType>,
+) -> Result<Value, ExecError> {
+    let result = match value {
+        Value::Null => Value::Null,
+        Value::Json(text) | Value::Text(text) | Value::JsonPath(text) | Value::Xml(text) => {
+            validate_json_text(text.as_str())?;
+            Value::Json(text.clone())
+        }
+        Value::TextRef(_, _) => {
+            let text = value.as_text().unwrap();
+            validate_json_text(text)?;
+            Value::Json(CompactString::new(text))
+        }
+        Value::Jsonb(bytes) => Value::Json(CompactString::from_owned(render_jsonb_bytes(bytes)?)),
+        Value::Bytea(bytes) => {
+            let text = String::from_utf8(bytes.clone()).map_err(|_| ExecError::DetailedError {
+                message: "invalid byte sequence for encoding \"UTF8\"".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22021",
+            })?;
+            validate_json_text(&text)?;
+            Value::Json(CompactString::from_owned(text))
+        }
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "JSON",
+                left: other.clone(),
+                right: Value::Json(CompactString::new("null")),
+            });
+        }
+    };
+    coerce_sql_json_return_value(result, result_type)
+}
+
+fn eval_sql_json_serialize(
+    value: &Value,
+    result_type: Option<SqlType>,
+) -> Result<Value, ExecError> {
+    let result = match value {
+        Value::Null => Value::Null,
+        Value::Json(text) | Value::Text(text) => {
+            validate_json_text(text.as_str())?;
+            Value::Text(text.clone())
+        }
+        Value::TextRef(_, _) => {
+            let text = value.as_text().unwrap();
+            validate_json_text(text)?;
+            Value::Text(CompactString::new(text))
+        }
+        Value::Jsonb(bytes) => Value::Text(CompactString::from_owned(render_jsonb_bytes(bytes)?)),
+        other => Value::Text(CompactString::from_owned(value_to_json_text(
+            other,
+            false,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            None,
+        ))),
+    };
+    coerce_sql_json_return_value(
+        result,
+        Some(result_type.unwrap_or(SqlType::new(SqlTypeKind::Text))),
+    )
+}
+
+fn eval_sql_json_object(
+    values: &[Value],
+    result_type: Option<SqlType>,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+) -> Result<Value, ExecError> {
+    let absent_on_null = matches!(values.first(), Some(Value::Bool(true)));
+    let unique_keys = matches!(values.get(1), Some(Value::Bool(true)));
+    let mut seen_keys = std::collections::HashSet::new();
+    let mut out = String::from("{");
+    let mut emitted = 0usize;
+    for pair in values.get(2..).unwrap_or(&[]).chunks(2) {
+        let key = pair.first().unwrap_or(&Value::Null);
+        if matches!(key, Value::Null) {
+            return Err(ExecError::DetailedError {
+                message: "null value not allowed for object key".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22004",
+            });
+        }
+        let key_text = json_object_key_text(key, "JSON_OBJECT")?;
+        if unique_keys && !seen_keys.insert(key_text.clone()) {
+            return Err(ExecError::DetailedError {
+                message: format!("duplicate JSON object key value: \"{key_text}\""),
+                detail: None,
+                hint: None,
+                sqlstate: "22030",
+            });
+        }
+        let value = pair.get(1).unwrap_or(&Value::Null);
+        if absent_on_null && matches!(value, Value::Null) {
+            continue;
+        }
+        if emitted > 0 {
+            out.push_str(", ");
+        }
+        emitted += 1;
+        out.push_str(&serde_json::to_string(&key_text).unwrap());
+        out.push_str(" : ");
+        out.push_str(&value_to_json_text(value, false, datetime_config, catalog));
+    }
+    out.push('}');
+    coerce_sql_json_return_value(Value::Json(CompactString::from_owned(out)), result_type)
+}
+
+fn eval_sql_json_array(
+    values: &[Value],
+    result_type: Option<SqlType>,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+) -> Result<Value, ExecError> {
+    let null_on_null = matches!(values.first(), Some(Value::Bool(true)));
+    let query_constructor = matches!(values.get(1), Some(Value::Bool(true)));
+    let mut out = String::from("[");
+    let mut emitted = 0usize;
+    let items = if query_constructor {
+        match values.get(2).unwrap_or(&Value::Null) {
+            Value::Array(items) => items.clone(),
+            Value::PgArray(array) => array.to_nested_values(),
+            Value::Null => Vec::new(),
+            other => vec![other.clone()],
+        }
+    } else {
+        values.get(2..).unwrap_or(&[]).to_vec()
+    };
+    for value in &items {
+        if !null_on_null && matches!(value, Value::Null) {
+            continue;
+        }
+        if emitted > 0 {
+            out.push_str(", ");
+        }
+        emitted += 1;
+        out.push_str(&value_to_json_text(value, false, datetime_config, catalog));
+    }
+    out.push(']');
+    coerce_sql_json_return_value(Value::Json(CompactString::from_owned(out)), result_type)
+}
+
+fn eval_sql_json_is_json(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Bool(false));
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let predicate_type = values
+        .get(1)
+        .and_then(Value::as_text)
+        .unwrap_or("value")
+        .to_ascii_lowercase();
+    let parsed = match value {
+        Value::Json(text) | Value::Text(text) | Value::JsonPath(text) => {
+            parse_json_text(text.as_str())
+        }
+        Value::Jsonb(bytes) => render_jsonb_bytes(bytes).and_then(|text| parse_json_text(&text)),
+        Value::TextRef(_, _) => parse_json_text(value.as_text().unwrap()),
+        Value::Bytea(bytes) => String::from_utf8(bytes.clone())
+            .map_err(|_| ExecError::DetailedError {
+                message: "invalid byte sequence for encoding \"UTF8\"".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22021",
+            })
+            .and_then(|text| parse_json_text(&text)),
+        _ => return Ok(Value::Bool(false)),
+    };
+    let Ok(json) = parsed else {
+        return Ok(Value::Bool(false));
+    };
+    let matches_type = match predicate_type.as_str() {
+        "scalar" => !matches!(json, SerdeJsonValue::Array(_) | SerdeJsonValue::Object(_)),
+        "array" => matches!(json, SerdeJsonValue::Array(_)),
+        "object" => matches!(json, SerdeJsonValue::Object(_)),
+        _ => true,
+    };
+    Ok(Value::Bool(matches_type))
+}
+
 fn render_json_builder_array(values: &[Value]) -> String {
     let mut out = String::from("[");
     for (idx, value) in values.iter().enumerate() {
@@ -1915,12 +2176,33 @@ fn array_values_for_json_object(value: &Value, op: &'static str) -> Result<Vec<V
 }
 
 fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecError> {
-    json_object_text_value(value, op)?.ok_or_else(|| ExecError::DetailedError {
-        message: "null value not allowed for object key".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "22004",
-    })
+    match value {
+        Value::Null => Err(ExecError::DetailedError {
+            message: "null value not allowed for object key".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22004",
+        }),
+        Value::JsonPath(_)
+        | Value::Xml(_)
+        | Value::Json(_)
+        | Value::Jsonb(_)
+        | Value::EnumOid(_)
+        | Value::Array(_)
+        | Value::PgArray(_)
+        | Value::Record(_) => Err(ExecError::DetailedError {
+            message: "key value must be scalar, not array, composite, or json".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        }),
+        _ => json_object_text_value(value, op)?.ok_or_else(|| ExecError::DetailedError {
+            message: "null value not allowed for object key".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22004",
+        }),
+    }
 }
 
 fn json_object_text_value(value: &Value, op: &'static str) -> Result<Option<String>, ExecError> {

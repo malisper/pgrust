@@ -1,11 +1,14 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, TransactionId};
 use crate::backend::commands::tablecmds::{execute_delete, execute_insert, execute_update};
+use crate::backend::executor::function_guc::{
+    apply_function_guc, parsed_proconfig, restore_function_gucs,
+};
 use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
     TupleSlot, Value, cast_value, cast_value_with_config,
@@ -14,6 +17,7 @@ use crate::backend::executor::{
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::libpq::pqformat::format_exec_error;
+use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::parser::{
     Catalog, CatalogLookup, ParseError, SqlType, SqlTypeKind, Statement, TriggerLevel,
     TriggerTiming, bind_scalar_expr_in_named_slot_scope, parse_statement,
@@ -91,6 +95,8 @@ struct FunctionState {
     scalar_return: Option<Value>,
     trigger_return: Option<TriggerFunctionResult>,
     cursors: HashMap<String, FunctionCursor>,
+    local_guc_writes: HashSet<String>,
+    session_guc_writes: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -343,6 +349,8 @@ pub fn execute_user_defined_trigger_function(
         scalar_return: None,
         trigger_return: None,
         cursors: HashMap::new(),
+        local_guc_writes: HashSet::new(),
+        session_guc_writes: HashSet::new(),
     };
     state.values[compiled.found_slot] = Value::Bool(false);
     seed_trigger_state(bindings, call, &mut state);
@@ -748,20 +756,58 @@ fn execute_compiled_function(
         scalar_return: None,
         trigger_return: None,
         cursors: HashMap::new(),
+        local_guc_writes: HashSet::new(),
+        session_guc_writes: HashSet::new(),
     };
     state.values[compiled.found_slot] = Value::Bool(false);
     for (slot_def, arg_value) in compiled.parameter_slots.iter().zip(arg_values.iter()) {
         state.values[slot_def.slot] = cast_value(arg_value.clone(), slot_def.ty)?;
     }
 
-    let _ = exec_function_block(
+    let saved_gucs = ctx.gucs.clone();
+    let config_entries = parsed_proconfig(compiled.proconfig.as_deref());
+    let has_function_config = !config_entries.is_empty();
+    let mut function_config_names = HashSet::new();
+    for (name, value) in config_entries {
+        match apply_function_guc(&mut ctx.gucs, &name, Some(&value)) {
+            Ok(normalized) => {
+                function_config_names.insert(normalized);
+            }
+            Err(err) => {
+                ctx.gucs = saved_gucs;
+                return Err(err);
+            }
+        }
+    }
+
+    let block_result = exec_function_block(
         &compiled.body,
         compiled,
         expected_record_shape,
         &mut state,
         ctx,
     )
-    .map_err(|err| with_plpgsql_context_if_missing(err, compiled, "statement"))?;
+    .map_err(|err| with_plpgsql_context_if_missing(err, compiled, "statement"));
+
+    if let Err(err) = block_result {
+        ctx.gucs = saved_gucs;
+        return Err(err);
+    }
+
+    if has_function_config {
+        let restore_names = function_config_names
+            .into_iter()
+            .filter(|name| !state.session_guc_writes.contains(name))
+            .chain(
+                state
+                    .local_guc_writes
+                    .iter()
+                    .filter(|name| !state.session_guc_writes.contains(*name))
+                    .cloned(),
+            )
+            .collect::<HashSet<_>>();
+        restore_function_gucs(ctx, saved_gucs, restore_names);
+    }
 
     match &compiled.return_contract {
         FunctionReturnContract::Scalar {
@@ -972,6 +1018,9 @@ fn exec_do_stmt(
             into_targets,
             using_exprs,
         } => exec_do_dynamic_execute(sql_expr, into_targets, using_exprs, values),
+        CompiledStmt::SetGuc { .. } => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "SET is only supported inside CREATE FUNCTION".into(),
+        ))),
         CompiledStmt::Return { .. }
         | CompiledStmt::ReturnNext { .. }
         | CompiledStmt::ReturnTriggerRow { .. }
@@ -1093,9 +1142,9 @@ fn exec_function_block(
         };
     }
     for stmt in &block.statements {
-        match exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx).map_err(|err| {
-            with_plpgsql_context_if_missing(err, compiled, stmt_context_action(stmt))
-        }) {
+        match exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx)
+            .map_err(|err| with_plpgsql_stmt_context_if_missing(err, compiled, stmt))
+        {
             Ok(FunctionControl::Continue) => {}
             Ok(FunctionControl::Return) => {
                 finish_function_block_subxact(ctx, subxact, true)?;
@@ -1335,7 +1384,7 @@ fn exec_function_stmt(
             exec_function_return_query(plan, compiled, expected_record_shape, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
-        CompiledStmt::Perform { plan } => {
+        CompiledStmt::Perform { plan, .. } => {
             exec_function_perform(plan, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
@@ -1352,6 +1401,19 @@ fn exec_function_stmt(
                 state,
                 ctx,
             )?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::SetGuc {
+            name,
+            value,
+            is_local,
+        } => {
+            let normalized = apply_function_guc(&mut ctx.gucs, name, value.as_deref())?;
+            if *is_local {
+                state.local_guc_writes.insert(normalized);
+            } else {
+                state.session_guc_writes.insert(normalized);
+            }
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::GetDiagnostics { stacked, items } => {
@@ -1423,9 +1485,8 @@ fn exec_function_stmt_list(
 ) -> Result<FunctionControl, ExecError> {
     for stmt in statements {
         if matches!(
-            exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx).map_err(
-                |err| with_plpgsql_context_if_missing(err, compiled, stmt_context_action(stmt)),
-            )?,
+            exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx)
+                .map_err(|err| with_plpgsql_stmt_context_if_missing(err, compiled, stmt))?,
             FunctionControl::Return
         ) {
             return Ok(FunctionControl::Return);
@@ -3173,10 +3234,35 @@ fn function_runtime_error(
 }
 
 fn with_plpgsql_context(err: ExecError, compiled: &CompiledFunction, action: &str) -> ExecError {
+    with_plpgsql_context_at_line(err, compiled, 1, action)
+}
+
+fn with_plpgsql_context_at_line(
+    err: ExecError,
+    compiled: &CompiledFunction,
+    line: usize,
+    action: &str,
+) -> ExecError {
     ExecError::WithContext {
         source: Box::new(err),
-        context: format!("PL/pgSQL function {} line 1 at {action}", compiled.name),
+        context: format!(
+            "PL/pgSQL function {} line {line} at {action}",
+            compiled_context_name(compiled)
+        ),
     }
+}
+
+fn compiled_context_name(compiled: &CompiledFunction) -> String {
+    if compiled.name == "inline_code_block" {
+        return compiled.name.clone();
+    }
+    let args = compiled
+        .parameter_slots
+        .iter()
+        .map(|slot| sql_type_name(slot.ty))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{}({args})", compiled.name)
 }
 
 fn with_plpgsql_context_if_missing(
@@ -3191,13 +3277,39 @@ fn with_plpgsql_context_if_missing(
     }
 }
 
+fn with_plpgsql_stmt_context_if_missing(
+    err: ExecError,
+    compiled: &CompiledFunction,
+    stmt: &CompiledStmt,
+) -> ExecError {
+    if has_plpgsql_context_for(&err, &compiled.name) {
+        err
+    } else {
+        with_plpgsql_context_at_line(
+            err,
+            compiled,
+            stmt_context_line(stmt),
+            stmt_context_action(stmt),
+        )
+    }
+}
+
 fn has_plpgsql_context_for(err: &ExecError, function_name: &str) -> bool {
     match err {
         ExecError::WithContext { source, context } => {
-            context.starts_with(&format!("PL/pgSQL function {function_name} "))
+            let prefix = format!("PL/pgSQL function {function_name}");
+            context.starts_with(&format!("{prefix} "))
+                || context.starts_with(&format!("{prefix}("))
                 || has_plpgsql_context_for(source, function_name)
         }
         _ => false,
+    }
+}
+
+fn stmt_context_line(stmt: &CompiledStmt) -> usize {
+    match stmt {
+        CompiledStmt::Perform { line, .. } => *line,
+        _ => 1,
     }
 }
 
@@ -3220,6 +3332,7 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
         | CompiledStmt::ReturnTriggerNoValue => "RETURN",
         CompiledStmt::Perform { .. } => "PERFORM",
         CompiledStmt::DynamicExecute { .. } => "EXECUTE",
+        CompiledStmt::SetGuc { .. } => "SQL statement",
         CompiledStmt::GetDiagnostics { .. } => "GET DIAGNOSTICS",
         CompiledStmt::OpenCursor { .. } => "OPEN",
         CompiledStmt::FetchCursor { .. } => "FETCH",
@@ -3377,6 +3490,8 @@ mod tests {
             scalar_return: None,
             trigger_return: None,
             cursors: HashMap::new(),
+            local_guc_writes: HashSet::new(),
+            session_guc_writes: HashSet::new(),
         };
 
         seed_trigger_state(&bindings, &call, &mut state);
@@ -3438,6 +3553,8 @@ mod tests {
             scalar_return: None,
             trigger_return: None,
             cursors: HashMap::new(),
+            local_guc_writes: HashSet::new(),
+            session_guc_writes: HashSet::new(),
         };
 
         seed_trigger_state(&bindings, &call, &mut state);

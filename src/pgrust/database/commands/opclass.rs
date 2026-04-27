@@ -734,6 +734,7 @@ fn proc_row_by_signature(
             prosrc: function_name.into(),
             probin: None,
             prosqlbody: None,
+            proconfig: None,
         });
     }
     let proc_oid = resolve_proc_oid(catalog, schema_name, function_name, arg_type_oids)?;

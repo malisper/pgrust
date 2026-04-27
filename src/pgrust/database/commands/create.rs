@@ -6,7 +6,7 @@ use crate::backend::parser::analyze::{
 };
 use crate::backend::parser::{
     AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
-    AlterAggregateRenameStatement, CreateAggregateStatement, CreateFunctionArg,
+    AlterAggregateRenameStatement, AlterRoutineOption, CreateAggregateStatement, CreateFunctionArg,
     CreateFunctionReturnSpec, CreateFunctionStatement, CreateProcedureStatement,
     CreateTableAsQuery, FunctionArgMode, FunctionParallel, FunctionVolatility, OwnedSequenceSpec,
     PartitionBoundSpec, RawTypeName, RelOption, RoutineSignature, SqlType, SqlTypeKind, Statement,
@@ -17,6 +17,7 @@ use crate::backend::rewrite::render_view_query_sql;
 use crate::backend::utils::cache::syscache::{
     SysCacheId, SysCacheTuple, search_sys_cache_list1_db, search_sys_cache1_db,
 };
+use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::utils::misc::notices::{
     push_backend_notice, push_notice, push_notice_with_detail,
 };
@@ -80,6 +81,36 @@ fn validate_sql_procedure_body(
         }
     }
     Ok(())
+}
+
+fn proc_config_from_options(options: &[AlterRoutineOption]) -> Option<Vec<String>> {
+    let mut config = Vec::<String>::new();
+    for option in options {
+        match option {
+            AlterRoutineOption::SetConfig { name, value } => {
+                let normalized = normalize_guc_name(name);
+                config.retain(|entry| {
+                    entry
+                        .split_once('=')
+                        .map(|(entry_name, _)| !entry_name.eq_ignore_ascii_case(&normalized))
+                        .unwrap_or(true)
+                });
+                config.push(format!("{normalized}={value}"));
+            }
+            AlterRoutineOption::ResetConfig(name) => {
+                let normalized = normalize_guc_name(name);
+                config.retain(|entry| {
+                    entry
+                        .split_once('=')
+                        .map(|(entry_name, _)| !entry_name.eq_ignore_ascii_case(&normalized))
+                        .unwrap_or(true)
+                });
+            }
+            AlterRoutineOption::ResetAll => config.clear(),
+            _ => {}
+        }
+    }
+    (!config.is_empty()).then_some(config)
 }
 
 fn sql_body_contains_create_table(body: &str) -> bool {
@@ -2199,6 +2230,7 @@ impl Database {
             language: create_stmt.language.clone(),
             body: create_stmt.body.clone(),
             link_symbol: None,
+            config: Vec::new(),
         };
         self.execute_create_function_stmt_in_transaction_with_kind(
             client_id,
@@ -2560,6 +2592,7 @@ impl Database {
             prosrc,
             probin,
             prosqlbody: None,
+            proconfig: proc_config_from_options(&create_stmt.config),
         };
 
         let ctx = CatalogWriteContext {
@@ -2931,6 +2964,7 @@ impl Database {
             prosrc: aggregate_name.clone(),
             probin: None,
             prosqlbody: None,
+            proconfig: None,
         };
         let aggregate_row = PgAggregateRow {
             aggfnoid: 0,

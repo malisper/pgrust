@@ -26272,6 +26272,317 @@ fn disabled_hashagg_keeps_distinct_limit_sorted() {
 }
 
 #[test]
+fn set_local_outside_transaction_warns_and_does_not_apply() {
+    let base = temp_dir("set_local_outside_transaction_warns");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "set datestyle = 'ISO, YMD'").unwrap();
+    clear_backend_notices();
+
+    session.execute(&db, "set local datestyle = 'SQL'").unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show datestyle"),
+        vec![vec![Value::Text("ISO, YMD".into())]]
+    );
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].severity, "WARNING");
+    assert_eq!(
+        notices[0].message,
+        "SET LOCAL can only be used in transaction blocks"
+    );
+}
+
+#[test]
+fn transaction_set_gucs_commit_or_rollback_like_postgres() {
+    let base = temp_dir("transaction_set_gucs");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "set datestyle = 'ISO, YMD'").unwrap();
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "set datestyle = 'German'").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show datestyle"),
+        vec![vec![Value::Text("German, DMY".into())]]
+    );
+    session.execute(&db, "rollback").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show datestyle"),
+        vec![vec![Value::Text("ISO, YMD".into())]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "set datestyle = 'SQL'").unwrap();
+    session
+        .execute(&db, "set local datestyle = 'Postgres, MDY'")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show datestyle"),
+        vec![vec![Value::Text("Postgres, MDY".into())]]
+    );
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show datestyle"),
+        vec![vec![Value::Text("SQL, YMD".into())]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "set local datestyle = 'Postgres, MDY'")
+        .unwrap();
+    session
+        .execute(&db, "set datestyle = 'German, DMY'")
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show datestyle"),
+        vec![vec![Value::Text("German, DMY".into())]]
+    );
+}
+
+#[test]
+fn rollback_to_savepoint_restores_nested_guc_state() {
+    let base = temp_dir("rollback_to_savepoint_gucs");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "set datestyle = 'ISO, YMD'").unwrap();
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "set datestyle = 'MDY'").unwrap();
+    session.execute(&db, "savepoint first_sp").unwrap();
+    session
+        .execute(&db, "set datestyle = 'German, DMY'")
+        .unwrap();
+    session.execute(&db, "savepoint second_sp").unwrap();
+    session
+        .execute(&db, "set local datestyle = 'Postgres, MDY'")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show datestyle"),
+        vec![vec![Value::Text("Postgres, MDY".into())]]
+    );
+
+    session.execute(&db, "rollback to second_sp").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show datestyle"),
+        vec![vec![Value::Text("German, DMY".into())]]
+    );
+
+    session.execute(&db, "rollback to first_sp").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show datestyle"),
+        vec![vec![Value::Text("ISO, MDY".into())]]
+    );
+
+    session.execute(&db, "rollback").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show datestyle"),
+        vec![vec![Value::Text("ISO, YMD".into())]]
+    );
+}
+
+#[test]
+fn release_savepoint_removes_nested_guc_snapshot_without_rolling_back() {
+    let base = temp_dir("release_savepoint_gucs");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "set datestyle = 'ISO, YMD'").unwrap();
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "savepoint guc_sp").unwrap();
+    session
+        .execute(&db, "set datestyle = 'German, DMY'")
+        .unwrap();
+    session.execute(&db, "release savepoint guc_sp").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show datestyle"),
+        vec![vec![Value::Text("German, DMY".into())]]
+    );
+    match session.execute(&db, "rollback to guc_sp") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "savepoint \"guc_sp\" does not exist");
+        }
+        other => panic!("expected missing savepoint error, got {other:?}"),
+    }
+    session.execute(&db, "rollback").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show datestyle"),
+        vec![vec![Value::Text("ISO, YMD".into())]]
+    );
+}
+
+#[test]
+fn custom_gucs_can_be_set_reset_and_reject_invalid_names() {
+    let base = temp_dir("custom_gucs");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    match session.execute(&db, "show custom.my_guc") {
+        Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(name))) => {
+            assert_eq!(name, "custom.my_guc");
+        }
+        other => panic!("expected unknown custom GUC, got {other:?}"),
+    }
+
+    session.execute(&db, "set custom.my_guc = 42").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show custom.my_guc"),
+        vec![vec![Value::Text("42".into())]]
+    );
+    session
+        .execute(&db, "set custom.my.qualified.guc = 'foo'")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show custom.my.qualified.guc"),
+        vec![vec![Value::Text("foo".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select current_setting('custom.my.qualified.guc')",
+        ),
+        vec![vec![Value::Text("foo".into())]]
+    );
+
+    session.execute(&db, "reset custom.my_guc").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show custom.my_guc"),
+        vec![vec![Value::Text("".into())]]
+    );
+
+    match session.execute(&db, "set custom.\"bad-guc\" = 1") {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) => {
+            assert_eq!(
+                message,
+                "invalid configuration parameter name \"custom.bad-guc\""
+            );
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "Custom parameter names must be two or more simple identifiers separated by dots."
+                )
+            );
+        }
+        other => panic!("expected invalid custom GUC name, got {other:?}"),
+    }
+}
+
+#[test]
+fn load_plpgsql_reserves_prefix_and_removes_placeholder_custom_gucs() {
+    let base = temp_dir("load_plpgsql_reserves_prefix");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set plpgsql.extra_foo_warnings = true")
+        .unwrap();
+    clear_backend_notices();
+    session.execute(&db, "load 'plpgsql'").unwrap();
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].severity, "WARNING");
+    assert_eq!(
+        notices[0].message,
+        "invalid configuration parameter name \"plpgsql.extra_foo_warnings\", removing it"
+    );
+    assert_eq!(
+        notices[0].detail.as_deref(),
+        Some("\"plpgsql\" is now a reserved prefix.")
+    );
+
+    match session.execute(&db, "set plpgsql.extra_foo_warnings = true") {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) => {
+            assert_eq!(
+                message,
+                "invalid configuration parameter name \"plpgsql.extra_foo_warnings\""
+            );
+            assert_eq!(detail.as_deref(), Some("\"plpgsql\" is a reserved prefix."));
+        }
+        other => panic!("expected reserved plpgsql prefix error, got {other:?}"),
+    }
+}
+
+#[test]
+fn discard_temp_and_all_reset_session_owned_state() {
+    let base = temp_dir("discard_resets_session_state");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table reset_test (data text)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname from pg_class where relname = 'reset_test'",
+        ),
+        vec![vec![Value::Text("reset_test".into())]]
+    );
+    session.execute(&db, "discard temp").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname from pg_class where relname = 'reset_test'",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+
+    session.execute(&db, "listen foo_event").unwrap();
+    assert!(db.async_notify_runtime.is_listening(1, "foo_event"));
+    session.execute(&db, "set vacuum_cost_delay = 13").unwrap();
+    session
+        .execute(&db, "create temp table tmp_foo (data text)")
+        .unwrap();
+    session
+        .execute(&db, "create role regress_guc_user")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization regress_guc_user")
+        .unwrap();
+
+    session.execute(&db, "discard all").unwrap();
+    assert!(!db.async_notify_runtime.is_listening(1, "foo_event"));
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show vacuum_cost_delay"),
+        vec![vec![Value::Text("0".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname from pg_class where relname = 'tmp_foo'",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+    session.execute(&db, "drop role regress_guc_user").unwrap();
+}
+
+#[test]
+fn declare_holdable_cursor_works_outside_explicit_transaction() {
+    let base = temp_dir("holdable_cursor_outside_txn");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "declare foo cursor with hold for select 1")
+        .unwrap();
+    let rows = session.cursor_view_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "foo");
+    assert!(rows[0].is_holdable);
+}
+
+#[test]
 fn plpgsql_gucs_show_set_current_setting_and_drive_asserts() {
     let base = temp_dir("plpgsql_gucs");
     let db = Database::open(&base, 16).unwrap();

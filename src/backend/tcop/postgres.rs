@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::{self, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::OnceLock;
@@ -401,6 +403,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             detail,
             ..
         }) => {
+            if message.starts_with("invalid value for parameter \"") {
+                return None;
+            }
             if message == "cannot determine type of empty array" {
                 return find_case_insensitive_token_position(sql, "array[]");
             }
@@ -562,7 +567,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message.starts_with("invalid input syntax for type numeric time zone: ") {
                 return None;
             }
-            if message.starts_with("invalid value for parameter \"default_toast_compression\"") {
+            if message.starts_with("invalid value for parameter \"") {
                 return None;
             }
             if message.starts_with("time zone \"") && message.ends_with("\" not recognized") {
@@ -1827,8 +1832,8 @@ struct SessionActivityGuard<'a> {
 }
 
 impl<'a> SessionActivityGuard<'a> {
-    fn new(db: &'a Database, client_id: ClientId, query: &str) -> Self {
-        db.set_session_query_active(client_id, query);
+    fn new(db: &'a Database, client_id: ClientId, query: &str, query_id: Option<i64>) -> Self {
+        db.set_session_query_active(client_id, query, query_id);
         Self { db, client_id }
     }
 }
@@ -1837,6 +1842,13 @@ impl Drop for SessionActivityGuard<'_> {
     fn drop(&mut self) {
         self.db.set_session_query_idle(self.client_id);
     }
+}
+
+fn query_id_for_sql(sql: &str) -> i64 {
+    let mut hasher = DefaultHasher::new();
+    sql.hash(&mut hasher);
+    let hash = hasher.finish() & 0x7fff_ffff_ffff_ffff;
+    i64::try_from(hash).unwrap_or(i64::MAX)
 }
 
 fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
@@ -2750,6 +2762,272 @@ fn try_handle_pg_cursors_query(
     Ok(true)
 }
 
+// :HACK: These session-state views and utility statements live in the wire
+// connection today. Long-term, pg_prepared_statements/current_schemas and SQL
+// PREPARE should be modeled in normal catalog/executor paths.
+fn try_handle_prepare_statement(
+    stream: &mut impl Write,
+    state: &mut ConnectionState,
+    sql: &str,
+) -> io::Result<bool> {
+    let Some((name, prepared_sql)) = parse_sql_prepare_statement(sql) else {
+        return Ok(false);
+    };
+    state.prepared.insert(
+        name,
+        PreparedStatement {
+            sql: prepared_sql,
+            param_type_oids: Vec::new(),
+        },
+    );
+    send_command_complete(stream, "PREPARE")?;
+    Ok(true)
+}
+
+fn parse_sql_prepare_statement(sql: &str) -> Option<(String, String)> {
+    let trimmed = sql.trim();
+    let rest = strip_keyword_ci(trimmed, "prepare")?.trim_start();
+    let (name_token, after_name) = split_prepare_name_token(rest)?;
+    if name_token.is_empty() {
+        return None;
+    }
+    let name = unquote_identifier_token(name_token);
+    let lower_rest = after_name.to_ascii_lowercase();
+    let as_pos = lower_rest.find(" as ")?;
+    let prepared_sql = after_name[as_pos + 4..].trim().to_string();
+    if prepared_sql.is_empty() {
+        return None;
+    }
+    Some((name, prepared_sql))
+}
+
+fn split_prepare_name_token(rest: &str) -> Option<(&str, &str)> {
+    if rest.starts_with('"') {
+        let bytes = rest.as_bytes();
+        let mut index = 1;
+        while index < bytes.len() {
+            if bytes[index] == b'"' {
+                if bytes.get(index + 1) == Some(&b'"') {
+                    index += 2;
+                    continue;
+                }
+                return Some((&rest[..=index], &rest[index + 1..]));
+            }
+            index += 1;
+        }
+        return None;
+    }
+    let name_end = rest
+        .find(|ch: char| ch.is_ascii_whitespace() || ch == '(')
+        .unwrap_or(rest.len());
+    Some((&rest[..name_end], &rest[name_end..]))
+}
+
+fn strip_keyword_ci<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
+    let prefix = text.get(..keyword.len())?;
+    if !prefix.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let rest = text.get(keyword.len()..)?;
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(rest)
+}
+
+fn unquote_identifier_token(token: &str) -> String {
+    let token = token.trim();
+    if token.starts_with('"') && token.ends_with('"') && token.len() >= 2 {
+        token[1..token.len() - 1].replace("\"\"", "\"")
+    } else {
+        token.to_ascii_lowercase()
+    }
+}
+
+fn try_handle_pg_prepared_statements_query(
+    stream: &mut impl Write,
+    state: &ConnectionState,
+    sql: &str,
+) -> io::Result<bool> {
+    let normalized = sql.to_ascii_lowercase();
+    if !normalized.contains("from pg_prepared_statements")
+        && !normalized.contains("from pg_catalog.pg_prepared_statements")
+    {
+        return Ok(false);
+    }
+    let name_only = normalized.trim_start().starts_with("select name ");
+    let columns = if name_only {
+        vec![QueryColumn::text("name")]
+    } else {
+        vec![
+            QueryColumn::text("name"),
+            QueryColumn::text("statement"),
+            QueryColumn {
+                name: "from_sql".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
+            },
+        ]
+    };
+    let mut names = state.prepared.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+    let rows = names
+        .into_iter()
+        .map(|name| {
+            if name_only {
+                vec![Value::Text(name.into())]
+            } else {
+                let statement = state
+                    .prepared
+                    .get(&name)
+                    .map(|prepared| prepared.sql.clone())
+                    .unwrap_or_default();
+                vec![
+                    Value::Text(name.into()),
+                    Value::Text(statement.into()),
+                    Value::Bool(true),
+                ]
+            }
+        })
+        .collect::<Vec<_>>();
+    send_query_result(
+        stream,
+        &columns,
+        &rows,
+        &format!("SELECT {}", rows.len()),
+        FloatFormatOptions {
+            extra_float_digits: state.session.extra_float_digits(),
+            bytea_output: state.session.bytea_output(),
+            datetime_config: state.session.datetime_config().clone(),
+        },
+        None,
+        None,
+        None,
+        None,
+        None,
+    )?;
+    Ok(true)
+}
+
+fn try_handle_pg_listening_channels_query(
+    stream: &mut impl Write,
+    db: &Database,
+    state: &ConnectionState,
+    sql: &str,
+) -> io::Result<bool> {
+    let normalized = sql.to_ascii_lowercase();
+    if !normalized.contains("pg_listening_channels()") {
+        return Ok(false);
+    }
+    let columns = vec![QueryColumn::text("pg_listening_channels")];
+    let rows = db
+        .async_notify_runtime
+        .listening_channels(state.session.client_id)
+        .into_iter()
+        .map(|channel| vec![Value::Text(channel.into())])
+        .collect::<Vec<_>>();
+    send_query_result(
+        stream,
+        &columns,
+        &rows,
+        &format!("SELECT {}", rows.len()),
+        FloatFormatOptions {
+            extra_float_digits: state.session.extra_float_digits(),
+            bytea_output: state.session.bytea_output(),
+            datetime_config: state.session.datetime_config().clone(),
+        },
+        None,
+        None,
+        None,
+        None,
+        None,
+    )?;
+    Ok(true)
+}
+
+fn try_handle_current_schemas_query(
+    stream: &mut impl Write,
+    db: &Database,
+    state: &ConnectionState,
+    sql: &str,
+) -> io::Result<bool> {
+    let collapsed = sql
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    if !collapsed
+        .trim_start()
+        .starts_with("select current_schemas(false)")
+    {
+        return Ok(false);
+    }
+    let catalog = state.session.catalog_lookup(db);
+    let namespace_names = catalog
+        .namespace_rows()
+        .into_iter()
+        .map(|row| (row.nspname.to_ascii_lowercase(), row.nspname))
+        .collect::<HashMap<_, _>>();
+    let current_user_name = catalog
+        .authid_rows()
+        .into_iter()
+        .find(|row| row.oid == catalog.current_user_oid())
+        .map(|row| row.rolname);
+    let configured = state
+        .session
+        .configured_search_path()
+        .unwrap_or_else(|| vec!["public".into()]);
+    let mut schemas = Vec::new();
+    for schema in configured {
+        let mut normalized = schema.trim().to_ascii_lowercase();
+        if normalized == "$user" {
+            let Some(user_name) = current_user_name.as_ref() else {
+                continue;
+            };
+            normalized = user_name.to_ascii_lowercase();
+        }
+        if normalized.is_empty() || normalized == "pg_catalog" || normalized == "pg_temp" {
+            continue;
+        }
+        if let Some(existing) = namespace_names.get(&normalized)
+            && !schemas.iter().any(|schema| schema == existing)
+        {
+            schemas.push(existing.clone());
+        }
+    }
+    let value = format!("{{{}}}", schemas.join(","));
+    let columns = vec![QueryColumn::text("current_schemas")];
+    let rows = vec![vec![Value::Text(value.into())]];
+    send_query_result(
+        stream,
+        &columns,
+        &rows,
+        "SELECT 1",
+        FloatFormatOptions {
+            extra_float_digits: state.session.extra_float_digits(),
+            bytea_output: state.session.bytea_output(),
+            datetime_config: state.session.datetime_config().clone(),
+        },
+        None,
+        None,
+        None,
+        None,
+        None,
+    )?;
+    Ok(true)
+}
+
+fn sql_is_discard_all(sql: &str) -> bool {
+    sql.split_ascii_whitespace()
+        .map(|word| word.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .starts_with(&["discard".to_string(), "all".to_string()])
+}
+
 fn execute_query_statement(
     stream: &mut impl Write,
     db: &Database,
@@ -2762,7 +3040,13 @@ fn execute_query_statement(
     if sql.is_empty() {
         return Ok(QueryStatementFlow::Continue);
     }
-    let _activity_guard = SessionActivityGuard::new(db, state.session.client_id, sql);
+    let query_id =
+        if state.session.track_activities_enabled() && state.session.compute_query_id_enabled() {
+            Some(query_id_for_sql(sql))
+        } else {
+            None
+        };
+    let _activity_guard = SessionActivityGuard::new(db, state.session.client_id, sql, query_id);
     if try_handle_float_shell_ddl(stream, sql)? {
         return Ok(QueryStatementFlow::Continue);
     }
@@ -2786,6 +3070,9 @@ fn execute_query_statement(
         return Ok(QueryStatementFlow::Continue);
     }
     if try_handle_statistics_catalog_query(stream, db, state, &sql)? {
+        return Ok(QueryStatementFlow::Continue);
+    }
+    if try_handle_prepare_statement(stream, state, &sql)? {
         return Ok(QueryStatementFlow::Continue);
     }
 
@@ -2917,6 +3204,15 @@ fn execute_query_statement(
     if try_handle_pg_cursors_query(stream, state, sql.as_ref())? {
         return Ok(QueryStatementFlow::Continue);
     }
+    if try_handle_pg_prepared_statements_query(stream, state, sql.as_ref())? {
+        return Ok(QueryStatementFlow::Continue);
+    }
+    if try_handle_pg_listening_channels_query(stream, db, state, sql.as_ref())? {
+        return Ok(QueryStatementFlow::Continue);
+    }
+    if try_handle_current_schemas_query(stream, db, state, sql.as_ref())? {
+        return Ok(QueryStatementFlow::Continue);
+    }
     if let Ok(Statement::CopyTo(copy_stmt)) = parsed.as_ref() {
         return execute_copy_to_statement(stream, db, state, &sql, copy_stmt);
     }
@@ -2937,6 +3233,7 @@ fn execute_query_statement(
         clear_notices();
     }
 
+    let discard_all = sql_is_discard_all(sql.as_ref());
     match state.session.execute(db, &sql) {
         Ok(StatementResult::Query {
             mut columns, rows, ..
@@ -2970,6 +3267,10 @@ fn execute_query_statement(
             Ok(QueryStatementFlow::Continue)
         }
         Ok(StatementResult::AffectedRows(n)) => {
+            if discard_all {
+                state.prepared.clear();
+                state.portals.clear();
+            }
             flush_pending_backend_messages_with_sql(stream, db, &state.session, &sql)?;
             send_changed_parameter_status(stream, &sql, &state.session)?;
             send_command_complete(stream, &infer_command_tag(&sql, n))?;
@@ -11537,6 +11838,29 @@ ORDER BY 1, 2;";
                 "\n",
             ]
         );
+    }
+
+    #[test]
+    fn parse_sql_prepare_statement_extracts_name_and_query() {
+        assert_eq!(
+            parse_sql_prepare_statement("PREPARE foo AS SELECT 1"),
+            Some(("foo".into(), "SELECT 1".into()))
+        );
+        assert_eq!(
+            parse_sql_prepare_statement("prepare \"Mixed Name\"(int4) as select $1"),
+            Some(("Mixed Name".into(), "select $1".into()))
+        );
+        assert_eq!(
+            parse_sql_prepare_statement("prepared foo as select 1"),
+            None
+        );
+    }
+
+    #[test]
+    fn sql_is_discard_all_requires_all_target() {
+        assert!(sql_is_discard_all("DISCARD ALL"));
+        assert!(sql_is_discard_all(" discard   all "));
+        assert!(!sql_is_discard_all("DISCARD TEMP"));
     }
 
     #[test]

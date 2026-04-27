@@ -285,6 +285,7 @@ const PG_STAT_ACTIVITY_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("datname"),
     SyntheticSystemViewColumn::text("usename"),
     SyntheticSystemViewColumn::text("state"),
+    SyntheticSystemViewColumn::new("query_id", SqlType::new(SqlTypeKind::Int8)),
     SyntheticSystemViewColumn::text("query"),
     SyntheticSystemViewColumn::text("backend_type"),
 ];

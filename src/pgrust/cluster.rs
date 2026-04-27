@@ -91,6 +91,7 @@ pub(crate) struct SessionActivityEntry {
     pub database_oid: u32,
     pub state: SessionActivityState,
     pub query: String,
+    pub query_id: Option<i64>,
 }
 
 pub(crate) struct OpenDatabaseState {

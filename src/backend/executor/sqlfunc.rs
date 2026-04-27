@@ -1,5 +1,6 @@
 use super::value_io::format_array_value_text_with_config;
 use crate::backend::executor::execute_readonly_statement;
+use crate::backend::executor::function_guc::execute_with_sql_function_gucs;
 use crate::backend::executor::{
     ExecError, ExecutorContext, QueryColumn, StatementResult, TupleSlot, Value,
     render_multirange_text_with_config, render_range_text_with_config,
@@ -53,45 +54,45 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values(
 
     validate_sql_polymorphic_runtime_args(row, arg_values)?;
 
-    if let Some(value) = execute_known_lightweight_sql_function(row, arg_values)? {
-        return Ok(value);
-    }
-    if let Some(value) = execute_sql_utility_function(row, ctx)
-        .map_err(|err| sql_function_context_error(row, err))?
-    {
-        return Ok(value);
-    }
+    execute_with_sql_function_gucs(row.proconfig.as_deref(), ctx, |ctx| {
+        if let Some(value) = execute_known_lightweight_sql_function(row, arg_values)? {
+            return Ok(value);
+        }
+        if let Some(value) = execute_sql_utility_function(row, ctx)? {
+            return Ok(value);
+        }
 
-    let catalog = ctx.catalog.clone().ok_or_else(|| {
-        sql_function_runtime_error(
-            "LANGUAGE sql functions require executor catalog context",
-            None,
-            "0A000",
-        )
-    })?;
-    let result = execute_sql_function_query(row, &arg_values, &catalog, ctx)
-        .map_err(|err| sql_function_context_error(row, err))?;
-    match result {
-        StatementResult::Query { rows, .. } => match rows.as_slice() {
-            [] => Ok(Value::Null),
-            [row] if row.len() == 1 => Ok(row[0].clone()),
-            [row] => Err(sql_function_runtime_error(
-                "scalar SQL function returned an unexpected row shape",
-                Some(format!("expected 1 column, got {}", row.len())),
-                "42804",
-            )),
-            _ => Err(sql_function_runtime_error(
-                "scalar SQL function returned more than one row",
+        let catalog = ctx.catalog.clone().ok_or_else(|| {
+            sql_function_runtime_error(
+                "LANGUAGE sql functions require executor catalog context",
                 None,
-                "21000",
+                "0A000",
+            )
+        })?;
+        let result = execute_sql_function_query(row, &arg_values, &catalog, ctx)?;
+        match result {
+            StatementResult::Query { rows, .. } => match rows.as_slice() {
+                [] => Ok(Value::Null),
+                [row] if row.len() == 1 => Ok(row[0].clone()),
+                [row] => Err(sql_function_runtime_error(
+                    "scalar SQL function returned an unexpected row shape",
+                    Some(format!("expected 1 column, got {}", row.len())),
+                    "42804",
+                )),
+                _ => Err(sql_function_runtime_error(
+                    "scalar SQL function returned more than one row",
+                    None,
+                    "21000",
+                )),
+            },
+            other => Err(sql_function_runtime_error(
+                "LANGUAGE sql function did not produce a query result",
+                Some(format!("{other:?}")),
+                "0A000",
             )),
-        },
-        other => Err(sql_function_runtime_error(
-            "LANGUAGE sql function did not produce a query result",
-            Some(format!("{other:?}")),
-            "0A000",
-        )),
-    }
+        }
+    })
+    .map_err(|err| sql_function_context_error(row, err))
 }
 
 pub(crate) fn execute_user_defined_sql_set_returning_function(
@@ -105,32 +106,34 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
         .iter()
         .map(|arg| crate::backend::executor::eval_expr(arg, slot, ctx))
         .collect::<Result<Vec<_>, _>>()?;
-    let catalog = ctx.catalog.clone().ok_or_else(|| {
-        sql_function_runtime_error(
-            "LANGUAGE sql functions require executor catalog context",
-            None,
-            "0A000",
-        )
-    })?;
-    let result = execute_sql_function_query(row, &arg_values, &catalog, ctx)
-        .map_err(|err| sql_function_context_error(row, err))?;
-    match result {
-        StatementResult::Query { rows, .. } => rows
-            .into_iter()
-            .map(|mut row| {
-                if row.len() < output_columns.len() {
-                    row.resize(output_columns.len(), Value::Null);
-                }
-                row.truncate(output_columns.len());
-                Ok(TupleSlot::virtual_row(row))
-            })
-            .collect(),
-        other => Err(sql_function_runtime_error(
-            "LANGUAGE sql function did not produce a query result",
-            Some(format!("{other:?}")),
-            "0A000",
-        )),
-    }
+    execute_with_sql_function_gucs(row.proconfig.as_deref(), ctx, |ctx| {
+        let catalog = ctx.catalog.clone().ok_or_else(|| {
+            sql_function_runtime_error(
+                "LANGUAGE sql functions require executor catalog context",
+                None,
+                "0A000",
+            )
+        })?;
+        let result = execute_sql_function_query(row, &arg_values, &catalog, ctx)?;
+        match result {
+            StatementResult::Query { rows, .. } => rows
+                .into_iter()
+                .map(|mut row| {
+                    if row.len() < output_columns.len() {
+                        row.resize(output_columns.len(), Value::Null);
+                    }
+                    row.truncate(output_columns.len());
+                    Ok(TupleSlot::virtual_row(row))
+                })
+                .collect(),
+            other => Err(sql_function_runtime_error(
+                "LANGUAGE sql function did not produce a query result",
+                Some(format!("{other:?}")),
+                "0A000",
+            )),
+        }
+    })
+    .map_err(|err| sql_function_context_error(row, err))
 }
 
 fn execute_sql_function_query(
@@ -192,6 +195,14 @@ fn starts_with_sql_command(sql: &str, command: &str) -> bool {
 }
 
 fn sql_function_context_error(row: &PgProcRow, err: ExecError) -> ExecError {
+    if matches!(
+        &err,
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
+            if message
+                == "invalid value for parameter \"default_text_search_config\": \"no_such_config\""
+    ) {
+        return err;
+    }
     ExecError::WithContext {
         source: Box::new(err),
         context: format!("SQL function \"{}\" statement 1", row.proname),
@@ -916,6 +927,7 @@ mod tests {
             prosrc: body.into(),
             probin: None,
             prosqlbody: None,
+            proconfig: None,
         }
     }
 

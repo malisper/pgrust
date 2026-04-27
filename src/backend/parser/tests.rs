@@ -5207,6 +5207,7 @@ fn parse_create_function_statement_with_returns_table() {
             language: "plpgsql".into(),
             body: " begin return next; end ".into(),
             link_symbol: None,
+            config: Vec::new(),
         })
     );
 }
@@ -5250,6 +5251,7 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
             language: "plpgsql".into(),
             body: " begin return next; end ".into(),
             link_symbol: None,
+            config: Vec::new(),
         })
     );
 }
@@ -5606,6 +5608,7 @@ fn parse_create_function_statement_with_unnamed_args() {
             language: "plpgsql".into(),
             body: " begin return true; end ".into(),
             link_symbol: None,
+            config: Vec::new(),
         })
     );
 }
@@ -5649,6 +5652,7 @@ fn parse_create_function_statement_with_variadic_arg() {
             language: "sql".into(),
             body: " select $1[1] ".into(),
             link_symbol: None,
+            config: Vec::new(),
         })
     );
 }
@@ -5696,6 +5700,7 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
             language: "c".into(),
             body: "regress".into(),
             link_symbol: Some("binary_coercible".into()),
+            config: Vec::new(),
         })
     );
 }
@@ -5733,6 +5738,7 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
             language: "sql".into(),
             body: "select substr(encode(sha256($1), 'hex'), 1, 32)".into(),
             link_symbol: None,
+            config: Vec::new(),
         })
     );
 }
@@ -5770,6 +5776,7 @@ fn parse_create_function_statement_with_cost_clause() {
             language: "plpgsql".into(),
             body: " begin return true; end ".into(),
             link_symbol: None,
+            config: Vec::new(),
         })
     );
 }
@@ -15760,6 +15767,47 @@ fn parse_json_builder_and_object_agg_functions() {
 }
 
 #[test]
+fn parse_sql_json_special_syntax() {
+    let stmt = parse_select(
+        "select json('123'), json_scalar(123), json_serialize('{\"a\":1}' returning text), json_object('a' value 1), json_array(1, 2), '{\"a\":1}' is json object",
+    )
+    .unwrap();
+
+    let expected = [
+        crate::backend::parser::gram::SQL_JSON_FUNC,
+        crate::backend::parser::gram::SQL_JSON_SCALAR_FUNC,
+        crate::backend::parser::gram::SQL_JSON_SERIALIZE_FUNC,
+        crate::backend::parser::gram::SQL_JSON_OBJECT_FUNC,
+        crate::backend::parser::gram::SQL_JSON_ARRAY_FUNC,
+        crate::backend::parser::gram::SQL_JSON_IS_JSON_FUNC,
+    ];
+
+    assert_eq!(stmt.targets.len(), expected.len());
+    for (target, expected_name) in stmt.targets.iter().zip(expected) {
+        let expr = match &target.expr {
+            SqlExpr::Cast(expr, _)
+                if expected_name == crate::backend::parser::gram::SQL_JSON_SERIALIZE_FUNC =>
+            {
+                expr.as_ref()
+            }
+            expr => expr,
+        };
+        assert!(
+            matches!(
+                expr,
+                SqlExpr::FuncCall { name, .. } if name == expected_name
+            ),
+            "expected {expected_name}, got {:?}",
+            target.expr
+        );
+    }
+
+    assert!(parse_select("select json()").is_err());
+    assert!(parse_select("select json_scalar()").is_err());
+    assert!(parse_select("select json_serialize()").is_err());
+}
+
+#[test]
 fn parse_jsonb_operators_and_functions() {
     let stmt = parse_select(
             "select '{\"a\":1}'::jsonb @> '{\"a\":1}'::jsonb, '{\"a\":1}'::jsonb ? 'a', '{\"a\":[1,2]}'::jsonb -> 0, jsonb_typeof('{\"a\":1}'::jsonb), jsonb_build_object('a', 1)",
@@ -16156,6 +16204,16 @@ fn parse_exists_subquery_expression() {
 fn parse_in_subquery_expression() {
     assert!(parse_select("select id in (select owner_id from pets) from people").is_ok());
     assert!(parse_select("select id not in (select owner_id from pets) from people").is_ok());
+    let stmt = parse_select("select (id, name) in (values (1, 'alice')) from people").unwrap();
+    match &stmt.targets[0].expr {
+        SqlExpr::InSubquery { expr, subquery, .. } => {
+            assert!(matches!(expr.as_ref(), SqlExpr::Row(items) if items.len() == 2));
+            assert!(
+                matches!(subquery.from.as_ref(), Some(FromItem::Values { rows }) if rows[0].len() == 2)
+            );
+        }
+        other => panic!("expected row-valued IN subquery, got {other:?}"),
+    }
 }
 
 #[test]
