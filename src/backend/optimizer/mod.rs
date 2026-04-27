@@ -223,6 +223,7 @@ fn path_relids(path: &Path) -> Vec<usize> {
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. }
         | Path::Aggregate { input, .. }

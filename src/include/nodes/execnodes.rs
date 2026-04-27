@@ -637,6 +637,21 @@ pub struct OrderByState {
 }
 
 #[derive(Debug)]
+pub struct IncrementalSortState {
+    pub(crate) input: PlanState,
+    pub(crate) items: Vec<OrderByEntry>,
+    pub(crate) presorted_count: usize,
+    pub(crate) display_items: Vec<String>,
+    pub(crate) presorted_display_items: Vec<String>,
+    pub(crate) rows: Vec<MaterializedRow>,
+    pub(crate) next_index: usize,
+    pub(crate) lookahead: Option<(Vec<Value>, MaterializedRow)>,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
 pub struct LimitState {
     pub(crate) input: PlanState,
     pub(crate) limit: Option<usize>,

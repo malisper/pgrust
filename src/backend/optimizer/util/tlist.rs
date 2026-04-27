@@ -176,7 +176,8 @@ pub(super) fn annotate_targets_for_input(
     let input_target = path.semantic_output_target();
     let indexed_input = IndexedPathTarget::new(&input_target);
     let projects_project_set_output = matches!(path, Path::ProjectSet { .. })
-        || matches!(path, Path::OrderBy { input, .. } if matches!(input.as_ref(), Path::ProjectSet { .. }));
+        || matches!(path, Path::OrderBy { input, .. } if matches!(input.as_ref(), Path::ProjectSet { .. }))
+        || matches!(path, Path::IncrementalSort { input, .. } if matches!(input.as_ref(), Path::ProjectSet { .. }));
     targets
         .iter()
         .cloned()
@@ -324,9 +325,10 @@ fn aggregate_layout(path: &Path) -> Option<(&[Expr], &[Expr])> {
             passthrough_exprs,
             ..
         } => Some((group_by, passthrough_exprs)),
-        Path::Filter { input, .. } | Path::OrderBy { input, .. } | Path::Limit { input, .. } => {
-            aggregate_layout(input)
-        }
+        Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. } => aggregate_layout(input),
         _ => None,
     }
 }

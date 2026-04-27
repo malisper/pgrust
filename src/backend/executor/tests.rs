@@ -5005,9 +5005,7 @@ fn explain_indents_child_plan_nodes() {
                 "expected top-level sort line, got {rendered:?}"
             );
             assert!(
-                rendered
-                    .iter()
-                    .any(|line| line.trim() == "Sort Key: people_indent.name"),
+                rendered.iter().any(|line| line.trim() == "Sort Key: name"),
                 "expected stored sort key display, got {rendered:?}"
             );
             assert!(
@@ -5175,6 +5173,7 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
             | Plan::Unique { input, .. }
             | Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
+            | Plan::IncrementalSort { input, .. }
             | Plan::Projection { input, .. }
             | Plan::Aggregate { input, .. }
             | Plan::WindowAgg { input, .. }
