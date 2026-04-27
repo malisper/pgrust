@@ -2664,10 +2664,8 @@ fn resolve_foreign_key_columns(
                 actual: format!("duplicate column in constraint: {column}"),
             });
         }
-        let index = column_lookup
-            .get(&normalized)
-            .ok_or_else(|| ParseError::UnknownColumn(column.clone()))?;
-        resolved.push(columns[*index].name.clone());
+        let index = foreign_key_column_index(column_lookup, column)?;
+        resolved.push(columns[index].name.clone());
     }
     Ok(resolved)
 }
@@ -2689,16 +2687,53 @@ fn resolve_relation_foreign_key_columns(
                 actual: format!("duplicate column in constraint: {column}"),
             });
         }
-        let index = column_lookup
-            .get(&normalized)
-            .ok_or_else(|| ParseError::UnknownColumn(column.clone()))?;
-        let desc_column = &desc.columns[*index];
+        let index = foreign_key_column_index(column_lookup, column)?;
+        let desc_column = &desc.columns[index];
         if desc_column.dropped {
-            return Err(ParseError::UnknownColumn(column.clone()));
+            return Err(foreign_key_column_missing_error(column));
         }
         resolved.push(desc_column.name.clone());
     }
     Ok(resolved)
+}
+
+fn foreign_key_column_index(
+    column_lookup: &BTreeMap<String, usize>,
+    column: &str,
+) -> Result<usize, ParseError> {
+    let normalized = column.to_ascii_lowercase();
+    column_lookup
+        .get(&normalized)
+        .copied()
+        .ok_or_else(|| foreign_key_column_lookup_error(column))
+}
+
+fn foreign_key_column_lookup_error(column: &str) -> ParseError {
+    if is_system_column_name(column) {
+        return ParseError::DetailedError {
+            message: "system columns cannot be used in foreign keys".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        };
+    }
+    foreign_key_column_missing_error(column)
+}
+
+fn foreign_key_column_missing_error(column: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!("column \"{column}\" referenced in foreign key constraint does not exist"),
+        detail: None,
+        hint: None,
+        sqlstate: "42703",
+    }
+}
+
+fn is_system_column_name(column: &str) -> bool {
+    matches!(
+        column.to_ascii_lowercase().as_str(),
+        "tableoid" | "ctid" | "xmin" | "cmin" | "xmax" | "cmax" | "oid"
+    )
 }
 
 fn resolve_index_constraint_columns(

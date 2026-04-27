@@ -22102,6 +22102,58 @@ fn self_referential_foreign_key_can_reference_inserted_row() {
 }
 
 #[test]
+fn foreign_key_insert_requires_select_on_referenced_table() {
+    let base = temp_dir("foreign_key_referenced_table_select_acl");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role regress_foreign_key_user login")
+        .unwrap();
+    session
+        .execute(&db, "create table pktable (id int4 primary key)")
+        .unwrap();
+    session
+        .execute(&db, "create table fktable (id int4 references pktable)")
+        .unwrap();
+    session
+        .execute(&db, "insert into pktable values (1), (2)")
+        .unwrap();
+    session
+        .execute(&db, "grant insert on fktable to regress_foreign_key_user")
+        .unwrap();
+    session
+        .execute(&db, "grant select on pktable to regress_foreign_key_user")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization regress_foreign_key_user")
+        .unwrap();
+    session
+        .execute(&db, "insert into fktable values (1)")
+        .unwrap();
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(
+            &db,
+            "revoke select on pktable from regress_foreign_key_user",
+        )
+        .unwrap();
+    session
+        .execute(&db, "set session authorization regress_foreign_key_user")
+        .unwrap();
+    match session.execute(&db, "insert into fktable values (2)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for table pktable");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected referenced table privilege error, got {other:?}"),
+    }
+}
+
+#[test]
 fn generated_foreign_key_names_preserve_label_when_truncated_and_suffix_collisions() {
     let base = temp_dir("foreign_key_generated_name_truncation");
     let db = Database::open(&base, 16).unwrap();
@@ -22252,6 +22304,53 @@ fn pg_get_constraintdef_formats_foreign_key_actions_and_delete_columns() {
                         .into(),
                 ),
             ],
+        ]
+    );
+}
+
+#[test]
+fn pg_get_constraintdef_keeps_fk_actions_when_referenced_columns_are_omitted() {
+    let base = temp_dir("pg_get_constraintdef_fk_actions_omitted_refs");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pktable (tid int4, id int4, primary key (tid, id))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fktable (
+            tid int4,
+            id int4,
+            fk_id_del_set_null int4,
+            fk_id_del_set_default int4 default 0,
+            foreign key (tid, fk_id_del_set_null)
+                references pktable on delete set null (fk_id_del_set_null),
+            foreign key (tid, fk_id_del_set_default)
+                references pktable on delete set default (fk_id_del_set_default, fk_id_del_set_default)
+        )",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_constraintdef(oid)
+               from pg_constraint
+              where conrelid = 'fktable'::regclass::oid
+              order by oid",
+        ),
+        vec![
+            vec![Value::Text(
+                "FOREIGN KEY (tid, fk_id_del_set_null) REFERENCES pktable(tid, id) ON DELETE SET NULL (fk_id_del_set_null)"
+                    .into()
+            )],
+            vec![Value::Text(
+                "FOREIGN KEY (tid, fk_id_del_set_default) REFERENCES pktable(tid, id) ON DELETE SET DEFAULT (fk_id_del_set_default)"
+                    .into()
+            )],
         ]
     );
 }

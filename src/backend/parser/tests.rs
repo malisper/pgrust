@@ -12915,6 +12915,83 @@ fn lower_create_table_preserves_key_constraint_deferrability() {
 }
 
 #[test]
+fn lower_create_table_uses_foreign_key_column_errors() {
+    let catalog = catalog_with_people_primary_key();
+
+    let stmt = parse_statement(
+        "create table fktable (
+            ftest1 int4,
+            constraint fkfail1 foreign key (ftest2) references people
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let err = lower_create_table(&ct, &catalog).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ParseError::DetailedError {
+                message,
+                sqlstate,
+                ..
+            } if message == "column \"ftest2\" referenced in foreign key constraint does not exist"
+                && *sqlstate == "42703"
+        ),
+        "unexpected error: {err:?}"
+    );
+
+    let stmt = parse_statement(
+        "create table fktable (
+            ftest1 int4,
+            constraint fkfail1 foreign key (tableoid) references people(id)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let err = lower_create_table(&ct, &catalog).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ParseError::DetailedError {
+                message,
+                sqlstate,
+                ..
+            } if message == "system columns cannot be used in foreign keys"
+                && *sqlstate == "0A000"
+        ),
+        "unexpected error: {err:?}"
+    );
+
+    let stmt = parse_statement(
+        "create table fktable (
+            ftest1 int4,
+            constraint fkfail1 foreign key (ftest1) references people(tableoid)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let err = lower_create_table(&ct, &catalog).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ParseError::DetailedError {
+                message,
+                sqlstate,
+                ..
+            } if message == "system columns cannot be used in foreign keys"
+                && *sqlstate == "0A000"
+        ),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
 fn lower_create_table_rejects_invalid_foreign_key_delete_set_columns() {
     let catalog = catalog_with_people_id_name_unique_index();
 

@@ -28,6 +28,7 @@ use super::expr_multirange::{
     multirange_overlaps_multirange, multirange_overlaps_range, normalize_multirange,
 };
 use super::expr_range::{range_contains_range, range_overlap};
+use super::permissions::relation_has_table_privilege;
 use super::relation_values_visible_for_error_detail;
 use super::{ConstraintTiming, ExecError, ExecutorContext, compare_order_values};
 
@@ -239,6 +240,7 @@ fn enforce_outbound_foreign_key(
     ) {
         return Ok(());
     }
+    check_referenced_table_select_privilege(constraint, ctx)?;
     let exists = if constraint.period_column_index.is_some() {
         temporal_referenced_key_exists(constraint, values, ctx)?
     } else {
@@ -259,6 +261,35 @@ fn enforce_outbound_foreign_key(
             render_key_values(&key_values, ctx),
             constraint.referenced_relation_name
         )),
+    })
+}
+
+fn check_referenced_table_select_privilege(
+    constraint: &BoundForeignKeyConstraint,
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    let Some(catalog) = ctx.catalog.as_ref() else {
+        return Ok(());
+    };
+    let Some(class_row) = catalog.class_row_by_oid(constraint.referenced_relation_oid) else {
+        return Ok(());
+    };
+    let authid_rows = catalog.authid_rows();
+    let auth_members_rows = catalog.auth_members_rows();
+    if relation_has_table_privilege(
+        &class_row,
+        &authid_rows,
+        &auth_members_rows,
+        ctx.current_user_oid,
+        'r',
+    ) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("permission denied for table {}", class_row.relname),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
     })
 }
 
