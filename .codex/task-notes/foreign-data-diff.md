@@ -58,6 +58,8 @@ Runtime behavior:
   explicit role before checking the server
 - quotes `user` as a keyword through `quote_ident`, fixing psql FDW option
   rendering for user mappings
+- rejects `CREATE INDEX` on foreign tables with PostgreSQL's foreign-table
+  unsupported-operation error and detail
 
 Tests run:
 - `cargo fmt`
@@ -133,9 +135,13 @@ Tests run:
 - `scripts/cargo_isolated.sh check`
 - `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
 - `scripts/run_regression.sh --skip-build --port 55456 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-quote-user-option`
+- `scripts/cargo_isolated.sh test --lib --quiet create_index_on_foreign_table_reports_unsupported_operation`
+- `scripts/cargo_isolated.sh check`
+- `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
+- `scripts/run_regression.sh --skip-build --port 55471 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-foreign-index-error`
 
 Remaining:
-`foreign_data` still fails, but improved to 399/539 matching queries and 1436
+`foreign_data` still fails, but improved to 400/539 matching queries and 1432
 diff lines in the latest run. Biggest
 remaining groups:
 - owner dependency reporting beyond the handled FDW function dependencies
