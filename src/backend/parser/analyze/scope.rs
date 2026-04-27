@@ -3275,7 +3275,16 @@ fn bind_json_record_from_item(
             kind,
             args: bound_args,
             output_columns,
-            record_type: None,
+            record_type: match kind {
+                JsonRecordFunction::PopulateRecord
+                | JsonRecordFunction::PopulateRecordSet
+                | JsonRecordFunction::JsonbPopulateRecord
+                | JsonRecordFunction::JsonbPopulateRecordSet => actual_types.first().copied(),
+                JsonRecordFunction::ToRecord
+                | JsonRecordFunction::ToRecordSet
+                | JsonRecordFunction::JsonbToRecord
+                | JsonRecordFunction::JsonbToRecordSet => None,
+            },
             with_ordinality: false,
         }),
         scope,

@@ -1,7 +1,7 @@
 use super::exec_expr::eval_expr;
 use super::expr_casts::{
-    cast_text_value_with_config, cast_value_with_config,
-    cast_value_with_source_type_catalog_and_config, parse_text_array_literal_with_op,
+    cast_text_value_with_config, cast_value_with_source_type_catalog_and_config,
+    enforce_domain_constraints_for_value, parse_text_array_literal_with_op,
 };
 use super::node_types::*;
 use super::{ExecError, ExecutorContext};
@@ -1069,7 +1069,12 @@ fn eval_json_record_scalar_function(
         &record_columns_from_descriptor(&descriptor),
         ctx,
     )?;
-    Ok(Value::Record(RecordValue::from_descriptor(descriptor, row)))
+    let record = Value::Record(RecordValue::from_descriptor(descriptor, row));
+    if let Some(record_type) = result_type.or_else(|| args.first().and_then(expr_sql_type_hint)) {
+        json_record_enforce_domain(record, record_type, &JsonRecordPath::default(), ctx)
+    } else {
+        Ok(record)
+    }
 }
 
 fn eval_json_record_valid_function(
@@ -1159,6 +1164,10 @@ fn json_record_row_for_output(
     ctx: &ExecutorContext,
 ) -> Result<TupleSlot, ExecError> {
     if let Some(record_type) = record_type {
+        let return_as_record = output_columns.len() == 1
+            && output_columns[0].sql_type.kind == record_type.kind
+            && output_columns[0].sql_type.type_oid == record_type.type_oid
+            && output_columns[0].sql_type.typrelid == record_type.typrelid;
         let descriptor = if let Value::Record(record) = base_value {
             record.descriptor.clone()
         } else if let Some(descriptor) = record_descriptor_from_sql_type(record_type, ctx)? {
@@ -1173,9 +1182,20 @@ fn json_record_row_for_output(
             &record_columns_from_descriptor(&descriptor),
             ctx,
         )?;
-        Ok(TupleSlot::virtual_row(vec![Value::Record(
-            RecordValue::from_descriptor(descriptor, row),
-        )]))
+        let record = json_record_enforce_domain(
+            Value::Record(RecordValue::from_descriptor(descriptor, row)),
+            record_type,
+            &JsonRecordPath::default(),
+            ctx,
+        )?;
+        if return_as_record {
+            Ok(TupleSlot::virtual_row(vec![record]))
+        } else {
+            let Value::Record(record) = record else {
+                unreachable!("record enforcement preserves record values");
+            };
+            Ok(TupleSlot::virtual_row(record.fields))
+        }
     } else {
         let row = json_record_row_from_value(func_name, value, base_value, output_columns, ctx)?;
         Ok(TupleSlot::virtual_row(row))
@@ -1227,10 +1247,14 @@ fn json_record_row_from_value(
                     ctx,
                 )
             } else {
-                Ok(base_fields
-                    .and_then(|fields| fields.get(index))
-                    .cloned()
-                    .unwrap_or(Value::Null))
+                match base_fields.and_then(|fields| fields.get(index)).cloned() {
+                    Some(value) => Ok(value),
+                    None => json_record_missing_field_to_value(
+                        column.sql_type,
+                        &JsonRecordPath::default().with_key(&column.name),
+                        ctx,
+                    ),
+                }
             }
         })
         .collect()
@@ -1244,16 +1268,21 @@ fn json_record_field_to_value(
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
     if matches!(value, SerdeJsonValue::Null) {
-        return Ok(Value::Null);
+        return json_record_null_to_value(ty, path, ctx);
     }
     if ty.is_array {
         return json_record_array_to_value(value, ty, path, ctx);
     }
     match ty.kind {
-        SqlTypeKind::Json => Ok(json_value_to_value(value, false)),
-        SqlTypeKind::Jsonb => Ok(Value::Jsonb(encode_jsonb(&JsonbValue::from_serde(
-            value.clone(),
-        )?))),
+        SqlTypeKind::Json => {
+            json_record_enforce_domain(json_value_to_value(value, false), ty, path, ctx)
+        }
+        SqlTypeKind::Jsonb => json_record_enforce_domain(
+            Value::Jsonb(encode_jsonb(&JsonbValue::from_serde(value.clone())?)),
+            ty,
+            path,
+            ctx,
+        ),
         SqlTypeKind::Record | SqlTypeKind::Composite => {
             let Some(descriptor) = record_descriptor_from_sql_type(ty, ctx)? else {
                 return Err(json_record_row_type_error("json record expansion"));
@@ -1275,13 +1304,19 @@ fn json_record_field_to_value(
                         &record_columns_from_descriptor(&descriptor),
                         ctx,
                     )?;
-                    Ok(Value::Record(RecordValue::from_descriptor(
-                        descriptor, fields,
-                    )))
+                    json_record_enforce_domain(
+                        Value::Record(RecordValue::from_descriptor(descriptor, fields)),
+                        ty,
+                        path,
+                        ctx,
+                    )
                 }
-                SerdeJsonValue::String(text) => {
-                    parse_record_literal_to_value(text, descriptor, ctx)
-                }
+                SerdeJsonValue::String(text) => json_record_enforce_domain(
+                    parse_record_literal_to_value(text, descriptor, ctx)?,
+                    ty,
+                    path,
+                    ctx,
+                ),
                 _ => Err(ExecError::DetailedError {
                     message: "expected JSON object".into(),
                     detail: None,
@@ -1294,6 +1329,32 @@ fn json_record_field_to_value(
     }
 }
 
+fn json_record_missing_field_to_value(
+    ty: SqlType,
+    path: &JsonRecordPath,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    json_record_null_to_value(ty, path, ctx)
+}
+
+fn json_record_null_to_value(
+    ty: SqlType,
+    path: &JsonRecordPath,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    json_record_enforce_domain(Value::Null, ty, path, ctx)
+}
+
+fn json_record_enforce_domain(
+    value: Value,
+    ty: SqlType,
+    path: &JsonRecordPath,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    enforce_domain_constraints_for_value(value, ty, ctx.catalog.as_deref())
+        .map_err(|err| json_record_error_with_hint(err, path.hint()))
+}
+
 fn cast_json_scalar_value(
     value: &SerdeJsonValue,
     ty: SqlType,
@@ -1301,8 +1362,7 @@ fn cast_json_scalar_value(
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
     let text = json_record_scalar_text(value)?;
-    cast_text_value_with_config(&text, ty, false, &ctx.datetime_config)
-        .map_err(|err| json_record_error_with_hint(err, path.hint()))
+    json_record_cast_value(Value::Text(CompactString::from_owned(text)), ty, path, ctx)
 }
 
 fn json_record_array_to_value(
@@ -1312,16 +1372,16 @@ fn json_record_array_to_value(
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
     match value {
-        SerdeJsonValue::String(text) => cast_value_with_config(
+        SerdeJsonValue::String(text) => json_record_cast_value(
             Value::Text(CompactString::from_owned(text.clone())),
             ty,
-            &ctx.datetime_config,
-        )
-        .map_err(|err| json_record_error_with_hint(err, path.hint())),
+            path,
+            ctx,
+        ),
         SerdeJsonValue::Array(items) => {
             let mut saw_array = false;
             let mut saw_scalar = false;
-            let element_type = ty.element_type();
+            let element_type = json_record_array_element_type(ty, ctx);
             let nested = items
                 .iter()
                 .enumerate()
@@ -1360,10 +1420,45 @@ fn json_record_array_to_value(
                     sqlstate: "22P02",
                 }
             })?;
-            Ok(Value::PgArray(array))
+            json_record_enforce_domain(Value::PgArray(array), ty, path, ctx)
         }
         _ => Err(expected_json_array_error(path, path.hint())),
     }
+}
+
+fn json_record_cast_value(
+    value: Value,
+    ty: SqlType,
+    path: &JsonRecordPath,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    if !ty.is_array
+        && let Some(text) = value.as_text()
+    {
+        let casted = cast_text_value_with_config(text, ty, false, &ctx.datetime_config)
+            .map_err(|err| json_record_error_with_hint(err, path.hint()))?;
+        return json_record_enforce_domain(casted, ty, path, ctx);
+    }
+    cast_value_with_source_type_catalog_and_config(
+        value,
+        None,
+        ty,
+        ctx.catalog.as_deref(),
+        &ctx.datetime_config,
+    )
+    .map_err(|err| json_record_error_with_hint(err, path.hint()))
+}
+
+fn json_record_array_element_type(ty: SqlType, ctx: &ExecutorContext) -> SqlType {
+    if let Some(domain) = ctx
+        .catalog
+        .as_deref()
+        .and_then(|catalog| catalog.domain_by_type_oid(ty.type_oid))
+        && domain.sql_type.is_array
+    {
+        return domain.sql_type.element_type();
+    }
+    ty.element_type()
 }
 
 fn json_record_array_nested_value(
@@ -1483,10 +1578,13 @@ fn parse_record_literal_to_value(
         .iter()
         .zip(fields)
         .map(|(field, raw)| match raw {
-            None => Ok(Value::Null),
-            Some(raw) => {
-                cast_text_value_with_config(&raw, field.sql_type, false, &ctx.datetime_config)
-            }
+            None => json_record_null_to_value(field.sql_type, &JsonRecordPath::default(), ctx),
+            Some(raw) => json_record_cast_value(
+                Value::Text(CompactString::from_owned(raw)),
+                field.sql_type,
+                &JsonRecordPath::default(),
+                ctx,
+            ),
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Value::Record(RecordValue::from_descriptor(
@@ -1553,7 +1651,7 @@ fn json_record_error_with_hint(err: ExecError, hint: Option<String>) -> ExecErro
             detail,
             hint: None,
             sqlstate,
-        } => ExecError::DetailedError {
+        } if !matches!(sqlstate, "23502" | "23514") => ExecError::DetailedError {
             message,
             detail,
             hint,
