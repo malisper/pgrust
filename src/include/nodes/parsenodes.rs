@@ -1842,6 +1842,12 @@ pub enum WindowFrameExclusion {
     Ties,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowNullTreatment {
+    Respect,
+    Ignore,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawWindowFrameBound {
     UnboundedPreceding,
@@ -3546,6 +3552,7 @@ pub struct DropSequenceStatement {
 pub struct DropDomainStatement {
     pub if_exists: bool,
     pub domain_name: String,
+    pub domain_names: Vec<String>,
     pub cascade: bool,
 }
 
@@ -4687,6 +4694,7 @@ pub enum SqlExpr {
         distinct: bool,
         func_variadic: bool,
         filter: Option<Box<SqlExpr>>,
+        null_treatment: Option<WindowNullTreatment>,
         over: Option<RawWindowSpec>,
     },
     FieldSelect {

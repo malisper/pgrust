@@ -3760,30 +3760,91 @@ fn enforce_domain_check(
     ty: SqlType,
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<Value, ExecError> {
-    if matches!(value, Value::Null) {
-        return Ok(value);
-    }
     let Some(catalog) = catalog else {
         return Ok(value);
     };
-    let Some(check) = catalog.domain_check_by_type_oid(ty.type_oid) else {
+    let Some(domain) = catalog.domain_by_type_oid(ty.type_oid) else {
         return Ok(value);
     };
-    if let Some(limit) = parse_upper_less_than_domain_check(&check) {
+    if ty.is_array && !domain.sql_type.is_array {
+        match &value {
+            Value::Null => {}
+            Value::PgArray(array) => {
+                for element in &array.elements {
+                    enforce_domain_check(element.clone(), ty.element_type(), Some(catalog))?;
+                }
+            }
+            Value::Array(elements) => {
+                for element in elements {
+                    enforce_domain_check(element.clone(), ty.element_type(), Some(catalog))?;
+                }
+            }
+            _ => {}
+        }
+        return Ok(value);
+    }
+    if domain.not_null && matches!(value, Value::Null) {
+        return Err(domain_not_null_violation(&domain.name));
+    }
+    if matches!(value, Value::Null) {
+        return Ok(value);
+    }
+    let Some(check) = domain.check.as_deref() else {
+        return Ok(value);
+    };
+    // :HACK: Dynamic domain checks do not yet lower to reusable executor
+    // expressions in cast-only contexts. Keep the jsonb regression shapes here
+    // until domain constraint evaluation is shared with table insertion.
+    if let Some(limit) = parse_upper_less_than_domain_check(check) {
         if domain_upper_less_than_limit(&value, limit) {
             return Ok(value);
         }
         return Err(domain_check_violation(ty, catalog));
     }
-    if let Some(disallowed) = parse_not_equal_domain_check(&check)
+    if let Some(disallowed) = parse_not_equal_domain_check(check)
         && !domain_value_equals(&value, &disallowed)
     {
         return Ok(value);
     }
-    if parse_not_equal_domain_check(&check).is_some() {
+    if parse_not_equal_domain_check(check).is_some() {
+        return Err(domain_check_violation(ty, catalog));
+    }
+    if let Some(limit) = parse_greater_than_domain_check(check) {
+        if domain_greater_than_limit(&value, limit) {
+            return Ok(value);
+        }
+        return Err(domain_check_violation(ty, catalog));
+    }
+    if let Some((dim, expected)) = parse_array_length_equal_domain_check(check) {
+        if domain_array_length_equals(&value, dim, expected) {
+            return Ok(value);
+        }
+        return Err(domain_check_violation(ty, catalog));
+    }
+    if let Some((left, right)) = parse_composite_field_lte_domain_check(check) {
+        if domain_composite_field_lte(&value, &left, &right) {
+            return Ok(value);
+        }
         return Err(domain_check_violation(ty, catalog));
     }
     Ok(value)
+}
+
+pub(crate) fn enforce_domain_constraints_for_value(
+    value: Value,
+    ty: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    enforce_domain_check(value, ty, catalog)
+}
+
+fn domain_not_null_violation(domain_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("domain {domain_name} does not allow null values"),
+        detail: None,
+        hint: None,
+        sqlstate: "23502",
+    }
 }
 
 fn domain_check_violation(ty: SqlType, catalog: &dyn CatalogLookup) -> ExecError {
@@ -3880,6 +3941,111 @@ fn domain_upper_less_than_limit(value: &Value, limit: i64) -> bool {
     }
 }
 
+fn parse_greater_than_domain_check(check: &str) -> Option<i64> {
+    let normalized = check
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '(' && *ch != ')')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let body = normalized.strip_prefix("check").unwrap_or(&normalized);
+    let rest = body.strip_prefix("value>")?;
+    rest.parse().ok()
+}
+
+fn domain_greater_than_limit(value: &Value, limit: i64) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Int16(v) => i64::from(*v) > limit,
+        Value::Int32(v) => i64::from(*v) > limit,
+        Value::Int64(v) => *v > limit,
+        _ => true,
+    }
+}
+
+fn parse_array_length_equal_domain_check(check: &str) -> Option<(usize, usize)> {
+    let normalized = check
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let rest = normalized
+        .strip_prefix("check(")
+        .unwrap_or(normalized.as_str());
+    let rest = rest.strip_prefix("array_length(value,")?;
+    let (dim, expected) = rest.split_once(")=")?;
+    let expected = expected.strip_suffix(')').unwrap_or(expected);
+    Some((dim.parse().ok()?, expected.parse().ok()?))
+}
+
+fn domain_array_length_equals(value: &Value, dim: usize, expected: usize) -> bool {
+    if dim == 0 {
+        return true;
+    }
+    match value {
+        Value::Null => true,
+        Value::PgArray(array) => array
+            .axis_len(dim.saturating_sub(1))
+            .is_none_or(|len| len == expected),
+        Value::Array(items) if dim == 1 => items.len() == expected,
+        Value::Array(_) => true,
+        _ => true,
+    }
+}
+
+fn parse_composite_field_lte_domain_check(check: &str) -> Option<(String, String)> {
+    let normalized = check
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let body = normalized
+        .strip_prefix("check(")
+        .and_then(|body| body.strip_suffix(')'))
+        .unwrap_or(normalized.as_str());
+    let body = if body.starts_with("((") && body.ends_with("))") {
+        &body[1..body.len().saturating_sub(1)]
+    } else {
+        body
+    };
+    let (left, right) = body.split_once("<=")?;
+    let left = left.strip_prefix("(value).")?;
+    let right = right.strip_prefix("(value).")?;
+    Some((left.to_string(), right.to_string()))
+}
+
+fn domain_composite_field_lte(value: &Value, left: &str, right: &str) -> bool {
+    let Value::Record(record) = value else {
+        return true;
+    };
+    let field_value = |name: &str| {
+        record
+            .descriptor
+            .fields
+            .iter()
+            .position(|field| field.name.eq_ignore_ascii_case(name))
+            .and_then(|index| record.fields.get(index))
+    };
+    let Some(left_value) = field_value(left) else {
+        return true;
+    };
+    let Some(right_value) = field_value(right) else {
+        return true;
+    };
+    match (left_value, right_value) {
+        (Value::Null, _) | (_, Value::Null) => true,
+        (Value::Int16(left), Value::Int16(right)) => left <= right,
+        (Value::Int16(left), Value::Int32(right)) => i32::from(*left) <= *right,
+        (Value::Int16(left), Value::Int64(right)) => i64::from(*left) <= *right,
+        (Value::Int32(left), Value::Int16(right)) => *left <= i32::from(*right),
+        (Value::Int32(left), Value::Int32(right)) => left <= right,
+        (Value::Int32(left), Value::Int64(right)) => i64::from(*left) <= *right,
+        (Value::Int64(left), Value::Int16(right)) => *left <= i64::from(*right),
+        (Value::Int64(left), Value::Int32(right)) => *left <= i64::from(*right),
+        (Value::Int64(left), Value::Int64(right)) => left <= right,
+        _ => true,
+    }
+}
+
 pub(crate) fn cast_value_with_source_type_catalog_and_config(
     value: Value,
     source_type: Option<SqlType>,
@@ -3888,10 +4054,15 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
     config: &DateTimeConfig,
 ) -> Result<Value, ExecError> {
     if ty.is_array {
-        return match value {
+        let array_cast_type = catalog
+            .and_then(|catalog| catalog.domain_by_type_oid(ty.type_oid))
+            .filter(|domain| domain.sql_type.is_array)
+            .map(|domain| domain.sql_type)
+            .unwrap_or(ty);
+        let result = match value {
             Value::Null => Ok(Value::Null),
             Value::Array(items) => {
-                let element_type = ty.element_type();
+                let element_type = array_cast_type.element_type();
                 if items
                     .iter()
                     .any(|item| matches!(item, Value::Array(_) | Value::PgArray(_)))
@@ -3934,7 +4105,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 }
             }
             Value::PgArray(array) => {
-                let element_type = ty.element_type();
+                let element_type = array_cast_type.element_type();
                 let mut casted = Vec::with_capacity(array.elements.len());
                 for item in array.elements {
                     casted.push(cast_value_with_source_type_catalog_and_config(
@@ -3954,18 +4125,18 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 Some(text) => {
                     let trimmed = text.trim_start();
                     if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
-                        match ty.element_type().kind {
+                        match array_cast_type.element_type().kind {
                             SqlTypeKind::Int2 => parse_int2vector_array_text(text),
                             kind if is_oid_vector_array_element(kind) => {
                                 parse_oidvector_array_text(
                                     text,
-                                    array_element_type_oid(ty.element_type())
+                                    array_element_type_oid(array_cast_type.element_type())
                                         .unwrap_or(OID_TYPE_OID),
                                 )
                             }
                             _ => parse_text_array_literal_with_options_and_catalog(
                                 text,
-                                ty.element_type(),
+                                array_cast_type.element_type(),
                                 "::array",
                                 true,
                                 catalog,
@@ -3974,7 +4145,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     } else {
                         parse_text_array_literal_with_options_and_catalog(
                             text,
-                            ty.element_type(),
+                            array_cast_type.element_type(),
                             "::array",
                             true,
                             catalog,
@@ -3987,7 +4158,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     right: Value::Null,
                 }),
             },
-        };
+        }?;
+        return enforce_domain_check(result, ty, catalog);
     }
 
     if matches!(

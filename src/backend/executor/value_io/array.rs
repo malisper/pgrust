@@ -1401,17 +1401,7 @@ fn format_array_values_nested(
                 &crate::backend::executor::render_macaddr8_text(v),
             ),
             Value::Json(v) => {
-                out.push('"');
-                for ch in v.chars() {
-                    match ch {
-                        '"' | '\\' => {
-                            out.push('\\');
-                            out.push(ch);
-                        }
-                        _ => out.push(ch),
-                    }
-                }
-                out.push('"');
+                push_array_text_element(&mut out, v);
             }
             Value::JsonPath(v) => {
                 out.push('"');
@@ -1458,17 +1448,7 @@ fn format_array_values_nested(
             Value::PgLsn(v) => out.push_str(&crate::backend::executor::render_pg_lsn_text(*v)),
             Value::Jsonb(v) => {
                 let rendered = render_jsonb_bytes(v).unwrap_or_else(|_| "null".into());
-                out.push('"');
-                for ch in rendered.chars() {
-                    match ch {
-                        '"' | '\\' => {
-                            out.push('\\');
-                            out.push(ch);
-                        }
-                        _ => out.push(ch),
-                    }
-                }
-                out.push('"');
+                push_array_text_element(&mut out, &rendered);
             }
             Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
             Value::Point(_)

@@ -7191,6 +7191,16 @@ fn parse_field_select_uses_field_name_as_default_output_name() {
 }
 
 #[test]
+fn parse_field_star_select_from_record_expression() {
+    let stmt =
+        parse_select("select (jsonb_populate_record(null::record, '{\"a\":1}'::jsonb)).*").unwrap();
+    match &stmt.targets[0].expr {
+        SqlExpr::FieldSelect { field, .. } => assert_eq!(field, "*"),
+        other => panic!("expected field star select, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_varchar_type_cast_expression() {
     let stmt = parse_select("select 'abc'::varchar(2)").unwrap();
     assert_eq!(stmt.targets[0].output_name, "varchar");
@@ -13057,6 +13067,7 @@ fn parse_create_drop_and_comment_on_domain_statements() {
     assert!(drop_stmt.if_exists);
     assert!(drop_stmt.cascade);
     assert_eq!(drop_stmt.domain_name, "dom_int");
+    assert_eq!(drop_stmt.domain_names, vec!["dom_int"]);
 
     let Statement::CommentOnDomain(comment) =
         parse_statement("comment on domain dom_int is 'hello'").unwrap()
@@ -14093,6 +14104,7 @@ fn parse_hypothetical_within_group_call() {
             func_variadic: false,
             filter: None,
             over: None,
+            ..
         } if name == "rank"
             && args.args().len() == 1
             && order_by.is_empty()
@@ -15474,6 +15486,17 @@ fn build_plan_for_aliased_select_list_generate_series_uses_alias() {
 }
 
 #[test]
+fn build_plan_for_project_set_keeps_scalar_target_name() {
+    let stmt = parse_select(
+        "select i, jsonb_populate_recordset(row(i,50), '[{\"a\":2,\"b\":3}]') from (values (1),(2)) v(i)",
+    )
+    .unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+
+    assert_eq!(plan.column_names()[0], "i");
+}
+
+#[test]
 fn build_plan_for_table_aliased_generate_series_keeps_direct_function_scan() {
     let stmt = parse_select("select * from generate_series(1, 3) as g").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
@@ -15608,6 +15631,27 @@ fn parse_srf_with_column_definitions() {
             assert!(!preserve_source_names);
         }
         other => panic!("expected aliased function call, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_srf_column_definitions_without_alias() {
+    let stmt = parse_select(
+        "select * from jsonb_populate_record(null::record, '{\"x\":776}') as (x int, y int)",
+    )
+    .unwrap();
+    match &stmt.from {
+        Some(FromItem::Alias {
+            alias,
+            column_aliases,
+            ..
+        }) => {
+            assert_eq!(alias, "jsonb_populate_record");
+            assert!(
+                matches!(column_aliases, AliasColumnSpec::Definitions(defs) if defs.len() == 2)
+            );
+        }
+        other => panic!("expected aliased function column definitions, got {other:?}"),
     }
 }
 
@@ -15891,11 +15935,28 @@ fn analyze_jsonb_populate_recordset_rejects_mismatched_query_rowtype() {
         "select * from jsonb_populate_recordset(row(0::int), '[{\"a\":\"1\"}]') q (a text, b text)",
     )
     .unwrap();
-    let err = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[])
-        .unwrap_err()
-        .to_string();
+    let err =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap_err();
 
-    assert!(err.contains("function return row and query-specified return row do not match"));
+    match err {
+        ParseError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        } => {
+            assert_eq!(
+                message,
+                "function return row and query-specified return row do not match"
+            );
+            assert_eq!(
+                detail.as_deref(),
+                Some("Returned row contains 1 attribute, but query expects 2.")
+            );
+            assert_eq!(sqlstate, "42804");
+        }
+        other => panic!("expected detailed rowtype mismatch, got {other:?}"),
+    }
 }
 
 #[test]
@@ -16714,6 +16775,7 @@ fn parse_dml_returning_targets() {
                         func_variadic: false,
                         filter: None,
                         over: None,
+                        null_treatment: None,
                     },
                 },
             ]
@@ -16745,6 +16807,7 @@ fn parse_dml_returning_targets() {
                         func_variadic: false,
                         filter: None,
                         over: None,
+                        null_treatment: None,
                     },
                 },
             ]

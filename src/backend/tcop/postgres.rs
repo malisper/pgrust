@@ -11123,6 +11123,38 @@ ORDER BY 1, 2;";
     }
 
     #[test]
+    fn psql_get_viewdef_renders_window_ignore_nulls() {
+        let db = Database::open(temp_dir("describe_viewdef_window_ignore_nulls"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table planets (name text, orbit int4)")
+            .unwrap();
+        db.execute(
+            1,
+            "create view planets_view as
+             select name,
+                    lag(orbit) over w as lag,
+                    lag(orbit) respect nulls over w as lag_respect,
+                    lag(orbit) ignore nulls over w as lag_ignore
+             from planets
+             window w as (order by name)",
+        )
+        .unwrap();
+
+        let (_, rows) = execute_psql_describe_query(
+            &db,
+            &session,
+            "SELECT pg_catalog.pg_get_viewdef('planets_view'::pg_catalog.regclass, true);",
+        )
+        .unwrap();
+        let Value::Text(definition) = &rows[0][0] else {
+            panic!("expected text view definition, got {:?}", rows[0][0]);
+        };
+        assert!(definition.contains("lag(orbit) OVER"));
+        assert!(definition.contains("lag(orbit) IGNORE NULLS OVER"));
+        assert!(!definition.contains("RESPECT NULLS"));
+    }
+
+    #[test]
     fn psql_get_create_view_query_handles_sql_json_table_keywords() {
         let db = Database::open(temp_dir("describe_viewdef_json_table"), 16).unwrap();
         let session = Session::new(1);

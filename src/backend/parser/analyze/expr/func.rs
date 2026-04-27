@@ -3360,6 +3360,22 @@ pub(super) fn bind_scalar_function_call(
                 .collect();
             Ok(build_func(func_variadic, coerced))
         }
+        BuiltinScalarFunction::JsonPopulateRecord
+        | BuiltinScalarFunction::JsonPopulateRecordValid
+        | BuiltinScalarFunction::JsonToRecord
+        | BuiltinScalarFunction::JsonbPopulateRecord
+        | BuiltinScalarFunction::JsonbPopulateRecordValid
+        | BuiltinScalarFunction::JsonbToRecord => {
+            let coerced = bound_args
+                .into_iter()
+                .zip(arg_types)
+                .zip(declared_arg_types.iter().copied())
+                .map(|((arg, actual_type), declared_type)| {
+                    coerce_bound_expr(arg, actual_type, declared_type)
+                })
+                .collect();
+            Ok(build_func(func_variadic, coerced))
+        }
         BuiltinScalarFunction::JsonbArrayLength => {
             let target_type = declared_arg_types
                 .first()

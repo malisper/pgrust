@@ -3756,6 +3756,9 @@ fn set_append_references(
         child_roots.len(),
         children.len()
     );
+    let single_child_root_alias = (children.len() == 1)
+        .then(|| append_source_alias(ctx, source_id))
+        .flatten();
     Plan::Append {
         plan_info,
         source_id,
@@ -3769,9 +3772,59 @@ fn set_append_references(
                     .and_then(Option::as_ref)
                     .map(PlannerSubroot::as_ref)
                     .or(ctx.root);
-                recurse_with_root(ctx, child_root, child)
+                let mut child_plan = recurse_with_root(ctx, child_root, child);
+                if let Some(alias) = single_child_root_alias.as_deref() {
+                    apply_single_append_scan_alias(&mut child_plan, alias);
+                }
+                child_plan
             })
             .collect(),
+    }
+}
+
+fn append_source_alias(ctx: &SetRefsContext<'_>, source_id: usize) -> Option<String> {
+    let root = ctx.root?;
+    let rte = root.parse.rtable.get(source_id.checked_sub(1)?)?;
+    match &rte.kind {
+        RangeTblEntryKind::Relation { .. } => rte
+            .alias
+            .clone()
+            .or_else(|| (!rte.eref.aliasname.is_empty()).then(|| rte.eref.aliasname.clone())),
+        _ => None,
+    }
+}
+
+fn apply_single_append_scan_alias(plan: &mut Plan, alias: &str) {
+    match plan {
+        Plan::SeqScan { relation_name, .. }
+        | Plan::IndexOnlyScan { relation_name, .. }
+        | Plan::IndexScan { relation_name, .. }
+        | Plan::BitmapHeapScan { relation_name, .. } => {
+            *relation_name = relation_name_with_alias(relation_name, alias);
+        }
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. } => apply_single_append_scan_alias(input, alias),
+        _ => {}
+    }
+}
+
+fn relation_name_with_alias(relation_name: &str, alias: &str) -> String {
+    let base_name = relation_name
+        .split_once(' ')
+        .map(|(base_name, _)| base_name)
+        .unwrap_or(relation_name);
+    if base_name.eq_ignore_ascii_case(alias) {
+        base_name.to_string()
+    } else {
+        format!("{base_name} {alias}")
     }
 }
 

@@ -2021,9 +2021,11 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
             | AggFunc::CovarPop
             | AggFunc::CovarSamp
             | AggFunc::Corr => args.len() == 2,
-            AggFunc::StringAgg | AggFunc::JsonObjectAgg | AggFunc::JsonbObjectAgg => {
-                args.len() == 2
-            }
+            AggFunc::StringAgg
+            | AggFunc::JsonObjectAgg
+            | AggFunc::JsonbObjectAgg
+            | AggFunc::JsonbObjectAggUnique
+            | AggFunc::JsonbObjectAggUniqueStrict => args.len() == 2,
         });
     if valid {
         Ok(())
@@ -4572,6 +4574,8 @@ fn supports_fixed_aggregate_return_type(func: AggFunc) -> bool {
             | AggFunc::JsonbAgg
             | AggFunc::JsonObjectAgg
             | AggFunc::JsonbObjectAgg
+            | AggFunc::JsonbObjectAggUnique
+            | AggFunc::JsonbObjectAggUniqueStrict
             | AggFunc::RangeAgg
             | AggFunc::XmlAgg
     )
@@ -4668,6 +4672,8 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         SQL_JSON_OBJECTAGG_FUNC | "json_objectagg" => Some(AggFunc::JsonObjectAgg),
         "json_object_agg" => Some(AggFunc::JsonObjectAgg),
         "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
+        "jsonb_object_agg_unique" => Some(AggFunc::JsonbObjectAggUnique),
+        "jsonb_object_agg_unique_strict" => Some(AggFunc::JsonbObjectAggUniqueStrict),
         "range_agg" => Some(AggFunc::RangeAgg),
         "xmlagg" => Some(AggFunc::XmlAgg),
         "range_intersect_agg" => Some(AggFunc::RangeIntersectAgg),

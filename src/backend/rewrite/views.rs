@@ -1515,7 +1515,7 @@ fn render_scalar_array_rhs(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String 
 }
 
 fn render_window_function(func: &WindowFuncExpr, ctx: &ViewDeparseContext<'_>) -> String {
-    let call = match &func.kind {
+    let mut call = match &func.kind {
         WindowFuncKind::Aggregate(aggref) => render_aggregate(aggref, ctx),
         WindowFuncKind::Builtin(kind) => format!(
             "{}({})",
@@ -1527,6 +1527,9 @@ fn render_window_function(func: &WindowFuncExpr, ctx: &ViewDeparseContext<'_>) -
                 .join(", ")
         ),
     };
+    if func.ignore_nulls {
+        call.push_str(" IGNORE NULLS");
+    }
     let over = ctx
         .query
         .window_clauses

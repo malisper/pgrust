@@ -5426,6 +5426,20 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             2,
         ),
         aggregate_row(
+            6294,
+            "jsonb_object_agg_unique",
+            JSONB_TYPE_OID,
+            &oid_argtypes(&[ANYOID, ANYOID]),
+            2,
+        ),
+        aggregate_row(
+            6295,
+            "jsonb_object_agg_unique_strict",
+            JSONB_TYPE_OID,
+            &oid_argtypes(&[ANYOID, ANYOID]),
+            2,
+        ),
+        aggregate_row(
             3538,
             "string_agg",
             TEXT_TYPE_OID,
@@ -9706,6 +9720,8 @@ fn synthetic_aggregate_proc_oids() -> &'static Vec<(AggFunc, u32)> {
             AggFunc::JsonbAgg,
             AggFunc::JsonObjectAgg,
             AggFunc::JsonbObjectAgg,
+            AggFunc::JsonbObjectAggUnique,
+            AggFunc::JsonbObjectAggUniqueStrict,
             AggFunc::RangeAgg,
             AggFunc::RangeIntersectAgg,
         ]
@@ -9776,6 +9792,8 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         "jsonb_agg" => Some(AggFunc::JsonbAgg),
         "json_object_agg" => Some(AggFunc::JsonObjectAgg),
         "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
+        "jsonb_object_agg_unique" => Some(AggFunc::JsonbObjectAggUnique),
+        "jsonb_object_agg_unique_strict" => Some(AggFunc::JsonbObjectAggUniqueStrict),
         "range_agg" => Some(AggFunc::RangeAgg),
         "range_intersect_agg" => Some(AggFunc::RangeIntersectAgg),
         _ => None,

@@ -13506,22 +13506,31 @@ fn build_drop_domain_statement(sql: &str) -> Result<DropDomainStatement, ParseEr
         if_exists = true;
         index += 2;
     }
-    let Some(name) = tokens.get(index) else {
+    let mut domain_names = Vec::new();
+    let mut cascade = false;
+    let mut saw_behavior = false;
+    while let Some(token) = tokens.get(index) {
+        if token.eq_ignore_ascii_case("cascade") || token.eq_ignore_ascii_case("restrict") {
+            cascade = token.eq_ignore_ascii_case("cascade");
+            saw_behavior = true;
+            index += 1;
+            break;
+        }
+        for part in token.split(',') {
+            let name = part.trim();
+            if !name.is_empty() {
+                domain_names.push(name.to_string());
+            }
+        }
+        index += 1;
+    }
+    if domain_names.is_empty() {
         return Err(ParseError::UnexpectedToken {
             expected: "domain name",
             actual: sql.into(),
         });
-    };
-    let cascade = tokens
-        .get(index + 1)
-        .is_some_and(|tok| tok.eq_ignore_ascii_case("cascade"));
-    if tokens.len() > index + 1 && !cascade && !tokens[index + 1].eq_ignore_ascii_case("restrict") {
-        return Err(ParseError::UnexpectedToken {
-            expected: "CASCADE, RESTRICT, or end of statement",
-            actual: tokens[index + 1].into(),
-        });
     }
-    if tokens.len() > index + 2 {
+    if saw_behavior && tokens.len() > index {
         return Err(ParseError::UnexpectedToken {
             expected: "end of statement",
             actual: sql.into(),
@@ -13529,7 +13538,8 @@ fn build_drop_domain_statement(sql: &str) -> Result<DropDomainStatement, ParseEr
     }
     Ok(DropDomainStatement {
         if_exists,
-        domain_name: (*name).to_string(),
+        domain_name: domain_names[0].clone(),
+        domain_names,
         cascade,
     })
 }
@@ -16196,13 +16206,18 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     Rule::joined_from_item => source = Some(build_from_item(part)?),
                     Rule::relation_alias => {
                         let (parsed_alias, parsed_column_aliases) = build_relation_alias(part)?;
-                        alias = Some(parsed_alias);
+                        if parsed_alias.is_some() {
+                            alias = parsed_alias;
+                        }
                         column_aliases = parsed_column_aliases;
                     }
                     _ => {}
                 }
             }
             let item = source.ok_or(ParseError::UnexpectedEof)?;
+            if alias.is_none() && !column_aliases.is_empty() {
+                alias = default_alias_for_column_definition_source(&item);
+            }
             if let Some(alias) = alias {
                 Ok(FromItem::Alias {
                     source: Box::new(item),
@@ -16262,13 +16277,18 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     | Rule::from_primary => source = Some(build_from_item(part)?),
                     Rule::relation_alias => {
                         let (parsed_alias, parsed_column_aliases) = build_relation_alias(part)?;
-                        alias = Some(parsed_alias);
+                        if parsed_alias.is_some() {
+                            alias = parsed_alias;
+                        }
                         column_aliases = parsed_column_aliases;
                     }
                     _ => {}
                 }
             }
             let item = source.ok_or(ParseError::UnexpectedEof)?;
+            if alias.is_none() && !column_aliases.is_empty() {
+                alias = default_alias_for_column_definition_source(&item);
+            }
             if let Some(alias) = alias {
                 Ok(FromItem::Alias {
                     source: Box::new(item),
@@ -16711,7 +16731,17 @@ fn collect_identifiers(pair: Pair<'_, Rule>, out: &mut Vec<String>) {
     }
 }
 
-fn build_relation_alias(pair: Pair<'_, Rule>) -> Result<(String, AliasColumnSpec), ParseError> {
+fn default_alias_for_column_definition_source(item: &FromItem) -> Option<String> {
+    match item {
+        FromItem::FunctionCall { name, .. } => Some(name.clone()),
+        FromItem::Lateral(inner) => default_alias_for_column_definition_source(inner),
+        _ => None,
+    }
+}
+
+fn build_relation_alias(
+    pair: Pair<'_, Rule>,
+) -> Result<(Option<String>, AliasColumnSpec), ParseError> {
     let mut alias = None;
     let mut column_aliases = AliasColumnSpec::None;
     for part in pair.into_inner() {
@@ -16726,7 +16756,10 @@ fn build_relation_alias(pair: Pair<'_, Rule>) -> Result<(String, AliasColumnSpec
             _ => {}
         }
     }
-    Ok((alias.ok_or(ParseError::UnexpectedEof)?, column_aliases))
+    if alias.is_none() && column_aliases.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok((alias, column_aliases))
 }
 
 fn build_alias_column_spec(pair: Pair<'_, Rule>) -> Result<AliasColumnSpec, ParseError> {
@@ -19797,6 +19830,7 @@ fn simple_func_call(name: impl Into<String>, args: Vec<SqlFunctionArg>) -> SqlEx
         distinct: false,
         func_variadic: false,
         filter: None,
+        null_treatment: None,
         over: None,
     }
 }
@@ -20181,6 +20215,7 @@ fn build_json_arrayagg_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, Pars
         distinct: false,
         func_variadic: false,
         filter: filter.map(Box::new),
+        null_treatment: None,
         over,
     };
     Ok(cast_json_returning(expr, returning))
@@ -20242,6 +20277,7 @@ fn build_json_objectagg_constructor(pair: Pair<'_, Rule>) -> Result<SqlExpr, Par
         distinct: false,
         func_variadic: false,
         filter: filter.map(Box::new),
+        null_treatment: None,
         over,
     };
     Ok(cast_json_returning(expr, returning))
@@ -22246,8 +22282,11 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Rule::field_select_suffix => {
                         let field = suffix
                             .into_inner()
-                            .find(|part| part.as_rule() == Rule::identifier)
-                            .map(build_identifier)
+                            .find_map(|part| match part.as_rule() {
+                                Rule::identifier => Some(build_identifier(part)),
+                                Rule::star => Some("*".to_string()),
+                                _ => None,
+                            })
                             .ok_or(ParseError::UnexpectedEof)?;
                         expr = SqlExpr::FieldSelect {
                             expr: Box::new(expr),
@@ -23282,6 +23321,7 @@ fn build_func_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     let mut is_star = false;
     let mut distinct = false;
     let mut filter = None;
+    let mut null_treatment = None;
     let mut over = None;
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -23303,6 +23343,9 @@ fn build_func_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             }
             Rule::agg_filter_clause => {
                 filter = Some(build_agg_filter_clause(part)?);
+            }
+            Rule::window_null_treatment => {
+                null_treatment = Some(build_window_null_treatment(part));
             }
             Rule::over_clause => {
                 over = Some(build_over_clause(part)?);
@@ -23356,6 +23399,7 @@ fn build_func_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         && within_group.is_none()
         && !distinct
         && filter.is_none()
+        && null_treatment.is_none()
         && over.is_none()
     {
         return Ok(SqlExpr::Random);
@@ -23368,8 +23412,23 @@ fn build_func_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         distinct,
         func_variadic: !is_star && parsed_args.func_variadic,
         filter: filter.map(Box::new),
+        null_treatment,
         over,
     })
+}
+
+fn build_window_null_treatment(
+    pair: Pair<'_, Rule>,
+) -> crate::backend::parser::WindowNullTreatment {
+    let text = pair.as_str().trim_start();
+    if text
+        .get(.."ignore".len())
+        .is_some_and(|keyword| keyword.eq_ignore_ascii_case("ignore"))
+    {
+        crate::backend::parser::WindowNullTreatment::Ignore
+    } else {
+        crate::backend::parser::WindowNullTreatment::Respect
+    }
 }
 
 fn build_within_group_clause(pair: Pair<'_, Rule>) -> Result<Vec<OrderByItem>, ParseError> {

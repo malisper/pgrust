@@ -137,6 +137,8 @@ pub(crate) enum AccumState {
     JsonObjectAgg {
         pairs: Vec<(Value, Value)>,
         jsonb: bool,
+        unique_keys: bool,
+        strict_values: bool,
     },
     StringAgg {
         bytes: Vec<u8>,
@@ -330,10 +332,26 @@ impl AccumState {
             (AggFunc::JsonObjectAgg, _) => AccumState::JsonObjectAgg {
                 pairs: Vec::new(),
                 jsonb: false,
+                unique_keys: false,
+                strict_values: false,
             },
             (AggFunc::JsonbObjectAgg, _) => AccumState::JsonObjectAgg {
                 pairs: Vec::new(),
                 jsonb: true,
+                unique_keys: false,
+                strict_values: false,
+            },
+            (AggFunc::JsonbObjectAggUnique, _) => AccumState::JsonObjectAgg {
+                pairs: Vec::new(),
+                jsonb: true,
+                unique_keys: true,
+                strict_values: false,
+            },
+            (AggFunc::JsonbObjectAggUniqueStrict, _) => AccumState::JsonObjectAgg {
+                pairs: Vec::new(),
+                jsonb: true,
+                unique_keys: true,
+                strict_values: true,
             },
             (AggFunc::StringAgg, _) => AccumState::StringAgg {
                 bytes: Vec::new(),
@@ -587,8 +605,21 @@ impl AccumState {
                 }
                 Ok(())
             },
-            (AggFunc::JsonObjectAgg | AggFunc::JsonbObjectAgg, _, _) => |state, values| {
-                if let AccumState::JsonObjectAgg { pairs, .. } = state {
+            (
+                AggFunc::JsonObjectAgg
+                | AggFunc::JsonbObjectAgg
+                | AggFunc::JsonbObjectAggUnique
+                | AggFunc::JsonbObjectAggUniqueStrict,
+                _,
+                _,
+            ) => |state, values| {
+                if let AccumState::JsonObjectAgg {
+                    pairs,
+                    unique_keys,
+                    strict_values,
+                    ..
+                } = state
+                {
                     let key = values.first().unwrap_or(&Value::Null);
                     if matches!(key, Value::Null) {
                         return Err(ExecError::DetailedError {
@@ -599,6 +630,22 @@ impl AccumState {
                         });
                     }
                     let value = values.get(1).unwrap_or(&Value::Null);
+                    if *strict_values && matches!(value, Value::Null) {
+                        return Ok(());
+                    }
+                    let key_text = json_object_agg_key(key);
+                    if *unique_keys
+                        && pairs
+                            .iter()
+                            .any(|(existing_key, _)| json_object_agg_key(existing_key) == key_text)
+                    {
+                        return Err(ExecError::DetailedError {
+                            message: format!("duplicate JSON object key value: \"{key_text}\""),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "22030",
+                        });
+                    }
                     pairs.push((key.to_owned_value(), value.to_owned_value()));
                 }
                 Ok(())
@@ -895,7 +942,7 @@ impl AccumState {
                 }
             }
             AccumState::ArrayAgg { values, .. } => finalize_array_agg(values),
-            AccumState::JsonObjectAgg { pairs, jsonb } => {
+            AccumState::JsonObjectAgg { pairs, jsonb, .. } => {
                 if *jsonb {
                     let built = JsonbValue::Object(
                         pairs
@@ -1197,6 +1244,8 @@ fn finalize_regr_stats(
         | AggFunc::JsonbAgg
         | AggFunc::JsonObjectAgg
         | AggFunc::JsonbObjectAgg
+        | AggFunc::JsonbObjectAggUnique
+        | AggFunc::JsonbObjectAggUniqueStrict
         | AggFunc::RangeAgg
         | AggFunc::XmlAgg
         | AggFunc::RangeIntersectAgg => unreachable!("non-regression aggregate"),
