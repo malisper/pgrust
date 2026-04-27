@@ -13766,6 +13766,16 @@ fn jsonb_record_expansion_functions_work() {
             &base,
             &txns,
             INVALID_TRANSACTION_ID,
+            "select * from jsonb_populate_record(null::record, '{\"x\":776}') as (x int, y int)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(776), Value::Null]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
             "select * from jsonb_to_record('{\"a\":1,\"b\":\"foo\"}') as x(a int, b text)",
         )
         .unwrap(),
@@ -13802,6 +13812,33 @@ fn jsonb_record_expansion_functions_work() {
                 ("f2".into(), Value::Int32(3)),
             ]))],
         ],
+    );
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_populate_recordset(null::record, '[{\"x\":0,\"y\":1}]')",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "42804");
+            assert_eq!(
+                message,
+                "could not determine row type for result of jsonb_populate_recordset"
+            );
+        }
+        other => panic!("expected row type error, got {other:?}"),
+    }
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from jsonb_populate_recordset(null::record, '[]') as (x int, y int)",
+        )
+        .unwrap(),
+        Vec::<Vec<Value>>::new(),
     );
 }
 
@@ -13885,7 +13922,7 @@ fn jsonb_to_record_allows_json_array_elements_inside_json_array_column() {
             Value::Json("\"2\"".into()),
             Value::Null,
             Value::Json("[3]".into()),
-            Value::Json("{\"k\":\"v\"}".into()),
+            Value::Json("{\"k\": \"v\"}".into()),
         ]))]],
     );
 }
@@ -21288,6 +21325,40 @@ fn jsonb_table_functions_and_agg_work() {
         &base,
         &txns,
         INVALID_TRANSACTION_ID,
+        "select jsonb_each('{\"a\":{\"b\":\"c\",\"c\":\"b\",\"1\":\"first\"},\"b\":[1,2],\"c\":\"cc\",\"1\":\"first\",\"n\":null}'::jsonb) as q",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["q"]);
+            assert_eq!(rows.len(), 5);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_each_text('{\"a\":{\"b\":\"c\"},\"b\":[1,2],\"c\":\"cc\",\"1\":\"first\",\"n\":null}'::jsonb) as q",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["q"]);
+            assert_eq!(rows.len(), 5);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
         "select key, value from jsonb_each('{\"a\":1,\"b\":null}') order by key",
     )
     .unwrap()
@@ -21329,6 +21400,145 @@ fn jsonb_table_functions_and_agg_work() {
                     crate::backend::executor::jsonb::parse_jsonb_text("[1,2]").unwrap()
                 )]]
             );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonb_object_agg_unique_variants_work() {
+    let base = temp_dir("jsonb_object_agg_unique");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_object_agg_unique(i, null) from generate_series(1, 3) g(i)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text(
+                        "{\"1\":null,\"2\":null,\"3\":null}"
+                    )
+                    .unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_object_agg_unique_strict(i, null) from generate_series(1, 3) g(i)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text("{}").unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_object_agg_unique(i, null) over (order by i) from generate_series(1, 3) g(i)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"1\":null}").unwrap()
+                    )],
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text(
+                            "{\"1\":null,\"2\":null}"
+                        )
+                        .unwrap()
+                    )],
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text(
+                            "{\"1\":null,\"2\":null,\"3\":null}"
+                        )
+                        .unwrap()
+                    )],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_object_agg_unique_strict(i, null) over (order by i) from generate_series(1, 3) g(i)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{}").unwrap()
+                    )],
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{}").unwrap()
+                    )],
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{}").unwrap()
+                    )],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_object_agg_unique(mod(i, 2), i) from generate_series(0, 3) g(i)",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "duplicate JSON object key value: \"0\""
+    );
+}
+
+#[test]
+fn jsonb_extract_path_text_renders_with_postgres_spacing() {
+    let base = temp_dir("jsonb_extract_path_text_spacing");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_extract_path_text('{\"f2\":{\"f3\":1},\"f4\":{\"f5\":99,\"f6\":\"stringy\"}}','f2')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("{\"f3\": 1}".into())]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }

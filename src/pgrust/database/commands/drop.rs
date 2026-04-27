@@ -1609,46 +1609,64 @@ impl Database {
         drop_stmt: &DropDomainStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
-        let (normalized, _, _) =
-            self.normalize_domain_name_for_create(&drop_stmt.domain_name, configured_search_path)?;
-        let Some(domain) = self.domains.read().get(&normalized).cloned() else {
-            if drop_stmt.if_exists {
-                return Ok(StatementResult::AffectedRows(0));
-            }
-            return Err(ExecError::Parse(ParseError::UnsupportedType(
-                drop_stmt.domain_name.clone(),
-            )));
+        let domain_names = if drop_stmt.domain_names.is_empty() {
+            vec![drop_stmt.domain_name.clone()]
+        } else {
+            drop_stmt.domain_names.clone()
         };
-        let default_range_name = format!("{}range", domain.name);
-        let dependent_ranges = self
-            .range_types
-            .read()
-            .iter()
-            .filter(|(_, entry)| {
-                entry.subtype_dependency_oid == Some(domain.oid)
-                    || entry.subtype.type_oid == domain.oid
-                    || entry.name.eq_ignore_ascii_case(&default_range_name)
-            })
-            .map(|(key, entry)| (key.clone(), entry.name.clone()))
-            .collect::<Vec<_>>();
-        if !drop_stmt.cascade
-            && let Some((_, dependent_name)) = dependent_ranges.first()
-        {
-            return Err(domain_has_range_dependents_error(
-                &domain.name,
-                dependent_name,
-            ));
+        let domains_guard = self.domains.read();
+        let range_types_guard = self.range_types.read();
+        let mut drops = Vec::new();
+        for domain_name in &domain_names {
+            let (normalized, _, _) =
+                self.normalize_domain_name_for_create(domain_name, configured_search_path)?;
+            let Some(domain) = domains_guard.get(&normalized).cloned() else {
+                if drop_stmt.if_exists {
+                    continue;
+                }
+                return Err(ExecError::Parse(ParseError::UnsupportedType(
+                    domain_name.clone(),
+                )));
+            };
+            let default_range_name = format!("{}range", domain.name);
+            let dependent_ranges = range_types_guard
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.subtype_dependency_oid == Some(domain.oid)
+                        || entry.subtype.type_oid == domain.oid
+                        || entry.name.eq_ignore_ascii_case(&default_range_name)
+                })
+                .map(|(key, entry)| (key.clone(), entry.name.clone()))
+                .collect::<Vec<_>>();
+            if !drop_stmt.cascade
+                && let Some((_, dependent_name)) = dependent_ranges.first()
+            {
+                return Err(domain_has_range_dependents_error(
+                    &domain.name,
+                    dependent_name,
+                ));
+            }
+            drops.push((normalized, dependent_ranges));
         }
+        drop(range_types_guard);
+        drop(domains_guard);
+
         let mut domains = self.domains.write();
-        domains.remove(&normalized);
+        for (normalized, _) in &drops {
+            domains.remove(normalized);
+        }
         drop(domains);
+
         if drop_stmt.cascade {
-            if !dependent_ranges.is_empty() {
-                let mut range_types = self.range_types.write();
+            let mut range_types = self.range_types.write();
+            let mut removed_range = false;
+            for (_, dependent_ranges) in drops {
                 for (key, name) in dependent_ranges {
                     push_notice(format!("drop cascades to type {name}"));
-                    range_types.remove(&key);
+                    removed_range |= range_types.remove(&key).is_some();
                 }
+            }
+            if removed_range {
                 save_range_type_entries(&self.cluster.base_dir, self.database_oid, &range_types)?;
             }
         }

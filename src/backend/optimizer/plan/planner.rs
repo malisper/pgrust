@@ -903,10 +903,12 @@ fn project_set_targets_for_srf_level(
         .collect::<Vec<_>>();
     for target in target_list {
         if !expr_contains_set_returning(&target.expr)
-            && !targets.iter().any(|candidate| {
-                matches!(candidate, ProjectSetTarget::Scalar(entry) if entry.expr == target.expr)
-            })
+            && let Some(ProjectSetTarget::Scalar(entry)) = targets
+                .iter_mut()
+                .find(|candidate| matches!(candidate, ProjectSetTarget::Scalar(entry) if entry.expr == target.expr))
         {
+            entry.name = target.name.clone();
+        } else if !expr_contains_set_returning(&target.expr) {
             targets.push(ProjectSetTarget::Scalar(target.clone()));
         }
     }

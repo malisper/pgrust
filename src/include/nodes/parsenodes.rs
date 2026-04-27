@@ -3546,6 +3546,7 @@ pub struct DropSequenceStatement {
 pub struct DropDomainStatement {
     pub if_exists: bool,
     pub domain_name: String,
+    pub domain_names: Vec<String>,
     pub cascade: bool,
 }
 

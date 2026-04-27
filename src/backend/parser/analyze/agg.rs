@@ -100,7 +100,9 @@ fn builtin_aggregate_accepts_call(func: AggFunc, args: &SqlCallArgs) -> bool {
         | AggFunc::Corr
         | AggFunc::StringAgg
         | AggFunc::JsonObjectAgg
-        | AggFunc::JsonbObjectAgg => arg_count == 2,
+        | AggFunc::JsonbObjectAgg
+        | AggFunc::JsonbObjectAggUnique
+        | AggFunc::JsonbObjectAggUniqueStrict => arg_count == 2,
     }
 }
 
@@ -797,7 +799,11 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
         | AggFunc::JsonAgg
         | AggFunc::JsonbAgg
         | AggFunc::JsonObjectAgg
-        | AggFunc::JsonbObjectAgg => unreachable!("fixed aggregate return types handled above"),
+        | AggFunc::JsonbObjectAgg
+        | AggFunc::JsonbObjectAggUnique
+        | AggFunc::JsonbObjectAggUniqueStrict => {
+            unreachable!("fixed aggregate return types handled above")
+        }
         AggFunc::RangeIntersectAgg => arg_type.unwrap_or(SqlType::new(Text)),
     }
 }

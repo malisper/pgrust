@@ -3275,7 +3275,16 @@ fn bind_json_record_from_item(
             kind,
             args: bound_args,
             output_columns,
-            record_type: None,
+            record_type: match kind {
+                JsonRecordFunction::PopulateRecord
+                | JsonRecordFunction::PopulateRecordSet
+                | JsonRecordFunction::JsonbPopulateRecord
+                | JsonRecordFunction::JsonbPopulateRecordSet => actual_types.first().copied(),
+                JsonRecordFunction::ToRecord
+                | JsonRecordFunction::ToRecordSet
+                | JsonRecordFunction::JsonbToRecord
+                | JsonRecordFunction::JsonbToRecordSet => None,
+            },
             with_ordinality: false,
         }),
         scope,
@@ -3348,8 +3357,8 @@ fn validate_json_record_coldef_compatibility(
     expected: &[QueryColumn],
 ) -> Result<(), ParseError> {
     if returned.len() != expected.len() {
-        return Err(function_coldeflist_error(&format!(
-            "function return row and query-specified return row do not match: returned row contains {} attribute{}, but query expects {}",
+        return Err(function_coldeflist_mismatch_error(format!(
+            "Returned row contains {} attribute{}, but query expects {}.",
             returned.len(),
             if returned.len() == 1 { "" } else { "s" },
             expected.len()
@@ -3357,8 +3366,8 @@ fn validate_json_record_coldef_compatibility(
     }
     for (index, (returned, expected)) in returned.iter().zip(expected.iter()).enumerate() {
         if returned.sql_type != expected.sql_type {
-            return Err(function_coldeflist_error(&format!(
-                "function return row and query-specified return row do not match: returned type {} at ordinal position {}, but query expects {}",
+            return Err(function_coldeflist_mismatch_error(format!(
+                "Returned type {} at ordinal position {}, but query expects {}.",
                 sql_type_name(returned.sql_type),
                 index + 1,
                 sql_type_name(expected.sql_type)
@@ -3467,6 +3476,15 @@ fn function_coldeflist_error(message: &str) -> ParseError {
     ParseError::UnexpectedToken {
         expected: "function row description in FROM",
         actual: message.into(),
+    }
+}
+
+fn function_coldeflist_mismatch_error(detail: String) -> ParseError {
+    ParseError::DetailedError {
+        message: "function return row and query-specified return row do not match".into(),
+        detail: Some(detail),
+        hint: None,
+        sqlstate: "42804",
     }
 }
 
@@ -3918,17 +3936,25 @@ fn apply_relation_alias(
         desc.columns[column_index].storage.name = alias.to_string();
     }
 
-    if relations.iter().any(|relation| {
-        relation
+    let alias_is_source_name = !source_is_alias
+        && relations.len() == 1
+        && relations[0]
             .relation_names
             .iter()
-            .any(|name| name.eq_ignore_ascii_case(alias))
-    }) || columns.iter().any(|column| {
-        column
-            .relation_names
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(alias))
-    }) {
+            .any(|name| name.eq_ignore_ascii_case(alias));
+    if !alias_is_source_name
+        && (relations.iter().any(|relation| {
+            relation
+                .relation_names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(alias))
+        }) || columns.iter().any(|column| {
+            column
+                .relation_names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(alias))
+        }))
+    {
         return Err(ParseError::DuplicateTableName(alias.to_string()));
     }
 

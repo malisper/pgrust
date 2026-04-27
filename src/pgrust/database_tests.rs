@@ -39385,6 +39385,224 @@ fn dynamic_domain_and_range_creation_after_user_range_table() {
 }
 
 #[test]
+fn jsonb_populate_record_enforces_domain_constraints() {
+    let dir = temp_dir("jsonb_populate_record_domain_constraints");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create domain jsb_i_not_null as int not null")
+        .unwrap();
+    db.execute(1, "create domain jsb_i_gt_1 as int check (value > 1)")
+        .unwrap();
+    db.execute(1, "create type jsb_i_not_null_rec as (a jsb_i_not_null)")
+        .unwrap();
+    db.execute(1, "create type jsb_i_gt_1_rec as (a jsb_i_gt_1)")
+        .unwrap();
+    db.execute(1, "create type jb_unordered_pair as (x int, y int)")
+        .unwrap();
+    db.execute(
+        1,
+        "create domain jb_ordered_pair as jb_unordered_pair check((value).x <= (value).y)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select jsonb_populate_record_valid(NULL::jsb_i_not_null_rec, '{\"a\": null}')"
+        ),
+        vec![vec![Value::Bool(false)]],
+    );
+    match db.execute(
+        1,
+        "select * from jsonb_populate_record(NULL::jsb_i_not_null_rec, '{\"a\": null}') q",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23502");
+            assert_eq!(message, "domain jsb_i_not_null does not allow null values");
+        }
+        other => panic!("expected domain not-null violation, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select jsonb_populate_record_valid(NULL::jsb_i_gt_1_rec, '{\"a\": 1}')"
+        ),
+        vec![vec![Value::Bool(false)]],
+    );
+    match db.execute(
+        1,
+        "select * from jsonb_populate_record(NULL::jsb_i_gt_1_rec, '{\"a\": 1}') q",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain jsb_i_gt_1 violates check constraint \"jsb_i_gt_1_check\""
+            );
+        }
+        other => panic!("expected domain check violation, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select * from jsonb_populate_record(NULL::jb_ordered_pair, '{\"x\": 0, \"y\": 1}') q"
+        ),
+        vec![vec![Value::Int32(0), Value::Int32(1)]],
+    );
+    match db.execute(
+        1,
+        "select * from jsonb_populate_record(NULL::jb_ordered_pair, '{\"x\": 1, \"y\": 0}') q",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain jb_ordered_pair violates check constraint \"jb_ordered_pair_check\""
+            );
+        }
+        other => panic!("expected composite domain check violation, got {other:?}"),
+    }
+
+    db.execute(1, "drop type jsb_i_not_null_rec, jsb_i_gt_1_rec")
+        .unwrap();
+    db.execute(1, "drop domain jsb_i_not_null, jsb_i_gt_1")
+        .unwrap();
+}
+
+#[test]
+fn jsonb_populate_record_coerces_text_jsonb_and_reports_array_errors() {
+    let dir = temp_dir("jsonb_populate_record_array_errors");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create domain jsb_int_array_1d as int[] check(array_length(value, 1) = 3)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create type jsbrec as (ia int[], ia2 int[][], ia1d jsb_int_array_1d)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ia from jsonb_populate_record(NULL::jsbrec, '{\"ia\": null}') q"
+        ),
+        vec![vec![Value::Null]],
+    );
+
+    match db.execute(
+        1,
+        "select ia from jsonb_populate_record(NULL::jsbrec, '{\"ia\": 123}') q",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(sqlstate, "22023");
+            assert_eq!(message, "expected JSON array");
+            assert_eq!(hint, Some("See the value of key \"ia\".".to_string()));
+        }
+        other => panic!("expected JSON array error, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "select ia2 from jsonb_populate_record(NULL::jsbrec, '{\"ia2\": [[1], 2]}') q",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(sqlstate, "22023");
+            assert_eq!(message, "expected JSON array");
+            assert_eq!(
+                hint,
+                Some("See the array element [1] of key \"ia2\".".to_string())
+            );
+        }
+        other => panic!("expected nested JSON array error, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "select ia1d from jsonb_populate_record(NULL::jsbrec, '{\"ia1d\": [1, 2, 3, 4]}') q",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain jsb_int_array_1d violates check constraint \"jsb_int_array_1d_check\""
+            );
+        }
+        other => panic!("expected array domain check violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn jsonb_populate_record_reuses_temp_table_type_info() {
+    let dir = temp_dir("jsonb_populate_record_temp_type_cache");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create type jbpop as (a text, b int, c timestamp)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create type jsbrec as (jsa json[], rec jbpop, reca jbpop[])",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create temp table jsbpoptest (js jsonb)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into jsbpoptest
+             select '{
+               \"jsa\": [1, \"2\", null, 4],
+               \"rec\": {\"a\": \"abc\", \"c\": \"01.02.2003\", \"x\": 43.2},
+               \"reca\": [{\"a\": \"abc\", \"b\": 456}, null, {\"c\": \"01.02.2003\", \"x\": 43.2}]
+             }'::jsonb
+             from generate_series(1, 3)",
+        )
+        .unwrap();
+
+    let result = session
+        .execute(
+            &db,
+            "select (jsonb_populate_record(NULL::jsbrec, js)).* from jsbpoptest",
+        )
+        .expect("jsonb_populate_record temp table type cache query");
+    let StatementResult::Query { rows, .. } = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(rows.len(), 3);
+}
+
+#[test]
 fn create_range_rejects_subtype_diff_with_wrong_argument_types() {
     let dir = temp_dir("range_subtype_diff_wrong_args");
     let db = Database::open(&dir, 64).unwrap();
