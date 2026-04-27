@@ -938,6 +938,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
         catalog: None,
+        scalar_function_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
         )),
@@ -1017,6 +1018,7 @@ fn run_plan(
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
         catalog: None,
+        scalar_function_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
         )),
@@ -1131,7 +1133,8 @@ fn first_tuple_slot_kind_for_sql(
             database: None,
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
-            catalog: catalog.materialize_visible_catalog(),
+            catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+            scalar_function_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                 crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
             )),
@@ -1229,6 +1232,7 @@ fn first_tuple_slot_kind_for_plan(
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog: None,
+            scalar_function_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                 crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
             )),
@@ -1339,7 +1343,8 @@ fn run_sql_with_catalog(
             database: None,
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
-            catalog: catalog.materialize_visible_catalog(),
+            catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+            scalar_function_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                 crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
             )),
@@ -1459,12 +1464,12 @@ fn expr_eval_obeys_null_semantics() {
 fn eval_current_catalog_and_schema() {
     let base = temp_dir("eval_current_catalog_and_schema");
     let mut ctx = empty_executor_context(&base);
-    ctx.catalog = Some(
+    ctx.catalog = Some(crate::backend::executor::executor_catalog(
         crate::backend::utils::cache::visible_catalog::VisibleCatalog::new(
             crate::backend::utils::cache::relcache::RelCache::default(),
             None,
         ),
-    );
+    ));
     let mut slot = TupleSlot::virtual_row(Vec::new());
 
     assert_eq!(
@@ -1488,29 +1493,100 @@ fn eval_current_catalog_and_schema() {
         Value::Text("pg_catalog".into())
     );
 
-    ctx.catalog = Some(
+    ctx.catalog = Some(crate::backend::executor::executor_catalog(
         crate::backend::utils::cache::visible_catalog::VisibleCatalog::with_search_path(
             crate::backend::utils::cache::relcache::RelCache::default(),
             None,
             vec!["pg_catalog".into(), "notme".into()],
         ),
-    );
+    ));
     assert_eq!(
         eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
         Value::Null
     );
 
-    ctx.catalog = Some(
+    ctx.catalog = Some(crate::backend::executor::executor_catalog(
         crate::backend::utils::cache::visible_catalog::VisibleCatalog::with_search_path(
             crate::backend::utils::cache::relcache::RelCache::default(),
             None,
             vec!["pg_catalog".into()],
         ),
-    );
+    ));
     assert_eq!(
         eval_expr(&Expr::CurrentSchema, &mut slot, &mut ctx).unwrap(),
         Value::Text("pg_catalog".into())
     );
+}
+
+#[test]
+fn eval_builtin_func_uses_bound_implementation_without_catalog_lookup() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::{BuiltinScalarFunction, ScalarFunctionImpl};
+
+    let base = temp_dir("eval_builtin_func_uses_bound_implementation_without_catalog_lookup");
+    let mut ctx = empty_executor_context(&base);
+    ctx.catalog = None;
+    let mut slot = TupleSlot::empty(0);
+    let expr = Expr::func_with_impl(
+        999_999_999,
+        Some(SqlType::new(SqlTypeKind::Int4)),
+        false,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Int4Pl),
+        vec![Expr::Const(Value::Int32(2)), Expr::Const(Value::Int32(3))],
+    );
+
+    assert_eq!(
+        eval_expr(&expr, &mut slot, &mut ctx).unwrap(),
+        Value::Int32(5)
+    );
+    assert!(ctx.scalar_function_cache.is_empty());
+}
+
+#[test]
+fn eval_user_defined_func_reuses_cached_call_info_without_catalog_lookup() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::backend::utils::cache::relcache::RelCache;
+    use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
+    use crate::include::catalog::EQSEL_PROC_OID;
+    use crate::include::nodes::primnodes::ScalarFunctionImpl;
+
+    let base = temp_dir("eval_user_defined_func_reuses_cached_call_info_without_catalog_lookup");
+    let mut ctx = empty_executor_context(&base);
+    ctx.catalog = Some(crate::backend::executor::executor_catalog(
+        VisibleCatalog::new(RelCache::default(), None),
+    ));
+    let mut slot = TupleSlot::empty(0);
+    let expr = Expr::func_with_impl(
+        EQSEL_PROC_OID,
+        Some(SqlType::new(SqlTypeKind::Float8)),
+        false,
+        ScalarFunctionImpl::UserDefined {
+            proc_oid: EQSEL_PROC_OID,
+        },
+        Vec::new(),
+    );
+
+    let first_err = eval_expr(&expr, &mut slot, &mut ctx).unwrap_err();
+    assert!(matches!(
+        first_err,
+        ExecError::DetailedError {
+            ref message,
+            sqlstate: "0A000",
+            ..
+        } if message == "function eqsel is not supported"
+    ));
+    assert!(ctx.scalar_function_cache.contains_key(&EQSEL_PROC_OID));
+
+    ctx.catalog = None;
+    let second_err = eval_expr(&expr, &mut slot, &mut ctx).unwrap_err();
+    assert!(matches!(
+        second_err,
+        ExecError::DetailedError {
+            ref message,
+            sqlstate: "0A000",
+            ..
+        } if message == "function eqsel is not supported"
+    ));
 }
 
 #[test]
@@ -11296,7 +11372,8 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         database: None,
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
-        catalog: catalog.materialize_visible_catalog(),
+        catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+        scalar_function_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
         )),
@@ -23544,7 +23621,8 @@ fn large_object_metadata_tracks_create_and_unlink() {
             database: None,
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
-            catalog: catalog.materialize_visible_catalog(),
+            catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+            scalar_function_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                 crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
             )),

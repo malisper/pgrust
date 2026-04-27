@@ -94,7 +94,7 @@ impl IndexBuildKeyProjector {
         let expr_ctx = ctx.expr_eval.as_ref().ok_or_else(|| {
             CatalogError::Io("index build missing expression evaluation context".into())
         })?;
-        let catalog = expr_ctx.visible_catalog.as_ref().ok_or_else(|| {
+        let catalog = expr_ctx.visible_catalog.as_deref().ok_or_else(|| {
             CatalogError::Io("index build missing visible catalog for index evaluation".into())
         })?;
         let mut index_meta = ctx.index_meta.clone();
@@ -165,6 +165,7 @@ impl IndexBuildKeyProjector {
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
                 catalog: expr_ctx.visible_catalog.clone(),
+                scalar_function_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                     crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
                 )),

@@ -738,7 +738,7 @@ fn hash_support_proc(
     spec: &LoweredPartitionSpec,
     ctx: &ExecutorContext,
 ) -> Option<u32> {
-    let catalog = ctx.catalog.as_ref()?;
+    let catalog = ctx.catalog.as_deref()?;
     let opclass_oid = *spec.partclass.get(key_index)?;
     let opclass = catalog
         .opclass_rows()

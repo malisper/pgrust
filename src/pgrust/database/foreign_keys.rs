@@ -224,7 +224,7 @@ enum ConstraintValidationTarget {
 fn build_constraint_validation_context(
     db: &Database,
     client_id: ClientId,
-    catalog: &LazyCatalogLookup<'_>,
+    catalog: &LazyCatalogLookup,
     xid: TransactionId,
     cid: CommandId,
     interrupts: Arc<InterruptState>,
@@ -276,7 +276,8 @@ fn build_constraint_validation_context(
         database: None,
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
-        catalog: catalog.materialize_visible_catalog(),
+        catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+        scalar_function_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: db.plpgsql_function_cache(client_id),
         pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -288,7 +289,7 @@ fn build_constraint_validation_context(
 }
 
 fn should_validate_constraint(
-    catalog: &LazyCatalogLookup<'_>,
+    catalog: &LazyCatalogLookup,
     tracker: &DeferredForeignKeyTracker,
     constraint_oid: u32,
     target: &ConstraintValidationTarget,
@@ -307,7 +308,7 @@ fn should_validate_constraint(
 }
 
 fn collect_constraint_validation_targets(
-    catalog: &LazyCatalogLookup<'_>,
+    catalog: &LazyCatalogLookup,
     tracker: &DeferredForeignKeyTracker,
     target: &ConstraintValidationTarget,
 ) -> (BTreeSet<u32>, BTreeSet<u32>) {
@@ -329,7 +330,7 @@ fn collect_constraint_validation_targets(
 }
 
 fn validate_foreign_key_constraints(
-    catalog: &LazyCatalogLookup<'_>,
+    catalog: &LazyCatalogLookup,
     constraint_oids: &BTreeSet<u32>,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
@@ -369,7 +370,7 @@ fn validate_foreign_key_constraints(
 }
 
 fn validate_unique_constraints(
-    catalog: &LazyCatalogLookup<'_>,
+    catalog: &LazyCatalogLookup,
     tracker: &DeferredForeignKeyTracker,
     constraint_oids: &BTreeSet<u32>,
     ctx: &mut ExecutorContext,
@@ -428,7 +429,7 @@ fn validate_unique_constraints(
 fn validate_constraint_target(
     db: &Database,
     client_id: ClientId,
-    catalog: &LazyCatalogLookup<'_>,
+    catalog: &LazyCatalogLookup,
     xid: TransactionId,
     cid: CommandId,
     interrupts: Arc<InterruptState>,
@@ -460,7 +461,7 @@ fn validate_constraint_target(
 pub(crate) fn validate_immediate_constraints(
     db: &Database,
     client_id: ClientId,
-    catalog: &LazyCatalogLookup<'_>,
+    catalog: &LazyCatalogLookup,
     xid: TransactionId,
     cid: CommandId,
     interrupts: Arc<InterruptState>,
@@ -483,7 +484,7 @@ pub(crate) fn validate_immediate_constraints(
 pub(crate) fn validate_deferred_constraints(
     db: &Database,
     client_id: ClientId,
-    catalog: &LazyCatalogLookup<'_>,
+    catalog: &LazyCatalogLookup,
     xid: TransactionId,
     cid: CommandId,
     interrupts: Arc<InterruptState>,
@@ -506,7 +507,7 @@ pub(crate) fn validate_deferred_constraints(
 pub(crate) fn validate_deferred_foreign_key_constraints(
     db: &Database,
     client_id: ClientId,
-    catalog: &LazyCatalogLookup<'_>,
+    catalog: &LazyCatalogLookup,
     xid: TransactionId,
     cid: CommandId,
     interrupts: Arc<InterruptState>,
@@ -533,7 +534,7 @@ fn qualified_constraint_name(name: &QualifiedNameRef) -> String {
 }
 
 fn matched_constraint_roots_for_name(
-    catalog: &LazyCatalogLookup<'_>,
+    catalog: &LazyCatalogLookup,
     all_rows: &[crate::include::catalog::PgConstraintRow],
     namespace_names: &HashMap<u32, String>,
     name: &QualifiedNameRef,
@@ -578,7 +579,7 @@ fn collect_constraint_descendants(
 }
 
 fn resolve_set_constraints_targets(
-    catalog: &LazyCatalogLookup<'_>,
+    catalog: &LazyCatalogLookup,
     constraints: &[QualifiedNameRef],
 ) -> Result<BTreeSet<u32>, ExecError> {
     let all_rows = catalog.constraint_rows();
@@ -620,7 +621,7 @@ fn resolve_set_constraints_targets(
 pub(crate) fn execute_set_constraints(
     db: &Database,
     client_id: ClientId,
-    catalog: &LazyCatalogLookup<'_>,
+    catalog: &LazyCatalogLookup,
     xid: Option<TransactionId>,
     cid: CommandId,
     interrupts: Arc<InterruptState>,

@@ -104,6 +104,8 @@ pub struct SelectGuard {
     pub(crate) row_locks: Arc<crate::backend::storage::lmgr::RowLockManager>,
     pub(crate) statement_lock_scope_id: Option<u64>,
     pub(crate) interrupt_guard: Option<StatementInterruptGuard>,
+    pub(crate) catalog_effect_start: usize,
+    pub(crate) base_command_id: CommandId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1555,7 +1557,7 @@ impl Session {
         }
     }
 
-    pub(crate) fn catalog_lookup<'a>(&self, db: &'a Database) -> LazyCatalogLookup<'a> {
+    pub(crate) fn catalog_lookup<'a>(&self, db: &'a Database) -> LazyCatalogLookup {
         db.install_row_security_enabled(self.client_id, self.row_security_enabled());
         let search_path = self.configured_search_path();
         db.lazy_catalog_lookup(
@@ -1576,7 +1578,7 @@ impl Session {
         db: &'a Database,
         xid: TransactionId,
         cid: u32,
-    ) -> LazyCatalogLookup<'a> {
+    ) -> LazyCatalogLookup {
         db.install_row_security_enabled(self.client_id, self.row_security_enabled());
         let search_path = self.configured_search_path();
         db.lazy_catalog_lookup(self.client_id, Some((xid, cid)), search_path.as_deref())
@@ -1826,7 +1828,7 @@ impl Session {
         db: &Database,
         snapshot: crate::backend::access::transam::xact::Snapshot,
         cid: u32,
-        catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup<'_>,
+        catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup,
         deferred_foreign_keys: Option<DeferredForeignKeyTracker>,
         statement_lock_scope_id: Option<u64>,
     ) -> ExecutorContext {
@@ -1903,7 +1905,8 @@ impl Session {
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
             subplans: Vec::new(),
-            catalog: catalog.materialize_visible_catalog(),
+            catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+            scalar_function_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: Arc::clone(&self.plpgsql_function_cache),
             pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -2255,6 +2258,7 @@ impl Session {
 
     fn merge_completed_streaming_portal(
         &mut self,
+        db: &Database,
         portal: &mut Portal,
         completed: bool,
         succeeded: bool,
@@ -2265,11 +2269,12 @@ impl Session {
         let crate::pgrust::portal::PortalExecution::Streaming(guard) = &mut portal.execution else {
             return;
         };
-        self.finish_streaming_select_guard(guard, succeeded);
+        self.finish_streaming_select_guard(db, guard, succeeded);
     }
 
     pub(crate) fn finish_streaming_select_guard(
         &mut self,
+        db: &Database,
         guard: &mut SelectGuard,
         succeeded: bool,
     ) {
@@ -2279,6 +2284,13 @@ impl Session {
             txn.xid = Some(xid);
         }
         self.merge_ctx_pending_async_notifications(&mut guard.ctx, succeeded);
+        if succeeded {
+            self.advance_catalog_command_id_after_statement(
+                guard.base_command_id,
+                guard.catalog_effect_start,
+            );
+            self.process_catalog_command_end(db, guard.catalog_effect_start);
+        }
     }
 
     fn validate_constraints_for_active_txn(
@@ -5038,20 +5050,24 @@ impl Session {
         db.install_session_replication_role(self.client_id, self.session_replication_role());
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_interrupt_state(self.client_id, self.interrupts());
-        let (txn_ctx, transaction_lock_scope_id) = if let Some(ref mut txn) = self.active_txn {
-            let cid = txn.next_command_id;
-            txn.next_command_id = txn.next_command_id.saturating_add(1);
-            (
-                txn.xid.map(|xid| (xid, cid)).or_else(|| {
-                    txn.isolation_level
-                        .uses_transaction_snapshot()
-                        .then_some((INVALID_TRANSACTION_ID, cid))
-                }),
-                Some(txn.advisory_scope_id),
-            )
-        } else {
-            (None, None)
-        };
+        let (txn_ctx, transaction_lock_scope_id, catalog_effect_start, base_command_id) =
+            if let Some(ref mut txn) = self.active_txn {
+                let effect_start = txn.catalog_effects.len();
+                let cid = txn.next_command_id;
+                txn.next_command_id = txn.next_command_id.saturating_add(1);
+                (
+                    txn.xid.map(|xid| (xid, cid)).or_else(|| {
+                        txn.isolation_level
+                            .uses_transaction_snapshot()
+                            .then_some((INVALID_TRANSACTION_ID, cid))
+                    }),
+                    Some(txn.advisory_scope_id),
+                    effect_start,
+                    cid,
+                )
+            } else {
+                (None, None, 0, 0)
+            };
         let snapshot_override = match txn_ctx {
             Some((snapshot_xid, snapshot_cid))
                 if self
@@ -5091,6 +5107,8 @@ impl Session {
             Arc::clone(&self.random_state),
         )?;
         guard.interrupt_guard = Some(self.statement_interrupt_guard()?);
+        guard.catalog_effect_start = catalog_effect_start;
+        guard.base_command_id = base_command_id;
         Ok(guard)
     }
 
@@ -5209,7 +5227,7 @@ impl Session {
                 .as_ref()
                 .map(|result| result.completed)
                 .unwrap_or(true);
-            self.merge_completed_streaming_portal(&mut portal, completed, fetch_result.is_ok());
+            self.merge_completed_streaming_portal(db, &mut portal, completed, fetch_result.is_ok());
             fetch_result?
         };
         self.portals.put(portal);
@@ -11850,15 +11868,10 @@ fn copy_options_force_quote_column(
 
 fn copy_enum_label_map(catalog: &dyn CatalogLookup) -> HashMap<(u32, u32), String> {
     catalog
-        .materialize_visible_catalog()
-        .map(|visible| {
-            visible
-                .enum_rows()
-                .into_iter()
-                .map(|row| ((row.enumtypid, row.oid), row.enumlabel))
-                .collect()
-        })
-        .unwrap_or_default()
+        .enum_rows()
+        .into_iter()
+        .map(|row| ((row.enumtypid, row.oid), row.enumlabel))
+        .collect()
 }
 
 fn escape_copy_text_field(value: &str) -> String {

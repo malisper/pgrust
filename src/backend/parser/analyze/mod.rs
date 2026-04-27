@@ -35,13 +35,14 @@ use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgEnumRow, PgForeignDataWrapperRow, PgForeignServerRow,
-    PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTsConfigMapRow, PgTsConfigRow,
-    PgTsDictRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow, RECORD_TYPE_OID,
-    bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
+    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow,
+    PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgEnumRow,
+    PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow,
+    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgProcRow,
+    PgRangeRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow,
+    RECORD_TYPE_OID, bootstrap_pg_aggregate_rows, bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows,
+    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_database_rows,
     bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
     bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
     bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
@@ -872,6 +873,25 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn depend_rows(&self) -> Vec<PgDependRow> {
+        Vec::new()
+    }
+
+    fn role_name_by_oid(&self, role_oid: u32) -> Option<String> {
+        self.authid_rows()
+            .into_iter()
+            .find(|row| row.oid == role_oid)
+            .map(|row| row.rolname)
+    }
+
+    fn database_rows(&self) -> Vec<PgDatabaseRow> {
+        bootstrap_pg_database_rows().to_vec()
+    }
+
+    fn database_row_by_oid(&self, oid: u32) -> Option<PgDatabaseRow> {
+        self.database_rows().into_iter().find(|row| row.oid == oid)
+    }
+
     fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
         bootstrap_pg_namespace_rows()
             .into_iter()
@@ -934,8 +954,20 @@ pub trait CatalogLookup {
             .or_else(|| synthetic_range_proc_row_by_oid(oid, &self.type_rows(), &self.range_rows()))
     }
 
+    fn proc_rows(&self) -> Vec<PgProcRow> {
+        bootstrap_pg_proc_rows()
+    }
+
     fn opclass_rows(&self) -> Vec<PgOpclassRow> {
         bootstrap_pg_opclass_rows()
+    }
+
+    fn amproc_rows(&self) -> Vec<PgAmprocRow> {
+        bootstrap_pg_amproc_rows()
+    }
+
+    fn amop_rows(&self) -> Vec<PgAmopRow> {
+        bootstrap_pg_amop_rows()
     }
 
     fn collation_rows(&self) -> Vec<PgCollationRow> {
@@ -1144,6 +1176,12 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn rewrite_row_by_oid(&self, rewrite_oid: u32) -> Option<PgRewriteRow> {
+        self.rewrite_rows()
+            .into_iter()
+            .find(|row| row.oid == rewrite_oid)
+    }
+
     fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
         Vec::new()
     }
@@ -1190,6 +1228,10 @@ pub trait CatalogLookup {
         &self,
         _relation_oid: u32,
     ) -> Vec<crate::include::catalog::PgTriggerRow> {
+        Vec::new()
+    }
+
+    fn trigger_rows(&self) -> Vec<crate::include::catalog::PgTriggerRow> {
         Vec::new()
     }
 
@@ -1314,6 +1356,12 @@ pub trait CatalogLookup {
 
     fn foreign_data_wrapper_rows(&self) -> Vec<PgForeignDataWrapperRow> {
         Vec::new()
+    }
+
+    fn foreign_data_wrapper_row_by_oid(&self, oid: u32) -> Option<PgForeignDataWrapperRow> {
+        self.foreign_data_wrapper_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
     }
 
     fn foreign_server_rows(&self) -> Vec<PgForeignServerRow> {
@@ -1979,6 +2027,10 @@ impl CatalogLookup for Catalog {
     ) -> Vec<crate::include::catalog::PgTriggerRow> {
         crate::backend::utils::cache::catcache::CatCache::from_catalog(self)
             .trigger_rows_for_relation(relation_oid)
+    }
+
+    fn trigger_rows(&self) -> Vec<crate::include::catalog::PgTriggerRow> {
+        crate::backend::utils::cache::catcache::CatCache::from_catalog(self).trigger_rows()
     }
 
     fn policy_rows_for_relation(

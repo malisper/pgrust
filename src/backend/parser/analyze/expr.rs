@@ -5304,10 +5304,7 @@ fn bind_regrole_literal_cast(
     let Some(role_name) = regrole_literal_text(expr) else {
         return Ok(None);
     };
-    let Some(visible_catalog) = catalog.materialize_visible_catalog() else {
-        return Ok(None);
-    };
-    let authid_rows = visible_catalog.authid_rows();
+    let authid_rows = catalog.authid_rows();
     let role =
         find_role_by_name(&authid_rows, role_name).ok_or_else(|| ParseError::UnexpectedToken {
             expected: "existing role name",

@@ -10,7 +10,7 @@ pub(crate) fn relation_values_visible_for_error_detail(
     relation_oid: u32,
     ctx: &ExecutorContext,
 ) -> bool {
-    let Some(catalog) = ctx.catalog.as_ref() else {
+    let Some(catalog) = ctx.catalog.as_deref() else {
         return true;
     };
     let Some(class_row) = CatalogLookup::class_row_by_oid(catalog, relation_oid) else {

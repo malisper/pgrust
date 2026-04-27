@@ -106,7 +106,8 @@ impl SeededSqlHarness {
                 database: None,
                 pending_catalog_effects: Vec::new(),
                 pending_table_locks: Vec::new(),
-                catalog: catalog.materialize_visible_catalog(),
+                catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+                scalar_function_cache: std::collections::HashMap::new(),
                 plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                     crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
                 )),

@@ -81,8 +81,8 @@ use crate::backend::utils::cache::lsyscache::{
 use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
-    BackendCacheState, backend_catcache as syscache_backend_catcache,
-    invalidate_backend_cache_state,
+    BackendCacheState, SysCacheId, SysCacheTuple, backend_catcache as syscache_backend_catcache,
+    invalidate_backend_cache_state, search_sys_cache1_db,
 };
 use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsSnapshot};
 use crate::backend::utils::misc::interrupts::InterruptState;

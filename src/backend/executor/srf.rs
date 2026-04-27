@@ -120,7 +120,7 @@ fn execute_user_defined_set_returning_function_by_language(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
-    let Some(catalog) = ctx.catalog.as_ref() else {
+    let Some(catalog) = ctx.catalog.as_deref() else {
         return Err(ExecError::DetailedError {
             message: "user-defined functions require executor catalog context".into(),
             detail: None,
@@ -660,7 +660,7 @@ fn eval_ts_stat_rows(
     let (column_name, table_name) = parse_ts_stat_select(query)?;
     let catalog = ctx
         .catalog
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ExecError::DetailedError {
             message: "ts_stat requires executor catalog context".into(),
             detail: None,
@@ -669,8 +669,7 @@ fn eval_ts_stat_rows(
         })?;
     let relation =
         catalog
-            .relcache()
-            .get_by_name(table_name)
+            .lookup_any_relation(table_name)
             .ok_or_else(|| ExecError::DetailedError {
                 message: format!("relation \"{table_name}\" does not exist"),
                 detail: None,
@@ -836,10 +835,7 @@ fn eval_ts_debug_rows(
         )?
     };
 
-    let catalog = ctx
-        .catalog
-        .as_ref()
-        .map(|catalog| catalog as &dyn CatalogLookup);
+    let catalog = ctx.catalog.as_deref();
     let mut rows = Vec::new();
     for token in crate::backend::tsearch::parse_default(document) {
         let Some(kind) = crate::backend::tsearch::token_kind(token.tokid) else {
@@ -918,7 +914,7 @@ fn ts_debug_config_from_value(
     if oid == crate::include::catalog::ENGLISH_TS_CONFIG_OID {
         return Ok(crate::backend::tsearch::cache::TextSearchConfig::English);
     }
-    let Some(row) = ctx.catalog.as_ref().and_then(|catalog| {
+    let Some(row) = ctx.catalog.as_deref().and_then(|catalog| {
         catalog
             .ts_config_rows()
             .into_iter()
@@ -1047,11 +1043,9 @@ fn eval_string_table_function(
         .collect())
 }
 
-fn partition_catalog(
-    ctx: &ExecutorContext,
-) -> Result<&crate::backend::utils::cache::visible_catalog::VisibleCatalog, ExecError> {
+fn partition_catalog(ctx: &ExecutorContext) -> Result<&dyn CatalogLookup, ExecError> {
     ctx.catalog
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ExecError::DetailedError {
             message: "partition lookup requires executor catalog context".into(),
             detail: None,

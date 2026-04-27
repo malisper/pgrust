@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::{CatalogTxnContext, ClientId, Database};
 use crate::backend::access::common::toast_compression::ensure_attribute_compression_supported;
@@ -15,7 +15,8 @@ use crate::backend::parser::{
 };
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
-    ensure_class_rows, ensure_depend_rows, ensure_namespace_rows, ensure_rewrite_rows,
+    SysCacheId, SysCacheTuple, ensure_class_rows, ensure_depend_rows, ensure_namespace_rows,
+    ensure_rewrite_rows, search_sys_cache_list1_db, search_sys_cache1_db,
 };
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::access::htup::{AttributeCompression, AttributeStorage};
@@ -25,6 +26,7 @@ use crate::include::catalog::{
     PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID, builtin_range_name_for_sql_type,
     builtin_type_name_for_oid, relkind_is_analyzable,
 };
+use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{Query, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{Var, user_attrno};
 use crate::pgrust::database::{
@@ -222,6 +224,84 @@ fn auth_catalog_for_ddl(
     })
 }
 
+fn ddl_oid_key(oid: u32) -> Value {
+    Value::Int64(i64::from(oid))
+}
+
+fn role_row_by_oid_for_ddl(
+    db: &Database,
+    client_id: ClientId,
+    role_oid: u32,
+) -> Result<Option<crate::include::catalog::PgAuthIdRow>, ExecError> {
+    Ok(search_sys_cache1_db(
+        db,
+        client_id,
+        None,
+        SysCacheId::AuthIdOid,
+        ddl_oid_key(role_oid),
+    )
+    .map_err(map_catalog_error)?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::AuthId(row) => Some(row),
+        _ => None,
+    }))
+}
+
+fn membership_rows_for_member_for_ddl(
+    db: &Database,
+    client_id: ClientId,
+    member_oid: u32,
+) -> Result<Vec<crate::include::catalog::PgAuthMembersRow>, ExecError> {
+    Ok(search_sys_cache_list1_db(
+        db,
+        client_id,
+        None,
+        SysCacheId::AuthMembersMemberRole,
+        ddl_oid_key(member_oid),
+    )
+    .map_err(map_catalog_error)?
+    .into_iter()
+    .filter_map(|tuple| match tuple {
+        SysCacheTuple::AuthMembers(row) => Some(row),
+        _ => None,
+    })
+    .collect())
+}
+
+fn has_effective_membership_for_ddl(
+    db: &Database,
+    client_id: ClientId,
+    target_oid: u32,
+) -> Result<bool, ExecError> {
+    let auth = db.auth_state(client_id);
+    let current_user_oid = auth.current_user_oid();
+    if current_user_oid == target_oid {
+        return Ok(true);
+    }
+    if role_row_by_oid_for_ddl(db, client_id, current_user_oid)?.is_some_and(|row| row.rolsuper) {
+        return Ok(true);
+    }
+
+    let mut pending = VecDeque::from([current_user_oid]);
+    let mut visited = BTreeSet::new();
+    while let Some(member_oid) = pending.pop_front() {
+        if !visited.insert(member_oid) {
+            continue;
+        }
+        for membership in membership_rows_for_member_for_ddl(db, client_id, member_oid)? {
+            if !membership.inherit_option {
+                continue;
+            }
+            if membership.roleid == target_oid {
+                return Ok(true);
+            }
+            pending.push_back(membership.roleid);
+        }
+    }
+    Ok(false)
+}
+
 pub(super) fn relation_kind_name(relkind: char) -> &'static str {
     match relkind {
         'c' => "type",
@@ -241,9 +321,7 @@ pub(super) fn ensure_relation_owner(
     relation: &BoundRelation,
     display_name: &str,
 ) -> Result<(), ExecError> {
-    let auth = db.auth_state(client_id);
-    let auth_catalog = auth_catalog_for_ddl(db, client_id)?;
-    if auth.has_effective_membership(relation.owner_oid, &auth_catalog) {
+    if has_effective_membership_for_ddl(db, client_id, relation.owner_oid)? {
         return Ok(());
     }
     let owner_object_kind = match relation.relkind {
@@ -818,12 +896,9 @@ pub(crate) fn reject_column_with_trigger_dependencies(
     column_name: &str,
     attnum: i16,
 ) -> Result<(), ExecError> {
-    let Some(visible) = catalog.materialize_visible_catalog() else {
-        return Ok(());
-    };
     let relation_name = relation_name_for_oid(catalog, relation_oid);
     let trigger_rows = catalog.trigger_rows_for_relation(relation_oid);
-    let details = visible
+    let details = catalog
         .depend_rows()
         .into_iter()
         .filter(|row| {

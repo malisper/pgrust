@@ -1230,7 +1230,8 @@ impl Database {
                     database: Some(self.clone()),
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
-                    catalog: catalog.materialize_visible_catalog(),
+                    catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+                    scalar_function_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1540,7 +1541,10 @@ impl Database {
                     database: Some(self.clone()),
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
-                    catalog: visible_catalog.materialize_visible_catalog(),
+                    catalog: Some(crate::backend::executor::executor_catalog(
+                        visible_catalog.clone(),
+                    )),
+                    scalar_function_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1660,7 +1664,8 @@ impl Database {
                     database: Some(self.clone()),
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
-                    catalog: catalog.materialize_visible_catalog(),
+                    catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+                    scalar_function_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1895,7 +1900,8 @@ impl Database {
                     database: Some(self.clone()),
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
-                    catalog: catalog.materialize_visible_catalog(),
+                    catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+                    scalar_function_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -2010,7 +2016,8 @@ impl Database {
                     database: Some(self.clone()),
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
-                    catalog: catalog.materialize_visible_catalog(),
+                    catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+                    scalar_function_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -2424,7 +2431,8 @@ impl Database {
                     database: Some(self.clone()),
                     pending_catalog_effects: Vec::new(),
                     pending_table_locks: Vec::new(),
-                    catalog: catalog.materialize_visible_catalog(),
+                    catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
+                    scalar_function_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -2573,7 +2581,9 @@ impl Database {
         use crate::backend::executor::executor_start;
 
         let visible_catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
-        let visible_catalog_snapshot = visible_catalog.materialize_visible_catalog();
+        let visible_catalog_snapshot = Some(crate::backend::executor::executor_catalog(
+            visible_catalog.clone(),
+        ));
         let (query_desc, rels) = {
             let query_desc = crate::backend::executor::create_query_desc(
                 crate::backend::parser::pg_plan_query_with_config(
@@ -2649,6 +2659,7 @@ impl Database {
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog: visible_catalog_snapshot,
+            scalar_function_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: self.plpgsql_function_cache(client_id),
             pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -2670,6 +2681,8 @@ impl Database {
             row_locks: std::sync::Arc::clone(&self.row_locks),
             statement_lock_scope_id,
             interrupt_guard: None,
+            catalog_effect_start: 0,
+            base_command_id: command_id,
         })
     }
 }

@@ -713,6 +713,13 @@ impl CatalogLookup for VisibleCatalog {
         VisibleCatalog::trigger_rows_for_relation(self, relation_oid)
     }
 
+    fn trigger_rows(&self) -> Vec<PgTriggerRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.trigger_rows())
+            .unwrap_or_default()
+    }
+
     fn policy_rows_for_relation(&self, relation_oid: u32) -> Vec<PgPolicyRow> {
         VisibleCatalog::policy_rows_for_relation(self, relation_oid)
     }

@@ -1,6 +1,5 @@
 use super::super::*;
 use crate::backend::parser::{BoundRelation, CatalogLookup, SequenceOwnedByClause};
-use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::INT8_TYPE_OID;
 use crate::pgrust::database::ddl::{ensure_relation_owner, relation_kind_name};
 use crate::pgrust::database::sequences::{
@@ -55,9 +54,15 @@ fn resolve_owned_by_clause(
     }
 }
 
-fn find_sequence_default_refs(catalog: &VisibleCatalog, sequence_oid: u32) -> Vec<(u32, String)> {
+fn find_sequence_default_refs(
+    catalog: &dyn CatalogLookup,
+    sequence_oid: u32,
+) -> Vec<(u32, String)> {
     let mut refs = Vec::new();
-    for (_, entry) in catalog.relcache().entries() {
+    for class in catalog.class_rows() {
+        let Some(entry) = catalog.relation_by_oid(class.oid) else {
+            continue;
+        };
         if entry.relkind != 'r' {
             continue;
         }
@@ -71,7 +76,7 @@ fn find_sequence_default_refs(catalog: &VisibleCatalog, sequence_oid: u32) -> Ve
 }
 
 fn find_sequence_type_relation_refs(
-    catalog: &VisibleCatalog,
+    catalog: &dyn CatalogLookup,
     sequence_oid: u32,
 ) -> Vec<(u32, String)> {
     let Some(class_row) = catalog.class_row_by_oid(sequence_oid) else {
@@ -89,7 +94,10 @@ fn find_sequence_type_relation_refs(
     }
 
     let mut refs = BTreeMap::new();
-    for (name, entry) in catalog.relcache().entries() {
+    for class in catalog.class_rows() {
+        let Some(entry) = catalog.relation_by_oid(class.oid) else {
+            continue;
+        };
         if entry.relation_oid == sequence_oid {
             continue;
         }
@@ -105,11 +113,7 @@ fn find_sequence_type_relation_refs(
         if !uses_sequence_type {
             continue;
         }
-        let display_name = if name.contains('.') {
-            name.to_string()
-        } else {
-            name.to_string()
-        };
+        let display_name = class.relname;
         refs.entry(entry.relation_oid)
             .and_modify(|existing: &mut String| {
                 if !existing.contains('.') && display_name.contains('.') {
@@ -351,12 +355,6 @@ impl Database {
             interrupts.as_ref(),
         )?;
 
-        let visible = catalog.materialize_visible_catalog().ok_or_else(|| {
-            ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "visible catalog",
-                actual: "sequence lookup unavailable".into(),
-            })
-        })?;
         let mut dropped = 0usize;
         let mut result = Ok(StatementResult::AffectedRows(0));
         for sequence_name in &drop_stmt.sequence_names {
@@ -380,8 +378,8 @@ impl Database {
             };
             ensure_relation_owner(self, client_id, &relation, sequence_name)?;
 
-            let refs = find_sequence_default_refs(&visible, relation.relation_oid);
-            let type_refs = find_sequence_type_relation_refs(&visible, relation.relation_oid);
+            let refs = find_sequence_default_refs(&catalog, relation.relation_oid);
+            let type_refs = find_sequence_type_relation_refs(&catalog, relation.relation_oid);
             if (!refs.is_empty() || !type_refs.is_empty()) && !drop_stmt.cascade {
                 let mut dependents = refs
                     .iter()

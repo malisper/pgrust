@@ -36,55 +36,60 @@ pub fn execute_query_desc(
     let column_names = query_desc.column_names();
     let planned_stmt = query_desc.planned_stmt;
     let saved_subplans = std::mem::replace(&mut ctx.subplans, planned_stmt.subplans);
-    let saved_exec_params = if planned_stmt.ext_params.is_empty() {
-        Vec::new()
-    } else {
-        let mut param_slot = ctx
-            .expr_bindings
-            .outer_tuple
-            .clone()
-            .map(TupleSlot::virtual_row)
-            .unwrap_or_else(|| TupleSlot::empty(0));
-        let mut saved = Vec::with_capacity(planned_stmt.ext_params.len());
-        for param in &planned_stmt.ext_params {
-            let value = eval_expr(&param.expr, &mut param_slot, ctx)?;
-            let old = ctx.expr_bindings.exec_params.insert(param.paramid, value);
-            saved.push((param.paramid, old));
-        }
-        saved
-    };
-    ctx.cte_tables.clear();
-    ctx.cte_tables.extend(
-        ctx.pinned_cte_tables
-            .iter()
-            .map(|(cte_id, table)| (*cte_id, table.clone())),
-    );
-    ctx.cte_producers.clear();
-    ctx.recursive_worktables.clear();
+    let saved_scalar_function_cache = std::mem::take(&mut ctx.scalar_function_cache);
     let result = (|| {
-        let mut state = executor_start(planned_stmt.plan_tree);
-        let mut rows = Vec::new();
-        while let Some(slot) = state.exec_proc_node(ctx)? {
-            let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-            Value::materialize_all(&mut values);
-            rows.push(values);
-        }
-        Ok(StatementResult::Query {
-            columns,
-            column_names,
-            rows,
-        })
-    })();
-    ctx.cte_tables.clear();
-    ctx.cte_producers.clear();
-    ctx.recursive_worktables.clear();
-    for (paramid, old) in saved_exec_params {
-        if let Some(value) = old {
-            ctx.expr_bindings.exec_params.insert(paramid, value);
+        let saved_exec_params = if planned_stmt.ext_params.is_empty() {
+            Vec::new()
         } else {
-            ctx.expr_bindings.exec_params.remove(&paramid);
+            let mut param_slot = ctx
+                .expr_bindings
+                .outer_tuple
+                .clone()
+                .map(TupleSlot::virtual_row)
+                .unwrap_or_else(|| TupleSlot::empty(0));
+            let mut saved = Vec::with_capacity(planned_stmt.ext_params.len());
+            for param in &planned_stmt.ext_params {
+                let value = eval_expr(&param.expr, &mut param_slot, ctx)?;
+                let old = ctx.expr_bindings.exec_params.insert(param.paramid, value);
+                saved.push((param.paramid, old));
+            }
+            saved
+        };
+        ctx.cte_tables.clear();
+        ctx.cte_tables.extend(
+            ctx.pinned_cte_tables
+                .iter()
+                .map(|(cte_id, table)| (*cte_id, table.clone())),
+        );
+        ctx.cte_producers.clear();
+        ctx.recursive_worktables.clear();
+        let result = (|| {
+            let mut state = executor_start(planned_stmt.plan_tree);
+            let mut rows = Vec::new();
+            while let Some(slot) = state.exec_proc_node(ctx)? {
+                let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                Value::materialize_all(&mut values);
+                rows.push(values);
+            }
+            Ok(StatementResult::Query {
+                columns,
+                column_names,
+                rows,
+            })
+        })();
+        ctx.cte_tables.clear();
+        ctx.cte_producers.clear();
+        ctx.recursive_worktables.clear();
+        for (paramid, old) in saved_exec_params {
+            if let Some(value) = old {
+                ctx.expr_bindings.exec_params.insert(paramid, value);
+            } else {
+                ctx.expr_bindings.exec_params.remove(&paramid);
+            }
         }
-    }
+        result
+    })();
+    ctx.scalar_function_cache = saved_scalar_function_cache;
     ctx.subplans = saved_subplans;
     result
 }
@@ -133,7 +138,8 @@ fn execute_statement_with_source(
 ) -> Result<StatementResult, ExecError> {
     let cid = ctx.next_command_id;
     ctx.snapshot = ctx.txns.read().snapshot_for_command(xid, cid)?;
-    let result = match stmt {
+    let saved_scalar_function_cache = std::mem::take(&mut ctx.scalar_function_cache);
+    let result = (|| match stmt {
         Statement::Do(stmt) => execute_do(&stmt),
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx, PlannerConfig::default()),
         Statement::Select(stmt) => execute_query_desc(
@@ -641,7 +647,8 @@ fn execute_statement_with_source(
                 actual: "transaction control".into(),
             }))
         }
-    };
+    })();
+    ctx.scalar_function_cache = saved_scalar_function_cache;
     ctx.next_command_id = ctx.next_command_id.saturating_add(1);
     result
 }

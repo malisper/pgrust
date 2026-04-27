@@ -144,7 +144,7 @@ fn reject_constraint_with_dependent_views(
 
 fn ddl_executor_context(
     db: &Database,
-    catalog: &dyn CatalogLookup,
+    _catalog: &dyn CatalogLookup,
     client_id: ClientId,
     xid: TransactionId,
     cid: CommandId,
@@ -197,7 +197,8 @@ fn ddl_executor_context(
         database: Some(db.clone()),
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
-        catalog: catalog.materialize_visible_catalog(),
+        catalog: None,
+        scalar_function_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: db.plpgsql_function_cache(client_id),
         pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -1547,7 +1548,7 @@ impl Database {
                     client_id,
                     &relation,
                     &index_name,
-                    catalog.materialize_visible_catalog(),
+                    Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     &storage_columns,
                     None,
                     !action.exclusion,

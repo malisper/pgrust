@@ -58,11 +58,20 @@ impl Database {
         txn_ctx: CatalogTxnContext,
         schema_name: &str,
     ) -> Option<crate::include::catalog::PgNamespaceRow> {
-        self.backend_catcache(client_id, txn_ctx)
-            .ok()?
-            .namespace_by_name_exact(schema_name)
-            .cloned()
-            .filter(|row| !self.other_session_temp_namespace_oid(client_id, row.oid))
+        search_sys_cache1_db(
+            self,
+            client_id,
+            txn_ctx,
+            SysCacheId::NamespaceName,
+            Value::Text(schema_name.to_ascii_lowercase().into()),
+        )
+        .ok()?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Namespace(row) => Some(row),
+            _ => None,
+        })
+        .filter(|row| !self.other_session_temp_namespace_oid(client_id, row.oid))
     }
 
     pub(crate) fn visible_namespace_oid_by_name(
@@ -349,13 +358,13 @@ impl Database {
         client_id: ClientId,
         txn_ctx: CatalogTxnContext,
         configured_search_path: Option<&[String]>,
-    ) -> LazyCatalogLookup<'_> {
+    ) -> LazyCatalogLookup {
         if txn_ctx.is_none() {
             self.accept_invalidation_messages(client_id);
         }
         let search_path = self.effective_search_path(client_id, configured_search_path);
         LazyCatalogLookup {
-            db: self,
+            db: self.clone(),
             client_id,
             txn_ctx,
             search_path,

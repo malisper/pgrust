@@ -1327,7 +1327,7 @@ pub(crate) fn index_key_values_for_row(
         let mut exprs = if !index.index_exprs.is_empty() {
             index.index_exprs.iter()
         } else if index.index_meta.indexprs.is_some() {
-            let catalog = ctx.catalog.as_ref().ok_or_else(|| {
+            let catalog = ctx.catalog.as_deref().ok_or_else(|| {
                 ExecError::Parse(ParseError::UnexpectedToken {
                     expected: "catalog for expression index evaluation",
                     actual: "missing visible catalog".into(),
@@ -2446,7 +2446,7 @@ fn relation_write_state_for_foreign_key(
 > {
     let catalog = ctx
         .catalog
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ExecError::DetailedError {
             message: "foreign key action failed".into(),
             detail: Some("executor context missing visible catalog".into()),
@@ -2532,7 +2532,7 @@ fn evaluate_default_value(
     };
     let catalog = ctx
         .catalog
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ExecError::DetailedError {
             message: "foreign key action failed".into(),
             detail: Some("executor context missing visible catalog".into()),
@@ -2556,7 +2556,7 @@ pub(super) fn materialize_generated_columns(
     let generated_exprs = {
         let catalog = ctx
             .catalog
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| ExecError::DetailedError {
                 message: "generated column evaluation failed".into(),
                 detail: Some("executor context missing visible catalog".into()),
@@ -2658,7 +2658,7 @@ fn apply_referential_action_to_rows(
     }
     let catalog = ctx
         .catalog
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ExecError::DetailedError {
             message: "foreign key action failed".into(),
             detail: Some("executor context missing visible catalog".into()),
@@ -2952,7 +2952,7 @@ fn apply_inbound_foreign_key_actions_on_delete(
                 let rows = collect_referencing_rows(constraint, &key_values, ctx)?;
                 let catalog = ctx
                     .catalog
-                    .as_ref()
+                    .as_deref()
                     .ok_or_else(|| ExecError::DetailedError {
                         message: "foreign key action failed".into(),
                         detail: Some("executor context missing visible catalog".into()),
@@ -4485,7 +4485,7 @@ fn relation_acl_allows(
 ) -> Result<bool, ExecError> {
     let catalog = ctx
         .catalog
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ExecError::DetailedError {
             message: "catalog is not available for privilege check".into(),
             detail: None,
@@ -4520,7 +4520,7 @@ fn relation_acl_allows(
 fn relation_permission_denied(ctx: &ExecutorContext, relation_oid: u32) -> ExecError {
     let relation_name = ctx
         .catalog
-        .as_ref()
+        .as_deref()
         .and_then(|catalog| catalog.class_row_by_oid(relation_oid))
         .map(|row| row.relname)
         .unwrap_or_else(|| relation_oid.to_string());
@@ -5034,7 +5034,7 @@ fn enforce_domain_constraint_for_value(
 ) -> Result<(), ExecError> {
     let Some(domain) = ctx
         .catalog
-        .as_ref()
+        .as_deref()
         .and_then(|catalog| catalog.domain_by_type_oid(ty.type_oid))
     else {
         return Ok(());
@@ -5070,7 +5070,7 @@ fn enforce_domain_constraint_for_value(
     };
     let scope = scope_for_relation(None, &desc);
     let bound = {
-        let Some(catalog) = ctx.catalog.as_ref() else {
+        let Some(catalog) = ctx.catalog.as_deref() else {
             return Ok(());
         };
         bind_expr_with_outer_and_ctes(&raw, &scope, catalog, &[], None, &[])
@@ -5273,9 +5273,7 @@ pub(crate) fn apply_assignment_target(
             value.clone(),
             None,
             assignment_type,
-            ctx.catalog
-                .as_ref()
-                .map(|catalog| catalog as &dyn CatalogLookup),
+            ctx.catalog.as_deref(),
             &ctx.datetime_config,
         )
     } else {
@@ -5512,7 +5510,7 @@ fn assignment_target_sql_type(desc: &RelationDesc, target: &BoundAssignmentTarge
 fn assignment_navigation_sql_type(sql_type: SqlType, ctx: &ExecutorContext) -> SqlType {
     let Some(domain) = ctx
         .catalog
-        .as_ref()
+        .as_deref()
         .and_then(|catalog| catalog.domain_by_type_oid(sql_type.type_oid))
     else {
         return sql_type;
@@ -5846,7 +5844,7 @@ fn assignment_record_descriptor(
     if matches!(sql_type.kind, SqlTypeKind::Composite) && sql_type.typrelid != 0 {
         let catalog = ctx
             .catalog
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| ExecError::DetailedError {
                 message: "named composite assignment requires catalog context".into(),
                 detail: None,
@@ -6642,7 +6640,7 @@ pub(crate) fn execute_insert_rows(
 ) -> Result<Vec<Vec<Value>>, ExecError> {
     let triggers = ctx
         .catalog
-        .as_ref()
+        .as_deref()
         .map(|catalog| {
             RuntimeTriggers::load(
                 catalog,
@@ -6771,7 +6769,7 @@ fn coerce_user_defined_base_assignments(
     {
         return Ok(());
     }
-    let Some(catalog) = ctx.catalog.as_ref() else {
+    let Some(catalog) = ctx.catalog.as_deref() else {
         return Ok(());
     };
     for (column, value) in desc.columns.iter().zip(values.iter_mut()) {
@@ -6806,28 +6804,24 @@ fn coerce_user_defined_base_assignments(
 fn insert_partition_constraint_recheck(
     relation_oid: u32,
     ctx: &ExecutorContext,
-) -> Option<(
-    crate::backend::utils::cache::visible_catalog::VisibleCatalog,
-    BoundRelation,
-)> {
-    let catalog = ctx.catalog.as_ref()?;
+) -> Option<(crate::backend::executor::ExecutorCatalog, BoundRelation)> {
+    let catalog = ctx.catalog.as_deref()?;
     let target = catalog.relation_by_oid(relation_oid)?;
-    target.relispartition.then(|| (catalog.clone(), target))
+    target
+        .relispartition
+        .then(|| (ctx.catalog.as_ref().unwrap().clone(), target))
 }
 
 fn enforce_partition_constraint_after_before_insert(
-    partition_recheck: Option<&(
-        crate::backend::utils::cache::visible_catalog::VisibleCatalog,
-        BoundRelation,
-    )>,
+    partition_recheck: Option<&(crate::backend::executor::ExecutorCatalog, BoundRelation)>,
     values: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let Some((catalog, target)) = partition_recheck else {
         return Ok(());
     };
-    let mut proute = exec_setup_partition_tuple_routing(catalog, target)?;
-    exec_find_partition(catalog, &mut proute, target, values, ctx)?;
+    let mut proute = exec_setup_partition_tuple_routing(catalog.as_ref(), target)?;
+    exec_find_partition(catalog.as_ref(), &mut proute, target, values, ctx)?;
     Ok(())
 }
 
@@ -6848,7 +6842,7 @@ pub(crate) fn execute_insert_values(
 ) -> Result<usize, ExecError> {
     if let Some(catalog) = ctx.catalog.clone() {
         return Ok(execute_insert_rows_with_routing(
-            &catalog,
+            catalog.as_ref(),
             relation_name,
             relation_oid,
             rel,
@@ -6896,7 +6890,7 @@ pub fn execute_prepared_insert_row(
 ) -> Result<(), ExecError> {
     let triggers = ctx
         .catalog
-        .as_ref()
+        .as_deref()
         .map(|catalog| {
             RuntimeTriggers::load(
                 catalog,
@@ -7021,7 +7015,7 @@ pub fn execute_update_with_waiter(
             let modified_attnums = modified_attnums_for_update(&target.assignments);
             let triggers = ctx
                 .catalog
-                .as_ref()
+                .as_deref()
                 .map(|catalog| {
                     RuntimeTriggers::load(
                         catalog,
@@ -7368,7 +7362,7 @@ fn execute_update_from_joined_input(
         .map(|target| {
             let modified_attnums = modified_attnums_for_update(&target.assignments);
             ctx.catalog
-                .as_ref()
+                .as_deref()
                 .map(|catalog| {
                     RuntimeTriggers::load(
                         catalog,
@@ -7600,7 +7594,7 @@ pub fn execute_delete_with_waiter(
         for target in &stmt.targets {
             let triggers = ctx
                 .catalog
-                .as_ref()
+                .as_deref()
                 .map(|catalog| {
                     RuntimeTriggers::load(
                         catalog,

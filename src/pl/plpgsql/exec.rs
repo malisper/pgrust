@@ -568,8 +568,8 @@ fn compiled_trigger_function_for_proc(
 fn executor_catalog<'a>(
     ctx: &'a ExecutorContext,
     object_kind: &str,
-) -> Result<&'a crate::backend::utils::cache::visible_catalog::VisibleCatalog, ExecError> {
-    ctx.catalog.as_ref().ok_or_else(|| {
+) -> Result<&'a dyn CatalogLookup, ExecError> {
+    ctx.catalog.as_deref().ok_or_else(|| {
         function_runtime_error(
             &format!("{object_kind} require executor catalog context"),
             None,
@@ -1772,7 +1772,7 @@ fn exec_function_insert(
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
     let cid = ctx.next_command_id;
-    let result = execute_insert(stmt.clone(), &catalog, ctx, xid, cid);
+    let result = execute_insert(stmt.clone(), catalog.as_ref(), ctx, xid, cid);
     ctx.expr_bindings.outer_tuple = None;
     let result = result?;
     advance_plpgsql_command_id(ctx);
@@ -1797,7 +1797,7 @@ fn exec_function_insert_into(
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
     let cid = ctx.next_command_id;
-    let result = execute_insert(stmt.clone(), &catalog, ctx, xid, cid);
+    let result = execute_insert(stmt.clone(), catalog.as_ref(), ctx, xid, cid);
     ctx.expr_bindings.outer_tuple = None;
     let StatementResult::Query { columns, rows, .. } = result? else {
         return Err(function_runtime_error(
@@ -1826,7 +1826,7 @@ fn exec_function_update(
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
     let cid = ctx.next_command_id;
-    let result = execute_update(stmt.clone(), &catalog, ctx, xid, cid);
+    let result = execute_update(stmt.clone(), catalog.as_ref(), ctx, xid, cid);
     ctx.expr_bindings.outer_tuple = None;
     let result = result?;
     advance_plpgsql_command_id(ctx);
@@ -1851,7 +1851,7 @@ fn exec_function_update_into(
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
     let cid = ctx.next_command_id;
-    let result = execute_update(stmt.clone(), &catalog, ctx, xid, cid);
+    let result = execute_update(stmt.clone(), catalog.as_ref(), ctx, xid, cid);
     ctx.expr_bindings.outer_tuple = None;
     let StatementResult::Query { columns, rows, .. } = result? else {
         return Err(function_runtime_error(
@@ -1879,7 +1879,7 @@ fn exec_function_delete(
     })?;
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
-    let result = execute_delete(stmt.clone(), &catalog, ctx, xid);
+    let result = execute_delete(stmt.clone(), catalog.as_ref(), ctx, xid);
     ctx.expr_bindings.outer_tuple = None;
     let result = result?;
     advance_plpgsql_command_id(ctx);
@@ -1903,7 +1903,7 @@ fn exec_function_delete_into(
     })?;
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
-    let result = execute_delete(stmt.clone(), &catalog, ctx, xid);
+    let result = execute_delete(stmt.clone(), catalog.as_ref(), ctx, xid);
     ctx.expr_bindings.outer_tuple = None;
     let StatementResult::Query { columns, rows, .. } = result? else {
         return Err(function_runtime_error(
@@ -2100,7 +2100,7 @@ fn execute_dynamic_statement(
             crate::backend::parser::Statement::Select(stmt) => execute_planned_stmt(
                 pg_plan_query_with_outer_scopes_and_ctes(
                     &stmt,
-                    &catalog,
+                    catalog.as_ref(),
                     &[],
                     &compiled.local_ctes,
                 )
@@ -2110,7 +2110,7 @@ fn execute_dynamic_statement(
             crate::backend::parser::Statement::Values(stmt) => execute_planned_stmt(
                 pg_plan_values_query_with_outer_scopes_and_ctes(
                     &stmt,
-                    &catalog,
+                    catalog.as_ref(),
                     &[],
                     &compiled.local_ctes,
                 )
@@ -2120,10 +2120,13 @@ fn execute_dynamic_statement(
             crate::backend::parser::Statement::Insert(stmt) => {
                 let xid = ctx.ensure_write_xid()?;
                 let cid = ctx.next_command_id;
-                let stmt =
-                    crate::backend::parser::bind_insert_with_outer_scopes(&stmt, &catalog, &[])
-                        .map_err(ExecError::Parse)?;
-                let result = execute_insert(stmt, &catalog, ctx, xid, cid);
+                let stmt = crate::backend::parser::bind_insert_with_outer_scopes(
+                    &stmt,
+                    catalog.as_ref(),
+                    &[],
+                )
+                .map_err(ExecError::Parse)?;
+                let result = execute_insert(stmt, catalog.as_ref(), ctx, xid, cid);
                 if result.is_ok() {
                     advance_plpgsql_command_id(ctx);
                 }
@@ -2132,10 +2135,13 @@ fn execute_dynamic_statement(
             crate::backend::parser::Statement::Update(stmt) => {
                 let xid = ctx.ensure_write_xid()?;
                 let cid = ctx.next_command_id;
-                let stmt =
-                    crate::backend::parser::bind_update_with_outer_scopes(&stmt, &catalog, &[])
-                        .map_err(ExecError::Parse)?;
-                let result = execute_update(stmt, &catalog, ctx, xid, cid);
+                let stmt = crate::backend::parser::bind_update_with_outer_scopes(
+                    &stmt,
+                    catalog.as_ref(),
+                    &[],
+                )
+                .map_err(ExecError::Parse)?;
+                let result = execute_update(stmt, catalog.as_ref(), ctx, xid, cid);
                 if result.is_ok() {
                     advance_plpgsql_command_id(ctx);
                 }
@@ -2143,10 +2149,13 @@ fn execute_dynamic_statement(
             }
             crate::backend::parser::Statement::Delete(stmt) => {
                 let xid = ctx.ensure_write_xid()?;
-                let stmt =
-                    crate::backend::parser::bind_delete_with_outer_scopes(&stmt, &catalog, &[])
-                        .map_err(ExecError::Parse)?;
-                let result = execute_delete(stmt, &catalog, ctx, xid);
+                let stmt = crate::backend::parser::bind_delete_with_outer_scopes(
+                    &stmt,
+                    catalog.as_ref(),
+                    &[],
+                )
+                .map_err(ExecError::Parse)?;
+                let result = execute_delete(stmt, catalog.as_ref(), ctx, xid);
                 if result.is_ok() {
                     advance_plpgsql_command_id(ctx);
                 }
@@ -2162,7 +2171,7 @@ fn execute_dynamic_statement(
                 // helpers use SET LOCAL jit=0 only to stabilize EXPLAIN.
                 Ok(crate::backend::executor::StatementResult::AffectedRows(0))
             }
-            other => execute_readonly_statement(other, &catalog, ctx),
+            other => execute_readonly_statement(other, catalog.as_ref(), ctx),
         }
     })
 }
@@ -2360,9 +2369,7 @@ fn cast_function_value(
         value,
         source_type,
         target_type,
-        ctx.catalog
-            .as_ref()
-            .map(|catalog| catalog as &dyn CatalogLookup),
+        ctx.catalog.as_deref(),
         &ctx.datetime_config,
     )
 }
@@ -2425,7 +2432,7 @@ fn record_descriptor_for_query_target(
     ctx: &ExecutorContext,
 ) -> Result<RecordDescriptor, ExecError> {
     if target_ty.kind == SqlTypeKind::Composite && target_ty.typrelid != 0 {
-        let catalog = ctx.catalog.as_ref().ok_or_else(|| {
+        let catalog = ctx.catalog.clone().ok_or_else(|| {
             function_runtime_error(
                 "named composite assignment requires catalog context",
                 None,
@@ -2470,7 +2477,7 @@ fn substitute_dynamic_query_params(
     params: &[Value],
     ctx: &ExecutorContext,
 ) -> Result<String, ExecError> {
-    let catalog = ctx.catalog.as_ref().ok_or_else(|| {
+    let catalog = ctx.catalog.clone().ok_or_else(|| {
         function_runtime_error(
             "user-defined functions require executor catalog context",
             None,
@@ -2559,7 +2566,11 @@ fn substitute_dynamic_query_params(
                             "42P02",
                         )
                     })?;
-                    out.push_str(&render_dynamic_query_param_sql(value, catalog, ctx)?);
+                    out.push_str(&render_dynamic_query_param_sql(
+                        value,
+                        catalog.as_ref(),
+                        ctx,
+                    )?);
                     idx = end;
                     continue;
                 }

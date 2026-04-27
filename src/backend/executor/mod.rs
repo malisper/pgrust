@@ -118,6 +118,7 @@ pub(crate) use expr_txid::{
     cast_text_to_txid_snapshot, eval_txid_builtin_function, is_txid_snapshot_type_oid,
 };
 pub(crate) use expr_xml::validate_xml_input;
+pub use fmgr::ScalarFunctionCallInfo;
 pub(crate) use nodes::{
     render_explain_expr, render_explain_join_expr, render_explain_projection_expr_with_qualifier,
     render_index_order_by, render_index_scan_condition_with_key_names,
@@ -149,15 +150,14 @@ use crate::backend::catalog::catalog::Catalog;
 use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::commands::tablecmds::*;
 use crate::backend::parser::{
-    ParseError, Statement, bind_delete, bind_insert, bind_update, parse_statement, pg_plan_query,
-    pg_plan_values_query,
+    CatalogLookup, ParseError, Statement, bind_delete, bind_insert, bind_update, parse_statement,
+    pg_plan_query, pg_plan_values_query,
 };
 use crate::backend::storage::lmgr::TableLockError;
 use crate::backend::storage::lmgr::{
     AdvisoryLockManager, RowLockError, RowLockManager, RowLockMode, RowLockOwner, RowLockTag,
 };
 use crate::backend::storage::smgr::RelFileLocator;
-use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::interrupts::{
@@ -172,6 +172,15 @@ use crate::pgrust::database::{
 };
 use crate::pl::plpgsql::PlpgsqlFunctionCache;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
+
+pub type ExecutorCatalog = std::sync::Arc<dyn CatalogLookup>;
+
+pub fn executor_catalog<C>(catalog: C) -> ExecutorCatalog
+where
+    C: CatalogLookup + 'static,
+{
+    std::sync::Arc::new(catalog)
+}
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -436,7 +445,8 @@ pub struct ExecutorContext {
     pub database: Option<Database>,
     pub pending_catalog_effects: Vec<CatalogMutationEffect>,
     pub pending_table_locks: Vec<RelFileLocator>,
-    pub catalog: Option<VisibleCatalog>,
+    pub catalog: Option<ExecutorCatalog>,
+    pub scalar_function_cache: HashMap<u32, ScalarFunctionCallInfo>,
     pub plpgsql_function_cache: Arc<parking_lot::RwLock<PlpgsqlFunctionCache>>,
     pub pinned_cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,
     pub cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,

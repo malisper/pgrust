@@ -5,7 +5,6 @@ use crate::backend::commands::tablecmds::{execute_insert_values, reinitialize_in
 use crate::backend::parser::{BoundIndexRelation, BoundRelation};
 use crate::backend::rewrite::load_view_return_select;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
-use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::nodes::parsenodes::{
     CreateTableAsQuery, DropMaterializedViewStatement, RefreshMaterializedViewStatement,
     TableAsObjectType,
@@ -180,7 +179,7 @@ impl Database {
                 xid,
                 cid,
                 Arc::clone(&interrupts),
-                catalog.materialize_visible_catalog(),
+                Some(crate::backend::executor::executor_catalog(catalog.clone())),
                 true,
             )?;
             execute_insert_values(
@@ -429,7 +428,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         interrupts: Arc<InterruptState>,
-        catalog: Option<VisibleCatalog>,
+        catalog: Option<crate::backend::executor::ExecutorCatalog>,
         allow_side_effects: bool,
     ) -> Result<ExecutorContext, ExecError> {
         Ok(ExecutorContext {
@@ -478,6 +477,7 @@ impl Database {
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
             catalog,
+            scalar_function_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: self.plpgsql_function_cache(client_id),
             pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: HashMap::new(),
@@ -777,7 +777,7 @@ fn execute_matview_select_rows(
     xid: TransactionId,
     cid: CommandId,
     interrupts: Arc<InterruptState>,
-    catalog: &dyn CatalogLookup,
+    catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup,
     stmt: Statement,
     allow_side_effects: bool,
 ) -> Result<MatviewSelectResult, ExecError> {
@@ -786,7 +786,7 @@ fn execute_matview_select_rows(
         xid,
         cid,
         interrupts,
-        catalog.materialize_visible_catalog(),
+        Some(crate::backend::executor::executor_catalog(catalog.clone())),
         allow_side_effects,
     )?;
     let StatementResult::Query { rows, .. } = execute_readonly_statement(stmt, catalog, &mut ctx)?
@@ -809,14 +809,7 @@ fn truncate_matview_storage(
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ExecError> {
     let interrupts = db.interrupt_state(client_id);
-    let mut ctx = db.matview_executor_context(
-        client_id,
-        xid,
-        cid,
-        interrupts,
-        catalog.materialize_visible_catalog(),
-        true,
-    )?;
+    let mut ctx = db.matview_executor_context(client_id, xid, cid, interrupts, None, true)?;
     let indexes = catalog.index_relations_for_heap(relation.relation_oid);
     let _ = ctx.pool.invalidate_relation(relation.rel);
     ctx.pool
@@ -858,14 +851,7 @@ fn insert_matview_rows(
             .into_iter()
             .next()
     });
-    let mut ctx = db.matview_executor_context(
-        client_id,
-        xid,
-        cid,
-        interrupts,
-        catalog.materialize_visible_catalog(),
-        true,
-    )?;
+    let mut ctx = db.matview_executor_context(client_id, xid, cid, interrupts, None, true)?;
     let relation_name = catalog
         .class_row_by_oid(relation.relation_oid)
         .map(|row| row.relname)

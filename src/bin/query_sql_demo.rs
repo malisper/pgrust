@@ -15,7 +15,7 @@ use pgrust::executor::{
     ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_readonly_statement,
 };
 use pgrust::include::access::htup::{HeapTuple, TupleValue};
-use pgrust::parser::{CatalogLookup, SqlType, SqlTypeKind, Statement, parse_statement};
+use pgrust::parser::{SqlType, SqlTypeKind, Statement, parse_statement};
 use pgrust::pl::plpgsql::{RaiseLevel, clear_notices, take_notices};
 use pgrust::{BufferPool, RelFileLocator, SmgrStorageBackend};
 use std::fs;
@@ -228,7 +228,8 @@ fn main() -> Result<(), ExecError> {
         database: None,
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
-        catalog: relcache.materialize_visible_catalog(),
+        catalog: Some(pgrust::executor::executor_catalog(relcache.clone())),
+        scalar_function_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             pgrust::pl::plpgsql::PlpgsqlFunctionCache::default(),
         )),

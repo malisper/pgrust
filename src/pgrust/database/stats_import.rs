@@ -260,7 +260,7 @@ impl StatsImportRuntime for Database {
             row.stadistinct = value;
         }
 
-        let catalog = ctx.catalog.as_ref().ok_or_else(missing_catalog_context)?;
+        let catalog = ctx.catalog.as_deref().ok_or_else(missing_catalog_context)?;
         let attr_type = statistic_attribute_type(column.sql_type);
         let attr_type_oid = sql_type_oid(attr_type);
         let eq_op = catalog
@@ -509,7 +509,7 @@ impl Database {
         schemaname: &str,
         relname: &str,
     ) -> Result<crate::backend::parser::BoundRelation, ExecError> {
-        let catalog = ctx.catalog.as_ref().ok_or_else(missing_catalog_context)?;
+        let catalog = ctx.catalog.as_deref().ok_or_else(missing_catalog_context)?;
         let qualified = format!("{schemaname}.{relname}");
         if !schemaname.eq_ignore_ascii_case("pg_temp")
             && !catalog
@@ -900,10 +900,7 @@ fn parse_text_stat_array(
     let Some(raw) = parsed.get(name).and_then(text_arg) else {
         return Ok(None);
     };
-    let catalog = ctx
-        .catalog
-        .as_ref()
-        .map(|catalog| catalog as &dyn CatalogLookup);
+    let catalog = ctx.catalog.as_deref();
     let value = match parse_text_array_literal_with_catalog_and_op(
         &raw,
         element_type,
