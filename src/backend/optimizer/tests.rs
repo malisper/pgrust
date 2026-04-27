@@ -3108,7 +3108,10 @@ fn planner_rewrites_distinct_minmax_with_unique_index_only_subplans() {
         planned_stmt_for_sql_with_catalog("select distinct min(id), max(id) from items", &catalog);
 
     assert_eq!(planned.subplans.len(), 2);
-    assert!(matches!(planned.plan_tree, Plan::Unique { .. }));
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::Unique { .. }
+    )));
     assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
         plan,
         Plan::Aggregate { .. } | Plan::SetOp { .. }

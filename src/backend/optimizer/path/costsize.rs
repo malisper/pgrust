@@ -629,10 +629,11 @@ pub(super) fn optimize_path_with_config(
                     .iter()
                     .map(|col| estimate_sql_type_width(col.sql_type))
                     .sum();
+                let transition_ops = accumulators.len();
+                let grouping_ops = group_by.len();
+                let per_tuple_ops = (transition_ops + grouping_ops).max(1) as f64;
                 let total = input_info.total_cost.as_f64()
-                    + input_info.plan_rows.as_f64()
-                        * (accumulators.len().max(1) as f64)
-                        * CPU_OPERATOR_COST;
+                    + input_info.plan_rows.as_f64() * per_tuple_ops * CPU_OPERATOR_COST;
                 Path::Aggregate {
                     plan_info: PlanEstimate::new(total, total, rows, width),
                     pathtarget,
