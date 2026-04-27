@@ -16005,6 +16005,16 @@ fn parse_exists_subquery_expression() {
 fn parse_in_subquery_expression() {
     assert!(parse_select("select id in (select owner_id from pets) from people").is_ok());
     assert!(parse_select("select id not in (select owner_id from pets) from people").is_ok());
+    let stmt = parse_select("select (id, name) in (values (1, 'alice')) from people").unwrap();
+    match &stmt.targets[0].expr {
+        SqlExpr::InSubquery { expr, subquery, .. } => {
+            assert!(matches!(expr.as_ref(), SqlExpr::Row(items) if items.len() == 2));
+            assert!(
+                matches!(subquery.from.as_ref(), Some(FromItem::Values { rows }) if rows[0].len() == 2)
+            );
+        }
+        other => panic!("expected row-valued IN subquery, got {other:?}"),
+    }
 }
 
 #[test]
