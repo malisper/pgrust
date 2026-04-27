@@ -2449,6 +2449,7 @@ impl Database {
                 cid,
                 configured_search_path,
                 catalog_effects,
+                temp_effects,
                 cascade,
                 expected_relkind,
                 expected_name,
@@ -2645,6 +2646,7 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        mut temp_effects: Option<&mut Vec<TempMutationEffect>>,
         cascade: bool,
         expected_relkind: char,
         expected_name: &'static str,
@@ -2775,10 +2777,58 @@ impl Database {
             }
 
             for relation_oid in &plan.relation_drop_order {
-                let relkind = catcache
+                let (relkind, relpersistence) = catcache
                     .class_by_oid(*relation_oid)
-                    .map(|row| row.relkind)
-                    .unwrap_or(expected_relkind);
+                    .map(|row| (row.relkind, row.relpersistence))
+                    .unwrap_or((expected_relkind, 'p'));
+                if relpersistence == 't' {
+                    let temp_name = self
+                        .temp_relation_name_for_oid(client_id, *relation_oid)
+                        .ok_or_else(|| {
+                            ExecError::Parse(ParseError::UnexpectedToken {
+                                expected: "tracked temporary relation",
+                                actual: relation_oid.to_string(),
+                            })
+                        })?;
+                    if relkind == 'v' {
+                        let ctx = CatalogWriteContext {
+                            pool: self.pool.clone(),
+                            txns: self.txns.clone(),
+                            xid,
+                            cid: next_cid,
+                            client_id,
+                            waiter: Some(self.txn_waiter.clone()),
+                            interrupts: Arc::clone(&interrupts),
+                        };
+                        let effect = self
+                            .catalog
+                            .write()
+                            .drop_view_by_oid_mvcc(*relation_oid, &ctx)
+                            .map(|(_, effect)| effect)
+                            .map_err(map_catalog_error)?;
+                        catalog_effects.push(effect);
+                        self.remove_temp_entry_after_catalog_drop(
+                            client_id,
+                            &temp_name,
+                            temp_effects
+                                .as_deref_mut()
+                                .expect("temp effects required for DROP VIEW"),
+                        )?;
+                    } else {
+                        self.drop_temp_relation_in_transaction(
+                            client_id,
+                            &temp_name,
+                            xid,
+                            next_cid,
+                            catalog_effects,
+                            temp_effects
+                                .as_deref_mut()
+                                .expect("temp effects required for DROP VIEW"),
+                        )?;
+                    }
+                    next_cid = next_cid.saturating_add(1);
+                    continue;
+                }
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),

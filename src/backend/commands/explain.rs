@@ -754,6 +754,9 @@ fn aggregate_group_key_input_names(
         }
         return verbose_plan_output_exprs(input, ctx, true);
     }
+    if matches!(input, Plan::Projection { .. }) {
+        return nonverbose_aggregate_input_names(input, ctx);
+    }
     input.column_names()
 }
 

@@ -10501,8 +10501,15 @@ fn drop_view_rejects_depended_on_view() {
         .unwrap();
 
     match session.execute(&db, "drop view first_view") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
-            if actual.contains("view depends on it: second_view") => {}
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            hint: Some(hint),
+            sqlstate,
+        }) if message == "cannot drop view first_view because other objects depend on it"
+            && detail == "view second_view depends on view first_view"
+            && hint == "Use DROP ... CASCADE to drop the dependent objects too."
+            && sqlstate == "2BP01" => {}
         other => panic!("expected dependent-view drop-view error, got {other:?}"),
     }
 }

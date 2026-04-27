@@ -5045,7 +5045,9 @@ fn explain_indents_child_plan_nodes() {
                 "expected stored sort key display, got {rendered:?}"
             );
             assert!(
-                rendered.iter().any(|line| line.starts_with("  Seq Scan")),
+                rendered
+                    .iter()
+                    .any(|line| line.starts_with("  ->  Seq Scan")),
                 "expected indented seq scan child line, got {rendered:?}"
             );
         }
