@@ -802,6 +802,14 @@ pub(crate) fn encode_jsonb(value: &JsonbValue) -> Vec<u8> {
     out
 }
 
+pub(crate) fn jsonb_nested_encoded_len_at(value: &JsonbValue, absolute_offset: usize) -> usize {
+    let prefix_len = absolute_offset % 4;
+    let mut out = vec![0; prefix_len];
+    let mut meta = 0u32;
+    encode_jsonb_value(&mut out, &mut meta, value, 1, false);
+    out.len() - prefix_len
+}
+
 pub(crate) fn jsonb_from_value(
     value: &Value,
     datetime_config: &DateTimeConfig,

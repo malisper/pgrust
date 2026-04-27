@@ -237,7 +237,29 @@ fn bind_json_constructor_arg_expr(
 ) -> Result<(Expr, SqlType), ParseError> {
     match arg {
         SqlExpr::Column(name) => {
-            if let Some(fields) = resolve_relation_row_expr_with_outer(scope, outer_scopes, name) {
+            if resolve_column_with_outer(scope, outer_scopes, name, grouped_outer).is_ok() {
+                let sql_type = infer_sql_expr_type_with_ctes(
+                    arg,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                Ok((
+                    bind_expr_with_outer_and_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    sql_type,
+                ))
+            } else if let Some(fields) =
+                resolve_relation_row_expr_with_outer(scope, outer_scopes, name)
+            {
                 let descriptor = assign_anonymous_record_descriptor(
                     fields
                         .iter()

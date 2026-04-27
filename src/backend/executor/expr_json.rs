@@ -47,19 +47,29 @@ fn parse_json_text(text: &str) -> Result<SerdeJsonValue, ExecError> {
 }
 
 fn validate_jsonpath_text(text: &str) -> Result<(), ExecError> {
-    validate_jsonpath(text).map_err(|_| ExecError::InvalidStorageValue {
+    validate_jsonpath(text).map_err(|err| jsonpath_input_error(text, err))
+}
+
+fn jsonpath_input_error(text: &str, err: ExecError) -> ExecError {
+    if let ExecError::InvalidStorageValue { details, .. } = &err
+        && is_jsonpath_syntax_error(details)
+    {
+        return err;
+    }
+    ExecError::InvalidStorageValue {
         column: "jsonpath".into(),
         details: format!("invalid input syntax for type jsonpath: \"{text}\""),
-    })
+    }
+}
+
+fn is_jsonpath_syntax_error(details: &str) -> bool {
+    details.starts_with("syntax error at or near ") && details.ends_with(" of jsonpath input")
 }
 
 pub(crate) fn canonicalize_jsonpath_text(text: &str) -> Result<CompactString, ExecError> {
     canonicalize_jsonpath(text)
         .map(CompactString::from_owned)
-        .map_err(|_| ExecError::InvalidStorageValue {
-            column: "jsonpath".into(),
-            details: format!("invalid input syntax for type jsonpath: \"{text}\""),
-        })
+        .map_err(|err| jsonpath_input_error(text, err))
 }
 
 enum ParsedJsonValue {
@@ -2437,6 +2447,9 @@ pub(crate) fn eval_jsonpath_operator(
         vars: None,
         datetime_config: &ctx.datetime_config,
         allow_timezone: false,
+        silent: true,
+        preserve_step_prefix: false,
+        preserve_unary_prefix: false,
     };
     let result = evaluate_jsonpath(&parsed, &eval_ctx);
     if as_match {
@@ -2482,6 +2495,9 @@ fn eval_jsonpath_function(
         vars: vars_json.as_ref(),
         datetime_config,
         allow_timezone,
+        silent,
+        preserve_step_prefix: matches!(kind, JsonPathFunctionKind::QueryFirst) && silent,
+        preserve_unary_prefix: silent,
     };
     let result = evaluate_jsonpath(&parsed, &eval_ctx);
     match kind {
@@ -2542,6 +2558,9 @@ fn eval_sql_json_query_path(values: &[Value]) -> Result<Option<Vec<JsonbValue>>,
         vars: None,
         datetime_config: &datetime_config,
         allow_timezone: false,
+        silent: true,
+        preserve_step_prefix: false,
+        preserve_unary_prefix: true,
     };
     // SQL/JSON query functions default to NULL/FALSE ON ERROR. Keep jsonpath
     // parse and input conversion errors visible, but suppress path evaluation
@@ -2566,7 +2585,7 @@ fn jsonpath_exists_result(
 ) -> Result<Value, ExecError> {
     match result {
         Ok(items) => Ok(Value::Bool(!items.is_empty())),
-        Err(_) if silent => Ok(Value::Bool(false)),
+        Err(_) if silent => Ok(Value::Null),
         Err(err) => Err(err),
     }
 }
@@ -4231,6 +4250,9 @@ fn eval_sql_json_path(
         vars,
         datetime_config: &datetime_config,
         allow_timezone: false,
+        silent: !error_on_error,
+        preserve_step_prefix: false,
+        preserve_unary_prefix: !error_on_error,
     };
     match evaluate_jsonpath(&parsed, &eval_ctx) {
         Ok(values) => Ok(values),
@@ -4655,6 +4677,9 @@ fn eval_jsonb_path_query_rows(
         vars: vars_json.as_ref(),
         datetime_config,
         allow_timezone,
+        silent,
+        preserve_step_prefix: false,
+        preserve_unary_prefix: silent,
     };
     let result = evaluate_jsonpath(&parsed, &eval_ctx);
     match result {

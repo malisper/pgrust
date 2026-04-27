@@ -8,8 +8,10 @@ use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::expr_casts::{
     cast_text_value_with_config, cast_value_with_config, parse_pg_float,
 };
-use crate::backend::executor::expr_ops::parse_numeric_text;
-use crate::backend::executor::jsonb::{JsonbValue, compare_jsonb, render_temporal_jsonb_value};
+use crate::backend::executor::expr_ops::{mixed_date_timestamp_ordering, parse_numeric_text};
+use crate::backend::executor::jsonb::{
+    JsonbValue, compare_jsonb, jsonb_nested_encoded_len_at, render_temporal_jsonb_value,
+};
 use crate::backend::executor::pg_regex::{eval_jsonpath_like_regex, validate_jsonpath_like_regex};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::notices::push_warning;
@@ -63,6 +65,10 @@ enum Expr {
     MethodCall {
         inner: Box<Expr>,
         method: Method,
+    },
+    Filter {
+        inner: Box<Expr>,
+        predicate: Box<Expr>,
     },
     Exists(Box<Expr>),
     Last,
@@ -194,6 +200,9 @@ pub(crate) struct EvaluationContext<'a> {
     pub(crate) vars: Option<&'a JsonbValue>,
     pub(crate) datetime_config: &'a DateTimeConfig,
     pub(crate) allow_timezone: bool,
+    pub(crate) silent: bool,
+    pub(crate) preserve_step_prefix: bool,
+    pub(crate) preserve_unary_prefix: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -260,7 +269,7 @@ fn eval_expr(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<Vec<JsonbValue>, E
         Expr::Arithmetic { op, left, right } => {
             let left_values = eval_expr(left, ctx)?;
             let right_values = eval_expr(right, ctx)?;
-            eval_arithmetic_any_pair(&left_values, &right_values, *op)
+            eval_arithmetic_operands(&left_values, &right_values, *op, ctx)
         }
         Expr::MethodCall { inner, method } => {
             eval_expr(inner, ctx)?
@@ -270,12 +279,25 @@ fn eval_expr(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<Vec<JsonbValue>, E
                     Ok(out)
                 })
         }
+        Expr::Filter { inner, predicate } => {
+            eval_expr(inner, ctx)?
+                .into_iter()
+                .try_fold(Vec::new(), |mut out, value| {
+                    let nested = RuntimeContext {
+                        global: ctx.global,
+                        current: &value,
+                        mode: ctx.mode,
+                        last_index: ctx.last_index,
+                    };
+                    if eval_predicate(predicate, &nested)? == PredicateValue::True {
+                        out.push(value);
+                    }
+                    Ok(out)
+                })
+        }
         Expr::Unary { op, inner } => {
             let values = eval_expr(inner, ctx)?;
-            values
-                .into_iter()
-                .map(|value| eval_unary_value(value, *op))
-                .collect()
+            eval_unary_values(&values, *op, ctx)
         }
     }
 }
@@ -285,15 +307,18 @@ fn eval_predicate(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<PredicateValu
         Expr::Exists(inner) => Ok(match eval_expr(inner, ctx) {
             Ok(values) if values.is_empty() => PredicateValue::False,
             Ok(_) => PredicateValue::True,
+            Err(err) if is_jsonpath_fatal_error(&err) => return Err(err),
             Err(_) => PredicateValue::Unknown,
         }),
         Expr::Compare { op, left, right } => {
             let left_values = match eval_expr(left, ctx) {
                 Ok(values) => values,
+                Err(err) if is_jsonpath_fatal_error(&err) => return Err(err),
                 Err(_) => return Ok(PredicateValue::Unknown),
             };
             let right_values = match eval_expr(right, ctx) {
                 Ok(values) => values,
+                Err(err) if is_jsonpath_fatal_error(&err) => return Err(err),
                 Err(_) => return Ok(PredicateValue::Unknown),
             };
             compare_any_pair(&left_values, &right_values, *op, ctx)
@@ -301,13 +326,15 @@ fn eval_predicate(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<PredicateValu
         Expr::StartsWith { left, right } => {
             let left_values = match eval_expr(left, ctx) {
                 Ok(values) => values,
+                Err(err) if is_jsonpath_fatal_error(&err) => return Err(err),
                 Err(_) => return Ok(PredicateValue::Unknown),
             };
             let right_values = match eval_expr(right, ctx) {
                 Ok(values) => values,
+                Err(err) if is_jsonpath_fatal_error(&err) => return Err(err),
                 Err(_) => return Ok(PredicateValue::Unknown),
             };
-            Ok(starts_with_any_pair(&left_values, &right_values))
+            Ok(starts_with_any_pair(&left_values, &right_values, ctx))
         }
         Expr::LikeRegex {
             expr,
@@ -316,9 +343,10 @@ fn eval_predicate(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<PredicateValu
         } => {
             let values = match eval_expr(expr, ctx) {
                 Ok(values) => values,
+                Err(err) if is_jsonpath_fatal_error(&err) => return Err(err),
                 Err(_) => return Ok(PredicateValue::Unknown),
             };
-            like_regex_any(&values, pattern, flags)
+            like_regex_any(&values, pattern, flags, ctx)
         }
         Expr::And(left, right) => {
             let left_value = eval_predicate(left, ctx)?;
@@ -364,6 +392,7 @@ fn predicate_value_from_items(
 ) -> Result<PredicateValue, ExecError> {
     let values = match eval_expr(expr, ctx) {
         Ok(values) => values,
+        Err(err) if is_jsonpath_fatal_error(&err) => return Err(err),
         Err(_) => return Ok(PredicateValue::Unknown),
     };
     if values.is_empty() {
@@ -393,16 +422,46 @@ fn predicate_value_to_jsonb(value: PredicateValue) -> JsonbValue {
 }
 
 fn lookup_var<'a>(ctx: &'a RuntimeContext<'_>, name: &str) -> Result<&'a JsonbValue, ExecError> {
-    let Some(JsonbValue::Object(items)) = ctx.global.vars else {
-        return Err(exec_jsonpath_error(
-            "jsonpath variables must be a jsonb object",
-        ));
+    let Some(vars) = ctx.global.vars else {
+        return Err(undefined_jsonpath_variable(name));
+    };
+    let JsonbValue::Object(items) = vars else {
+        return Err(jsonpath_vars_not_object_error());
     };
     items
         .iter()
         .find(|(key, _)| key == name)
         .map(|(_, value)| value)
-        .ok_or_else(|| exec_jsonpath_error(&format!("jsonpath variable \"{name}\" not found")))
+        .ok_or_else(|| undefined_jsonpath_variable(name))
+}
+
+fn undefined_jsonpath_variable(name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("could not find jsonpath variable \"{name}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "42704",
+    }
+}
+
+fn jsonpath_vars_not_object_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "\"vars\" argument is not an object".into(),
+        detail: Some(
+            "Jsonpath parameters should be encoded as key-value pairs of \"vars\" object.".into(),
+        ),
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+fn is_jsonpath_fatal_error(err: &ExecError) -> bool {
+    matches!(
+        err,
+        ExecError::DetailedError { message, .. }
+            if message.starts_with("could not find jsonpath variable ")
+                || message == "\"vars\" argument is not an object"
+    )
 }
 
 fn apply_step(
@@ -412,7 +471,12 @@ fn apply_step(
 ) -> Result<Vec<JsonbValue>, ExecError> {
     let mut out = Vec::new();
     for value in values {
-        apply_step_single(&value, step, ctx, &mut out)?;
+        if let Err(err) = apply_step_single(&value, step, ctx, &mut out) {
+            if ctx.global.preserve_step_prefix && !out.is_empty() {
+                return Ok(out);
+            }
+            return Err(err);
+        }
     }
     Ok(out)
 }
@@ -429,7 +493,9 @@ fn apply_step_single(
                 if let Some((_, found)) = items.iter().find(|(key, _)| key == name) {
                     out.push(found.clone());
                 } else if matches!(ctx.mode, PathMode::Strict) {
-                    return Err(exec_jsonpath_error("jsonpath member not found"));
+                    return Err(exec_jsonpath_error(&format!(
+                        "JSON object does not contain key \"{name}\""
+                    )));
                 }
             }
             JsonbValue::Array(items) if matches!(ctx.mode, PathMode::Lax) => {
@@ -439,7 +505,7 @@ fn apply_step_single(
             }
             _ if matches!(ctx.mode, PathMode::Strict) => {
                 return Err(exec_jsonpath_error(
-                    "jsonpath member access requires object",
+                    "jsonpath member accessor can only be applied to an object",
                 ));
             }
             _ => {}
@@ -453,7 +519,7 @@ fn apply_step_single(
             }
             _ if matches!(ctx.mode, PathMode::Strict) => {
                 return Err(exec_jsonpath_error(
-                    "jsonpath wildcard member access requires object",
+                    "jsonpath wildcard member accessor can only be applied to an object",
                 ));
             }
             _ => {}
@@ -475,7 +541,7 @@ fn apply_step_single(
             }
             _ if matches!(ctx.mode, PathMode::Strict) => {
                 return Err(exec_jsonpath_error(
-                    "jsonpath array subscript requires array",
+                    "jsonpath array accessor can only be applied to an array",
                 ));
             }
             _ => {}
@@ -485,7 +551,7 @@ fn apply_step_single(
             _ if matches!(ctx.mode, PathMode::Lax) => out.push(value.clone()),
             _ if matches!(ctx.mode, PathMode::Strict) => {
                 return Err(exec_jsonpath_error(
-                    "jsonpath array wildcard requires array",
+                    "jsonpath wildcard array accessor can only be applied to an array",
                 ));
             }
             _ => {}
@@ -652,7 +718,7 @@ fn apply_method_values(
     ctx: &RuntimeContext<'_>,
 ) -> Result<Vec<JsonbValue>, ExecError> {
     if matches!(method.kind, MethodKind::KeyValue) {
-        return apply_keyvalue_method(value).map_err(|err| err);
+        return apply_keyvalue_method(value, ctx).map_err(|err| err);
     }
     Ok(vec![apply_method(value, method, ctx)?])
 }
@@ -757,22 +823,85 @@ fn method_auto_unwraps_array(method: &Method) -> bool {
     !matches!(method.kind, MethodKind::Size | MethodKind::Type)
 }
 
-fn apply_keyvalue_method(value: &JsonbValue) -> Result<Vec<JsonbValue>, ExecError> {
+fn apply_keyvalue_method(
+    value: &JsonbValue,
+    ctx: &RuntimeContext<'_>,
+) -> Result<Vec<JsonbValue>, ExecError> {
     let JsonbValue::Object(items) = value else {
         return Err(exec_jsonpath_error(
             "jsonpath item method .keyvalue() can only be applied to an object",
         ));
     };
+    let id = jsonpath_keyvalue_object_id(ctx.global.root, value).unwrap_or(0);
     Ok(items
         .iter()
         .map(|(key, value)| {
             JsonbValue::Object(vec![
                 ("key".to_string(), JsonbValue::String(key.clone())),
                 ("value".to_string(), value.clone()),
-                ("id".to_string(), numeric_jsonb_from_i32(0)),
+                ("id".to_string(), numeric_jsonb_from_i64(id)),
             ])
         })
         .collect())
+}
+
+fn jsonpath_keyvalue_object_id(root: &JsonbValue, target: &JsonbValue) -> Option<i64> {
+    find_jsonb_object_offset(root, target, 0).and_then(|offset| i64::try_from(offset).ok())
+}
+
+fn find_jsonb_object_offset(
+    value: &JsonbValue,
+    target: &JsonbValue,
+    container_offset: usize,
+) -> Option<usize> {
+    if matches!(value, JsonbValue::Object(_)) && value == target {
+        return Some(container_offset);
+    }
+    match value {
+        JsonbValue::Array(items) => {
+            let mut data_offset = container_offset + 4 + items.len() * 4;
+            for item in items {
+                if let Some(offset) = find_jsonb_object_offset(
+                    item,
+                    target,
+                    jsonb_child_container_offset(item, data_offset),
+                ) {
+                    return Some(offset);
+                }
+                data_offset += jsonb_nested_encoded_len_at(item, data_offset);
+            }
+            None
+        }
+        JsonbValue::Object(items) => {
+            let mut data_offset = container_offset + 4 + items.len() * 8;
+            for (key, _) in items {
+                data_offset += key.len();
+            }
+            for (_, item) in items {
+                if let Some(offset) = find_jsonb_object_offset(
+                    item,
+                    target,
+                    jsonb_child_container_offset(item, data_offset),
+                ) {
+                    return Some(offset);
+                }
+                data_offset += jsonb_nested_encoded_len_at(item, data_offset);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn jsonb_child_container_offset(value: &JsonbValue, data_offset: usize) -> usize {
+    match value {
+        JsonbValue::Array(_) | JsonbValue::Object(_) => align4(data_offset),
+        _ => data_offset,
+    }
+}
+
+fn align4(offset: usize) -> usize {
+    (offset + 3) & !3
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1137,13 +1266,24 @@ fn jsonpath_offset_literal(offset_seconds: i32) -> String {
 }
 
 fn looks_like_date(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    bytes.len() >= 10
-        && bytes[0..4].iter().all(u8::is_ascii_digit)
-        && bytes[4] == b'-'
-        && bytes[5..7].iter().all(u8::is_ascii_digit)
-        && bytes[7] == b'-'
-        && bytes[8..10].iter().all(u8::is_ascii_digit)
+    let mut parts = text.splitn(4, '-');
+    let Some(year) = parts.next() else {
+        return false;
+    };
+    let Some(month) = parts.next() else {
+        return false;
+    };
+    let Some(day_and_rest) = parts.next() else {
+        return false;
+    };
+    let day = day_and_rest
+        .get(..2)
+        .filter(|day| day.as_bytes().iter().all(u8::is_ascii_digit));
+    !year.is_empty()
+        && year.as_bytes().iter().all(u8::is_ascii_digit)
+        && month.len() == 2
+        && month.as_bytes().iter().all(u8::is_ascii_digit)
+        && day.is_some()
 }
 
 fn jsonpath_datetime_offset_seconds(text: &str) -> Option<i32> {
@@ -1829,18 +1969,35 @@ fn compare_any_pair(
     })
 }
 
-fn starts_with_any_pair(left: &[JsonbValue], right: &[JsonbValue]) -> PredicateValue {
+fn starts_with_any_pair(
+    left: &[JsonbValue],
+    right: &[JsonbValue],
+    ctx: &RuntimeContext<'_>,
+) -> PredicateValue {
+    let mut found = false;
     let mut unknown = false;
     for left_value in left {
         for right_value in right {
             match starts_with_values(left_value, right_value) {
-                PredicateValue::True => return PredicateValue::True,
-                PredicateValue::Unknown => unknown = true,
+                PredicateValue::True => {
+                    if matches!(ctx.mode, PathMode::Lax) {
+                        return PredicateValue::True;
+                    }
+                    found = true;
+                }
+                PredicateValue::Unknown => {
+                    if matches!(ctx.mode, PathMode::Strict) {
+                        return PredicateValue::Unknown;
+                    }
+                    unknown = true;
+                }
                 PredicateValue::False => {}
             }
         }
     }
-    if unknown {
+    if found {
+        PredicateValue::True
+    } else if unknown {
         PredicateValue::Unknown
     } else {
         PredicateValue::False
@@ -1864,16 +2021,30 @@ fn like_regex_any(
     values: &[JsonbValue],
     pattern: &str,
     flags: &str,
+    ctx: &RuntimeContext<'_>,
 ) -> Result<PredicateValue, ExecError> {
+    let mut found = false;
     let mut unknown = false;
     for value in values {
         match like_regex_value(value, pattern, flags)? {
-            PredicateValue::True => return Ok(PredicateValue::True),
-            PredicateValue::Unknown => unknown = true,
+            PredicateValue::True => {
+                if matches!(ctx.mode, PathMode::Lax) {
+                    return Ok(PredicateValue::True);
+                }
+                found = true;
+            }
+            PredicateValue::Unknown => {
+                if matches!(ctx.mode, PathMode::Strict) {
+                    return Ok(PredicateValue::Unknown);
+                }
+                unknown = true;
+            }
             PredicateValue::False => {}
         }
     }
-    Ok(if unknown {
+    Ok(if found {
+        PredicateValue::True
+    } else if unknown {
         PredicateValue::Unknown
     } else {
         PredicateValue::False
@@ -1901,6 +2072,21 @@ fn compare_values(
     op: CompareOp,
     ctx: &RuntimeContext<'_>,
 ) -> Result<PredicateValue, ExecError> {
+    if matches!(left, JsonbValue::Array(_) | JsonbValue::Object(_))
+        || matches!(right, JsonbValue::Array(_) | JsonbValue::Object(_))
+    {
+        return Ok(PredicateValue::Unknown);
+    }
+    if matches!((left, right), (JsonbValue::Null, _) | (_, JsonbValue::Null)) {
+        return Ok(match (left, right, op) {
+            (JsonbValue::Null, JsonbValue::Null, CompareOp::Eq) => PredicateValue::True,
+            (JsonbValue::Null, JsonbValue::Null, CompareOp::NotEq) => PredicateValue::False,
+            (JsonbValue::Null, JsonbValue::Null, _) => PredicateValue::Unknown,
+            (_, _, CompareOp::Eq) => PredicateValue::False,
+            (_, _, CompareOp::NotEq) => PredicateValue::True,
+            _ => PredicateValue::Unknown,
+        });
+    }
     if let Some(ordering) = compare_datetime_values(left, right, ctx)? {
         return Ok(predicate_from_ordering(ordering, op));
     }
@@ -1945,6 +2131,17 @@ fn compare_datetime_value_pair(
     right: Value,
     ctx: &RuntimeContext<'_>,
 ) -> Result<Option<Ordering>, ExecError> {
+    if let Some(ordering) =
+        mixed_date_timestamp_ordering(&left, &right, Some(ctx.global.datetime_config))
+    {
+        if matches!(
+            (&left, &right),
+            (Value::Date(_), Value::TimestampTz(_)) | (Value::TimestampTz(_), Value::Date(_))
+        ) {
+            ensure_datetime_timezone_is_allowed(SqlTypeKind::Date, SqlTypeKind::TimestampTz, ctx)?;
+        }
+        return Ok(Some(ordering));
+    }
     Ok(Some(match (left, right) {
         (Value::Date(left), Value::Date(right)) => left.0.cmp(&right.0),
         (Value::Date(left), Value::Timestamp(right)) => datetime_sort_key(&cast_datetime_value(
@@ -2100,59 +2297,121 @@ fn jsonb_temporal_to_value(value: &JsonbValue) -> Option<Value> {
     }
 }
 
-fn eval_arithmetic_any_pair(
+fn eval_arithmetic_operands(
     left: &[JsonbValue],
     right: &[JsonbValue],
     op: ArithmeticOp,
+    ctx: &RuntimeContext<'_>,
 ) -> Result<Vec<JsonbValue>, ExecError> {
-    if left.is_empty() || right.is_empty() {
-        return Err(exec_jsonpath_error(
-            "jsonpath arithmetic requires numeric operands",
-        ));
-    }
-    let mut out = Vec::new();
-    for left_value in left {
-        for right_value in right {
-            out.push(eval_arithmetic_pair(left_value, right_value, op)?);
-        }
-    }
-    Ok(out)
+    let left_values = arithmetic_operand_values(left, ctx);
+    let right_values = arithmetic_operand_values(right, ctx);
+    let left = singleton_numeric_operand(&left_values, "left", op)?;
+    let right = singleton_numeric_operand(&right_values, "right", op)?;
+    eval_arithmetic_pair(left, right, op).map(|value| vec![value])
 }
 
 fn eval_arithmetic_pair(
-    left: &JsonbValue,
-    right: &JsonbValue,
+    left: NumericValue,
+    right: NumericValue,
     op: ArithmeticOp,
 ) -> Result<JsonbValue, ExecError> {
-    let left = numeric_from_jsonb(left)?;
-    let right = numeric_from_jsonb(right)?;
     let value = match op {
         ArithmeticOp::Add => left.add(&right),
         ArithmeticOp::Sub => left.sub(&right),
         ArithmeticOp::Mul => left.mul(&right),
         ArithmeticOp::Div => left
             .div(&right, 16)
-            .ok_or_else(|| exec_jsonpath_error("jsonpath division by zero"))?,
+            .ok_or_else(|| exec_jsonpath_error("division by zero"))?,
         ArithmeticOp::Mod => numeric_remainder(&left, &right)
-            .ok_or_else(|| exec_jsonpath_error("jsonpath division by zero"))?,
+            .ok_or_else(|| exec_jsonpath_error("division by zero"))?,
     };
     Ok(JsonbValue::Numeric(value))
 }
 
-fn eval_unary_value(value: JsonbValue, op: UnaryOp) -> Result<JsonbValue, ExecError> {
-    let numeric = numeric_from_jsonb(&value)?;
-    Ok(JsonbValue::Numeric(match op {
-        UnaryOp::Plus => numeric,
-        UnaryOp::Minus => numeric.negate(),
-    }))
+fn arithmetic_operand_values(values: &[JsonbValue], ctx: &RuntimeContext<'_>) -> Vec<JsonbValue> {
+    if matches!(ctx.mode, PathMode::Strict) {
+        return values.to_vec();
+    }
+    values.iter().fold(Vec::new(), |mut out, value| {
+        match value {
+            JsonbValue::Array(items) => out.extend(items.iter().cloned()),
+            _ => out.push(value.clone()),
+        }
+        out
+    })
 }
 
-fn numeric_from_jsonb(value: &JsonbValue) -> Result<NumericValue, ExecError> {
+fn singleton_numeric_operand(
+    values: &[JsonbValue],
+    side: &str,
+    op: ArithmeticOp,
+) -> Result<NumericValue, ExecError> {
+    let [value] = values else {
+        return Err(singleton_numeric_operand_error(side, op));
+    };
     match value {
         JsonbValue::Numeric(numeric) => Ok(numeric.clone()),
-        _ => Err(exec_jsonpath_error(
-            "jsonpath arithmetic requires numeric operands",
-        )),
+        _ => Err(singleton_numeric_operand_error(side, op)),
+    }
+}
+
+fn singleton_numeric_operand_error(side: &str, op: ArithmeticOp) -> ExecError {
+    exec_jsonpath_error(&format!(
+        "{side} operand of jsonpath operator {} is not a single numeric value",
+        arithmetic_op_symbol(op)
+    ))
+}
+
+fn arithmetic_op_symbol(op: ArithmeticOp) -> &'static str {
+    match op {
+        ArithmeticOp::Add => "+",
+        ArithmeticOp::Sub => "-",
+        ArithmeticOp::Mul => "*",
+        ArithmeticOp::Div => "/",
+        ArithmeticOp::Mod => "%",
+    }
+}
+
+fn eval_unary_values(
+    values: &[JsonbValue],
+    op: UnaryOp,
+    ctx: &RuntimeContext<'_>,
+) -> Result<Vec<JsonbValue>, ExecError> {
+    let values = arithmetic_operand_values(values, ctx);
+    let mut out = Vec::new();
+    for value in values {
+        match value {
+            JsonbValue::Numeric(numeric) => out.push(JsonbValue::Numeric(match op {
+                UnaryOp::Plus => numeric,
+                UnaryOp::Minus => numeric.negate(),
+            })),
+            _ if ctx.global.silent
+                && matches!(ctx.mode, PathMode::Lax)
+                && ctx.global.preserve_unary_prefix
+                && !out.is_empty() =>
+            {
+                break;
+            }
+            _ if ctx.global.silent
+                && matches!(ctx.mode, PathMode::Lax)
+                && !ctx.global.preserve_unary_prefix => {}
+            _ => return Err(unary_numeric_operand_error(op)),
+        }
+    }
+    Ok(out)
+}
+
+fn unary_numeric_operand_error(op: UnaryOp) -> ExecError {
+    exec_jsonpath_error(&format!(
+        "operand of unary jsonpath operator {} is not a numeric value",
+        unary_op_symbol(op)
+    ))
+}
+
+fn unary_op_symbol(op: UnaryOp) -> &'static str {
+    match op {
+        UnaryOp::Plus => "+",
+        UnaryOp::Minus => "-",
     }
 }
 
@@ -2225,6 +2484,10 @@ fn truncate_numeric_to_i32(value: &NumericValue) -> Result<i32, ExecError> {
 }
 
 fn numeric_jsonb_from_i32(value: i32) -> JsonbValue {
+    JsonbValue::Numeric(NumericValue::finite(num_bigint::BigInt::from(value), 0))
+}
+
+fn numeric_jsonb_from_i64(value: i64) -> JsonbValue {
     JsonbValue::Numeric(NumericValue::finite(num_bigint::BigInt::from(value), 0))
 }
 
@@ -2543,6 +2806,12 @@ fn render_expr(expr: &Expr, out: &mut String) {
             render_operand(inner, out);
             render_method(method, out);
         }
+        Expr::Filter { inner, predicate } => {
+            render_operand(inner, out);
+            out.push_str(" ? (");
+            render_expr(predicate, out);
+            out.push(')');
+        }
         Expr::Exists(inner) => {
             out.push_str("exists(");
             render_expr(inner, out);
@@ -2575,6 +2844,7 @@ fn render_operand(expr: &Expr, out: &mut String) {
         | Expr::StartsWith { .. }
         | Expr::LikeRegex { .. }
         | Expr::Arithmetic { .. }
+        | Expr::Filter { .. }
         | Expr::And(..)
         | Expr::Or(..) => {
             out.push('(');
@@ -2704,7 +2974,12 @@ fn validate_method_arg_syntax(kind: MethodKind, args: &[MethodArg]) -> Result<()
             if let MethodArg::Numeric(value) = arg {
                 let text = value.render();
                 if text.starts_with('-') || text.contains('.') {
-                    return Err(jsonpath_syntax_error_near(text));
+                    let token = if text.starts_with('-') {
+                        "-"
+                    } else {
+                        text.as_str()
+                    };
+                    return Err(jsonpath_syntax_error_near(token));
                 }
             }
         }
@@ -2801,11 +3076,16 @@ fn render_quoted_string(text: &str, out: &mut String) {
 struct Parser<'a> {
     input: &'a str,
     offset: usize,
+    allow_postfix_filter: bool,
 }
 
 impl<'a> Parser<'a> {
     fn new(input: &'a str) -> Self {
-        Self { input, offset: 0 }
+        Self {
+            input,
+            offset: 0,
+            allow_postfix_filter: true,
+        }
     }
 
     fn parse(mut self) -> Result<JsonPath, ExecError> {
@@ -3007,6 +3287,18 @@ impl<'a> Parser<'a> {
         loop {
             let saved = self.offset;
             self.skip_ws();
+            if self.allow_postfix_filter && self.consume("?") {
+                self.skip_ws();
+                self.expect("(")?;
+                let predicate = self.parse_or_expr()?;
+                self.skip_ws();
+                self.expect(")")?;
+                expr = Expr::Filter {
+                    inner: Box::new(expr),
+                    predicate: Box::new(predicate),
+                };
+                continue;
+            }
             if !self.consume(".") {
                 self.offset = saved;
                 return Ok(expr);
@@ -3119,7 +3411,11 @@ impl<'a> Parser<'a> {
                         self.skip_ws();
                         if self.consume_keyword("to") {
                             self.skip_ws();
-                            let end = self.parse_additive_expr()?;
+                            let allow_postfix_filter = self.allow_postfix_filter;
+                            self.allow_postfix_filter = false;
+                            let end = self.parse_additive_expr();
+                            self.allow_postfix_filter = allow_postfix_filter;
+                            let end = end?;
                             selections.push(SubscriptSelection::Range(
                                 subscript_expr_to_expr(start)?,
                                 end,
@@ -3179,7 +3475,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_subscript_expr(&mut self) -> Result<SubscriptExpr, ExecError> {
-        let expr = self.parse_additive_expr()?;
+        let allow_postfix_filter = self.allow_postfix_filter;
+        self.allow_postfix_filter = false;
+        let expr = self.parse_additive_expr();
+        self.allow_postfix_filter = allow_postfix_filter;
+        let expr = expr?;
         self.skip_ws();
         if self.consume("?") {
             self.skip_ws();

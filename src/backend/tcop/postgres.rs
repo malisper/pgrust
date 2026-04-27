@@ -547,6 +547,14 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::InvalidFloatInput { value, .. } => value.as_str(),
         ExecError::FloatOutOfRange { value, .. } => value.as_str(),
         ExecError::InvalidStorageValue { details, .. } => {
+            if is_jsonpath_syntax_error(details)
+                && let Some(position) = find_jsonpath_literal_position(sql)
+            {
+                return Some(position);
+            }
+            if is_jsonpath_sql_surface(sql) && is_jsonpath_datetime_error(details, sql) {
+                return None;
+            }
             if let Some(zone) = extract_unrecognized_time_zone(details) {
                 let lower = sql.to_ascii_lowercase();
                 if lower.contains(" at time zone ")
@@ -568,6 +576,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::DetailedError {
             message, detail, ..
         } => {
+            if is_jsonpath_sql_surface(sql) && is_jsonpath_datetime_error(message, sql) {
+                return None;
+            }
             if matches!(
                 message.as_str(),
                 "parallel option requires a value between 0 and 1024"
@@ -1178,6 +1189,78 @@ fn extract_quoted_error_value(message: &str) -> Option<&str> {
 
     let (_, rest) = message.rsplit_once(": \"")?;
     rest.strip_suffix('"')
+}
+
+fn is_jsonpath_syntax_error(message: &str) -> bool {
+    message.starts_with("syntax error at or near ") && message.ends_with(" of jsonpath input")
+}
+
+fn is_jsonpath_sql_surface(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    lower.contains("jsonb_path_")
+        || lower.contains(" jsonpath")
+        || lower.contains("@?")
+        || lower.contains("@@")
+}
+
+fn is_jsonpath_datetime_error(message: &str, sql: &str) -> bool {
+    matches!(
+        message
+            .split_once(':')
+            .map(|(prefix, _)| prefix)
+            .unwrap_or(message),
+        "datetime format is not recognized"
+            | "date format is not recognized"
+            | "time format is not recognized"
+            | "time_tz format is not recognized"
+            | "timestamp format is not recognized"
+            | "timestamp_tz format is not recognized"
+            | "invalid datetime format separator"
+    ) || (message.starts_with("invalid value \"") && sql.contains(".datetime("))
+}
+
+fn find_jsonpath_literal_position(sql: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b'\'' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        let mut content = String::new();
+        while index < bytes.len() {
+            if bytes[index] == b'\'' {
+                if bytes.get(index + 1) == Some(&b'\'') {
+                    content.push('\'');
+                    index += 2;
+                    continue;
+                }
+                index += 1;
+                if looks_like_jsonpath_literal(content.trim()) {
+                    return Some(start + 1);
+                }
+                break;
+            }
+            if let Some(ch) = sql[index..].chars().next() {
+                content.push(ch);
+                index += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+    }
+    None
+}
+
+fn looks_like_jsonpath_literal(text: &str) -> bool {
+    text.starts_with('$')
+        || text.starts_with('@')
+        || text.starts_with("strict ")
+        || text.starts_with("lax ")
+        || text.starts_with("exists(")
+        || text.contains('$')
 }
 
 fn extract_missing_column_name(message: &str) -> Option<&str> {
