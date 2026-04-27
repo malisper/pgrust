@@ -32,7 +32,7 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::include::nodes::primnodes::{
     Expr, QueryColumn, RelationDesc, ScalarFunctionImpl, SetReturningCall, SqlJsonTableBehavior,
-    SqlJsonTableColumnKind, Var, attrno_index,
+    SqlJsonTableColumnKind, SqlXmlTableColumnKind, Var, attrno_index,
 };
 use crate::pgrust::database::ddl::{append_view_check_option, format_sql_type_name};
 use crate::pgrust::database::{
@@ -834,6 +834,24 @@ fn collect_set_returning_call_rule_dependencies(
             }
             collect_sql_json_behavior_rule_dependencies(&table.on_error, query, catalog, deps);
         }
+        SetReturningCall::SqlXmlTable(table) => {
+            collect_expr_rule_dependencies(&table.row_path, query, catalog, deps);
+            collect_expr_rule_dependencies(&table.document, query, catalog, deps);
+            for namespace in &table.namespaces {
+                collect_expr_rule_dependencies(&namespace.uri, query, catalog, deps);
+            }
+            for column in &table.columns {
+                collect_sql_type_rule_dependency(column.sql_type, deps);
+                if let SqlXmlTableColumnKind::Regular { path, default, .. } = &column.kind {
+                    if let Some(path) = path {
+                        collect_expr_rule_dependencies(path, query, catalog, deps);
+                    }
+                    if let Some(default) = default {
+                        collect_expr_rule_dependencies(default, query, catalog, deps);
+                    }
+                }
+            }
+        }
         SetReturningCall::PgLockStatus { .. } => {}
     }
 }
@@ -863,7 +881,9 @@ fn set_returning_proc_oid(call: &SetReturningCall) -> Option<u32> {
         | SetReturningCall::PgLockStatus { func_oid, .. }
         | SetReturningCall::TxidSnapshotXip { func_oid, .. } => *func_oid,
         SetReturningCall::UserDefined { proc_oid, .. } => *proc_oid,
-        SetReturningCall::TextSearchTableFunction { .. } | SetReturningCall::SqlJsonTable(_) => 0,
+        SetReturningCall::TextSearchTableFunction { .. }
+        | SetReturningCall::SqlJsonTable(_)
+        | SetReturningCall::SqlXmlTable(_) => 0,
     };
     (proc_oid != 0).then_some(proc_oid)
 }

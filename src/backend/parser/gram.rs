@@ -16189,6 +16189,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                         part.as_rule(),
                         Rule::values_from_item
                             | Rule::json_table_from_item
+                            | Rule::xml_table_from_item
                             | Rule::srf_from_item
                             | Rule::derived_from_item
                             | Rule::parenthesized_from_item
@@ -16270,6 +16271,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     | Rule::lateral_from_item
                     | Rule::values_from_item
                     | Rule::json_table_from_item
+                    | Rule::xml_table_from_item
                     | Rule::parenthesized_table_from_item
                     | Rule::srf_from_item
                     | Rule::derived_from_item
@@ -16324,6 +16326,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 .collect::<Result<Vec<_>, _>>()?,
         }),
         Rule::json_table_from_item => build_json_table_from_item(pair),
+        Rule::xml_table_from_item => build_xml_table_from_item(pair),
         Rule::srf_from_item => {
             let mut name = None;
             let mut parsed_args = ParsedFunctionArgs::default();
@@ -16380,6 +16383,169 @@ fn build_json_table_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseErr
         .find(|part| part.as_rule() == Rule::json_table_expr)
         .ok_or(ParseError::UnexpectedEof)?;
     build_json_table_expr(expr).map(FromItem::JsonTable)
+}
+
+fn build_xml_table_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
+    let expr = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::xml_table_expr)
+        .ok_or(ParseError::UnexpectedEof)?;
+    build_xml_table_expr(expr).map(FromItem::XmlTable)
+}
+
+fn build_xml_table_expr(pair: Pair<'_, Rule>) -> Result<XmlTableExpr, ParseError> {
+    let mut namespaces = Vec::new();
+    let mut row_path = None;
+    let mut document = None;
+    let mut columns = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::xml_namespaces_clause => namespaces = build_xml_namespaces_clause(part)?,
+            Rule::expr if row_path.is_none() => row_path = Some(build_expr(part)?),
+            Rule::xml_passing_clause => document = Some(build_xml_passing_clause(part)?),
+            Rule::xml_table_column_definition_list => {
+                columns = Some(build_xml_table_column_list(part)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(XmlTableExpr {
+        namespaces,
+        row_path: row_path.ok_or(ParseError::UnexpectedEof)?,
+        document: document.ok_or(ParseError::UnexpectedEof)?,
+        columns: columns.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_xml_namespaces_clause(pair: Pair<'_, Rule>) -> Result<Vec<XmlTableNamespace>, ParseError> {
+    let list = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::xml_namespace_list)
+        .ok_or(ParseError::UnexpectedEof)?;
+    list.into_inner()
+        .filter(|part| part.as_rule() == Rule::xml_namespace)
+        .map(build_xml_namespace)
+        .collect()
+}
+
+fn build_xml_namespace(pair: Pair<'_, Rule>) -> Result<XmlTableNamespace, ParseError> {
+    let is_default = pair
+        .as_str()
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("default");
+    let mut uri = None;
+    let mut name = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr => uri = Some(build_expr(part)?),
+            Rule::identifier => name = Some(build_identifier(part)),
+            _ => {}
+        }
+    }
+    Ok(XmlTableNamespace {
+        name: if is_default { None } else { name },
+        uri: uri.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_xml_passing_clause(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    pair.into_inner()
+        .find(|part| part.as_rule() == Rule::expr)
+        .ok_or(ParseError::UnexpectedEof)
+        .and_then(build_expr)
+}
+
+fn build_xml_table_column_list(pair: Pair<'_, Rule>) -> Result<Vec<XmlTableColumn>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::xml_table_column_definition)
+        .map(build_xml_table_column)
+        .collect()
+}
+
+fn build_xml_table_column(pair: Pair<'_, Rule>) -> Result<XmlTableColumn, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::xml_table_ordinality_column => {
+            let name = inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(XmlTableColumn::Ordinality { name })
+        }
+        Rule::xml_table_regular_column => build_xml_table_regular_column(inner),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "XMLTABLE column",
+            actual: inner.as_str().into(),
+        }),
+    }
+}
+
+fn build_xml_table_regular_column(pair: Pair<'_, Rule>) -> Result<XmlTableColumn, ParseError> {
+    let mut name = None;
+    let mut type_name = None;
+    let mut path = None;
+    let mut default = None;
+    let mut not_null = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::type_name => type_name = Some(build_type_name(part)),
+            Rule::xml_table_column_option => {
+                let option = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+                match option.as_rule() {
+                    Rule::xml_table_path_clause => {
+                        path = Some(
+                            option
+                                .into_inner()
+                                .find(|inner| inner.as_rule() == Rule::expr)
+                                .ok_or(ParseError::UnexpectedEof)
+                                .and_then(build_expr)?,
+                        );
+                    }
+                    Rule::xml_table_default_clause => {
+                        default = Some(
+                            option
+                                .into_inner()
+                                .find(|inner| inner.as_rule() == Rule::expr)
+                                .ok_or(ParseError::UnexpectedEof)
+                                .and_then(build_expr)?,
+                        );
+                    }
+                    Rule::xml_table_nullability_clause => {
+                        not_null = option.as_str().to_ascii_lowercase().starts_with("not");
+                    }
+                    Rule::xml_table_named_option => {
+                        let name = option
+                            .into_inner()
+                            .find(|inner| inner.as_rule() == Rule::identifier)
+                            .map(build_identifier)
+                            .ok_or(ParseError::UnexpectedEof)?;
+                        if name == "__pg__is_not_null" {
+                            return Err(ParseError::DetailedError {
+                                message: format!(
+                                    "option name \"{name}\" cannot be used in XMLTABLE"
+                                ),
+                                detail: None,
+                                hint: None,
+                                sqlstate: "42601",
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(XmlTableColumn::Regular {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        type_name: type_name.ok_or(ParseError::UnexpectedEof)?,
+        path,
+        default,
+        not_null,
+    })
 }
 
 fn build_json_table_expr(pair: Pair<'_, Rule>) -> Result<JsonTableExpr, ParseError> {
@@ -25110,6 +25276,102 @@ mod tests {
             Statement::Select(select) => {
                 assert!(matches!(select.from, Some(FromItem::JsonTable(_))));
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_basic_xml_table_from_item() {
+        let sql = "SELECT * FROM XMLTABLE('/ROWS/ROW' PASSING data COLUMNS id int PATH '@id')";
+        match parse_statement(sql).unwrap() {
+            Statement::Select(select) => match select.from {
+                Some(FromItem::XmlTable(table)) => {
+                    assert_eq!(table.namespaces.len(), 0);
+                    assert_eq!(table.columns.len(), 1);
+                }
+                other => panic!("expected XMLTABLE from item, got {other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_xml_table_with_namespaces() {
+        let sql = "SELECT * FROM XMLTABLE(XMLNAMESPACES('urn:x' AS x), '/x:rows/x:row' PASSING data COLUMNS id int PATH '@id')";
+        match parse_statement(sql).unwrap() {
+            Statement::Select(select) => match select.from {
+                Some(FromItem::XmlTable(table)) => {
+                    assert_eq!(table.namespaces.len(), 1);
+                    assert_eq!(table.namespaces[0].name.as_deref(), Some("x"));
+                }
+                other => panic!("expected XMLTABLE from item, got {other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_xml_table_column_options() {
+        let sql = "SELECT * FROM XMLTABLE('/ROWS/ROW' PASSING data COLUMNS ord FOR ORDINALITY, name text PATH 'name' DEFAULT 'n/a' NOT NULL, note text NULL)";
+        match parse_statement(sql).unwrap() {
+            Statement::Select(select) => match select.from {
+                Some(FromItem::XmlTable(table)) => {
+                    assert!(matches!(
+                        table.columns[0],
+                        XmlTableColumn::Ordinality { .. }
+                    ));
+                    match &table.columns[1] {
+                        XmlTableColumn::Regular {
+                            path,
+                            default,
+                            not_null,
+                            ..
+                        } => {
+                            assert!(path.is_some());
+                            assert!(default.is_some());
+                            assert!(*not_null);
+                        }
+                        other => panic!("expected regular XMLTABLE column, got {other:?}"),
+                    }
+                    assert!(matches!(
+                        &table.columns[2],
+                        XmlTableColumn::Regular {
+                            not_null: false,
+                            ..
+                        }
+                    ));
+                }
+                other => panic!("expected XMLTABLE from item, got {other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_lowercase_xml_table_alias() {
+        let sql = "select * from xmltable('/r' passing data columns v text path '.') xt";
+        match parse_statement(sql).unwrap() {
+            Statement::Select(select) => match select.from {
+                Some(FromItem::Alias { source, alias, .. }) => {
+                    assert_eq!(alias, "xt");
+                    assert!(matches!(*source, FromItem::XmlTable(_)));
+                }
+                other => panic!("expected aliased XMLTABLE from item, got {other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_lateral_xml_table_from_item() {
+        let sql = "SELECT * FROM t CROSS JOIN LATERAL XMLTABLE('/r' PASSING t.data COLUMNS v text PATH '.')";
+        match parse_statement(sql).unwrap() {
+            Statement::Select(select) => match select.from {
+                Some(FromItem::Join { right, .. }) => {
+                    assert!(matches!(*right, FromItem::Lateral(_)));
+                }
+                other => panic!("expected join with lateral XMLTABLE, got {other:?}"),
+            },
             other => panic!("{other:?}"),
         }
     }

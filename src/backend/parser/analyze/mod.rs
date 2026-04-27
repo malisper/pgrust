@@ -3659,6 +3659,17 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
+            FromItem::XmlTable(table) => {
+                for namespace in &table.namespaces {
+                    self.visit_expr(&namespace.uri, context)?;
+                }
+                self.visit_expr(&table.row_path, context)?;
+                self.visit_expr(&table.document, context)?;
+                for column in &table.columns {
+                    self.visit_xml_table_column(column, context)?;
+                }
+                Ok(())
+            }
             FromItem::Lateral(source) | FromItem::Alias { source, .. } => {
                 self.visit_from(source, context)
             }
@@ -3717,6 +3728,25 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
             }
             JsonTableColumn::Ordinality { .. } | JsonTableColumn::Exists { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn visit_xml_table_column(
+        &mut self,
+        column: &XmlTableColumn,
+        context: RecursiveReferenceContext,
+    ) -> Result<(), ParseError> {
+        match column {
+            XmlTableColumn::Regular { path, default, .. } => {
+                if let Some(expr) = path {
+                    self.visit_expr(expr, context)?;
+                }
+                if let Some(expr) = default {
+                    self.visit_expr(expr, context)?;
+                }
+            }
+            XmlTableColumn::Ordinality { .. } => {}
         }
         Ok(())
     }
@@ -4037,6 +4067,7 @@ fn from_item_references_table(item: &FromItem, table_name: &str) -> bool {
                 || from_item_references_table(right, table_name)
         }
         FromItem::JsonTable(table) => json_table_expr_references_table(table, table_name),
+        FromItem::XmlTable(table) => xml_table_expr_references_table(table, table_name),
         FromItem::Values { .. } | FromItem::FunctionCall { .. } => false,
     }
 }
@@ -4074,6 +4105,32 @@ fn json_table_column_references_table(column: &JsonTableColumn, table_name: &str
             .iter()
             .any(|column| json_table_column_references_table(column, table_name)),
         JsonTableColumn::Ordinality { .. } | JsonTableColumn::Exists { .. } => false,
+    }
+}
+
+fn xml_table_expr_references_table(table: &XmlTableExpr, table_name: &str) -> bool {
+    table
+        .namespaces
+        .iter()
+        .any(|namespace| sql_expr_references_table(&namespace.uri, table_name))
+        || sql_expr_references_table(&table.row_path, table_name)
+        || sql_expr_references_table(&table.document, table_name)
+        || table
+            .columns
+            .iter()
+            .any(|column| xml_table_column_references_table(column, table_name))
+}
+
+fn xml_table_column_references_table(column: &XmlTableColumn, table_name: &str) -> bool {
+    match column {
+        XmlTableColumn::Regular { path, default, .. } => {
+            path.as_ref()
+                .is_some_and(|expr| sql_expr_references_table(expr, table_name))
+                || default
+                    .as_ref()
+                    .is_some_and(|expr| sql_expr_references_table(expr, table_name))
+        }
+        XmlTableColumn::Ordinality { .. } => false,
     }
 }
 

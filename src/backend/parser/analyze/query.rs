@@ -150,10 +150,10 @@ impl AnalyzedFrom {
 
     pub(super) fn function(call: SetReturningCall) -> Self {
         let output_columns = call.output_columns().to_vec();
-        let relation_name = if matches!(call, SetReturningCall::SqlJsonTable(_)) {
-            "json_table"
-        } else {
-            "function_call"
+        let relation_name = match &call {
+            SetReturningCall::SqlJsonTable(_) => "json_table",
+            SetReturningCall::SqlXmlTable(_) => "xmltable",
+            _ => "function_call",
         };
         let desc = RelationDesc {
             columns: output_columns

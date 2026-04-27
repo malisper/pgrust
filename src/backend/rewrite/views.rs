@@ -20,9 +20,10 @@ use crate::include::nodes::primnodes::{
     Aggref, BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, JoinType, OpExprKind,
     RelationDesc, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, ScalarFunctionImpl,
     SetReturningCall, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
-    SqlJsonTableColumnKind, SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SubLink,
-    SubLinkType, TABLE_OID_ATTR_NO, TargetEntry, Var, WindowClause, WindowFrameBound,
-    WindowFuncExpr, WindowFuncKind, attrno_index, expr_sql_type_hint, user_attrno,
+    SqlJsonTableColumnKind, SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable,
+    SqlXmlTableColumnKind, SubLink, SubLinkType, TABLE_OID_ATTR_NO, TargetEntry, Var, WindowClause,
+    WindowFrameBound, WindowFuncExpr, WindowFuncKind, attrno_index, expr_sql_type_hint,
+    user_attrno,
 };
 
 const RETURN_RULE_NAME: &str = "_RETURN";
@@ -56,6 +57,11 @@ impl<'a> ViewDeparseContext<'a> {
 
     fn scope_for_var(&self, var: &Var) -> Option<Self> {
         if var.varlevelsup == 0 {
+            return Some(self.clone());
+        }
+        // :HACK: LATERAL table-function arguments are stored as one-level outer
+        // Vars even though view deparse renders them inside the current FROM.
+        if var.varlevelsup == 1 && self.outers.is_empty() {
             return Some(self.clone());
         }
         let query = *self.outers.get(var.varlevelsup.saturating_sub(1))?;
@@ -515,13 +521,15 @@ fn render_from_node(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode, indent: u
                     _ => None,
                 })
                 .unwrap_or_default();
-            let constraint = if using_cols.is_empty() {
-                format!("ON {}", render_expr(quals, ctx))
+            let constraint = if *kind == JoinType::Cross {
+                String::new()
+            } else if using_cols.is_empty() {
+                format!(" ON {}", render_expr(quals, ctx))
             } else {
-                format!("USING ({})", using_cols.join(", "))
+                format!(" USING ({})", using_cols.join(", "))
             };
             let joined_body = format!(
-                "{left_sql}\n{}{} JOIN {} {}",
+                "{left_sql}\n{}{} JOIN {}{}",
                 " ".repeat(indent + 3),
                 render_join_type(*kind),
                 right_sql,
@@ -708,6 +716,9 @@ fn render_set_returning_call(call: &SetReturningCall, ctx: &ViewDeparseContext<'
     if let SetReturningCall::SqlJsonTable(table) = call {
         return render_sql_json_table_call(table, ctx);
     }
+    if let SetReturningCall::SqlXmlTable(table) = call {
+        return render_sql_xml_table_call(table, ctx);
+    }
     let (name, args, with_ordinality) = match call {
         SetReturningCall::GenerateSeries {
             start,
@@ -865,12 +876,77 @@ fn render_set_returning_call(call: &SetReturningCall, ctx: &ViewDeparseContext<'
                 *with_ordinality,
             )
         }
-        SetReturningCall::SqlJsonTable(_) => unreachable!("handled above"),
+        SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_) => {
+            unreachable!("handled above")
+        }
     };
     let mut rendered = format!("{}({})", quote_identifier_if_needed(&name), args.join(", "));
     if with_ordinality {
         rendered.push_str(" WITH ORDINALITY");
     }
+    rendered
+}
+
+fn render_sql_xml_table_call(table: &SqlXmlTable, ctx: &ViewDeparseContext<'_>) -> String {
+    let mut rendered = String::from("XMLTABLE(");
+    if !table.namespaces.is_empty() {
+        rendered.push_str("XMLNAMESPACES (");
+        rendered.push_str(
+            &table
+                .namespaces
+                .iter()
+                .map(|namespace| {
+                    let uri = render_expr(&namespace.uri, ctx);
+                    match namespace.name.as_deref() {
+                        Some(name) => format!("{uri} AS {}", quote_identifier_if_needed(name)),
+                        None => format!("DEFAULT {uri}"),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        rendered.push_str("), ");
+    }
+    rendered.push_str(&render_expr(&table.row_path, ctx));
+    rendered.push_str(" PASSING ");
+    rendered.push_str(&render_expr(&table.document, ctx));
+    rendered.push_str(" COLUMNS ");
+    rendered.push_str(
+        &table
+            .columns
+            .iter()
+            .map(|column| {
+                let name = quote_identifier_if_needed(&column.name);
+                match &column.kind {
+                    SqlXmlTableColumnKind::Ordinality => format!("{name} FOR ORDINALITY"),
+                    SqlXmlTableColumnKind::Regular {
+                        path,
+                        default,
+                        not_null,
+                    } => {
+                        let mut rendered = format!(
+                            "{name} {}",
+                            render_sql_json_table_type(column.sql_type, ctx.catalog)
+                        );
+                        if let Some(path) = path {
+                            rendered.push_str(" PATH ");
+                            rendered.push_str(&render_expr(path, ctx));
+                        }
+                        if let Some(default) = default {
+                            rendered.push_str(" DEFAULT ");
+                            rendered.push_str(&render_expr(default, ctx));
+                        }
+                        if *not_null {
+                            rendered.push_str(" NOT NULL");
+                        }
+                        rendered
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    rendered.push(')');
     rendered
 }
 
@@ -1979,7 +2055,7 @@ fn var_name(var: &Var, ctx: &ViewDeparseContext<'_>) -> Option<String> {
     }
     let column = rte.desc.columns.get(column_index)?;
     if let RangeTblEntryKind::Function {
-        call: SetReturningCall::SqlJsonTable(_),
+        call: SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_),
     } = &rte.kind
         && rte.alias.is_none()
     {

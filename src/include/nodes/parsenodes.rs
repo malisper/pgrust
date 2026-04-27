@@ -1632,6 +1632,7 @@ pub enum FromItem {
         with_ordinality: bool,
     },
     JsonTable(JsonTableExpr),
+    XmlTable(XmlTableExpr),
     Lateral(Box<FromItem>),
     DerivedTable(Box<SelectStatement>),
     Join {
@@ -1684,6 +1685,34 @@ pub struct JsonTableExpr {
     pub passing: Vec<JsonTablePassingArg>,
     pub columns: Vec<JsonTableColumn>,
     pub on_error: Option<JsonTableBehavior>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XmlTableExpr {
+    pub namespaces: Vec<XmlTableNamespace>,
+    pub row_path: SqlExpr,
+    pub document: SqlExpr,
+    pub columns: Vec<XmlTableColumn>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XmlTableNamespace {
+    pub name: Option<String>,
+    pub uri: SqlExpr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum XmlTableColumn {
+    Ordinality {
+        name: String,
+    },
+    Regular {
+        name: String,
+        type_name: RawTypeName,
+        path: Option<SqlExpr>,
+        default: Option<SqlExpr>,
+        not_null: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
