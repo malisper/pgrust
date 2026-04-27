@@ -54,6 +54,8 @@ Runtime behavior:
   `bar(text[], oid)`
 - preserves foreign-data wrapper option order during `ALTER FOREIGN DATA
   WRAPPER ... OPTIONS`
+- matches PostgreSQL's `CREATE USER MAPPING` error priority by resolving an
+  explicit role before checking the server
 
 Tests run:
 - `cargo fmt`
@@ -121,9 +123,13 @@ Tests run:
 - `scripts/cargo_isolated.sh check`
 - `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
 - `scripts/run_regression.sh --skip-build --port 55454 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-fdw-option-order`
+- `scripts/cargo_isolated.sh test --lib --quiet create_user_mapping_reports_missing_role_before_missing_server`
+- `scripts/cargo_isolated.sh check`
+- `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
+- `scripts/run_regression.sh --skip-build --port 55455 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-user-mapping-error-order`
 
 Remaining:
-`foreign_data` still fails, but improved to 397/539 matching queries and 1467
+`foreign_data` still fails, but improved to 398/539 matching queries and 1458
 diff lines in the latest run. Biggest
 remaining groups:
 - owner dependency reporting beyond the handled FDW function dependencies
