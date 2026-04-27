@@ -7118,6 +7118,35 @@ fn partition_bound_validation_and_catalog_describe_helpers() {
 }
 
 #[test]
+fn pg_get_partkeydef_and_pg_table_is_visible_use_catalog() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    db.execute(
+        1,
+        "create table fdw_describe_parent (a int4, payload text) partition by list (a)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_partkeydef('fdw_describe_parent'::regclass), \
+                    pg_table_is_visible('fdw_describe_parent'::regclass)",
+        ),
+        vec![vec![Value::Text("LIST (a)".into()), Value::Bool(true),]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_partkeydef(0), pg_table_is_visible(0)"
+        ),
+        vec![vec![Value::Null, Value::Null]]
+    );
+}
+
+#[test]
 fn enable_partitionwise_join_explains_append_of_child_joins() {
     let dir = temp_dir("partitionwise_join_explain");
     let db = Database::open(&dir, 64).unwrap();

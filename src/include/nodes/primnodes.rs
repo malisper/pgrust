@@ -374,6 +374,8 @@ pub enum BuiltinScalarFunction {
     Version,
     PgBackendPid,
     PgPartitionRoot,
+    PgGetPartKeyDef,
+    PgTableIsVisible,
     GetDatabaseEncoding,
     UnicodeVersion,
     UnicodeAssigned,

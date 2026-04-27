@@ -1412,7 +1412,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::TxidStatus => args.len() == 1,
             BuiltinScalarFunction::PgGetTriggerDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgTriggerDepth => args.is_empty(),
-            BuiltinScalarFunction::PgPartitionRoot => args.len() == 1,
+            BuiltinScalarFunction::PgPartitionRoot
+            | BuiltinScalarFunction::PgGetPartKeyDef
+            | BuiltinScalarFunction::PgTableIsVisible => args.len() == 1,
             BuiltinScalarFunction::DatePart | BuiltinScalarFunction::Extract => args.len() == 2,
             BuiltinScalarFunction::DateTrunc => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::DateBin => args.len() == 3,
@@ -2727,6 +2729,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_filenode_relation",
             BuiltinScalarFunction::PgFilenodeRelation,
+        ),
+        ("pg_get_partkeydef", BuiltinScalarFunction::PgGetPartKeyDef),
+        (
+            "pg_table_is_visible",
+            BuiltinScalarFunction::PgTableIsVisible,
         ),
         ("pg_my_temp_schema", BuiltinScalarFunction::PgMyTempSchema),
         (
@@ -4276,6 +4283,8 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::CurrentDatabase
             | BuiltinScalarFunction::PgBackendPid
             | BuiltinScalarFunction::PgPartitionRoot
+            | BuiltinScalarFunction::PgGetPartKeyDef
+            | BuiltinScalarFunction::PgTableIsVisible
             | BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::CurrVal
             | BuiltinScalarFunction::SetVal

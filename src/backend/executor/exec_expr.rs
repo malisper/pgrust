@@ -128,8 +128,8 @@ use crate::backend::executor::jsonb::{
 use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, LoweredPartitionSpec, ParseError, PartitionBoundSpec, PartitionRangeDatumValue,
-    SerializedPartitionValue, SqlType, SqlTypeKind, SubqueryComparisonOp,
-    deserialize_partition_bound, partition_value_to_value,
+    PartitionStrategy, SerializedPartitionValue, SqlType, SqlTypeKind, SubqueryComparisonOp,
+    deserialize_partition_bound, partition_value_to_value, relation_partition_spec,
 };
 use crate::backend::rewrite::{format_stored_rule_definition_with_catalog, format_view_definition};
 use crate::backend::statistics::{
@@ -5018,6 +5018,76 @@ fn eval_pg_partition_root(values: &[Value], ctx: &ExecutorContext) -> Result<Val
     }
 }
 
+fn eval_pg_get_partkeydef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [value] => {
+            let relation_oid = oid_arg_to_u32(value, "pg_get_partkeydef")?;
+            let catalog = executor_catalog(ctx)?;
+            let Some(relation) = catalog.lookup_relation_by_oid(relation_oid) else {
+                return Ok(Value::Null);
+            };
+            if relation.partitioned_table.is_none() {
+                return Ok(Value::Null);
+            }
+            let spec = relation_partition_spec(&relation).map_err(ExecError::Parse)?;
+            let strategy = match spec.strategy {
+                PartitionStrategy::List => "LIST",
+                PartitionStrategy::Range => "RANGE",
+                PartitionStrategy::Hash => "HASH",
+            };
+            let keys = spec
+                .partattrs
+                .iter()
+                .enumerate()
+                .map(|(index, attnum)| {
+                    if *attnum == 0 {
+                        return spec
+                            .key_sqls
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| format!("partition key {}", index + 1));
+                    }
+                    relation
+                        .desc
+                        .columns
+                        .get(attnum.saturating_sub(1) as usize)
+                        .map(|column| quote_identifier(&column.name))
+                        .unwrap_or_else(|| format!("partition key {}", index + 1))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            Ok(Value::Text(format!("{strategy} ({keys})").into()))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_get_partkeydef(oid)",
+            actual: format!("PgGetPartKeyDef({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_pg_table_is_visible(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [value] => {
+            let relation_oid = oid_arg_to_u32(value, "pg_table_is_visible")?;
+            let catalog = executor_catalog(ctx)?;
+            let Some(class_row) = catalog.class_row_by_oid(relation_oid) else {
+                return Ok(Value::Null);
+            };
+            Ok(Value::Bool(
+                catalog
+                    .lookup_any_relation(&class_row.relname)
+                    .is_some_and(|relation| relation.relation_oid == relation_oid),
+            ))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_table_is_visible(oid)",
+            actual: format!("PgTableIsVisible({} args)", values.len()),
+        })),
+    }
+}
+
 fn sequence_runtime(
     ctx: &ExecutorContext,
 ) -> Result<&crate::pgrust::database::SequenceRuntime, ExecError> {
@@ -6899,6 +6969,14 @@ fn eval_plpgsql_builtin_function(
         }
         BuiltinScalarFunction::HasServerPrivilege => {
             eval_has_foreign_privilege_function(ForeignPrivilegeKind::Server, &values, None)
+        }
+        BuiltinScalarFunction::PgGetPartKeyDef | BuiltinScalarFunction::PgTableIsVisible => {
+            Err(ExecError::DetailedError {
+                message: "catalog helper requires executor context".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })
         }
         BuiltinScalarFunction::RegProcToText => {
             eval_reg_object_to_text(&values[0], SqlTypeKind::RegProc, None)
@@ -9022,6 +9100,8 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::TestCanonicalizePath => eval_test_canonicalize_path(&values),
         BuiltinScalarFunction::TestRelpath => Ok(Value::Null),
         BuiltinScalarFunction::PgPartitionRoot => eval_pg_partition_root(&values, ctx),
+        BuiltinScalarFunction::PgGetPartKeyDef => eval_pg_get_partkeydef(&values, ctx),
+        BuiltinScalarFunction::PgTableIsVisible => eval_pg_table_is_visible(&values, ctx),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
         BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(&values, ctx),
         BuiltinScalarFunction::PgGetFunctionArguments => {

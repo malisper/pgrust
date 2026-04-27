@@ -29,6 +29,8 @@ Runtime behavior:
 - exposes `pg_user_mappings` and information_schema FDW views
 - supports `COMMENT ON SERVER`
 - stores `GRANT/REVOKE USAGE` ACLs for foreign data wrappers and servers
+- exposes minimal `pg_roles`, `pg_table_is_visible`, and `pg_get_partkeydef`
+  catalog helper behavior needed by FDW describe/privilege queries
 
 Tests run:
 - `cargo fmt`
@@ -52,12 +54,14 @@ Tests run:
 - `scripts/cargo_isolated.sh test --lib --quiet import_foreign_schema_requires_fdw_handler`
 - `scripts/run_regression.sh --skip-build --port 55440 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-import`
 - `scripts/run_regression.sh --skip-build --port 55441 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-pg-roles`
+- `scripts/cargo_isolated.sh test --lib --quiet pg_get_partkeydef_and_pg_table_is_visible_use_catalog`
+- `scripts/run_regression.sh --skip-build --port 55442 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-helper-funcs`
 
 Remaining:
-`foreign_data` still fails, but improved to 284/539 matching queries. Biggest
+`foreign_data` still fails, but improved to 285/539 matching queries. Biggest
 remaining groups:
-- `pg_catalog.pg_table_is_visible` and `pg_catalog.pg_get_partkeydef`
 - FDW dependency reporting for handler functions and owners
 - full `IMPORT FOREIGN SCHEMA` callback behavior beyond missing-handler errors
-- foreign table DDL/partition forms and psql helper functions
+- foreign table DDL/partition forms and partition catalog state
+- psql describe output compatibility beyond the helper-function lookups
 - Notices and exact PostgreSQL error/caret wording
