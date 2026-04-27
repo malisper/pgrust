@@ -2143,16 +2143,6 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
     }
 }
 
-fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<String>() {
-        return message.clone();
-    }
-    if let Some(message) = payload.downcast_ref::<&'static str>() {
-        return (*message).to_string();
-    }
-    format!("{payload:?}")
-}
-
 #[test]
 fn planned_rangefuncs_lateral_full_join_has_no_root_ext_params() {
     let sql = r#"
@@ -2455,9 +2445,8 @@ fn planned_distinct_window_specs_stack_windowagg_nodes() {
     );
 }
 
-#[test]
-fn executable_plan_validator_reports_node_and_field() {
-    let plan = Plan::Projection {
+fn invalid_executable_projection_plan() -> Plan {
+    Plan::Projection {
         plan_info: PlanEstimate::new(1.0, 1.0, 1.0, 1),
         input: Box::new(values_path(10, 1.0, 1.0).into_plan()),
         targets: vec![TargetEntry::new(
@@ -2477,21 +2466,11 @@ fn executable_plan_validator_reports_node_and_field() {
             int4(),
             1,
         )],
-    };
-
-    let panic = std::panic::catch_unwind(|| {
-        super::setrefs::validate_executable_plan_for_tests(&plan);
-    })
-    .expect_err("validator should reject planner-only expressions");
-
-    let message = panic_message(panic);
-    assert!(message.contains("Projection.targets"));
-    assert!(message.contains("Aggref"));
+    }
 }
 
-#[test]
-fn planner_path_validator_rejects_executor_only_refs() {
-    let path = filter_path(
+fn invalid_planner_filter_path() -> Path {
+    filter_path(
         1.0,
         1.0,
         values_path(10, 1.0, 1.0),
@@ -2500,14 +2479,58 @@ fn planner_path_validator_rejects_executor_only_refs() {
             paramid: 1,
             paramtype: bool_ty(),
         }),
+    )
+}
+
+// Some optimized nightly test builds abort while unwinding caught panics, so
+// keep these intentional validator panics isolated from the parent test process.
+fn run_optimizer_validator_panic_child(case: &str) -> String {
+    let output = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+        .env("PGRUST_OPTIMIZER_VALIDATOR_PANIC_CASE", case)
+        .arg("backend::optimizer::tests::optimizer_validator_panic_child")
+        .arg("--exact")
+        .arg("--ignored")
+        .arg("--nocapture")
+        .output()
+        .expect("run validator panic child");
+    assert!(
+        !output.status.success(),
+        "validator child should reject invalid {case}"
     );
+    let mut message = String::from_utf8_lossy(&output.stderr).into_owned();
+    message.push_str(&String::from_utf8_lossy(&output.stdout));
+    message
+}
 
-    let panic = std::panic::catch_unwind(|| {
-        super::setrefs::validate_planner_path_for_tests(&path);
-    })
-    .expect_err("validator should reject executor-only planner refs");
+#[test]
+#[ignore]
+fn optimizer_validator_panic_child() {
+    match std::env::var("PGRUST_OPTIMIZER_VALIDATOR_PANIC_CASE")
+        .expect("validator panic case")
+        .as_str()
+    {
+        "executable_projection" => {
+            super::setrefs::validate_executable_plan_for_tests(
+                &invalid_executable_projection_plan(),
+            );
+        }
+        "planner_filter" => {
+            super::setrefs::validate_planner_path_for_tests(&invalid_planner_filter_path());
+        }
+        case => panic!("unknown validator panic case: {case}"),
+    }
+}
 
-    let message = panic_message(panic);
+#[test]
+fn executable_plan_validator_reports_node_and_field() {
+    let message = run_optimizer_validator_panic_child("executable_projection");
+    assert!(message.contains("Projection.targets"));
+    assert!(message.contains("Aggref"));
+}
+
+#[test]
+fn planner_path_validator_rejects_executor_only_refs() {
+    let message = run_optimizer_validator_panic_child("planner_filter");
     assert!(message.contains("Filter.predicate"));
     assert!(message.contains("PARAM_EXEC"));
 }
