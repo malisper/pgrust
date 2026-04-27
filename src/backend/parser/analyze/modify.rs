@@ -854,6 +854,7 @@ fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>
         window_clauses: Vec::new(),
         having_qual: None,
         sort_clause: Vec::new(),
+        constraint_deps: Vec::new(),
         limit_count: None,
         limit_offset: 0,
         locking_clause: None,

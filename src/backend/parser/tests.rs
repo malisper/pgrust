@@ -2303,6 +2303,21 @@ fn parse_create_view_options() {
 }
 
 #[test]
+fn parse_create_view_column_aliases_over_union() {
+    let stmt = parse_statement(
+        "create view union_names (id, label) as select 1, 'a' union all select 2, 'b'",
+    )
+    .unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::CreateView(CreateViewStatement { view_name, column_names, query, .. })
+            if view_name == "union_names"
+                && column_names == vec!["id", "label"]
+                && query.set_operation.is_some()
+    ));
+}
+
+#[test]
 fn parse_comment_on_index_statement() {
     let stmt = parse_statement("comment on index public.items_idx is 'hello world'").unwrap();
     assert_eq!(
@@ -4177,6 +4192,21 @@ fn parse_alter_index_set_statistics_rejects_column_zero() {
 #[test]
 fn parse_alter_table_rename_column_statement() {
     let stmt = parse_statement("alter table items rename column note to body").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableRenameColumn(AlterTableRenameColumnStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            column_name: "note".into(),
+            new_column_name: "body".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_alter_table_rename_column_shorthand() {
+    let stmt = parse_statement("alter table items rename note to body").unwrap();
     assert_eq!(
         stmt,
         Statement::AlterTableRenameColumn(AlterTableRenameColumnStatement {

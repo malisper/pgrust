@@ -83,6 +83,7 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
             .into_iter()
             .map(simplify_sort_group_clause)
             .collect::<Result<Vec<_>, _>>()?,
+        constraint_deps: query.constraint_deps,
         limit_count: query.limit_count,
         limit_offset: query.limit_offset,
         locking_clause: query.locking_clause,

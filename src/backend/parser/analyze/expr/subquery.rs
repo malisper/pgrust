@@ -425,6 +425,18 @@ pub(super) fn bind_quantified_subquery_expr(
         grouped_outer,
         ctes,
     )?);
+    if row_width.is_none()
+        && let Some(right_type) = subquery.columns().first().map(|column| column.sql_type)
+        && right_type.is_array
+        && let Some(comparison_op) = comparison_operator_for_quantified_array(op)
+    {
+        let left_type = expr_sql_type_hint(&left).unwrap_or(SqlType::new(SqlTypeKind::Text));
+        return Err(ParseError::UndefinedOperator {
+            op: comparison_op,
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        });
+    }
     Ok(Expr::SubLink(Box::new(SubLink {
         sublink_type: if is_all {
             SubLinkType::AllSubLink(op)
@@ -453,6 +465,30 @@ pub(super) fn bind_quantified_array_expr(
         infer_sql_expr_type_with_ctes(array, scope, catalog, outer_scopes, grouped_outer, ctes);
     let left_type =
         coerce_unknown_string_literal_type(left, raw_left_type, raw_array_type.element_type());
+    let scalar_subquery_type = if let SqlExpr::ScalarSubquery(select) = array {
+        let child_visible_agg_scope = child_visible_aggregate_scope();
+        let query = bind_subquery_query(
+            select,
+            scope,
+            catalog,
+            outer_scopes,
+            child_visible_agg_scope.as_ref(),
+            ctes,
+        )?;
+        ensure_single_column_subquery(query.columns().len())?;
+        query.columns().first().map(|column| column.sql_type)
+    } else {
+        None
+    };
+    if let Some(array_type) = scalar_subquery_type.filter(|ty| ty.is_array) {
+        if let Some(comparison_op) = comparison_operator_for_quantified_array(op) {
+            return Err(ParseError::UndefinedOperator {
+                op: comparison_op,
+                left_type: sql_type_name(left_type),
+                right_type: sql_type_name(array_type),
+            });
+        }
+    }
     let target_array_type = if matches!(op, SubqueryComparisonOp::Match)
         && matches!(left_type.kind, SqlTypeKind::TsVector)
         && matches!(

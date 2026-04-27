@@ -10,8 +10,7 @@ use crate::backend::parser::{
     CreateFunctionReturnSpec, CreateFunctionStatement, CreateProcedureStatement,
     CreateTableAsQuery, FunctionArgMode, FunctionParallel, FunctionVolatility, OwnedSequenceSpec,
     PartitionBoundSpec, RawTypeName, RelOption, RoutineSignature, SqlType, SqlTypeKind, Statement,
-    analyze_select_query_with_outer, parse_statement, pg_partitioned_table_row,
-    resolve_raw_type_name, serialize_partition_bound,
+    parse_statement, pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::backend::rewrite::render_view_query_sql;
 use crate::backend::utils::cache::syscache::{
@@ -28,8 +27,13 @@ use crate::include::catalog::{
     PgAuthIdRow, PgAuthMembersRow, PgProcRow, RECORD_TYPE_OID, VOID_TYPE_OID,
 };
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
-use crate::include::nodes::primnodes::{QueryColumn, RelationDesc};
+use crate::include::nodes::parsenodes::{
+    ForeignKeyAction, ForeignKeyMatchType, Query, RangeTblEntryKind,
+};
+use crate::include::nodes::primnodes::{
+    Expr, QueryColumn, RelationDesc, ScalarFunctionImpl, SetReturningCall, SqlJsonTableBehavior,
+    SqlJsonTableColumnKind, Var, attrno_index,
+};
 use crate::pgrust::database::ddl::{append_view_check_option, format_sql_type_name};
 use crate::pgrust::database::{
     SequenceData, SequenceRuntime, default_sequence_name_base, format_nextval_default_oid,
@@ -369,6 +373,521 @@ fn validate_create_or_replace_view_columns(
     }
 
     Ok(())
+}
+
+fn apply_create_view_column_names(
+    desc: &mut crate::backend::executor::RelationDesc,
+    column_names: &[String],
+) -> Result<(), ExecError> {
+    if column_names.len() > desc.columns.len() {
+        return Err(ExecError::DetailedError {
+            message: "CREATE VIEW specifies more column names than columns".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+    for (column, name) in desc.columns.iter_mut().zip(column_names.iter()) {
+        column.name = name.clone();
+    }
+    Ok(())
+}
+
+fn collect_rule_dependencies_from_query(
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    deps: &mut crate::backend::catalog::store::RuleDependencies,
+) {
+    for rte in &query.rtable {
+        for qual in &rte.security_quals {
+            collect_expr_rule_dependencies(qual, query, catalog, deps);
+        }
+        match &rte.kind {
+            RangeTblEntryKind::Relation { relation_oid, .. } => {
+                deps.relation_oids.push(*relation_oid);
+            }
+            RangeTblEntryKind::Join { joinaliasvars, .. } => {
+                for expr in joinaliasvars {
+                    collect_expr_rule_dependencies(expr, query, catalog, deps);
+                }
+            }
+            RangeTblEntryKind::Values { rows, .. } => {
+                for expr in rows.iter().flatten() {
+                    collect_expr_rule_dependencies(expr, query, catalog, deps);
+                }
+            }
+            RangeTblEntryKind::Function { call } => {
+                collect_set_returning_call_rule_dependencies(call, query, catalog, deps);
+            }
+            RangeTblEntryKind::Cte { query, .. } | RangeTblEntryKind::Subquery { query } => {
+                collect_rule_dependencies_from_query(query, catalog, deps);
+            }
+            RangeTblEntryKind::Result | RangeTblEntryKind::WorkTable { .. } => {}
+        }
+    }
+    for target in &query.target_list {
+        collect_expr_rule_dependencies(&target.expr, query, catalog, deps);
+        collect_sql_type_rule_dependency(target.sql_type, deps);
+    }
+    for expr in query
+        .where_qual
+        .iter()
+        .chain(query.having_qual.iter())
+        .chain(query.group_by.iter())
+    {
+        collect_expr_rule_dependencies(expr, query, catalog, deps);
+    }
+    for sort in &query.sort_clause {
+        collect_expr_rule_dependencies(&sort.expr, query, catalog, deps);
+    }
+    for accumulator in &query.accumulators {
+        if accumulator.aggfnoid != 0 {
+            deps.proc_oids.push(accumulator.aggfnoid);
+        }
+        collect_sql_type_rule_dependency(accumulator.sql_type, deps);
+        for expr in accumulator
+            .direct_args
+            .iter()
+            .chain(accumulator.args.iter())
+            .chain(accumulator.filter.iter())
+        {
+            collect_expr_rule_dependencies(expr, query, catalog, deps);
+        }
+        for order in &accumulator.order_by {
+            collect_expr_rule_dependencies(&order.expr, query, catalog, deps);
+        }
+    }
+    for clause in &query.window_clauses {
+        for expr in &clause.spec.partition_by {
+            collect_expr_rule_dependencies(expr, query, catalog, deps);
+        }
+        for order in &clause.spec.order_by {
+            collect_expr_rule_dependencies(&order.expr, query, catalog, deps);
+        }
+        for func in &clause.functions {
+            for expr in &func.args {
+                collect_expr_rule_dependencies(expr, query, catalog, deps);
+            }
+            collect_sql_type_rule_dependency(func.result_type, deps);
+        }
+    }
+    if let Some(recursive) = &query.recursive_union {
+        collect_rule_dependencies_from_query(&recursive.anchor, catalog, deps);
+        collect_rule_dependencies_from_query(&recursive.recursive, catalog, deps);
+    }
+    if let Some(set_operation) = &query.set_operation {
+        for input in &set_operation.inputs {
+            collect_rule_dependencies_from_query(input, catalog, deps);
+        }
+    }
+}
+
+fn collect_expr_rule_dependencies(
+    expr: &Expr,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    deps: &mut crate::backend::catalog::store::RuleDependencies,
+) {
+    match expr {
+        Expr::Var(var) => collect_var_rule_dependency(var, query, catalog, deps),
+        Expr::Aggref(aggref) => {
+            if aggref.aggfnoid != 0 {
+                deps.proc_oids.push(aggref.aggfnoid);
+            }
+            collect_sql_type_rule_dependency(aggref.aggtype, deps);
+            for expr in aggref
+                .direct_args
+                .iter()
+                .chain(aggref.args.iter())
+                .chain(aggref.aggfilter.iter())
+            {
+                collect_expr_rule_dependencies(expr, query, catalog, deps);
+            }
+            for order in &aggref.aggorder {
+                collect_expr_rule_dependencies(&order.expr, query, catalog, deps);
+            }
+        }
+        Expr::WindowFunc(window_func) => {
+            if let crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) =
+                &window_func.kind
+            {
+                if aggref.aggfnoid != 0 {
+                    deps.proc_oids.push(aggref.aggfnoid);
+                }
+            }
+            collect_sql_type_rule_dependency(window_func.result_type, deps);
+            for expr in &window_func.args {
+                collect_expr_rule_dependencies(expr, query, catalog, deps);
+            }
+        }
+        Expr::Op(op) => {
+            if op.opfuncid != 0 {
+                deps.proc_oids.push(op.opfuncid);
+            }
+            collect_sql_type_rule_dependency(op.opresulttype, deps);
+            for expr in &op.args {
+                collect_expr_rule_dependencies(expr, query, catalog, deps);
+            }
+        }
+        Expr::Bool(bool_expr) => {
+            for expr in &bool_expr.args {
+                collect_expr_rule_dependencies(expr, query, catalog, deps);
+            }
+        }
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_expr_rule_dependencies(arg, query, catalog, deps);
+            }
+            for when in &case_expr.args {
+                collect_expr_rule_dependencies(&when.expr, query, catalog, deps);
+                collect_expr_rule_dependencies(&when.result, query, catalog, deps);
+            }
+            collect_expr_rule_dependencies(&case_expr.defresult, query, catalog, deps);
+        }
+        Expr::Func(func) => {
+            if func.funcid != 0 {
+                deps.proc_oids.push(func.funcid);
+            }
+            if let ScalarFunctionImpl::UserDefined { proc_oid } = func.implementation {
+                deps.proc_oids.push(proc_oid);
+            }
+            if let Some(sql_type) = func.funcresulttype {
+                collect_sql_type_rule_dependency(sql_type, deps);
+            }
+            for expr in &func.args {
+                collect_expr_rule_dependencies(expr, query, catalog, deps);
+            }
+        }
+        Expr::SetReturning(srf) => {
+            collect_set_returning_call_rule_dependencies(&srf.call, query, catalog, deps);
+            collect_sql_type_rule_dependency(srf.sql_type, deps);
+        }
+        Expr::SubLink(sublink) => {
+            if let Some(testexpr) = &sublink.testexpr {
+                collect_expr_rule_dependencies(testexpr, query, catalog, deps);
+            }
+            collect_rule_dependencies_from_query(&sublink.subselect, catalog, deps);
+        }
+        Expr::SubPlan(subplan) => {
+            if let Some(testexpr) = &subplan.testexpr {
+                collect_expr_rule_dependencies(testexpr, query, catalog, deps);
+            }
+            if let Some(sql_type) = subplan.first_col_type {
+                collect_sql_type_rule_dependency(sql_type, deps);
+            }
+            for expr in &subplan.args {
+                collect_expr_rule_dependencies(expr, query, catalog, deps);
+            }
+        }
+        Expr::ScalarArrayOp(saop) => {
+            collect_expr_rule_dependencies(&saop.left, query, catalog, deps);
+            collect_expr_rule_dependencies(&saop.right, query, catalog, deps);
+        }
+        Expr::Xml(xml) => {
+            for expr in xml.child_exprs() {
+                collect_expr_rule_dependencies(expr, query, catalog, deps);
+            }
+            if let Some(sql_type) = xml.target_type {
+                collect_sql_type_rule_dependency(sql_type, deps);
+            }
+        }
+        Expr::Cast(inner, sql_type) => {
+            collect_expr_rule_dependencies(inner, query, catalog, deps);
+            collect_sql_type_rule_dependency(*sql_type, deps);
+        }
+        Expr::Collate { expr, .. } | Expr::IsNull(expr) | Expr::IsNotNull(expr) => {
+            collect_expr_rule_dependencies(expr, query, catalog, deps);
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_expr_rule_dependencies(expr, query, catalog, deps);
+            collect_expr_rule_dependencies(pattern, query, catalog, deps);
+            if let Some(escape) = escape {
+                collect_expr_rule_dependencies(escape, query, catalog, deps);
+            }
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            collect_expr_rule_dependencies(left, query, catalog, deps);
+            collect_expr_rule_dependencies(right, query, catalog, deps);
+        }
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => {
+            collect_sql_type_rule_dependency(*array_type, deps);
+            for expr in elements {
+                collect_expr_rule_dependencies(expr, query, catalog, deps);
+            }
+        }
+        Expr::Row { descriptor, fields } => {
+            for field in &descriptor.fields {
+                collect_sql_type_rule_dependency(field.sql_type, deps);
+            }
+            for (_, expr) in fields {
+                collect_expr_rule_dependencies(expr, query, catalog, deps);
+            }
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_expr_rule_dependencies(array, query, catalog, deps);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_expr_rule_dependencies(lower, query, catalog, deps);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_expr_rule_dependencies(upper, query, catalog, deps);
+                }
+            }
+        }
+        Expr::FieldSelect {
+            expr, field_type, ..
+        } => {
+            collect_expr_rule_dependencies(expr, query, catalog, deps);
+            collect_sql_type_rule_dependency(*field_type, deps);
+        }
+        Expr::Param(param) => collect_sql_type_rule_dependency(param.paramtype, deps),
+        Expr::CaseTest(case_test) => collect_sql_type_rule_dependency(case_test.type_id, deps),
+        Expr::Const(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => {}
+    }
+}
+
+fn collect_var_rule_dependency(
+    var: &Var,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    deps: &mut crate::backend::catalog::store::RuleDependencies,
+) {
+    if var.varlevelsup != 0 {
+        return;
+    }
+    let Some(rte) = query.rtable.get(var.varno.saturating_sub(1)) else {
+        return;
+    };
+    match &rte.kind {
+        RangeTblEntryKind::Relation { relation_oid, .. } => {
+            collect_attnum_dependency(*relation_oid, var.varattno, &rte.desc, deps);
+        }
+        RangeTblEntryKind::Function { call } => {
+            if let Some(relation_oid) = set_returning_return_relation_oid(call, catalog, deps) {
+                collect_attnum_dependency(relation_oid, var.varattno, &rte.desc, deps);
+            }
+        }
+        RangeTblEntryKind::Join { joinaliasvars, .. } => {
+            if let Some(index) = attrno_index(var.varattno)
+                && let Some(expr) = joinaliasvars.get(index)
+            {
+                collect_expr_rule_dependencies(expr, query, catalog, deps);
+            }
+        }
+        RangeTblEntryKind::Subquery { query: subquery }
+        | RangeTblEntryKind::Cte {
+            query: subquery, ..
+        } => {
+            if let Some(index) = attrno_index(var.varattno)
+                && let Some(target) = subquery.target_list.get(index)
+            {
+                collect_expr_rule_dependencies(&target.expr, subquery, catalog, deps);
+            }
+        }
+        RangeTblEntryKind::Result
+        | RangeTblEntryKind::Values { .. }
+        | RangeTblEntryKind::WorkTable { .. } => {}
+    }
+}
+
+fn collect_attnum_dependency(
+    relation_oid: u32,
+    varattno: i32,
+    desc: &RelationDesc,
+    deps: &mut crate::backend::catalog::store::RuleDependencies,
+) {
+    if varattno == 0 {
+        for (index, column) in desc.columns.iter().enumerate() {
+            if !column.dropped {
+                deps.column_refs
+                    .push((relation_oid, index.saturating_add(1) as i16));
+            }
+        }
+        return;
+    }
+    if let Some(index) = attrno_index(varattno)
+        && desc
+            .columns
+            .get(index)
+            .is_some_and(|column| !column.dropped)
+        && let Ok(attnum) = i16::try_from(varattno)
+    {
+        deps.column_refs.push((relation_oid, attnum));
+    }
+}
+
+fn collect_set_returning_call_rule_dependencies(
+    call: &SetReturningCall,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    deps: &mut crate::backend::catalog::store::RuleDependencies,
+) {
+    if let Some(proc_oid) = set_returning_proc_oid(call) {
+        deps.proc_oids.push(proc_oid);
+        if let Some(proc_row) = catalog.proc_row_by_oid(proc_oid) {
+            deps.type_oids.push(proc_row.prorettype);
+        }
+    }
+    match call {
+        SetReturningCall::GenerateSeries {
+            start,
+            stop,
+            step,
+            timezone,
+            ..
+        } => {
+            for expr in [start, stop, step] {
+                collect_expr_rule_dependencies(expr, query, catalog, deps);
+            }
+            if let Some(timezone) = timezone {
+                collect_expr_rule_dependencies(timezone, query, catalog, deps);
+            }
+        }
+        SetReturningCall::GenerateSubscripts {
+            array,
+            dimension,
+            reverse,
+            ..
+        } => {
+            collect_expr_rule_dependencies(array, query, catalog, deps);
+            collect_expr_rule_dependencies(dimension, query, catalog, deps);
+            if let Some(reverse) = reverse {
+                collect_expr_rule_dependencies(reverse, query, catalog, deps);
+            }
+        }
+        SetReturningCall::Unnest { args, .. }
+        | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::StringTableFunction { args, .. }
+        | SetReturningCall::TextSearchTableFunction { args, .. }
+        | SetReturningCall::UserDefined { args, .. } => {
+            for expr in args {
+                collect_expr_rule_dependencies(expr, query, catalog, deps);
+            }
+        }
+        SetReturningCall::JsonRecordFunction {
+            args, record_type, ..
+        } => {
+            if let Some(sql_type) = record_type {
+                collect_sql_type_rule_dependency(*sql_type, deps);
+            }
+            for expr in args {
+                collect_expr_rule_dependencies(expr, query, catalog, deps);
+            }
+        }
+        SetReturningCall::PartitionTree { relid, .. }
+        | SetReturningCall::PartitionAncestors { relid, .. } => {
+            collect_expr_rule_dependencies(relid, query, catalog, deps);
+        }
+        SetReturningCall::TxidSnapshotXip { arg, .. } => {
+            collect_expr_rule_dependencies(arg, query, catalog, deps);
+        }
+        SetReturningCall::SqlJsonTable(table) => {
+            collect_expr_rule_dependencies(&table.context, query, catalog, deps);
+            for arg in &table.passing {
+                collect_expr_rule_dependencies(&arg.expr, query, catalog, deps);
+            }
+            for column in &table.columns {
+                collect_sql_type_rule_dependency(column.sql_type, deps);
+                match &column.kind {
+                    SqlJsonTableColumnKind::Scalar {
+                        on_empty, on_error, ..
+                    }
+                    | SqlJsonTableColumnKind::Formatted {
+                        on_empty, on_error, ..
+                    } => {
+                        collect_sql_json_behavior_rule_dependencies(on_empty, query, catalog, deps);
+                        collect_sql_json_behavior_rule_dependencies(on_error, query, catalog, deps);
+                    }
+                    SqlJsonTableColumnKind::Exists { on_error, .. } => {
+                        collect_sql_json_behavior_rule_dependencies(on_error, query, catalog, deps);
+                    }
+                    SqlJsonTableColumnKind::Ordinality => {}
+                }
+            }
+            collect_sql_json_behavior_rule_dependencies(&table.on_error, query, catalog, deps);
+        }
+        SetReturningCall::PgLockStatus { .. } => {}
+    }
+}
+
+fn collect_sql_json_behavior_rule_dependencies(
+    behavior: &SqlJsonTableBehavior,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    deps: &mut crate::backend::catalog::store::RuleDependencies,
+) {
+    if let SqlJsonTableBehavior::Default(expr) = behavior {
+        collect_expr_rule_dependencies(expr, query, catalog, deps);
+    }
+}
+
+fn set_returning_proc_oid(call: &SetReturningCall) -> Option<u32> {
+    let proc_oid = match call {
+        SetReturningCall::GenerateSeries { func_oid, .. }
+        | SetReturningCall::GenerateSubscripts { func_oid, .. }
+        | SetReturningCall::Unnest { func_oid, .. }
+        | SetReturningCall::JsonTableFunction { func_oid, .. }
+        | SetReturningCall::JsonRecordFunction { func_oid, .. }
+        | SetReturningCall::RegexTableFunction { func_oid, .. }
+        | SetReturningCall::StringTableFunction { func_oid, .. }
+        | SetReturningCall::PartitionTree { func_oid, .. }
+        | SetReturningCall::PartitionAncestors { func_oid, .. }
+        | SetReturningCall::PgLockStatus { func_oid, .. }
+        | SetReturningCall::TxidSnapshotXip { func_oid, .. } => *func_oid,
+        SetReturningCall::UserDefined { proc_oid, .. } => *proc_oid,
+        SetReturningCall::TextSearchTableFunction { .. } | SetReturningCall::SqlJsonTable(_) => 0,
+    };
+    (proc_oid != 0).then_some(proc_oid)
+}
+
+fn set_returning_return_relation_oid(
+    call: &SetReturningCall,
+    catalog: &dyn CatalogLookup,
+    deps: &mut crate::backend::catalog::store::RuleDependencies,
+) -> Option<u32> {
+    let proc_oid = set_returning_proc_oid(call)?;
+    let proc_row = catalog.proc_row_by_oid(proc_oid)?;
+    deps.type_oids.push(proc_row.prorettype);
+    catalog
+        .type_by_oid(proc_row.prorettype)
+        .and_then(|row| (row.typrelid != 0).then_some(row.typrelid))
+}
+
+fn collect_sql_type_rule_dependency(
+    sql_type: SqlType,
+    deps: &mut crate::backend::catalog::store::RuleDependencies,
+) {
+    if sql_type.type_oid != 0 {
+        deps.type_oids.push(sql_type.type_oid);
+    }
 }
 
 fn collation_name(catalog: &dyn CatalogLookup, oid: u32) -> String {
@@ -3813,12 +4332,7 @@ impl Database {
             configured_search_path,
         )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let (planned_stmt, referenced_constraint_oids) =
-            crate::backend::parser::analyze::with_functional_grouping_constraint_tracking(|| {
-                crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)
-            })?;
-        let plan = planned_stmt.plan_tree;
-        let (analyzed_query, _) = analyze_select_query_with_outer(
+        let (analyzed_query, _) = crate::backend::parser::analyze_select_query_with_outer(
             &create_stmt.query,
             &catalog,
             &[],
@@ -3827,6 +4341,8 @@ impl Database {
             &[],
             &[],
         )?;
+        let constraint_oids = analyzed_query.constraint_deps.clone();
+        let plan = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?.plan_tree;
         let canonical_sql = if create_stmt.query.with.is_empty() {
             render_view_query_sql(&analyzed_query, &catalog)
         } else {
@@ -3840,7 +4356,7 @@ impl Database {
                 .to_string()
         };
         let canonical_query_sql = append_view_check_option(canonical_sql, create_stmt.check_option);
-        let desc = crate::backend::executor::RelationDesc {
+        let mut desc = crate::backend::executor::RelationDesc {
             columns: plan
                 .column_names()
                 .into_iter()
@@ -3848,6 +4364,7 @@ impl Database {
                 .map(|(name, column)| column_desc(name, column.sql_type, true))
                 .collect(),
         };
+        apply_create_view_column_names(&mut desc, &create_stmt.column_names)?;
         let reloptions = create_view_reloptions(&create_stmt.options)?;
         let mut referenced_relation_oids = std::collections::BTreeSet::new();
         collect_direct_relation_oids_from_select(
@@ -4013,20 +4530,23 @@ impl Database {
             cid: cid.saturating_add(2),
             ..rule_drop_ctx
         };
-        let rule_result = {
-            self.catalog.write().create_rule_mvcc_with_owner_dependency(
-                relation_oid,
-                "_RETURN",
-                '1',
-                true,
-                String::new(),
-                canonical_query_sql,
-                &referenced_relation_oids.into_iter().collect::<Vec<_>>(),
-                &referenced_constraint_oids,
-                crate::backend::catalog::store::RuleOwnerDependency::Internal,
-                &rule_ctx,
-            )
+        let mut rule_dependencies = crate::backend::catalog::store::RuleDependencies {
+            relation_oids: referenced_relation_oids.into_iter().collect::<Vec<_>>(),
+            constraint_oids,
+            ..Default::default()
         };
+        collect_rule_dependencies_from_query(&analyzed_query, &catalog, &mut rule_dependencies);
+        let rule_result = self.catalog.write().create_rule_mvcc_with_dependencies(
+            relation_oid,
+            "_RETURN",
+            '1',
+            true,
+            String::new(),
+            canonical_query_sql,
+            rule_dependencies,
+            crate::backend::catalog::store::RuleOwnerDependency::Internal,
+            &rule_ctx,
+        );
         let rule_effect = match rule_result {
             Ok(effect) => effect,
             Err(err) => {

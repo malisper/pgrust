@@ -326,6 +326,16 @@ fn drop_table_relation_kind_name(relkind: char) -> &'static str {
     }
 }
 
+fn drop_schema_relation_drop_priority(relkind: char) -> u8 {
+    match relkind {
+        'r' | 'p' | 'm' | 'S' => 0,
+        'v' => 1,
+        'c' => 2,
+        'i' | 'I' | 't' => 3,
+        _ => 4,
+    }
+}
+
 fn drop_table_display_relation_name(
     catcache: &CatCache,
     relation_oid: u32,
@@ -1480,7 +1490,7 @@ impl Database {
             .class_rows()
             .into_iter()
             .filter(|row| row.relnamespace == schema_oid)
-            .filter(|row| matches!(row.relkind, 'r' | 'p' | 'm' | 'S' | 'v'))
+            .filter(|row| matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'S' | 'v'))
             .collect::<Vec<_>>();
         let proc_rows = catcache
             .proc_rows()
@@ -1489,21 +1499,21 @@ impl Database {
             .collect::<Vec<_>>();
         let mut next_cid = cid;
 
-        let mut relation_rows_by_drop_order = relation_rows
-            .iter()
-            .filter(|row| row.relkind != 'c')
-            .cloned()
-            .collect::<Vec<_>>();
-        relation_rows_by_drop_order.extend(
-            relation_rows
-                .iter()
-                .filter(|row| row.relkind == 'c')
-                .cloned(),
-        );
+        let mut relation_rows_by_drop_order = relation_rows.clone();
+        relation_rows_by_drop_order
+            .sort_by_key(|row| (drop_schema_relation_drop_priority(row.relkind), row.oid));
 
         let mut dropped_relation_oids = BTreeSet::new();
         for relation in relation_rows_by_drop_order {
             if dropped_relation_oids.contains(&relation.oid) {
+                continue;
+            }
+            if self
+                .backend_catcache(client_id, Some((xid, next_cid)))
+                .map_err(map_catalog_error)?
+                .class_by_oid(relation.oid)
+                .is_none()
+            {
                 continue;
             }
             let ctx = CatalogWriteContext {
@@ -3432,6 +3442,21 @@ mod tests {
             .execute(&db, "create table widgets (id int4)")
             .unwrap();
         session
+            .execute(&db, "create view widget_view as select id from widgets")
+            .unwrap();
+        session
+            .execute(&db, "create type tenant_pair as (x int4)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create view pair_view as select row(id)::tenant_pair as pair from widgets",
+            )
+            .unwrap();
+        session
+            .execute(&db, "create table pair_log (old_row pair_view)")
+            .unwrap();
+        session
             .execute(
                 &db,
                 "create function tenant_fn() returns int4 language sql as $$ select 1 $$",
@@ -3444,11 +3469,15 @@ mod tests {
 
         let catcache = db.backend_catcache(1, None).unwrap();
         assert!(catcache.namespace_by_name("tenant_drop").is_none());
+        assert!(!catcache.class_rows().into_iter().any(|row| matches!(
+            row.relname.as_str(),
+            "widgets" | "widget_view" | "tenant_pair" | "pair_view" | "pair_log"
+        )));
         assert!(
             !catcache
-                .class_rows()
+                .type_rows()
                 .into_iter()
-                .any(|row| row.relname == "widgets")
+                .any(|row| row.typname == "tenant_pair")
         );
         assert!(
             !catcache

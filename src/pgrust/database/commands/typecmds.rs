@@ -5,6 +5,7 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::executor::expr_reg::format_type_text;
 use crate::backend::executor::{ColumnDesc, RelationDesc, StatementResult};
+use crate::backend::parser::analyze::raw_type_name_is_unknown;
 use crate::backend::parser::{
     AlterCompositeTypeAction, AlterCompositeTypeStatement, AlterEnumValuePosition,
     AlterTypeAddEnumValueStatement, AlterTypeOwnerStatement, AlterTypeRenameEnumValueStatement,
@@ -1351,6 +1352,14 @@ fn apply_composite_attribute_action(
                     sqlstate: "42701",
                 });
             }
+            if raw_type_name_is_unknown(&attribute.ty) {
+                return Err(ExecError::Parse(ParseError::DetailedError {
+                    message: format!("column \"{}\" has pseudo-type unknown", attribute.name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P16",
+                }));
+            }
             let sql_type =
                 resolve_raw_type_name(&attribute.ty, catalog).map_err(ExecError::Parse)?;
             reject_composite_self_reference(composite_type_name, composite_type_oid, sql_type)?;
@@ -1600,6 +1609,14 @@ fn lower_create_composite_type_desc(
             }));
         }
 
+        if raw_type_name_is_unknown(&attribute.ty) {
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: format!("column \"{}\" has pseudo-type unknown", attribute.name),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            }));
+        }
         let sql_type = resolve_raw_type_name(&attribute.ty, catalog).map_err(ExecError::Parse)?;
         if matches!(sql_type.kind, SqlTypeKind::Cstring) || sql_type.type_oid == UNKNOWN_TYPE_OID {
             return Err(ExecError::Parse(ParseError::DetailedError {

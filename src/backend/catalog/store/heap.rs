@@ -60,7 +60,7 @@ use crate::include::nodes::datum::Value;
 
 use super::{
     CatalogControl, CatalogMutationEffect, CatalogStore, CatalogStoreMode, CatalogWriteContext,
-    CreateTableResult, RuleOwnerDependency,
+    CreateTableResult, RuleDependencies, RuleOwnerDependency,
 };
 
 const PG_DESCRIPTION_O_C_O_INDEX_OID: u32 = 2675;
@@ -3751,6 +3751,33 @@ impl CatalogStore {
         owner_dependency: RuleOwnerDependency,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut dependencies = RuleDependencies::from_relation_oids(referenced_relation_oids);
+        dependencies.constraint_oids = referenced_constraint_oids.to_vec();
+        self.create_rule_mvcc_with_dependencies(
+            relation_oid,
+            rule_name,
+            ev_type,
+            is_instead,
+            ev_qual,
+            ev_action,
+            dependencies,
+            owner_dependency,
+            ctx,
+        )
+    }
+
+    pub fn create_rule_mvcc_with_dependencies(
+        &mut self,
+        relation_oid: u32,
+        rule_name: impl Into<String>,
+        ev_type: char,
+        is_instead: bool,
+        ev_qual: String,
+        ev_action: String,
+        dependencies: RuleDependencies,
+        owner_dependency: RuleOwnerDependency,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
         let rule_name = rule_name.into();
         self.relation_id_get_relation(ctx, relation_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
@@ -3766,9 +3793,21 @@ impl CatalogStore {
             ev_action,
         };
         control.next_oid = control.next_oid.saturating_add(1);
-        let mut referenced = referenced_relation_oids.to_vec();
+        let mut referenced = dependencies.relation_oids;
         referenced.sort_unstable();
         referenced.dedup();
+        let mut column_refs = dependencies.column_refs;
+        column_refs.sort_unstable();
+        column_refs.dedup();
+        let mut constraint_oids = dependencies.constraint_oids;
+        constraint_oids.sort_unstable();
+        constraint_oids.dedup();
+        let mut proc_oids = dependencies.proc_oids;
+        proc_oids.sort_unstable();
+        proc_oids.dedup();
+        let mut type_oids = dependencies.type_oids;
+        type_oids.sort_unstable();
+        type_oids.dedup();
 
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
         let mut depends = match owner_dependency {
@@ -3780,9 +3819,8 @@ impl CatalogStore {
             }
         };
         depends.extend(
-            referenced_constraint_oids
-                .iter()
-                .copied()
+            constraint_oids
+                .into_iter()
                 .map(|constraint_oid| PgDependRow {
                     classid: PG_REWRITE_RELATION_OID,
                     objid: rewrite_row.oid,
@@ -3793,9 +3831,39 @@ impl CatalogStore {
                     deptype: DEPENDENCY_NORMAL,
                 }),
         );
+        depends.extend(
+            column_refs
+                .into_iter()
+                .map(|(relation_oid, attnum)| PgDependRow {
+                    classid: PG_REWRITE_RELATION_OID,
+                    objid: rewrite_row.oid,
+                    objsubid: 0,
+                    refclassid: PG_CLASS_RELATION_OID,
+                    refobjid: relation_oid,
+                    refobjsubid: i32::from(attnum),
+                    deptype: DEPENDENCY_NORMAL,
+                }),
+        );
+        depends.extend(proc_oids.into_iter().map(|proc_oid| PgDependRow {
+            classid: PG_REWRITE_RELATION_OID,
+            objid: rewrite_row.oid,
+            objsubid: 0,
+            refclassid: PG_PROC_RELATION_OID,
+            refobjid: proc_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        }));
+        depends.extend(type_oids.into_iter().map(|type_oid| PgDependRow {
+            classid: PG_REWRITE_RELATION_OID,
+            objid: rewrite_row.oid,
+            objsubid: 0,
+            refclassid: PG_TYPE_RELATION_OID,
+            refobjid: type_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        }));
         sort_pg_depend_rows(&mut depends);
         depends.dedup();
-
         let rows = PhysicalCatalogRows {
             rewrites: vec![rewrite_row.clone()],
             depends,
@@ -5660,7 +5728,7 @@ impl CatalogStore {
         let kinds = drop_relation_delete_kinds();
         let control = self.control_state()?;
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
-        delete_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+        delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
 
         let mut effect = CatalogMutationEffect::default();

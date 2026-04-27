@@ -24,6 +24,49 @@ fn relation_basename(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
+fn reject_constraint_with_dependent_rule(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    constraint_oid: u32,
+    constraint_name: &str,
+    table_name: &str,
+) -> Result<(), ExecError> {
+    let depends =
+        crate::backend::utils::cache::syscache::ensure_depend_rows(db, client_id, txn_ctx);
+    let Some(depend) = depends.into_iter().find(|depend| {
+        depend.classid == crate::include::catalog::PG_REWRITE_RELATION_OID
+            && depend.refclassid == crate::include::catalog::PG_CONSTRAINT_RELATION_OID
+            && depend.refobjid == constraint_oid
+            && depend.deptype == crate::include::catalog::DEPENDENCY_NORMAL
+    }) else {
+        return Ok(());
+    };
+    let rewrites =
+        crate::backend::utils::cache::syscache::ensure_rewrite_rows(db, client_id, txn_ctx);
+    let classes = crate::backend::utils::cache::syscache::ensure_class_rows(db, client_id, txn_ctx);
+    let view_name = rewrites
+        .iter()
+        .find(|rewrite| rewrite.oid == depend.objid)
+        .and_then(|rewrite| {
+            classes
+                .iter()
+                .find(|class| class.oid == rewrite.ev_class)
+                .map(|class| class.relname.clone())
+        })
+        .unwrap_or_else(|| "unknown".into());
+    Err(ExecError::DetailedError {
+        message: format!(
+            "cannot drop constraint {constraint_name} on table {table_name} because other objects depend on it"
+        ),
+        detail: Some(format!(
+            "view {view_name} depends on constraint {constraint_name} on table {table_name}"
+        )),
+        hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+        sqlstate: "2BP01",
+    })
+}
+
 fn choose_available_constraint_name(
     base: &str,
     used_names: &mut std::collections::BTreeSet<String>,
@@ -1929,6 +1972,14 @@ impl Database {
                         sqlstate: "0A000",
                     });
                 }
+                reject_constraint_with_dependent_rule(
+                    self,
+                    client_id,
+                    Some((xid, cid)),
+                    row.oid,
+                    &row.conname,
+                    relation_basename(&drop_stmt.table_name),
+                )?;
                 if row.conindid != 0 {
                     reject_index_with_referencing_foreign_keys(
                         &catalog,

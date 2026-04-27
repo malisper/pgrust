@@ -635,6 +635,12 @@ pub(super) fn resolve_common_scalar_type(left: SqlType, right: SqlType) -> Optio
         }
         return Some(SqlType::record(crate::include::catalog::RECORD_TYPE_OID));
     }
+    if matches!(left.kind, SqlTypeKind::Varchar) && matches!(right.kind, SqlTypeKind::Varchar) {
+        return Some(SqlType::new(SqlTypeKind::Varchar));
+    }
+    if matches!(left.kind, SqlTypeKind::Char) && matches!(right.kind, SqlTypeKind::Char) {
+        return Some(SqlType::new(SqlTypeKind::Char));
+    }
     if is_text_like_type(left) && is_text_like_type(right) {
         return Some(SqlType::new(SqlTypeKind::Text));
     }
@@ -673,7 +679,23 @@ pub(super) fn resolve_common_scalar_type(left: SqlType, right: SqlType) -> Optio
     if is_numeric_family(left) && is_numeric_family(right) {
         return resolve_numeric_binary_type("+", left, right).ok();
     }
+    if let Some(temporal) = resolve_common_temporal_type(left, right) {
+        return Some(temporal);
+    }
     None
+}
+
+fn resolve_common_temporal_type(left: SqlType, right: SqlType) -> Option<SqlType> {
+    use SqlTypeKind::{Date, Time, TimeTz, Timestamp, TimestampTz};
+
+    match (left.kind, right.kind) {
+        (TimestampTz, Date | Timestamp) | (Date | Timestamp, TimestampTz) => {
+            Some(SqlType::new(TimestampTz))
+        }
+        (Timestamp, Date) | (Date, Timestamp) => Some(SqlType::new(Timestamp)),
+        (TimeTz, Time) | (Time, TimeTz) => Some(SqlType::new(TimeTz)),
+        _ => None,
+    }
 }
 
 pub(super) fn resolve_array_concat_element_type(

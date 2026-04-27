@@ -87,6 +87,27 @@ pub enum RuleOwnerDependency {
     Internal,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuleDependencies {
+    pub relation_oids: Vec<u32>,
+    pub column_refs: Vec<(u32, i16)>,
+    pub constraint_oids: Vec<u32>,
+    pub proc_oids: Vec<u32>,
+    pub type_oids: Vec<u32>,
+}
+
+impl RuleDependencies {
+    pub fn from_relation_oids(relation_oids: &[u32]) -> Self {
+        Self {
+            relation_oids: relation_oids.to_vec(),
+            column_refs: Vec::new(),
+            constraint_oids: Vec::new(),
+            proc_oids: Vec::new(),
+            type_oids: Vec::new(),
+        }
+    }
+}
+
 pub struct CatalogWriteContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
     pub txns: std::sync::Arc<RwLock<TransactionManager>>,

@@ -283,6 +283,18 @@ fn compare_bt_values_for_type_with_option(
         }
         return ord;
     }
+    if matches!(ty.kind, crate::backend::parser::SqlTypeKind::Char)
+        && !ty.is_array
+        && let (Some(left_text), Some(right_text)) = (left.as_text(), right.as_text())
+    {
+        let mut ord = left_text
+            .trim_end_matches(' ')
+            .cmp(right_text.trim_end_matches(' '));
+        if option & crate::backend::access::nbtree::nbtcompare::BT_DESC_FLAG != 0 {
+            ord = ord.reverse();
+        }
+        return ord;
+    }
     compare_bt_values_with_options(left, right, option)
 }
 
