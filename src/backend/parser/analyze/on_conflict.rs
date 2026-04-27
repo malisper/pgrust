@@ -578,6 +578,9 @@ fn scope_for_executor_relation(
                 relation_names: vec![relation_name.to_string()],
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
+                source_relation_oid: None,
+                source_attno: None,
+                source_columns: Vec::new(),
             })
             .collect(),
         relations: vec![ScopeRelation {
@@ -585,6 +588,7 @@ fn scope_for_executor_relation(
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
             system_varno: None,
+            relation_oid: None,
         }],
     }
 }

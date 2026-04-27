@@ -9,7 +9,8 @@ use crate::backend::parser::{
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{
     CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
-    CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, PG_CATALOG_NAMESPACE_OID, PgConstraintRow,
+    CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID,
+    PG_CONSTRAINT_RELATION_OID, PG_REWRITE_RELATION_OID, PgConstraintRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::TupleSlot;
@@ -43,6 +44,59 @@ fn check_constraint_exprs_match(row: &PgConstraintRow, expr_sql: &str) -> bool {
     row.conbin
         .as_deref()
         .is_some_and(|conbin| conbin.trim().eq_ignore_ascii_case(expr_sql.trim()))
+}
+
+fn reject_constraint_with_dependent_views(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    catalog: &dyn CatalogLookup,
+    relation_name: &str,
+    constraint: &PgConstraintRow,
+) -> Result<(), ExecError> {
+    let depend_rows =
+        crate::backend::utils::cache::syscache::ensure_depend_rows(db, client_id, txn_ctx);
+    let rewrite_rows =
+        crate::backend::utils::cache::syscache::ensure_rewrite_rows(db, client_id, txn_ctx);
+    let Some((_, rewrite)) = depend_rows
+        .iter()
+        .filter(|depend| {
+            depend.classid == PG_REWRITE_RELATION_OID
+                && depend.refclassid == PG_CONSTRAINT_RELATION_OID
+                && depend.refobjid == constraint.oid
+                && depend.deptype == DEPENDENCY_NORMAL
+        })
+        .filter_map(|depend| {
+            rewrite_rows
+                .iter()
+                .find(|rewrite| rewrite.oid == depend.objid)
+                .map(|rewrite| (depend, rewrite))
+        })
+        .find(|(_, rewrite)| {
+            catalog
+                .class_row_by_oid(rewrite.ev_class)
+                .is_some_and(|class| class.relkind == 'v')
+        })
+    else {
+        return Ok(());
+    };
+    let view_name = catalog
+        .class_row_by_oid(rewrite.ev_class)
+        .map(|class| class.relname)
+        .unwrap_or_else(|| rewrite.ev_class.to_string());
+    let relation_name = relation_basename(relation_name);
+    Err(ExecError::DetailedError {
+        message: format!(
+            "cannot drop constraint {} on table {} because other objects depend on it",
+            constraint.conname, relation_name
+        ),
+        detail: Some(format!(
+            "view {} depends on constraint {} on table {}",
+            view_name, constraint.conname, relation_name
+        )),
+        hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+        sqlstate: "2BP01",
+    })
 }
 
 fn ddl_executor_context(
@@ -1779,6 +1833,19 @@ impl Database {
                     ),
                 })
             })?;
+        if drop_stmt.cascade {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "ALTER TABLE DROP CONSTRAINT CASCADE".into(),
+            )));
+        }
+        reject_constraint_with_dependent_views(
+            self,
+            client_id,
+            Some((xid, cid)),
+            &catalog,
+            &drop_stmt.table_name,
+            &row,
+        )?;
 
         match row.contype {
             CONSTRAINT_CHECK | CONSTRAINT_FOREIGN => {

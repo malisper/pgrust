@@ -2392,8 +2392,8 @@ impl Database {
             | Statement::Fetch(_)
             | Statement::Move(_)
             | Statement::ClosePortal(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "portal command handled by session layer",
-                actual: "portal command".into(),
+                expected: "session command handled by session layer",
+                actual: "session command".into(),
             })),
         }
     }

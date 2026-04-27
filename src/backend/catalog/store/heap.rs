@@ -3704,6 +3704,7 @@ impl CatalogStore {
             ev_qual,
             ev_action,
             referenced_relation_oids,
+            &[],
             RuleOwnerDependency::Auto,
             ctx,
         )
@@ -3718,6 +3719,7 @@ impl CatalogStore {
         ev_qual: String,
         ev_action: String,
         referenced_relation_oids: &[u32],
+        referenced_constraint_oids: &[u32],
         owner_dependency: RuleOwnerDependency,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
@@ -3741,16 +3743,34 @@ impl CatalogStore {
         referenced.dedup();
 
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
+        let mut depends = match owner_dependency {
+            RuleOwnerDependency::Auto => {
+                relation_rule_depend_rows(rewrite_row.oid, relation_oid, &referenced)
+            }
+            RuleOwnerDependency::Internal => {
+                view_rewrite_depend_rows(rewrite_row.oid, relation_oid, &referenced)
+            }
+        };
+        depends.extend(
+            referenced_constraint_oids
+                .iter()
+                .copied()
+                .map(|constraint_oid| PgDependRow {
+                    classid: PG_REWRITE_RELATION_OID,
+                    objid: rewrite_row.oid,
+                    objsubid: 0,
+                    refclassid: PG_CONSTRAINT_RELATION_OID,
+                    refobjid: constraint_oid,
+                    refobjsubid: 0,
+                    deptype: DEPENDENCY_NORMAL,
+                }),
+        );
+        sort_pg_depend_rows(&mut depends);
+        depends.dedup();
+
         let rows = PhysicalCatalogRows {
             rewrites: vec![rewrite_row.clone()],
-            depends: match owner_dependency {
-                RuleOwnerDependency::Auto => {
-                    relation_rule_depend_rows(rewrite_row.oid, relation_oid, &referenced)
-                }
-                RuleOwnerDependency::Internal => {
-                    view_rewrite_depend_rows(rewrite_row.oid, relation_oid, &referenced)
-                }
-            },
+            depends,
             ..PhysicalCatalogRows::default()
         };
         let kinds = vec![

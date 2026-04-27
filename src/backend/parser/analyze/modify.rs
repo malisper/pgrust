@@ -896,8 +896,12 @@ pub fn plan_merge(
     );
     target_base.output_exprs = generated_relation_output_exprs(&entry.desc, catalog)?;
     let (target_from, target_visible_count) = with_merge_target_ctid(target_base, &entry.desc);
-    let target_scope =
-        scope_for_base_relation_with_generated(&target_relation_name, &entry.desc, catalog)?;
+    let target_scope = scope_for_base_relation_with_generated(
+        &target_relation_name,
+        &entry.desc,
+        Some(entry.relation_oid),
+        catalog,
+    )?;
     let (source_base, source_scope_raw) =
         bind_from_item_with_ctes(&stmt.source, catalog, &[], None, &local_ctes, &[])?;
     let (source_from, source_visible_count) = with_merge_source_present(source_base);
@@ -2140,8 +2144,12 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         catalog,
     )?;
     let visible_target_name = stmt.table_alias.as_deref().unwrap_or(&stmt.table_name);
-    let target_scope =
-        scope_for_base_relation_with_generated(visible_target_name, &entry.desc, catalog)?;
+    let target_scope = scope_for_base_relation_with_generated(
+        visible_target_name,
+        &entry.desc,
+        Some(entry.relation_oid),
+        catalog,
+    )?;
     let expr_scope = empty_scope();
     let returning = bind_returning_targets(
         &stmt.returning,
@@ -2387,8 +2395,12 @@ fn bind_simple_update(
 ) -> Result<BoundUpdateStatement, ParseError> {
     let target_relation_name = update_target_relation_name(stmt);
     let explain_target_name = update_explain_target_name(stmt);
-    let scope =
-        scope_for_base_relation_with_generated(&target_relation_name, &entry.desc, catalog)?;
+    let scope = scope_for_base_relation_with_generated(
+        &target_relation_name,
+        &entry.desc,
+        Some(entry.relation_oid),
+        catalog,
+    )?;
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, local_ctes)?;
     let predicate = stmt
         .where_clause
@@ -2511,8 +2523,12 @@ fn bind_update_from(
 ) -> Result<BoundUpdateStatement, ParseError> {
     let target_relation_name = update_target_relation_name(stmt);
     let explain_target_name = update_explain_target_name(stmt);
-    let target_scope =
-        scope_for_base_relation_with_generated(&target_relation_name, &entry.desc, catalog)?;
+    let target_scope = scope_for_base_relation_with_generated(
+        &target_relation_name,
+        &entry.desc,
+        Some(entry.relation_oid),
+        catalog,
+    )?;
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, local_ctes)?;
     let source_stmt = stmt.from.as_ref().expect("checked above");
     let (source_from, source_scope_raw) =

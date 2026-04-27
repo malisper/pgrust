@@ -28,23 +28,15 @@ pub(super) fn build_aggregate_layout(
     catalog: &dyn CatalogLookup,
 ) -> AggregateLayout {
     let original_group_by = query.group_by.clone();
-    if original_group_by.len() < 2 || query_has_outer_joins(query) {
-        return AggregateLayout {
-            group_by: original_group_by,
-            passthrough_exprs: Vec::new(),
-        };
-    }
+    let reduced_group_by = if original_group_by.len() < 2 || query_has_outer_joins(query) {
+        original_group_by
+    } else {
+        let per_relation_reduced = remove_redundant_relation_group_keys(query, catalog);
+        collapse_duplicate_group_keys(query, per_relation_reduced)
+    };
 
-    let per_relation_reduced = remove_redundant_relation_group_keys(query, catalog);
-    let reduced_group_by = collapse_duplicate_group_keys(query, per_relation_reduced);
-    if reduced_group_by == query.group_by {
-        return AggregateLayout {
-            group_by: query.group_by.clone(),
-            passthrough_exprs: Vec::new(),
-        };
-    }
-
-    let passthrough_exprs = collect_passthrough_exprs(query, &reduced_group_by);
+    let mut passthrough_exprs = collect_passthrough_exprs(query, &reduced_group_by);
+    collect_aggregate_passthrough_exprs(query, &reduced_group_by, &mut passthrough_exprs);
 
     AggregateLayout {
         group_by: reduced_group_by,
@@ -61,6 +53,191 @@ fn collect_passthrough_exprs(query: &Query, reduced_group_by: &[Expr]) -> Vec<Ex
         })
         .cloned()
         .collect()
+}
+
+fn collect_aggregate_passthrough_exprs(
+    query: &Query,
+    group_by: &[Expr],
+    passthrough_exprs: &mut Vec<Expr>,
+) {
+    for target in &query.target_list {
+        collect_passthrough_expr(&target.expr, group_by, passthrough_exprs);
+    }
+    if let Some(having) = query.having_qual.as_ref() {
+        collect_passthrough_expr(having, group_by, passthrough_exprs);
+    }
+    for item in &query.sort_clause {
+        collect_passthrough_expr(&item.expr, group_by, passthrough_exprs);
+    }
+    for clause in &query.window_clauses {
+        for expr in &clause.spec.partition_by {
+            collect_passthrough_expr(expr, group_by, passthrough_exprs);
+        }
+        for item in &clause.spec.order_by {
+            collect_passthrough_expr(&item.expr, group_by, passthrough_exprs);
+        }
+        for func in &clause.functions {
+            collect_window_func_passthrough_exprs(func, group_by, passthrough_exprs);
+        }
+    }
+}
+
+fn push_passthrough_expr(exprs: &mut Vec<Expr>, expr: Expr) {
+    if !exprs.contains(&expr) {
+        exprs.push(expr);
+    }
+}
+
+fn collect_window_func_passthrough_exprs(
+    func: &WindowFuncExpr,
+    group_by: &[Expr],
+    passthrough_exprs: &mut Vec<Expr>,
+) {
+    for arg in &func.args {
+        collect_passthrough_expr(arg, group_by, passthrough_exprs);
+    }
+    if let WindowFuncKind::Aggregate(aggref) = &func.kind {
+        for item in &aggref.aggorder {
+            collect_passthrough_expr(&item.expr, group_by, passthrough_exprs);
+        }
+        if let Some(filter) = aggref.aggfilter.as_ref() {
+            collect_passthrough_expr(filter, group_by, passthrough_exprs);
+        }
+    }
+}
+
+fn collect_passthrough_expr(expr: &Expr, group_by: &[Expr], passthrough_exprs: &mut Vec<Expr>) {
+    if group_by.contains(expr) {
+        return;
+    }
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => {
+            push_passthrough_expr(passthrough_exprs, expr.clone());
+        }
+        Expr::Aggref(_) => {}
+        Expr::WindowFunc(window_func) => {
+            collect_window_func_passthrough_exprs(window_func, group_by, passthrough_exprs);
+        }
+        Expr::Op(op) => {
+            for arg in &op.args {
+                collect_passthrough_expr(arg, group_by, passthrough_exprs);
+            }
+        }
+        Expr::Bool(bool_expr) => {
+            for arg in &bool_expr.args {
+                collect_passthrough_expr(arg, group_by, passthrough_exprs);
+            }
+        }
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_passthrough_expr(arg, group_by, passthrough_exprs);
+            }
+            for arm in &case_expr.args {
+                collect_passthrough_expr(&arm.expr, group_by, passthrough_exprs);
+                collect_passthrough_expr(&arm.result, group_by, passthrough_exprs);
+            }
+            collect_passthrough_expr(&case_expr.defresult, group_by, passthrough_exprs);
+        }
+        Expr::Func(func) => {
+            for arg in &func.args {
+                collect_passthrough_expr(arg, group_by, passthrough_exprs);
+            }
+        }
+        Expr::SetReturning(srf) => {
+            for arg in set_returning_call_exprs(&srf.call) {
+                collect_passthrough_expr(arg, group_by, passthrough_exprs);
+            }
+        }
+        Expr::SubLink(sublink) => {
+            if let Some(testexpr) = &sublink.testexpr {
+                collect_passthrough_expr(testexpr, group_by, passthrough_exprs);
+            }
+        }
+        Expr::SubPlan(subplan) => {
+            if let Some(testexpr) = &subplan.testexpr {
+                collect_passthrough_expr(testexpr, group_by, passthrough_exprs);
+            }
+            for arg in &subplan.args {
+                collect_passthrough_expr(arg, group_by, passthrough_exprs);
+            }
+        }
+        Expr::ScalarArrayOp(op) => {
+            collect_passthrough_expr(&op.left, group_by, passthrough_exprs);
+            collect_passthrough_expr(&op.right, group_by, passthrough_exprs);
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => collect_passthrough_expr(inner, group_by, passthrough_exprs),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_passthrough_expr(expr, group_by, passthrough_exprs);
+            collect_passthrough_expr(pattern, group_by, passthrough_exprs);
+            if let Some(escape) = escape.as_deref() {
+                collect_passthrough_expr(escape, group_by, passthrough_exprs);
+            }
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            collect_passthrough_expr(left, group_by, passthrough_exprs);
+            collect_passthrough_expr(right, group_by, passthrough_exprs);
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            for element in elements {
+                collect_passthrough_expr(element, group_by, passthrough_exprs);
+            }
+        }
+        Expr::Row { fields, .. } => {
+            for (_, expr) in fields {
+                collect_passthrough_expr(expr, group_by, passthrough_exprs);
+            }
+        }
+        Expr::FieldSelect { expr, .. } => {
+            collect_passthrough_expr(expr, group_by, passthrough_exprs);
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_passthrough_expr(array, group_by, passthrough_exprs);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_passthrough_expr(lower, group_by, passthrough_exprs);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_passthrough_expr(upper, group_by, passthrough_exprs);
+                }
+            }
+        }
+        Expr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                collect_passthrough_expr(child, group_by, passthrough_exprs);
+            }
+        }
+        Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => {}
+    }
 }
 
 fn query_references_group_output_expr(query: &Query, target: &Expr) -> bool {
