@@ -184,6 +184,7 @@ fn seqscan_path_with_rows(slot_id: usize, startup_cost: f64, total_cost: f64, ro
         relation_oid: rel_number,
         relkind: 'r',
         relispopulated: true,
+        disabled: false,
         toast: None,
         desc: RelationDesc {
             columns: output_columns
@@ -695,6 +696,7 @@ fn int4_btree_options(num_keys: usize, indnullsnotdistinct: bool) -> CatalogInde
         indnullsnotdistinct,
         indisexclusion: false,
         indimmediate: true,
+        btree_options: None,
         brin_options: None,
         gin_options: None,
         hash_options: None,
@@ -712,6 +714,7 @@ fn box_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
         indnullsnotdistinct: false,
         indisexclusion: false,
         indimmediate: true,
+        btree_options: None,
         brin_options: None,
         gin_options: None,
         hash_options: None,
@@ -729,6 +732,7 @@ fn polygon_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
         indnullsnotdistinct: false,
         indisexclusion: false,
         indimmediate: true,
+        btree_options: None,
         brin_options: None,
         gin_options: None,
         hash_options: None,
@@ -803,6 +807,34 @@ fn catalog_with_indexed_items() -> Catalog {
         .expect("create test catalog relation");
     let index = catalog
         .create_index("items_id_idx", "items", false, &["id".into()])
+        .expect("create test catalog index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark test catalog index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 128, 10_000.0)
+        .expect("seed test catalog table stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 32, 10_000.0)
+        .expect("seed test catalog index stats");
+    catalog
+}
+
+fn catalog_with_indexed_later_column() -> Catalog {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "items",
+            RelationDesc {
+                columns: vec![
+                    column_desc("id", int4(), false),
+                    column_desc("hundred", int4(), false),
+                ],
+            },
+        )
+        .expect("create test catalog relation");
+    let index = catalog
+        .create_index("items_hundred_idx", "items", false, &["hundred".into()])
         .expect("create test catalog index");
     catalog
         .set_index_ready_valid(index.relation_oid, true, true)
@@ -1014,6 +1046,7 @@ fn catalog_with_inherited_indexed_items()
             indnullsnotdistinct: false,
             indisexclusion: false,
             indimmediate: true,
+            btree_options: None,
             brin_options: None,
             gin_options: None,
             hash_options: None,
@@ -3078,6 +3111,45 @@ fn explain_hash_distinct_group_key_uses_distinct_expr() {
 }
 
 #[test]
+fn planner_keeps_unique_for_ordered_select_distinct() {
+    let catalog = catalog_with_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select distinct id from items order by id desc",
+        &catalog,
+    );
+
+    assert_eq!(
+        count_plan_nodes(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Unique { .. }
+        )),
+        1
+    );
+}
+
+#[test]
+fn planner_keeps_unique_for_ordered_select_distinct_saop_index_path() {
+    let catalog = catalog_with_indexed_later_column();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select distinct hundred from items where hundred in (47, 48, 72, 82) order by hundred desc",
+        &catalog,
+        PlannerConfig {
+            enable_seqscan: false,
+            enable_bitmapscan: false,
+            ..PlannerConfig::default()
+        },
+    );
+
+    assert_eq!(
+        count_plan_nodes(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Unique { .. }
+        )),
+        1
+    );
+}
+
+#[test]
 fn planner_uses_index_order_for_distinct_on_reordered_keys() {
     let catalog = catalog_with_distinct_on_tbl();
     let planned = planned_stmt_for_sql_with_catalog(
@@ -3091,22 +3163,20 @@ fn planner_uses_index_order_for_distinct_on_reordered_keys() {
         }),
         1
     );
+    fn skip_projection(plan: &Plan) -> &Plan {
+        match plan {
+            Plan::Projection { input, .. } => input.as_ref(),
+            other => other,
+        }
+    }
+    let unique_input = match skip_projection(&planned.plan_tree) {
+        Plan::Unique { input, .. } => Some(skip_projection(input.as_ref())),
+        _ => None,
+    };
     assert!(matches!(
-        &planned.plan_tree,
-        Plan::Projection { input, .. }
-            if matches!(
-                input.as_ref(),
-                Plan::Unique { input, .. }
-                    if matches!(
-                        input.as_ref(),
-                        Plan::IndexOnlyScan { index_name, .. }
-                            if index_name == "distinct_on_tbl_x_y_idx"
-                    ) || matches!(
-                        input.as_ref(),
-                        Plan::IndexScan { index_name, .. }
-                            if index_name == "distinct_on_tbl_x_y_idx"
-                    )
-            )
+        unique_input,
+        Some(Plan::IndexOnlyScan { index_name, .. } | Plan::IndexScan { index_name, .. })
+            if index_name == "distinct_on_tbl_x_y_idx"
     ));
 }
 

@@ -1832,9 +1832,57 @@ fn interval_out_of_range() -> ExecError {
     }
 }
 
+fn fixed_vector_items(value: &Value) -> Option<Vec<i64>> {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .map(|value| match value {
+                Value::Int16(value) => Some(i64::from(*value)),
+                Value::Int32(value) => Some(i64::from(*value)),
+                Value::Int64(value) => Some(*value),
+                _ => None,
+            })
+            .collect(),
+        Value::PgArray(array) => array
+            .elements
+            .iter()
+            .map(|value| match value {
+                Value::Int16(value) => Some(i64::from(*value)),
+                Value::Int32(value) => Some(i64::from(*value)),
+                Value::Int64(value) => Some(*value),
+                _ => None,
+            })
+            .collect(),
+        value => value.as_text().and_then(|text| {
+            text.split_ascii_whitespace()
+                .map(|part| part.parse::<i64>().ok())
+                .collect()
+        }),
+    }
+}
+
+fn compare_record_field_values(
+    left_value: &Value,
+    right_value: &Value,
+    field_type: Option<SqlType>,
+    collation_oid: Option<u32>,
+) -> Result<Ordering, ExecError> {
+    if field_type
+        .is_some_and(|ty| matches!(ty.kind, SqlTypeKind::Int2Vector | SqlTypeKind::OidVector))
+        && let (Some(left), Some(right)) = (
+            fixed_vector_items(left_value),
+            fixed_vector_items(right_value),
+        )
+    {
+        return Ok(left.cmp(&right));
+    }
+    compare_order_values(left_value, right_value, collation_oid, None, false)
+}
+
 fn compare_record_values(left: &RecordValue, right: &RecordValue) -> Ordering {
-    for (left_value, right_value) in left.fields.iter().zip(&right.fields) {
-        let value_ordering = compare_order_values(left_value, right_value, None, None, false)
+    for (idx, (left_value, right_value)) in left.fields.iter().zip(&right.fields).enumerate() {
+        let field_type = left.descriptor.fields.get(idx).map(|field| field.sql_type);
+        let value_ordering = compare_record_field_values(left_value, right_value, field_type, None)
             .expect("record field comparisons use implicit default collation");
         if value_ordering != Ordering::Equal {
             return value_ordering;
@@ -1849,11 +1897,13 @@ fn order_record_values(
     right: &RecordValue,
     collation_oid: Option<u32>,
 ) -> Result<Value, ExecError> {
-    for (left_value, right_value) in left.fields.iter().zip(&right.fields) {
+    for (idx, (left_value, right_value)) in left.fields.iter().zip(&right.fields).enumerate() {
         if matches!(left_value, Value::Null) || matches!(right_value, Value::Null) {
             return Ok(Value::Null);
         }
-        let ordering = compare_order_values(left_value, right_value, collation_oid, None, false)?;
+        let field_type = left.descriptor.fields.get(idx).map(|field| field.sql_type);
+        let ordering =
+            compare_record_field_values(left_value, right_value, field_type, collation_oid)?;
         if ordering != Ordering::Equal {
             return Ok(Value::Bool(compare_ord(ordering, Ordering::Equal, op)));
         }

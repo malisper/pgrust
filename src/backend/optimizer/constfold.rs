@@ -800,6 +800,26 @@ fn evaluate_const_func(
 }
 
 fn cast_is_const_fold_safe(value: &Value, target: SqlType) -> bool {
+    if matches!(
+        target.kind,
+        SqlTypeKind::Name
+            | SqlTypeKind::Oid
+            | SqlTypeKind::RegProc
+            | SqlTypeKind::RegClass
+            | SqlTypeKind::RegType
+            | SqlTypeKind::RegRole
+            | SqlTypeKind::RegNamespace
+            | SqlTypeKind::RegOper
+            | SqlTypeKind::RegOperator
+            | SqlTypeKind::RegProcedure
+            | SqlTypeKind::RegCollation
+            | SqlTypeKind::RegConfig
+            | SqlTypeKind::RegDictionary
+            | SqlTypeKind::Int2Vector
+            | SqlTypeKind::OidVector
+    ) {
+        return false;
+    }
     if matches!(value, Value::Null)
         && matches!(target.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
     {

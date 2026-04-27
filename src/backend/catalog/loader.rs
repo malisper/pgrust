@@ -48,10 +48,11 @@ use crate::include::access::brin_page::{
 };
 use crate::include::access::gin::{GinOptions, gin_metapage_data};
 use crate::include::access::hash::{HashOptions, hash_metapage_data};
+use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::{
-    BRIN_AM_OID, BootstrapCatalogKind, GIN_AM_OID, HASH_AM_OID, PgAmRow, PgAmopRow, PgAmprocRow,
-    PgAttrdefRow, PgAttributeRow, PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow,
-    PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds,
+    BRIN_AM_OID, BTREE_AM_OID, BootstrapCatalogKind, GIN_AM_OID, HASH_AM_OID, PgAmRow, PgAmopRow,
+    PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgCollationRow, PgConstraintRow,
+    PgIndexRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds,
     bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, bootstrap_pg_database_rows,
     bootstrap_pg_tablespace_rows, bootstrap_relation_desc, system_catalog_index_by_oid,
 };
@@ -404,6 +405,8 @@ pub(crate) fn catalog_from_physical_rows_scoped(
             other => format!("{other}.{}", row.relname),
         };
         let rel = catalog_relation_locator(row.oid, row.relfilenode, db_oid);
+        let btree_options =
+            load_btree_options_from_reloptions(row.relam, row.relkind, row.reloptions.as_deref());
         let brin_options = load_brin_options_from_metapage(base_dir, rel, row.relam, row.relkind);
         let gin_options = load_gin_options_from_metapage(base_dir, rel, row.relam, row.relkind);
         let hash_options = load_hash_options_from_metapage(base_dir, rel, row.relam, row.relkind);
@@ -460,6 +463,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                         indoption: index.indoption.clone(),
                         indexprs: index.indexprs.clone(),
                         indpred: index.indpred.clone(),
+                        btree_options,
                         brin_options: brin_options.clone(),
                         gin_options: gin_options.clone(),
                         hash_options,
@@ -528,6 +532,44 @@ fn load_gin_options_from_metapage(
     let mut page = [0u8; BLCKSZ];
     smgr.read_block(rel, ForkNumber::Main, 0, &mut page).ok()?;
     gin_metapage_data(&page).ok().map(|meta| meta.options())
+}
+
+fn load_btree_options_from_reloptions(
+    am_oid: u32,
+    relkind: char,
+    reloptions: Option<&[String]>,
+) -> Option<BtreeOptions> {
+    if am_oid != BTREE_AM_OID || !matches!(relkind, 'i' | 'I') {
+        return None;
+    }
+    let reloptions = reloptions?;
+    let mut options = BtreeOptions::default();
+    let mut saw_option = false;
+    for option in reloptions {
+        let Some((name, value)) = option.split_once('=') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("fillfactor") {
+            if let Ok(fillfactor) = value.parse::<u16>() {
+                options.fillfactor = fillfactor;
+                saw_option = true;
+            }
+        } else if name.eq_ignore_ascii_case("deduplicate_items") {
+            if let Some(value) = parse_reloption_bool(value) {
+                options.deduplicate_items = value;
+                saw_option = true;
+            }
+        }
+    }
+    saw_option.then_some(options)
+}
+
+fn parse_reloption_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "on" | "true" | "yes" | "1" => Some(true),
+        "off" | "false" | "no" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 fn load_hash_options_from_metapage(

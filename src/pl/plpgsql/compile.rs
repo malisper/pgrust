@@ -1603,6 +1603,9 @@ fn outer_scope_for_sql(env: &CompileEnv) -> crate::backend::parser::BoundScope {
             relation_names: Vec::new(),
             hidden_invalid_relation_names: Vec::new(),
             hidden_missing_relation_names: Vec::new(),
+            source_relation_oid: None,
+            source_attno: None,
+            source_columns: Vec::new(),
         })
         .collect::<Vec<_>>();
     let mut relations = Vec::new();

@@ -375,6 +375,7 @@ pub enum Statement {
     AlterViewRenameColumn(AlterTableRenameColumnStatement),
     AlterIndexAttachPartition(AlterIndexAttachPartitionStatement),
     AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement),
+    AlterIndexAlterColumnOptions(AlterIndexAlterColumnOptionsStatement),
     AlterTableCompound(AlterTableCompoundStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
     AlterTableAddColumns(AlterTableAddColumnsStatement),
@@ -2440,6 +2441,7 @@ pub struct AlterTableDropConstraintStatement {
     pub only: bool,
     pub table_name: String,
     pub constraint_name: String,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2578,6 +2580,14 @@ pub struct AlterIndexSetStatement {
     pub if_exists: bool,
     pub index_name: String,
     pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterIndexAlterColumnOptionsStatement {
+    pub if_exists: bool,
+    pub index_name: String,
+    pub column_name: String,
+    pub action: AlterColumnOptionsAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

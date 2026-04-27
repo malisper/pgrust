@@ -979,9 +979,6 @@ fn make_ordered_rel(
         &input_rel.relids,
         input_rel.reltarget.clone(),
     );
-    if !root.upper_rels[upper_rel_index].rel.pathlist.is_empty() {
-        return root.upper_rels[upper_rel_index].rel.clone();
-    }
     let mut rel = RelOptInfo::new(
         input_rel.relids.clone(),
         RelOptKind::UpperRel,
@@ -1063,7 +1060,21 @@ fn make_ordered_rel(
     rel
 }
 
-fn distinct_pathkeys(targets: &[TargetEntry]) -> Vec<PathKey> {
+fn distinct_pathkeys(root: &PlannerInfo, targets: &[TargetEntry]) -> Vec<PathKey> {
+    let target_refs = targets
+        .iter()
+        .map(|target| target.ressortgroupref)
+        .collect::<Vec<_>>();
+    if !root.query_pathkeys.is_empty()
+        && root.query_pathkeys.len() == targets.len()
+        && root.query_pathkeys.iter().all(|key| {
+            (key.ressortgroupref != 0 && target_refs.contains(&key.ressortgroupref))
+                || targets.iter().any(|target| target.expr == key.expr)
+        })
+    {
+        return root.query_pathkeys.clone();
+    }
+
     targets
         .iter()
         .map(|target| PathKey {
@@ -1622,7 +1633,7 @@ fn make_distinct_rel(
         return root.upper_rels[upper_rel_index].rel.clone();
     }
 
-    let required_pathkeys = distinct_pathkeys(targets);
+    let required_pathkeys = distinct_pathkeys(root, targets);
     let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
     let raw_input_paths = input_rel.pathlist;
     let mut ordered_input_paths = raw_input_paths.clone();
@@ -1761,7 +1772,11 @@ fn make_distinct_on_rel(
                 }
             }
         }
-        let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
+        let mut rel = RelOptInfo::new(
+            input_rel.relids.clone(),
+            RelOptKind::UpperRel,
+            reltarget.clone(),
+        );
         for path in input_paths {
             let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
                 let display_items = sort_key_display_items(root, &required_pathkeys, catalog);
@@ -1807,7 +1822,11 @@ fn make_distinct_on_rel(
         }
     }
 
-    let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
+    let mut rel = RelOptInfo::new(
+        input_rel.relids.clone(),
+        RelOptKind::UpperRel,
+        reltarget.clone(),
+    );
     for path in input_paths {
         let required_pathkeys = distinct_on_required_pathkeys_for_path(root, &path, &key_pathkeys);
         let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
@@ -1830,7 +1849,7 @@ fn make_distinct_on_rel(
         rel.add_path(optimize_path_with_config(
             Path::Unique {
                 plan_info: PlanEstimate::default(),
-                pathtarget: path.semantic_output_target(),
+                pathtarget: reltarget.clone(),
                 key_indices,
                 input: Box::new(path),
             },
@@ -2158,9 +2177,6 @@ fn make_projection_rel(
         &input_rel.relids,
         reltarget.clone(),
     );
-    if !root.upper_rels[upper_rel_index].rel.pathlist.is_empty() {
-        return root.upper_rels[upper_rel_index].rel.clone();
-    }
     let slot_id = next_synthetic_slot_id();
     let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
     for path in input_rel.pathlist {

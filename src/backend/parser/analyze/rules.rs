@@ -39,6 +39,9 @@ fn scope_for_special_rule_tuple(
                 relation_names: relation_name.into_iter().map(str::to_string).collect(),
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],
+                source_relation_oid: None,
+                source_attno: None,
+                source_columns: Vec::new(),
             })
             .collect(),
         relations: relation_name
@@ -48,6 +51,7 @@ fn scope_for_special_rule_tuple(
                     hidden_invalid_relation_names: vec![],
                     hidden_missing_relation_names: vec![],
                     system_varno: Some(varno),
+                    relation_oid: None,
                 }]
             })
             .unwrap_or_default(),

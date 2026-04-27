@@ -71,9 +71,10 @@ pub(crate) fn generated_relation_output_exprs(
 pub(crate) fn scope_for_base_relation_with_generated(
     relation_name: &str,
     desc: &RelationDesc,
+    relation_oid: Option<u32>,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundScope, ParseError> {
-    let mut scope = scope_for_base_relation(relation_name, desc);
+    let mut scope = scope_for_base_relation(relation_name, desc, relation_oid);
     scope.output_exprs = generated_relation_output_exprs(desc, catalog)?;
     Ok(scope)
 }

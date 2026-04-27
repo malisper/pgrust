@@ -697,6 +697,7 @@ fn index_relcache_entry_from_index_row(
         indpred: index.indpred,
         rd_indexprs: None,
         rd_indpred: None,
+        btree_options: None,
         brin_options: None,
         gin_options: None,
         hash_options: None,

@@ -563,6 +563,7 @@ fn push_nonverbose_plan_details(
             keys,
             desc,
             index_meta,
+            index_quals,
             ..
         } => {
             let key_column_names = desc
@@ -579,6 +580,11 @@ fn push_nonverbose_plan_details(
                 Some(&render_runtime),
             ) {
                 lines.push(format!("{prefix}Index Cond: ({detail})"));
+            } else if let Some(qual) = index_quals.iter().cloned().reduce(Expr::and) {
+                lines.push(format!(
+                    "{prefix}Index Cond: {}",
+                    render_explain_expr(&qual, &key_column_names)
+                ));
             }
             true
         }
