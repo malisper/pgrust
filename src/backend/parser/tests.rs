@@ -7573,13 +7573,15 @@ fn parse_prefixed_and_underscored_numeric_literals() {
     assert!(
         matches!(&stmt.targets[2].expr, SqlExpr::IntegerLiteral(value) if value == "518979583")
     );
-    assert!(matches!(&stmt.targets[3].expr, SqlExpr::IntegerLiteral(value) if value == "1000000"));
     assert!(
-        matches!(&stmt.targets[4].expr, SqlExpr::NumericLiteral(value) if value == "1000.000005")
+        matches!(&stmt.targets[3].expr, SqlExpr::IntegerLiteral(value) if value == "1_000_000")
     );
-    assert!(matches!(&stmt.targets[5].expr, SqlExpr::NumericLiteral(value) if value == ".000005"));
     assert!(
-        matches!(&stmt.targets[6].expr, SqlExpr::NumericLiteral(value) if value == "1000.5e01")
+        matches!(&stmt.targets[4].expr, SqlExpr::NumericLiteral(value) if value == "1_000.000_005")
+    );
+    assert!(matches!(&stmt.targets[5].expr, SqlExpr::NumericLiteral(value) if value == ".000_005"));
+    assert!(
+        matches!(&stmt.targets[6].expr, SqlExpr::NumericLiteral(value) if value == "1_000.5e0_1")
     );
 }
 
