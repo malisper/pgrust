@@ -30,6 +30,7 @@ use crate::backend::access::transam::xlogreader::{
 };
 use crate::backend::storage::buffer::{BufferTag, PAGE_SIZE};
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator};
+use crate::backend::utils::crc32c;
 use crate::include::access::heapam_xlog::{XLOG_HEAP2_VISIBLE, XlHeapVisible};
 
 pub mod replay {

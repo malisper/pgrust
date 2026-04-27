@@ -146,7 +146,6 @@ required-features = ["tools"]
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 chrono-tz = "0.10"
-crc32c = "0.6.8"
 crc32fast = "1.4"
 getrandom = { version = "0.2", features = ["js"] }
 itoa = "1"
