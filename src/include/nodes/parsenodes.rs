@@ -348,6 +348,11 @@ pub enum Statement {
     CreatePolicy(CreatePolicyStatement),
     CreateStatistics(CreateStatisticsStatement),
     AlterStatistics(AlterStatisticsStatement),
+    CreateTextSearchDictionary(CreateTextSearchDictionaryStatement),
+    AlterTextSearchDictionary(AlterTextSearchDictionaryStatement),
+    CreateTextSearchConfiguration(CreateTextSearchConfigurationStatement),
+    AlterTextSearchConfiguration(AlterTextSearchConfigurationStatement),
+    DropTextSearchConfiguration(DropTextSearchConfigurationStatement),
     CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
     CreateForeignServer(CreateForeignServerStatement),
     CreateForeignTable(CreateForeignTableStatement),
@@ -869,6 +874,75 @@ pub struct CreateAggregateStatement {
     pub mfinalfunc_extra: bool,
     pub mfinalfunc_modify: char,
     pub hypothetical: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextSearchOptionValueKind {
+    Identifier,
+    String,
+    Integer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextSearchOption {
+    pub name: String,
+    pub value: String,
+    pub value_kind: TextSearchOptionValueKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTextSearchDictionaryStatement {
+    pub schema_name: Option<String>,
+    pub dictionary_name: String,
+    pub options: Vec<TextSearchOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTextSearchDictionaryStatement {
+    pub schema_name: Option<String>,
+    pub dictionary_name: String,
+    pub options: Vec<TextSearchOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTextSearchConfigurationStatement {
+    pub schema_name: Option<String>,
+    pub config_name: String,
+    pub copy_config_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterTextSearchConfigurationAction {
+    AlterMappingFor {
+        token_names: Vec<String>,
+        dictionary_names: Vec<String>,
+    },
+    AlterMappingReplace {
+        old_dictionary_name: String,
+        new_dictionary_name: String,
+    },
+    AddMapping {
+        token_names: Vec<String>,
+        dictionary_names: Vec<String>,
+    },
+    DropMapping {
+        if_exists: bool,
+        token_names: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTextSearchConfigurationStatement {
+    pub schema_name: Option<String>,
+    pub config_name: String,
+    pub action: AlterTextSearchConfigurationAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropTextSearchConfigurationStatement {
+    pub if_exists: bool,
+    pub schema_name: Option<String>,
+    pub config_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -39,6 +39,7 @@ mod sequence;
 mod session_auth;
 mod tablespace;
 mod trigger;
+mod tsearch;
 mod typecmds;
 mod typed_table;
 mod vacuum_full;

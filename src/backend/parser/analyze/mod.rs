@@ -38,16 +38,17 @@ use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
     PgCollationRow, PgConstraintRow, PgEnumRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
     PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow,
-    PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTsConfigRow,
-    PgTsDictRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
-    builtin_range_rows, builtin_type_row_by_name, builtin_type_row_by_oid, builtin_type_rows,
-    is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
-    proc_oid_for_builtin_aggregate_function, proc_oid_for_builtin_hypothetical_aggregate_function,
-    range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
-    synthetic_range_proc_rows_by_name,
+    PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTsTemplateRow, PgTypeRow, RECORD_TYPE_OID,
+    bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
+    bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
+    bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
+    bootstrap_pg_ts_template_rows, builtin_range_rows, builtin_type_row_by_name,
+    builtin_type_row_by_oid, builtin_type_rows, is_synthetic_range_proc_name,
+    multirange_type_ref_for_sql_type, proc_oid_for_builtin_aggregate_function,
+    proc_oid_for_builtin_hypothetical_aggregate_function, range_type_ref_for_sql_type,
+    relkind_is_analyzable, synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
@@ -907,6 +908,14 @@ pub trait CatalogLookup {
         bootstrap_pg_ts_dict_rows().to_vec()
     }
 
+    fn ts_template_rows(&self) -> Vec<PgTsTemplateRow> {
+        bootstrap_pg_ts_template_rows().to_vec()
+    }
+
+    fn ts_config_map_rows(&self) -> Vec<PgTsConfigMapRow> {
+        bootstrap_pg_ts_config_map_rows()
+    }
+
     fn cast_by_source_target(
         &self,
         source_type_oid: u32,
@@ -1664,6 +1673,14 @@ impl CatalogLookup for Catalog {
 
     fn ts_dict_rows(&self) -> Vec<PgTsDictRow> {
         CatCache::from_catalog(self).ts_dict_rows()
+    }
+
+    fn ts_template_rows(&self) -> Vec<PgTsTemplateRow> {
+        CatCache::from_catalog(self).ts_template_rows()
+    }
+
+    fn ts_config_map_rows(&self) -> Vec<PgTsConfigMapRow> {
+        CatCache::from_catalog(self).ts_config_map_rows()
     }
 
     fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<PgAggregateRow> {
@@ -4352,20 +4369,7 @@ fn bind_select_query_with_outer(
             )?;
             reject_window_clause(predicate, "WHERE")?;
         }
-        let lower_distinct_to_grouping = stmt.distinct
-            && stmt.distinct_on.is_empty()
-            && stmt.group_by.is_empty()
-            && target_aggs.is_empty()
-            && stmt.having.is_none()
-            && (!stmt.order_by.is_empty() || stmt.limit.is_some() || stmt.offset.is_some());
-        let effective_group_by = if lower_distinct_to_grouping {
-            stmt.targets
-                .iter()
-                .map(|target| target.expr.clone())
-                .collect::<Vec<_>>()
-        } else {
-            normalize_group_by_exprs(stmt, &scope)?
-        };
+        let effective_group_by = normalize_group_by_exprs(stmt, &scope)?;
 
         for group_expr in &effective_group_by {
             analyze_expr_aggregates_in_clause(
@@ -4975,11 +4979,7 @@ fn bind_select_query_with_outer(
                         recursive_union: None,
                         set_operation: None,
                     };
-                    let query = apply_select_distinct(
-                        query,
-                        stmt.distinct && !lower_distinct_to_grouping,
-                        distinct_on,
-                    );
+                    let query = apply_select_distinct(query, stmt.distinct, distinct_on);
                     Ok((query, scope))
                 });
             } else {

@@ -645,6 +645,36 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateTextSearchDictionary(ref create_stmt) => self
+                .execute_create_text_search_dictionary_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTextSearchDictionary(ref alter_stmt) => self
+                .execute_alter_text_search_dictionary_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::CreateTextSearchConfiguration(ref create_stmt) => self
+                .execute_create_text_search_configuration_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTextSearchConfiguration(ref alter_stmt) => self
+                .execute_alter_text_search_configuration_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::DropTextSearchConfiguration(ref drop_stmt) => self
+                .execute_drop_text_search_configuration_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
             Statement::DropStatistics(ref drop_stmt) => self
                 .execute_drop_statistics_stmt_with_search_path(
                     client_id,

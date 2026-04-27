@@ -2847,6 +2847,96 @@ impl Session {
                     )
                 }
             }
+            Statement::CreateTextSearchDictionary(ref create_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_create_text_search_dictionary_stmt_with_search_path(
+                        self.client_id,
+                        create_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterTextSearchDictionary(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_text_search_dictionary_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::CreateTextSearchConfiguration(ref create_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_create_text_search_configuration_stmt_with_search_path(
+                        self.client_id,
+                        create_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterTextSearchConfiguration(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_text_search_configuration_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::DropTextSearchConfiguration(ref drop_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_drop_text_search_configuration_stmt_with_search_path(
+                        self.client_id,
+                        drop_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::DropTrigger(ref drop_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_drop_trigger_stmt_with_search_path(
@@ -5407,6 +5497,66 @@ impl Session {
                 db.execute_alter_statistics_stmt_in_transaction_with_search_path(
                     client_id,
                     alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
+            Statement::CreateTextSearchDictionary(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_create_text_search_dictionary_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
+            Statement::AlterTextSearchDictionary(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_alter_text_search_dictionary_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
+            Statement::CreateTextSearchConfiguration(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_create_text_search_configuration_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
+            Statement::AlterTextSearchConfiguration(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_alter_text_search_configuration_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
+            Statement::DropTextSearchConfiguration(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_drop_text_search_configuration_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),

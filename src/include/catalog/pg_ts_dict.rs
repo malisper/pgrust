@@ -4,6 +4,7 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID};
 
 pub const SIMPLE_TS_DICTIONARY_OID: u32 = 3765;
+pub const ENGLISH_STEM_TS_DICTIONARY_OID: u32 = 12_001;
 const SIMPLE_TS_TEMPLATE_OID: u32 = 3727;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

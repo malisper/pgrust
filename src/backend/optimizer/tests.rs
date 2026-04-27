@@ -1284,6 +1284,7 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Aggregate { input, .. }
@@ -1344,6 +1345,7 @@ fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Aggregate { input, .. }
@@ -1617,6 +1619,7 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Unique { input, .. }
@@ -1732,6 +1735,7 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::WindowAgg { input, .. }
@@ -2016,6 +2020,7 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Unique { input, .. }
@@ -2067,6 +2072,7 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Unique { input, .. }
@@ -2233,6 +2239,29 @@ fn ordinary_grouped_aggregate_uses_hashed_strategy() {
         } => {
             assert_eq!(*strategy, AggregateStrategy::Hashed);
             assert!(!matches!(input.as_ref(), Plan::OrderBy { .. }));
+        }
+        other => panic!("expected aggregate plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn disabled_hashagg_uses_sorted_grouping_strategy() {
+    let catalog = LiteralDefaultCatalog;
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select grp, count(*) from (values (2), (1), (2)) as t(grp) group by grp",
+        &catalog,
+        PlannerConfig {
+            enable_hashagg: false,
+            ..PlannerConfig::default()
+        },
+    );
+    let aggregate = find_aggregate_plan(&planned.plan_tree).expect("aggregate plan");
+    match aggregate {
+        Plan::Aggregate {
+            strategy, input, ..
+        } => {
+            assert_eq!(*strategy, AggregateStrategy::Sorted);
+            assert!(matches!(input.as_ref(), Plan::OrderBy { .. }));
         }
         other => panic!("expected aggregate plan, got {other:?}"),
     }
@@ -2984,6 +3013,52 @@ fn planner_uses_unique_for_simple_select_distinct() {
 }
 
 #[test]
+fn planner_preserves_distinct_before_final_order_projection() {
+    let catalog = catalog_with_distinct_on_tbl();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select distinct y, x from distinct_on_tbl order by y",
+        &catalog,
+    );
+
+    assert_eq!(
+        count_plan_nodes(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Unique { .. }
+                | Plan::Aggregate {
+                    strategy: AggregateStrategy::Hashed,
+                    ..
+                }
+        )),
+        1,
+        "{:#?}",
+        planned.plan_tree
+    );
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::OrderBy { .. }
+    )));
+}
+
+#[test]
+fn explain_hash_distinct_group_key_uses_distinct_expr() {
+    let catalog = LiteralDefaultCatalog;
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select distinct g%1000 from generate_series(0,9999) g",
+        &catalog,
+        PlannerConfig {
+            enable_sort: false,
+            ..PlannerConfig::default()
+        },
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        lines.iter().any(|line| line == "  Group Key: (g % 1000)"),
+        "{lines:#?}"
+    );
+}
+
+#[test]
 fn planner_uses_index_order_for_distinct_on_reordered_keys() {
     let catalog = catalog_with_distinct_on_tbl();
     let planned = planned_stmt_for_sql_with_catalog(
@@ -3054,7 +3129,10 @@ fn planner_rewrites_distinct_minmax_with_unique_index_only_subplans() {
         planned_stmt_for_sql_with_catalog("select distinct min(id), max(id) from items", &catalog);
 
     assert_eq!(planned.subplans.len(), 2);
-    assert!(matches!(planned.plan_tree, Plan::Unique { .. }));
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::Unique { .. }
+    )));
     assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
         plan,
         Plan::Aggregate { .. } | Plan::SetOp { .. }
@@ -3420,6 +3498,7 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
             | Plan::Filter { input, .. }
             | Plan::Projection { input, .. }
             | Plan::OrderBy { input, .. }
+            | Plan::IncrementalSort { input, .. }
             | Plan::Limit { input, .. }
             | Plan::LockRows { input, .. }
             | Plan::Unique { input, .. }
