@@ -13179,6 +13179,10 @@ fn parse_foreign_data_wrapper_statements() {
     assert_eq!(alter.validator_name, Some(None));
     assert_eq!(alter.options.len(), 3);
 
+    let err = parse_statement("alter foreign data wrapper foo;").unwrap_err();
+    assert_eq!(err.to_string(), "syntax error at or near \";\"");
+    assert!(err.position().is_some());
+
     let Statement::AlterForeignDataWrapperOwner(owner) =
         parse_statement("alter foreign data wrapper foo owner to regress_test_role").unwrap()
     else {
@@ -13275,6 +13279,10 @@ fn parse_foreign_data_wrapper_statements() {
     );
     assert_eq!(alter_server.options[0].name, "host");
     assert_eq!(alter_server.options[0].value.as_deref(), Some("127.0.0.1"));
+
+    let err = parse_statement("alter server srv;").unwrap_err();
+    assert_eq!(err.to_string(), "syntax error at or near \";\"");
+    assert!(err.position().is_some());
 
     let Statement::CreateForeignTable(create_table) = parse_statement(
         "create foreign table ft (a int options (column_name 'remote_a') not null, b text) server srv options (table_name 'remote_ft')",

@@ -5008,6 +5008,9 @@ fn build_alter_foreign_server_statement(sql: &str) -> Result<Option<Statement>, 
         rest = tail.trim_start();
     }
     let options = if rest.is_empty() {
+        if version.is_none() {
+            return Err(syntax_error_at_statement_end(sql));
+        }
         Vec::new()
     } else if keyword_at_start(rest, "options") {
         parse_alter_generic_options(rest)?
@@ -5707,6 +5710,9 @@ fn build_alter_foreign_data_wrapper_statement(sql: &str) -> Result<Option<Statem
         break;
     }
     let options = if rest.is_empty() {
+        if handler_name.is_none() && validator_name.is_none() {
+            return Err(syntax_error_at_statement_end(sql));
+        }
         Vec::new()
     } else {
         parse_alter_generic_options(rest)?

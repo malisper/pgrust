@@ -65,6 +65,8 @@ Runtime behavior:
 - reports FDW/server cascade notices for dependent servers, user mappings, and
   foreign tables, and includes nested user-mapping details in restrictive FDW
   drops
+- rejects empty `ALTER FOREIGN DATA WRAPPER name` and `ALTER SERVER name`
+  statements at parse time with PostgreSQL-style semicolon syntax errors
 
 Tests run:
 - `cargo fmt`
@@ -152,9 +154,13 @@ Tests run:
 - `scripts/cargo_isolated.sh check`
 - `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
 - `scripts/run_regression.sh --skip-build --port 55473 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-cascade-notices`
+- `scripts/cargo_isolated.sh test --lib --quiet parse_foreign_data_wrapper_statements`
+- `scripts/cargo_isolated.sh check`
+- `CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --bin pgrust_server`
+- `scripts/run_regression.sh --skip-build --port 55474 --test foreign_data --jobs 1 --timeout 240 --results-dir /tmp/pgrust-foreign-data-results-empty-alter-syntax`
 
 Remaining:
-`foreign_data` still fails, but improved to 408/539 matching queries and 1390
+`foreign_data` still fails, but improved to 410/539 matching queries and 1372
 diff lines in the latest run. Biggest
 remaining groups:
 - owner dependency reporting beyond the handled FDW function dependencies
