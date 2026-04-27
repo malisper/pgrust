@@ -62,6 +62,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let (dictname, namespace_oid) = self.resolve_ts_create_name(
             client_id,
+            Some((xid, cid)),
             stmt.schema_name.as_deref(),
             &stmt.dictionary_name,
             configured_search_path,
@@ -166,10 +167,10 @@ impl Database {
                 .join(", "),
         );
         let ctx = self.tsearch_catalog_write_context(client_id, xid, cid);
-        let effect = self
+        let (_, effect) = self
             .catalog
             .write()
-            .replace_ts_dict_mvcc(old_row, new_row, &ctx)
+            .replace_ts_dict_mvcc(&old_row, new_row, &ctx)
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         self.plan_cache.invalidate_all();
@@ -211,6 +212,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let (cfgname, namespace_oid) = self.resolve_ts_create_name(
             client_id,
+            Some((xid, cid)),
             stmt.schema_name.as_deref(),
             &stmt.config_name,
             configured_search_path,
@@ -244,7 +246,7 @@ impl Database {
         let (_, effect) = self
             .catalog
             .write()
-            .create_ts_config_mvcc(row, source_maps, &ctx)
+            .create_ts_config_with_maps_mvcc(row, source_maps, &ctx)
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         self.plan_cache.invalidate_all();
@@ -469,28 +471,33 @@ impl Database {
     fn resolve_ts_create_name(
         &self,
         client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
         schema_name: Option<&str>,
         object_name: &str,
         configured_search_path: Option<&[String]>,
     ) -> Result<(String, u32), ExecError> {
-        match schema_name {
-            Some(schema) if schema.eq_ignore_ascii_case("pg_catalog") => {
-                Ok((object_name.to_ascii_lowercase(), PG_CATALOG_NAMESPACE_OID))
+        let namespace_oid = if let Some(schema_name) = schema_name {
+            self.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("schema \"{schema_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "3F000",
+                })?
+        } else {
+            let mut namespace_oid = None;
+            for schema in self.effective_search_path(client_id, configured_search_path) {
+                if matches!(schema.as_str(), "" | "$user" | "pg_temp" | "pg_catalog") {
+                    continue;
+                }
+                if let Some(oid) = self.visible_namespace_oid_by_name(client_id, txn_ctx, &schema) {
+                    namespace_oid = Some(oid);
+                    break;
+                }
             }
-            Some(schema) if schema.eq_ignore_ascii_case("public") => {
-                Ok((object_name.to_ascii_lowercase(), PUBLIC_NAMESPACE_OID))
-            }
-            Some(_) => Ok((object_name.to_ascii_lowercase(), PUBLIC_NAMESPACE_OID)),
-            None => {
-                let namespace_oid = self
-                    .effective_search_path(client_id, configured_search_path)
-                    .into_iter()
-                    .find(|schema| schema == "public")
-                    .map(|_| PUBLIC_NAMESPACE_OID)
-                    .unwrap_or(PUBLIC_NAMESPACE_OID);
-                Ok((object_name.to_ascii_lowercase(), namespace_oid))
-            }
-        }
+            namespace_oid.unwrap_or(PUBLIC_NAMESPACE_OID)
+        };
+        Ok((object_name.to_ascii_lowercase(), namespace_oid))
     }
 }
 

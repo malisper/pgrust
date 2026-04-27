@@ -993,7 +993,7 @@ fn catalog_with_inherited_indexed_items()
             if column.descending {
                 option |= 0x0001;
             }
-            if column.nulls_first.unwrap_or(false) {
+            if column.nulls_first.unwrap_or(column.descending) {
                 option |= 0x0002;
             }
             indoption.push(option);
@@ -1277,6 +1277,7 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
             Some(children)
         }
         Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children.iter().find_map(append_with_join_children),
         Plan::Hash { input, .. }
@@ -1334,6 +1335,7 @@ fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
                 .to_string(),
         ),
         Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => {
             for child in children {
@@ -1611,6 +1613,7 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. } => false,
         Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => {
             children.iter().any(|child| plan_contains(child, predicate))
@@ -1728,6 +1731,7 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
     match plan {
         Plan::Aggregate { .. } => Some(plan),
         Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children.iter().find_map(find_aggregate_plan),
         Plan::Hash { input, .. }
@@ -2032,6 +2036,7 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
             bitmapqual: input, ..
         } => find_seq_scan(input),
         Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children.iter().find_map(find_seq_scan),
         Plan::NestedLoopJoin { left, right, .. }
@@ -2063,6 +2068,7 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. } => 0,
         Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children
             .iter()
@@ -3508,6 +3514,7 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
                 bitmapqual: input, ..
             } => find_project_set(input),
             Plan::Append { children, .. }
+            | Plan::BitmapOr { children, .. }
             | Plan::MergeAppend { children, .. }
             | Plan::SetOp { children, .. } => children.iter().find_map(find_project_set),
             Plan::NestedLoopJoin { left, right, .. }

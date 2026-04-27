@@ -510,6 +510,7 @@ impl PlanNode for MergeJoinState {
         indent: usize,
         analyze: bool,
         show_costs: bool,
+        timing: bool,
         lines: &mut Vec<String>,
     ) {
         let prefix = "  ".repeat(indent + 1);
@@ -542,7 +543,21 @@ impl PlanNode for MergeJoinState {
                 render_explain_join_expr(&format_qual_list(&self.qual), left_names, right_names)
             ));
         }
-        format_explain_lines_with_costs(&*self.left, indent + 1, analyze, show_costs, lines);
-        format_explain_lines_with_costs(&*self.right, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(
+            &*self.left,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
+        format_explain_lines_with_costs(
+            &*self.right,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
     }
 }

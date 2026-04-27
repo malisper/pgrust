@@ -287,6 +287,7 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
     match plan {
         Plan::Result { .. } | Plan::WorkTableScan { .. } => {}
         Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => {
             for child in children {

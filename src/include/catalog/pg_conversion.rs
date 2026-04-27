@@ -33,6 +33,10 @@ pub fn bootstrap_pg_conversion_rows() -> [PgConversionRow; 0] {
     []
 }
 
+pub fn sort_pg_conversion_rows(rows: &mut [PgConversionRow]) {
+    rows.sort_by_key(|row| (row.connamespace, row.conname.clone(), row.oid));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

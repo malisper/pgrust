@@ -2,12 +2,15 @@ use super::super::*;
 use crate::backend::executor::StatementResult;
 use crate::backend::parser::{
     AlterForeignDataWrapperOwnerStatement, AlterForeignDataWrapperRenameStatement,
-    AlterForeignDataWrapperStatement, AlterGenericOptionAction,
+    AlterForeignDataWrapperStatement, AlterForeignServerRenameStatement, AlterGenericOptionAction,
     CommentOnForeignDataWrapperStatement, CreateForeignDataWrapperStatement,
     CreateForeignServerStatement, CreateForeignTableStatement, DropForeignDataWrapperStatement,
     ParseError,
 };
-use crate::include::catalog::{BOOL_TYPE_OID, FDW_HANDLER_TYPE_OID, PgForeignDataWrapperRow};
+use crate::backend::utils::misc::notices::push_notice;
+use crate::include::catalog::{
+    BOOL_TYPE_OID, FDW_HANDLER_TYPE_OID, PgForeignDataWrapperRow, PgForeignServerRow,
+};
 use crate::pgrust::database::ddl::ensure_can_set_role;
 
 fn normalize_foreign_data_wrapper_name(name: &str) -> Result<String, ParseError> {
@@ -130,6 +133,21 @@ fn lookup_foreign_data_wrapper(
         .find(|row| row.fdwname.eq_ignore_ascii_case(&normalized)))
 }
 
+fn lookup_foreign_server(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    name: &str,
+) -> Result<Option<PgForeignServerRow>, ExecError> {
+    let normalized = normalize_foreign_data_wrapper_name(name).map_err(ExecError::Parse)?;
+    Ok(db
+        .backend_catcache(client_id, txn_ctx)
+        .map_err(map_catalog_error)?
+        .foreign_server_rows()
+        .into_iter()
+        .find(|row| row.srvname.eq_ignore_ascii_case(&normalized)))
+}
+
 fn ensure_fdw_owner(
     db: &Database,
     client_id: ClientId,
@@ -189,19 +207,117 @@ impl Database {
         client_id: ClientId,
         stmt: &CreateForeignServerStatement,
     ) -> Result<StatementResult, ExecError> {
-        let normalized =
+        let fdw_name =
             normalize_foreign_data_wrapper_name(&stmt.fdw_name).map_err(ExecError::Parse)?;
-        if lookup_foreign_data_wrapper(self, client_id, None, &normalized)?.is_none() {
+        let fdw =
+            lookup_foreign_data_wrapper(self, client_id, None, &fdw_name)?.ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: format!("foreign-data wrapper \"{}\" does not exist", stmt.fdw_name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                }
+            })?;
+        let server_name =
+            normalize_foreign_data_wrapper_name(&stmt.server_name).map_err(ExecError::Parse)?;
+        if lookup_foreign_server(self, client_id, None, &server_name)?.is_some() {
             return Err(ExecError::DetailedError {
-                message: format!("foreign-data wrapper \"{}\" does not exist", stmt.fdw_name),
+                message: format!("server \"{}\" already exists", stmt.server_name),
+                detail: None,
+                hint: None,
+                sqlstate: "42710",
+            });
+        }
+        let row = PgForeignServerRow {
+            oid: 0,
+            srvname: server_name,
+            srvowner: self.auth_state(client_id).current_user_oid(),
+            srvfdw: fdw.oid,
+            srvtype: None,
+            srvversion: None,
+            srvacl: None,
+            srvoptions: None,
+        };
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: 0,
+            client_id,
+            waiter: Some(self.txn_waiter.clone()),
+            interrupts: self.interrupt_state(client_id),
+        };
+        let (_, effect) = self
+            .catalog
+            .write()
+            .create_foreign_server_mvcc(row, &ctx)
+            .map_err(map_catalog_error)?;
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            Ok(StatementResult::AffectedRows(0)),
+            &[effect],
+            &[],
+            &[],
+        );
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_alter_foreign_server_rename_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterForeignServerRenameStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let existing = lookup_foreign_server(self, client_id, None, &stmt.server_name)?
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("server \"{}\" does not exist", stmt.server_name),
                 detail: None,
                 hint: None,
                 sqlstate: "42704",
+            })?;
+        let new_name =
+            normalize_foreign_data_wrapper_name(&stmt.new_name).map_err(ExecError::Parse)?;
+        if lookup_foreign_server(self, client_id, None, &new_name)?.is_some() {
+            return Err(ExecError::DetailedError {
+                message: format!("server \"{}\" already exists", stmt.new_name),
+                detail: None,
+                hint: None,
+                sqlstate: "42710",
             });
         }
-        let _server_name =
-            normalize_foreign_data_wrapper_name(&stmt.server_name).map_err(ExecError::Parse)?;
-        Ok(StatementResult::AffectedRows(0))
+        let replacement = PgForeignServerRow {
+            srvname: new_name,
+            ..existing.clone()
+        };
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: 0,
+            client_id,
+            waiter: Some(self.txn_waiter.clone()),
+            interrupts: self.interrupt_state(client_id),
+        };
+        let (_, effect) = self
+            .catalog
+            .write()
+            .replace_foreign_server_mvcc(&existing, replacement, &ctx)
+            .map_err(map_catalog_error)?;
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            Ok(StatementResult::AffectedRows(0)),
+            &[effect],
+            &[],
+            &[],
+        );
+        guard.disarm();
+        result
     }
 
     pub(crate) fn execute_create_foreign_table_stmt_in_transaction_with_search_path(
@@ -628,6 +744,19 @@ impl Database {
             });
         };
         ensure_fdw_owner(self, client_id, existing.fdwowner, &stmt.fdw_name, None)?;
+        if stmt.cascade {
+            let mut server_rows = self
+                .backend_catcache(client_id, None)
+                .map_err(map_catalog_error)?
+                .foreign_server_rows()
+                .into_iter()
+                .filter(|row| row.srvfdw == existing.oid)
+                .collect::<Vec<_>>();
+            server_rows.sort_by_key(|row| row.oid);
+            for server in server_rows {
+                push_notice(format!("drop cascades to server {}", server.srvname));
+            }
+        }
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let ctx = CatalogWriteContext {
