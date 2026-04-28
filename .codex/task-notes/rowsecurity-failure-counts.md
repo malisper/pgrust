@@ -186,3 +186,14 @@ Policy subquery privilege bucket:
 - Latest rowsecurity regression result with a 300s file timeout:
   `672/774` matched, `102` mismatches, `1908` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+EXPLAIN INSERT SELECT bucket:
+- Added `EXPLAIN INSERT ... SELECT` support that binds the INSERT, checks INSERT
+  and source SELECT privileges, rewrites/plans the SELECT source, and renders it
+  as a child plan under `Insert on ...`.
+- Added child-plan renderers for normal and verbose logical EXPLAIN output so
+  INSERT sources show PostgreSQL-style `->` prefixes.
+- Focused EXPLAIN INSERT test passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `673/774` matched, `101` mismatches, `1897` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.

@@ -169,6 +169,23 @@ pub(crate) fn format_verbose_explain_plan_with_catalog(
     format_verbose_explain_plan_with_context(plan, subplans, indent, show_costs, ctx, lines);
 }
 
+pub(crate) fn format_verbose_explain_child_plan_with_catalog(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    catalog: &dyn CatalogLookup,
+    lines: &mut Vec<String>,
+) {
+    let ctx = VerboseExplainContext {
+        type_names: collect_explain_type_names(plan, subplans, catalog),
+        ..VerboseExplainContext::default()
+    };
+    format_explain_plan_with_subplans_inner(
+        plan, subplans, indent, show_costs, true, true, false, &ctx, lines,
+    );
+}
+
 pub(crate) fn format_verbose_explain_plan_json_with_catalog(
     plan: &Plan,
     subplans: &[Plan],

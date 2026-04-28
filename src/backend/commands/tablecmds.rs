@@ -29,12 +29,12 @@ use crate::backend::parser::{
     BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey, BoundRelation,
     BoundRelationConstraints, BoundTemporalConstraint, BoundUpdateStatement, BoundUpdateTarget,
     Catalog, CatalogLookup, CreateTableAsStatement, DeleteStatement, DomainConstraintLookupKind,
-    DropTableStatement, ExplainFormat, ExplainStatement, ForeignKeyAction, MaintenanceTarget,
-    MergeStatement, OverridingKind, ParseError, SelectStatement, SqlType, SqlTypeKind, Statement,
-    TableAsObjectType, TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table,
-    bind_delete, bind_expr_with_outer_and_ctes, bind_generated_expr,
-    bind_referenced_by_foreign_keys, bind_relation_constraints, bind_scalar_expr_in_scope,
-    bind_update, parse_expr, scope_for_relation,
+    DropTableStatement, ExplainFormat, ExplainStatement, ForeignKeyAction, InsertStatement,
+    MaintenanceTarget, MergeStatement, OverridingKind, ParseError, SelectStatement, SqlType,
+    SqlTypeKind, Statement, TableAsObjectType, TruncateTableStatement, UpdateStatement,
+    VacuumStatement, bind_create_table, bind_delete, bind_expr_with_outer_and_ctes,
+    bind_generated_expr, bind_insert, bind_referenced_by_foreign_keys, bind_relation_constraints,
+    bind_scalar_expr_in_scope, bind_update, parse_expr, scope_for_relation,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -50,8 +50,8 @@ use super::copyto::{capture_copy_to_dml_notices, capture_copy_to_dml_returning_r
 use super::explain::{
     format_buffer_usage, format_explain_child_plan_with_subplans, format_explain_lines_with_costs,
     format_explain_lines_with_options, format_explain_plan_with_subplans,
-    format_verbose_explain_plan_json_with_catalog, format_verbose_explain_plan_with_catalog,
-    push_explain_line,
+    format_verbose_explain_child_plan_with_catalog, format_verbose_explain_plan_json_with_catalog,
+    format_verbose_explain_plan_with_catalog, push_explain_line,
 };
 use super::partition::{
     exec_find_partition, exec_setup_partition_tuple_routing, partition_root_oid,
@@ -513,15 +513,21 @@ pub(crate) fn execute_explain(
     if let Statement::Delete(delete) = statement {
         return execute_explain_delete(delete, analyze, costs, verbose, catalog, planner_config);
     }
+    if let Statement::Insert(insert) = statement {
+        return execute_explain_insert(
+            insert,
+            analyze,
+            costs,
+            verbose,
+            catalog,
+            ctx,
+            planner_config,
+        );
+    }
 
     let explain_target = match statement {
         Statement::Select(select) => EitherExplainTarget::Select(select),
         Statement::DeclareCursor(declare) => EitherExplainTarget::Select(declare.query),
-        Statement::Insert(_) => {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "EXPLAIN INSERT".into(),
-            )));
-        }
         Statement::Merge(merge) => EitherExplainTarget::Merge(merge),
         Statement::CreateTableAs(create_table_as) => {
             if explain_create_table_as_relation_exists(&create_table_as, catalog)? {
@@ -535,7 +541,7 @@ pub(crate) fn execute_explain(
         }
         _ => {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "SELECT, UPDATE, MERGE, or DECLARE CURSOR statement after EXPLAIN",
+                expected: "SELECT, INSERT, UPDATE, DELETE, MERGE, or DECLARE CURSOR statement after EXPLAIN",
                 actual: "unsupported statement".into(),
             }));
         }
@@ -821,6 +827,72 @@ fn execute_explain_delete(
 
     let bound = finalize_bound_delete_stmt(bind_delete(&stmt, catalog)?, catalog);
     let lines = explain_delete_lines(&stmt, &bound, catalog, costs, verbose);
+    Ok(StatementResult::Query {
+        columns: vec![QueryColumn::text("QUERY PLAN")],
+        column_names: vec!["QUERY PLAN".into()],
+        rows: lines
+            .into_iter()
+            .map(|line| vec![Value::Text(line.into())])
+            .collect(),
+    })
+}
+
+fn execute_explain_insert(
+    stmt: InsertStatement,
+    analyze: bool,
+    costs: bool,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+    ctx: &ExecutorContext,
+    planner_config: PlannerConfig,
+) -> Result<StatementResult, ExecError> {
+    if analyze {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "EXPLAIN ANALYZE INSERT".into(),
+        )));
+    }
+
+    let bound = bind_insert(&stmt, catalog)?;
+    check_relation_privilege_requirements(ctx, &bound.required_privileges)?;
+    let target_name = explain_insert_target_name(&bound, verbose, catalog);
+    let BoundInsertSource::Select(query) = bound.source else {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "EXPLAIN INSERT".into(),
+        )));
+    };
+    let [query] = pg_rewrite_query(*query, catalog)
+        .map_err(ExecError::Parse)?
+        .try_into()
+        .expect("insert-select rewrite should return a single query");
+    let query = crate::backend::optimizer::fold_query_constants(query).map_err(ExecError::Parse)?;
+    let planned = crate::backend::optimizer::planner_with_config(query, catalog, planner_config)?;
+    check_planned_stmt_select_privileges(&planned, ctx)?;
+
+    let mut lines = Vec::new();
+    push_explain_line(
+        &format!("Insert on {target_name}"),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        costs,
+        &mut lines,
+    );
+    if verbose {
+        format_verbose_explain_child_plan_with_catalog(
+            &planned.plan_tree,
+            &planned.subplans,
+            1,
+            costs,
+            catalog,
+            &mut lines,
+        );
+    } else {
+        format_explain_child_plan_with_subplans(
+            &planned.plan_tree,
+            &planned.subplans,
+            1,
+            costs,
+            &mut lines,
+        );
+    }
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("QUERY PLAN")],
         column_names: vec!["QUERY PLAN".into()],
@@ -1191,6 +1263,23 @@ fn delete_target_filter_expr(expr: &Expr) -> Option<Expr> {
         }
         other => Some(other.clone()),
     }
+}
+
+fn explain_insert_target_name(
+    bound: &BoundInsertStatement,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    if !verbose || bound.relation_name.contains('.') {
+        return bound.relation_name.clone();
+    }
+    let Some(class_row) = catalog.class_row_by_oid(bound.relation_oid) else {
+        return bound.relation_name.clone();
+    };
+    let Some(namespace) = catalog.namespace_row_by_oid(class_row.relnamespace) else {
+        return bound.relation_name.clone();
+    };
+    format!("{}.{}", namespace.nspname, class_row.relname)
 }
 
 fn explain_update_lines(

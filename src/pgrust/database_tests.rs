@@ -43467,6 +43467,77 @@ fn rls_policy_subquery_privileges_are_checked_for_select_and_explain() {
 }
 
 #[test]
+fn explain_insert_select_shows_rewritten_source_plan() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut app = Session::new(2);
+
+    owner
+        .execute(&db, "create role explain_insert_owner nologin")
+        .unwrap();
+    owner
+        .execute(&db, "create role explain_insert_app nologin")
+        .unwrap();
+    owner
+        .execute(&db, "set session authorization explain_insert_owner")
+        .unwrap();
+    owner
+        .execute(&db, "create table explain_src (a int4, b text)")
+        .unwrap();
+    owner
+        .execute(&db, "create table explain_dst (a int4, b text)")
+        .unwrap();
+    owner
+        .execute(&db, "grant select on explain_src to explain_insert_app")
+        .unwrap();
+    owner
+        .execute(&db, "grant insert on explain_dst to explain_insert_app")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy src_even on explain_src for select using (a % 2 = 0)",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "alter table explain_src enable row level security")
+        .unwrap();
+
+    app.execute(&db, "set session authorization explain_insert_app")
+        .unwrap();
+    let StatementResult::Query { rows, .. } = app
+        .execute(
+            &db,
+            "explain (costs off) insert into explain_dst select * from explain_src",
+        )
+        .unwrap()
+    else {
+        panic!("expected EXPLAIN query result");
+    };
+    let lines = rows
+        .into_iter()
+        .map(|row| match row.first() {
+            Some(Value::Text(text)) => text.to_string(),
+            other => panic!("expected EXPLAIN text row, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines.first().map(String::as_str),
+        Some("Insert on explain_dst")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim() == "->  Seq Scan on explain_src"),
+        "expected source scan under insert, got {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("(a % 2) = 0")),
+        "expected source RLS filter under insert, got {lines:?}"
+    );
+}
+
+#[test]
 fn on_conflict_do_update_enforces_rls_update_path_checks() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut owner = Session::new(1);
