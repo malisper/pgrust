@@ -21,6 +21,7 @@ use crate::include::nodes::primnodes::{
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 
+use num_bigint::BigInt;
 use num_traits::{Signed, Zero};
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -59,6 +60,74 @@ pub(crate) enum NumericAccum {
     Int(i64),
     Float(f64),
     Numeric(NumericValue),
+    NumericSum(NumericSumAccum),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum NumericSumAccum {
+    Finite {
+        coeff: BigInt,
+        scale: u32,
+        dscale: u32,
+    },
+    Special(NumericValue),
+}
+
+impl NumericSumAccum {
+    fn new(value: &NumericValue) -> Self {
+        match value {
+            NumericValue::Finite {
+                coeff,
+                scale,
+                dscale,
+            } => NumericSumAccum::Finite {
+                coeff: coeff.clone(),
+                scale: *scale,
+                dscale: *dscale,
+            },
+            other => NumericSumAccum::Special(other.clone()),
+        }
+    }
+
+    fn add_numeric(&mut self, value: &NumericValue) {
+        match (self, value) {
+            (
+                NumericSumAccum::Finite {
+                    coeff,
+                    scale,
+                    dscale,
+                },
+                NumericValue::Finite {
+                    coeff: rhs,
+                    scale: rhs_scale,
+                    dscale: rhs_dscale,
+                },
+            ) if scale == rhs_scale => {
+                *coeff += rhs;
+                *dscale = (*dscale).max(*rhs_dscale);
+            }
+            (accum, value) => {
+                let sum = accum.to_numeric().add(value);
+                *accum = NumericSumAccum::new(&sum);
+            }
+        }
+    }
+
+    fn to_numeric(&self) -> NumericValue {
+        match self {
+            NumericSumAccum::Finite {
+                coeff,
+                scale,
+                dscale,
+            } => NumericValue::Finite {
+                coeff: coeff.clone(),
+                scale: *scale,
+                dscale: *dscale,
+            }
+            .normalize(),
+            NumericSumAccum::Special(value) => value.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -455,7 +524,7 @@ impl AccumState {
             (AggFunc::Sum, _, _) => |state, values| {
                 if let AccumState::Sum { sum, result_type } = state {
                     let value = values.first().unwrap_or(&Value::Null);
-                    *sum = accumulate_value(sum.take(), *result_type, value);
+                    *sum = accumulate_sum_value(sum.take(), *result_type, value);
                 }
                 Ok(())
             },
@@ -786,6 +855,9 @@ impl AccumState {
                 Some(NumericAccum::Numeric(v)) => {
                     Value::Numeric(format_numeric_result(v.clone(), *result_type))
                 }
+                Some(NumericAccum::NumericSum(v)) => {
+                    Value::Numeric(format_numeric_result(v.to_numeric(), *result_type))
+                }
                 None => Value::Null,
             },
             AccumState::Avg {
@@ -818,6 +890,17 @@ impl AccumState {
                             let avg = v
                                 .div(&count_numeric, numeric_div_display_scale(v, &count_numeric))
                                 .unwrap_or_else(|| v.clone());
+                            Value::Numeric(format_numeric_result(avg, *result_type))
+                        }
+                        Some(NumericAccum::NumericSum(v)) => {
+                            let sum = v.to_numeric();
+                            let count_numeric = NumericValue::from_i64(*count);
+                            let avg = sum
+                                .div(
+                                    &count_numeric,
+                                    numeric_div_display_scale(&sum, &count_numeric),
+                                )
+                                .unwrap_or(sum);
                             Value::Numeric(format_numeric_result(avg, *result_type))
                         }
                         None => Value::Null,
@@ -1623,6 +1706,11 @@ fn accumulate_value(
         Value::Int64(v) => Some(accumulate_integral(sum, result_type, *v)),
         Value::Money(v) => Some(accumulate_integral(sum, result_type, *v)),
         Value::Float64(v) => Some(match sum {
+            Some(NumericAccum::NumericSum(mut cur)) => {
+                let rhs = parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero);
+                cur.add_numeric(&rhs);
+                NumericAccum::NumericSum(cur)
+            }
             Some(NumericAccum::Numeric(cur)) => {
                 let rhs = parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero);
                 NumericAccum::Numeric(cur.add(&rhs))
@@ -1642,6 +1730,10 @@ fn accumulate_value(
         Value::Numeric(v) => {
             let parsed = v.clone();
             Some(match sum {
+                Some(NumericAccum::NumericSum(mut cur)) => {
+                    cur.add_numeric(&parsed);
+                    NumericAccum::NumericSum(cur)
+                }
                 Some(NumericAccum::Numeric(cur)) => NumericAccum::Numeric(cur.add(&parsed)),
                 Some(NumericAccum::Int(cur)) => {
                     NumericAccum::Numeric(NumericValue::from_i64(cur).add(&parsed))
@@ -1654,6 +1746,65 @@ fn accumulate_value(
                 None => NumericAccum::Numeric(parsed),
             })
         }
+        _ => sum,
+    }
+}
+
+fn accumulate_sum_value(
+    sum: Option<NumericAccum>,
+    result_type: SqlType,
+    value: &Value,
+) -> Option<NumericAccum> {
+    match value {
+        Value::Null => sum,
+        Value::Int16(v) => Some(accumulate_integral(sum, result_type, *v as i64)),
+        Value::Int32(v) => Some(accumulate_integral(sum, result_type, *v as i64)),
+        Value::Int64(v) => Some(accumulate_integral(sum, result_type, *v)),
+        Value::Money(v) => Some(accumulate_integral(sum, result_type, *v)),
+        Value::Float64(v) => Some(match sum {
+            Some(NumericAccum::NumericSum(mut cur)) => {
+                let rhs = parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero);
+                cur.add_numeric(&rhs);
+                NumericAccum::NumericSum(cur)
+            }
+            Some(NumericAccum::Numeric(cur)) => {
+                let rhs = parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero);
+                NumericAccum::Numeric(cur.add(&rhs))
+            }
+            Some(NumericAccum::Int(cur)) => NumericAccum::Float(cur as f64 + *v),
+            Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + *v),
+            None => {
+                if matches!(result_type.kind, SqlTypeKind::Numeric) {
+                    let rhs = parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero);
+                    NumericAccum::NumericSum(NumericSumAccum::new(&rhs))
+                } else {
+                    NumericAccum::Float(*v)
+                }
+            }
+        }),
+        Value::Numeric(v) => Some(match sum {
+            Some(NumericAccum::NumericSum(mut cur)) => {
+                cur.add_numeric(v);
+                NumericAccum::NumericSum(cur)
+            }
+            Some(NumericAccum::Numeric(cur)) => {
+                let mut accum = NumericSumAccum::new(&cur);
+                accum.add_numeric(v);
+                NumericAccum::NumericSum(accum)
+            }
+            Some(NumericAccum::Int(cur)) => {
+                let mut accum = NumericSumAccum::new(&NumericValue::from_i64(cur));
+                accum.add_numeric(v);
+                NumericAccum::NumericSum(accum)
+            }
+            Some(NumericAccum::Float(cur)) => {
+                let left = parse_numeric_text(&cur.to_string()).unwrap_or_else(NumericValue::zero);
+                let mut accum = NumericSumAccum::new(&left);
+                accum.add_numeric(v);
+                NumericAccum::NumericSum(accum)
+            }
+            None => NumericAccum::NumericSum(NumericSumAccum::new(v)),
+        }),
         _ => sum,
     }
 }
@@ -1761,6 +1912,10 @@ fn accumulate_integral(
     value: i64,
 ) -> NumericAccum {
     match sum {
+        Some(NumericAccum::NumericSum(mut cur)) => {
+            cur.add_numeric(&NumericValue::from_i64(value));
+            NumericAccum::NumericSum(cur)
+        }
         Some(NumericAccum::Numeric(cur)) => {
             NumericAccum::Numeric(cur.add(&NumericValue::from_i64(value)))
         }

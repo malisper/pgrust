@@ -79,6 +79,11 @@ path = "src/bin/mvcc_disk_demo.rs"
 required-features = ["tools"]
 
 [[bin]]
+name = "numeric_query_bench"
+path = "src/bin/numeric_query_bench.rs"
+required-features = ["tools"]
+
+[[bin]]
 name = "pgbench_accounts_test_repro"
 path = "src/bin/pgbench_accounts_test_repro.rs"
 required-features = ["tools"]

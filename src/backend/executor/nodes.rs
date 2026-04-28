@@ -1,5 +1,6 @@
 use super::{
-    AggGroup, ExecError, ExecutorContext, OrderedAggInput, build_aggregate_runtime, executor_start,
+    AggGroup, AggregateRuntime, ExecError, ExecutorContext, OrderedAggInput,
+    build_aggregate_runtime, executor_start,
 };
 use crate::backend::access::heap::heapam::{
     heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_end, heap_scan_next_visible,
@@ -14,7 +15,8 @@ use crate::backend::executor::expr_geometry::render_geometry_text;
 use crate::backend::executor::expr_ops::compare_order_values;
 use crate::backend::executor::pg_regex::explain_similar_pattern;
 use crate::backend::executor::srf::{
-    eval_project_set_returning_call, eval_set_returning_call, set_returning_call_label,
+    eval_project_set_returning_call, eval_set_returning_call,
+    eval_set_returning_call_simple_values, set_returning_call_label,
 };
 use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
 use crate::backend::executor::window::execute_window_clause;
@@ -45,17 +47,17 @@ use crate::include::nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, T
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, BitmapOrState,
-    BitmapQualState, CteScanState, FilterState, FunctionScanState, IncrementalSortState,
-    IndexOnlyScanState, IndexScanState, LimitState, LockRowsState, MaterializedRow,
-    MergeAppendState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState,
-    ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState,
-    SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, UniqueState,
-    ValuesState, WindowAggState, WorkTableScanState,
+    BitmapQualState, CteScanState, FilterState, FunctionScanRows, FunctionScanState,
+    IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
+    MaterializedRow, MergeAppendState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode,
+    PlanState, ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState,
+    SetOpState, SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot,
+    UniqueState, ValuesState, WindowAggState, WorkTableScanState,
 };
-use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument};
+use crate::include::nodes::plannodes::{AggregateStrategy, IndexScanKey, IndexScanKeyArgument};
 use crate::include::nodes::primnodes::{
     BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, OrderByEntry,
-    ParamKind, RelationDesc, ScalarFunctionImpl, Var, attrno_index,
+    ParamKind, RelationDesc, ScalarFunctionImpl, Var, attrno_index, is_special_varno,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -337,6 +339,23 @@ fn materialize_slot_values(slot: &mut TupleSlot) -> Result<Vec<Value>, ExecError
     let mut values = slot.values()?.to_vec();
     Value::materialize_all(&mut values);
     Ok(values)
+}
+
+fn store_single_virtual_value(slot: &mut TupleSlot, value: Value) {
+    slot.kind = SlotKind::Virtual;
+    slot.tts_values.clear();
+    slot.tts_values.push(value);
+    slot.tts_nvalid = 1;
+    slot.decode_offset = 0;
+    slot.toast = None;
+    slot.table_oid = None;
+    slot.virtual_tid = None;
+}
+
+fn function_scan_uses_simple_path(
+    call: &crate::include::nodes::primnodes::SetReturningCall,
+) -> bool {
+    !call.with_ordinality() && call.output_columns().len() == 1
 }
 
 fn sequence_scan_runtime(
@@ -6327,6 +6346,180 @@ fn projection_is_explain_passthrough(state: &ProjectionState) -> bool {
         .all(|target| !target.resjunk && matches!(target.expr, Expr::Var(_)))
 }
 
+fn aggregate_uses_plain_fast_path(state: &AggregateState) -> bool {
+    state.strategy == AggregateStrategy::Plain
+        && !state.disabled
+        && state.group_by.is_empty()
+        && state.passthrough_exprs.is_empty()
+        && state.having.is_none()
+        && state.accumulators.iter().all(|accum| {
+            !accum.distinct
+                && accum.direct_args.is_empty()
+                && accum.order_by.is_empty()
+                && accum.filter.is_none()
+                && accum.args.iter().all(expr_is_plain_aggregate_safe)
+        })
+}
+
+fn expr_is_plain_aggregate_safe(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup == 0 && !is_special_varno(var.varno),
+        Expr::Const(_) => true,
+        Expr::Op(op) => op.args.iter().all(expr_is_plain_aggregate_safe),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().all(expr_is_plain_aggregate_safe),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_none_or(expr_is_plain_aggregate_safe)
+                && case_expr.args.iter().all(|arm| {
+                    expr_is_plain_aggregate_safe(&arm.expr)
+                        && expr_is_plain_aggregate_safe(&arm.result)
+                })
+                && expr_is_plain_aggregate_safe(&case_expr.defresult)
+        }
+        Expr::Func(func) => func.args.iter().all(expr_is_plain_aggregate_safe),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .all(expr_is_plain_aggregate_safe),
+        Expr::ScalarArrayOp(op) => {
+            expr_is_plain_aggregate_safe(&op.left) && expr_is_plain_aggregate_safe(&op.right)
+        }
+        Expr::Xml(xml) => xml.child_exprs().all(expr_is_plain_aggregate_safe),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_is_plain_aggregate_safe(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_is_plain_aggregate_safe(expr)
+                && expr_is_plain_aggregate_safe(pattern)
+                && escape.as_deref().is_none_or(expr_is_plain_aggregate_safe)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_is_plain_aggregate_safe(left) && expr_is_plain_aggregate_safe(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().all(expr_is_plain_aggregate_safe),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .all(|(_, field)| expr_is_plain_aggregate_safe(field)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_is_plain_aggregate_safe(array)
+                && subscripts.iter().all(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_none_or(expr_is_plain_aggregate_safe)
+                        && subscript
+                            .upper
+                            .as_ref()
+                            .is_none_or(expr_is_plain_aggregate_safe)
+                })
+        }
+        Expr::Param(_)
+        | Expr::Aggref(_)
+        | Expr::WindowFunc(_)
+        | Expr::CaseTest(_)
+        | Expr::SetReturning(_)
+        | Expr::SubLink(_)
+        | Expr::SubPlan(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn execute_plain_aggregate_fast_path(
+    state: &mut AggregateState,
+    runtimes: &[AggregateRuntime],
+    ctx: &mut ExecutorContext,
+) -> Result<Option<Vec<MaterializedRow>>, ExecError> {
+    let mut accum_states = runtimes
+        .iter()
+        .zip(state.accumulators.iter())
+        .map(|(runtime, accum)| runtime.initialize_state(accum))
+        .collect::<Vec<_>>();
+    let const_arg_values = state
+        .accumulators
+        .iter()
+        .map(|accum| {
+            accum
+                .args
+                .iter()
+                .map(|arg| match arg {
+                    Expr::Const(value) => Some(value.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .collect::<Vec<_>>();
+
+    while let Some(slot) = state.input.exec_proc_node(ctx)? {
+        ctx.check_for_interrupts()?;
+        clear_inner_expr_bindings(ctx);
+        for (i, accum) in state.accumulators.iter().enumerate() {
+            if let Some(values) = const_arg_values[i].as_ref() {
+                runtimes[i].transition(&mut accum_states[i], values, ctx)?;
+                continue;
+            }
+            match accum.args.as_slice() {
+                [] => runtimes[i].transition(&mut accum_states[i], &[], ctx)?,
+                [arg] => {
+                    let value = eval_expr(arg, slot, ctx)?;
+                    runtimes[i].transition(
+                        &mut accum_states[i],
+                        std::slice::from_ref(&value),
+                        ctx,
+                    )?;
+                }
+                args => {
+                    let values = args
+                        .iter()
+                        .map(|arg| eval_expr(arg, slot, ctx))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    runtimes[i].transition(&mut accum_states[i], &values, ctx)?;
+                }
+            }
+        }
+    }
+
+    let mut row_values = Vec::with_capacity(state.accumulators.len());
+    for ((runtime, accum_state), accum) in runtimes
+        .iter()
+        .zip(accum_states.iter())
+        .zip(state.accumulators.iter())
+    {
+        row_values.push(runtime.finalize(accum, accum_state, &[], &[], ctx)?);
+    }
+
+    Ok(Some(vec![MaterializedRow::new(
+        TupleSlot::virtual_row(row_values),
+        Vec::new(),
+    )]))
+}
+
 impl PlanNode for AggregateState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -6350,6 +6543,23 @@ impl PlanNode for AggregateState {
                 .runtimes
                 .clone()
                 .expect("aggregate runtimes initialized above");
+            if aggregate_uses_plain_fast_path(self)
+                && let Some(result_rows) = execute_plain_aggregate_fast_path(self, &runtimes, ctx)?
+            {
+                self.result_rows = Some(result_rows);
+                let rows = self.result_rows.as_mut().unwrap();
+                if self.next_index >= rows.len() {
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                }
+
+                let idx = self.next_index;
+                self.next_index += 1;
+                self.current_bindings = rows[idx].system_bindings.clone();
+                set_active_system_bindings(ctx, &self.current_bindings);
+                finish_row(&mut self.stats, start);
+                return Ok(Some(&mut rows[idx].slot));
+            }
             let mut groups: Vec<AggGroup> = Vec::new();
 
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
@@ -6800,31 +7010,60 @@ impl PlanNode for FunctionScanState {
         };
         if self.rows.is_none() {
             let mut dummy = TupleSlot::empty(0);
-            self.rows = Some(
-                eval_set_returning_call(&self.call, &mut dummy, ctx)?
-                    .into_iter()
-                    .map(|slot| MaterializedRow::new(slot, Vec::new()))
-                    .collect(),
-            );
+            self.rows = Some(if function_scan_uses_simple_path(&self.call) {
+                FunctionScanRows::Simple(eval_set_returning_call_simple_values(
+                    &self.call, &mut dummy, ctx,
+                )?)
+            } else {
+                let rows = eval_set_returning_call(&self.call, &mut dummy, ctx)?;
+                FunctionScanRows::Materialized(
+                    rows.into_iter()
+                        .map(|slot| MaterializedRow::new(slot, Vec::new()))
+                        .collect(),
+                )
+            });
         }
 
         let rows = self.rows.as_mut().unwrap();
-        if self.next_index >= rows.len() {
-            finish_eof(&mut self.stats, start, ctx);
-            return Ok(None);
-        }
+        match rows {
+            FunctionScanRows::Simple(rows) => {
+                if self.next_index >= rows.len() {
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                }
 
-        let idx = self.next_index;
-        self.next_index += 1;
-        self.current_bindings = rows[idx].system_bindings.clone();
-        set_active_system_bindings(ctx, &self.current_bindings);
-        finish_row(&mut self.stats, start);
-        Ok(Some(&mut rows[idx].slot))
+                let idx = self.next_index;
+                self.next_index += 1;
+                let value = std::mem::replace(&mut rows[idx], Value::Null);
+                store_single_virtual_value(&mut self.slot, value);
+                self.current_bindings.clear();
+                set_active_system_bindings(ctx, &self.current_bindings);
+                finish_row(&mut self.stats, start);
+                Ok(Some(&mut self.slot))
+            }
+            FunctionScanRows::Materialized(rows) => {
+                if self.next_index >= rows.len() {
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                }
+
+                let idx = self.next_index;
+                self.next_index += 1;
+                self.current_bindings = rows[idx].system_bindings.clone();
+                set_active_system_bindings(ctx, &self.current_bindings);
+                finish_row(&mut self.stats, start);
+                Ok(Some(&mut rows[idx].slot))
+            }
+        }
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
-        let rows = self.rows.as_mut()?;
-        let idx = self.next_index.checked_sub(1)?;
-        rows.get_mut(idx).map(|row| &mut row.slot)
+        match self.rows.as_mut()? {
+            FunctionScanRows::Simple(_) => self.next_index.checked_sub(1).map(|_| &mut self.slot),
+            FunctionScanRows::Materialized(rows) => {
+                let idx = self.next_index.checked_sub(1)?;
+                rows.get_mut(idx).map(|row| &mut row.slot)
+            }
+        }
     }
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
         &self.current_bindings
