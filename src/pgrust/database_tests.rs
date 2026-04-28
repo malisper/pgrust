@@ -43394,6 +43394,52 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
 }
 
 #[test]
+fn policy_expressions_can_reference_ctid() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role ctid_policy_owner nologin")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization ctid_policy_owner")
+        .unwrap();
+    session
+        .execute(&db, "create table ctid_policy_items (a int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into ctid_policy_items values (10), (20)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p1 on ctid_policy_items using (ctid in ('(0,1)'::tid))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table ctid_policy_items enable row level security",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table ctid_policy_items force row level security",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select ctid, a from ctid_policy_items order by a",
+        ),
+        vec![vec![Value::Text("(0,1)".into()), Value::Int32(10)]]
+    );
+}
+
+#[test]
 fn create_policy_rejects_aggregate_with_policy_error() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

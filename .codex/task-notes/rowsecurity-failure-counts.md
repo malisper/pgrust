@@ -369,3 +369,15 @@ Custom operator/selectivity bucket:
 - Latest rowsecurity regression result with a 300s file timeout:
   `689/774` matched, `85` mismatches, `1516` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+Policy `ctid` bucket:
+- Named relation expression scopes and generated relation scopes now expose the
+  single base relation's system var, so policy expressions can bind `ctid`.
+- Added focused coverage for a forced-RLS policy using `ctid IN (...)`.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  policy_expressions_can_reference_ctid` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `689/774` matched, `85` mismatches, `1493` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.

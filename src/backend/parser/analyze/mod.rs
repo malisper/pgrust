@@ -3370,6 +3370,7 @@ fn named_relation_scope(
     relation_scopes: &[(&str, &RelationDesc)],
     columns: &[(String, SqlType)],
 ) -> scope::BoundScope {
+    let single_relation_system_varno = (relation_scopes.len() == 1).then_some(1);
     let mut desc_columns = columns
         .iter()
         .map(|(name, sql_type)| column_desc(name.clone(), *sql_type, true))
@@ -3394,7 +3395,7 @@ fn named_relation_scope(
             relation_names: vec![(*relation_name).to_string()],
             hidden_invalid_relation_names: Vec::new(),
             hidden_missing_relation_names: Vec::new(),
-            system_varno: None,
+            system_varno: single_relation_system_varno,
             relation_oid: None,
         });
         for column in &desc.columns {
