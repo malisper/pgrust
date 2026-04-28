@@ -3410,6 +3410,12 @@ pub struct CommentOnOperatorStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantTableColumnPrivilege {
+    pub privilege: GrantObjectPrivilege,
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrantObjectPrivilege {
     CreateOnDatabase,
     AllPrivilegesOnTable,
@@ -3422,9 +3428,12 @@ pub enum GrantObjectPrivilege {
     TriggerOnTable,
     MaintainOnTable,
     TablePrivileges(String),
+    TableColumnPrivileges(Vec<GrantTableColumnPrivilege>),
     AllPrivilegesOnSchema,
     UsageOnSchema,
     UsageOnType,
+    UsageOnLanguage,
+    AllPrivilegesOnLanguage,
     ExecuteOnFunction,
     ExecuteOnProcedure,
     ExecuteOnRoutine,
@@ -3463,6 +3472,7 @@ pub struct GrantRoleMembershipStatement {
     pub role_names: Vec<String>,
     pub grantee_names: Vec<String>,
     pub admin_option: bool,
+    pub admin_option_specified: bool,
     pub inherit_option: Option<bool>,
     pub set_option: Option<bool>,
     pub granted_by: Option<RoleGrantorSpec>,

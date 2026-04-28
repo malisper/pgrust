@@ -6,12 +6,13 @@ use crate::backend::parser::{
     ParseError, RevokeObjectStatement, RevokeRoleMembershipStatement, RoleGrantorSpec, RoutineKind,
     parse_type_name, resolve_raw_type_name,
 };
+use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::pg_proc::{is_bootstrap_proc_oid, set_bootstrap_proc_execute_acl};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_NAME, CURRENT_DATABASE_OID, PgAuthIdRow,
     PgForeignDataWrapperRow, PgForeignServerRow,
 };
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 const TABLE_ALL_PRIVILEGE_CHARS: &str = "arwdDxtm";
 const TABLE_SELECT_PRIVILEGE_CHARS: &str = "r";
@@ -40,6 +41,24 @@ fn table_privilege_chars(privilege: &GrantObjectPrivilege) -> Option<&str> {
         GrantObjectPrivilege::TriggerOnTable => Some(TABLE_TRIGGER_PRIVILEGE_CHARS),
         GrantObjectPrivilege::MaintainOnTable => Some(TABLE_MAINTAIN_PRIVILEGE_CHARS),
         GrantObjectPrivilege::TablePrivileges(chars) => Some(chars.as_str()),
+        _ => None,
+    }
+}
+
+fn table_column_privilege_specs(
+    privilege: &GrantObjectPrivilege,
+    columns: &[String],
+) -> Option<Vec<(GrantObjectPrivilege, Vec<String>)>> {
+    if !columns.is_empty() {
+        return Some(vec![(privilege.clone(), columns.to_vec())]);
+    }
+    match privilege {
+        GrantObjectPrivilege::TableColumnPrivileges(specs) => Some(
+            specs
+                .iter()
+                .map(|spec| (spec.privilege.clone(), spec.columns.clone()))
+                .collect(),
+        ),
         _ => None,
     }
 }
@@ -566,7 +585,8 @@ impl Database {
             | GrantObjectPrivilege::ReferencesOnTable
             | GrantObjectPrivilege::TriggerOnTable
             | GrantObjectPrivilege::MaintainOnTable
-            | GrantObjectPrivilege::TablePrivileges(_) => self
+            | GrantObjectPrivilege::TablePrivileges(_)
+            | GrantObjectPrivilege::TableColumnPrivileges(_) => self
                 .execute_grant_table_acl_stmt_with_search_path(
                     client_id,
                     stmt,
@@ -583,6 +603,13 @@ impl Database {
                 client_id,
                 stmt,
                 configured_search_path,
+            ),
+            GrantObjectPrivilege::UsageOnLanguage
+            | GrantObjectPrivilege::AllPrivilegesOnLanguage => self.execute_language_acl_stmt(
+                client_id,
+                &stmt.object_names,
+                &stmt.grantee_names,
+                false,
             ),
             GrantObjectPrivilege::ExecuteOnFunction
             | GrantObjectPrivilege::ExecuteOnProcedure
@@ -623,7 +650,8 @@ impl Database {
             | GrantObjectPrivilege::ReferencesOnTable
             | GrantObjectPrivilege::TriggerOnTable
             | GrantObjectPrivilege::MaintainOnTable
-            | GrantObjectPrivilege::TablePrivileges(_) => self
+            | GrantObjectPrivilege::TablePrivileges(_)
+            | GrantObjectPrivilege::TableColumnPrivileges(_) => self
                 .execute_revoke_table_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt,
@@ -657,6 +685,13 @@ impl Database {
                     catalog_effects,
                     true,
                 ),
+            GrantObjectPrivilege::UsageOnLanguage
+            | GrantObjectPrivilege::AllPrivilegesOnLanguage => self.execute_language_acl_stmt(
+                client_id,
+                &stmt.object_names,
+                &stmt.grantee_names,
+                true,
+            ),
             GrantObjectPrivilege::ExecuteOnFunction
             | GrantObjectPrivilege::ExecuteOnProcedure
             | GrantObjectPrivilege::ExecuteOnRoutine => self
@@ -711,7 +746,8 @@ impl Database {
             | GrantObjectPrivilege::ReferencesOnTable
             | GrantObjectPrivilege::TriggerOnTable
             | GrantObjectPrivilege::MaintainOnTable
-            | GrantObjectPrivilege::TablePrivileges(_) => self
+            | GrantObjectPrivilege::TablePrivileges(_)
+            | GrantObjectPrivilege::TableColumnPrivileges(_) => self
                 .execute_grant_table_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt,
@@ -745,6 +781,13 @@ impl Database {
                     catalog_effects,
                     false,
                 ),
+            GrantObjectPrivilege::UsageOnLanguage
+            | GrantObjectPrivilege::AllPrivilegesOnLanguage => self.execute_language_acl_stmt(
+                client_id,
+                &stmt.object_names,
+                &stmt.grantee_names,
+                false,
+            ),
             GrantObjectPrivilege::ExecuteOnFunction
             | GrantObjectPrivilege::ExecuteOnProcedure
             | GrantObjectPrivilege::ExecuteOnRoutine => self
@@ -796,7 +839,8 @@ impl Database {
             | GrantObjectPrivilege::ReferencesOnTable
             | GrantObjectPrivilege::TriggerOnTable
             | GrantObjectPrivilege::MaintainOnTable
-            | GrantObjectPrivilege::TablePrivileges(_) => self
+            | GrantObjectPrivilege::TablePrivileges(_)
+            | GrantObjectPrivilege::TableColumnPrivileges(_) => self
                 .execute_revoke_table_acl_stmt_with_search_path(
                     client_id,
                     stmt,
@@ -815,6 +859,13 @@ impl Database {
                     stmt,
                     configured_search_path,
                 ),
+            GrantObjectPrivilege::UsageOnLanguage
+            | GrantObjectPrivilege::AllPrivilegesOnLanguage => self.execute_language_acl_stmt(
+                client_id,
+                &stmt.object_names,
+                &stmt.grantee_names,
+                true,
+            ),
             GrantObjectPrivilege::ExecuteOnFunction
             | GrantObjectPrivilege::ExecuteOnProcedure
             | GrantObjectPrivilege::ExecuteOnRoutine => self
@@ -930,8 +981,6 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        let privilege_chars = table_privilege_chars(&stmt.privilege)
-            .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
         if stmt.object_names.is_empty() {
             return Err(ExecError::Parse(ParseError::UnexpectedEof));
         }
@@ -946,7 +995,7 @@ impl Database {
             let relation = catalog.lookup_any_relation(object_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(object_name.to_string()))
             })?;
-            if !matches!(relation.relkind, 'r' | 'p') {
+            if !matches!(relation.relkind, 'r' | 'p' | 'v' | 'm' | 'f') {
                 return Err(ExecError::Parse(ParseError::WrongObjectType {
                     name: object_name.to_string(),
                     expected: "table",
@@ -985,76 +1034,84 @@ impl Database {
                     hint: None,
                     sqlstate: "XX000",
                 })?;
-            if !stmt.columns.is_empty() {
-                if stmt.privilege != GrantObjectPrivilege::SelectOnTable {
-                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                        "column privileges other than SELECT".into(),
-                    )));
-                }
-                for column_name in &stmt.columns {
-                    let Some((column_index, column)) = relation
-                        .desc
-                        .columns
-                        .iter()
-                        .enumerate()
-                        .find(|(_, column)| {
-                            !column.dropped && column.name.eq_ignore_ascii_case(column_name)
-                        })
-                    else {
-                        return Err(ExecError::Parse(ParseError::UnknownColumn(
-                            column_name.clone(),
-                        )));
-                    };
-                    let mut acl = column.attacl.clone().unwrap_or_default();
-                    for grantee_name in &stmt.grantee_names {
-                        let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                            String::new()
-                        } else {
-                            auth_catalog
-                                .role_by_name(grantee_name)
-                                .map(|row| row.rolname.clone())
-                                .ok_or_else(|| {
-                                    ExecError::Parse(role_management_error(format!(
-                                        "role \"{}\" does not exist",
-                                        grantee_name
-                                    )))
-                                })?
+            if let Some(column_specs) = table_column_privilege_specs(&stmt.privilege, &stmt.columns)
+            {
+                let mut column_acls = BTreeMap::<i16, Vec<String>>::new();
+                for (column_privilege, columns) in column_specs {
+                    let privilege_chars = table_privilege_chars(&column_privilege)
+                        .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
+                    for column_name in columns {
+                        let Some((column_index, column)) = relation
+                            .desc
+                            .columns
+                            .iter()
+                            .enumerate()
+                            .find(|(_, column)| {
+                                !column.dropped && column.name.eq_ignore_ascii_case(&column_name)
+                            })
+                        else {
+                            return Err(ExecError::Parse(ParseError::UnknownColumn(
+                                column_name.clone(),
+                            )));
                         };
-                        grant_table_acl_entry(
-                            &mut acl,
-                            &grantee_acl_name,
-                            &grantor_name,
-                            privilege_chars,
-                        );
+                        let attnum = column_index.saturating_add(1) as i16;
+                        let acl = column_acls
+                            .entry(attnum)
+                            .or_insert_with(|| column.attacl.clone().unwrap_or_default());
+                        for grantee_name in &stmt.grantee_names {
+                            let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
+                                String::new()
+                            } else {
+                                auth_catalog
+                                    .role_by_name(grantee_name)
+                                    .map(|row| row.rolname.clone())
+                                    .ok_or_else(|| {
+                                        ExecError::Parse(role_management_error(format!(
+                                            "role \"{}\" does not exist",
+                                            grantee_name
+                                        )))
+                                    })?
+                            };
+                            grant_table_acl_entry(
+                                acl,
+                                &grantee_acl_name,
+                                &grantor_name,
+                                privilege_chars,
+                            );
+                        }
                     }
-                    let ctx = CatalogWriteContext {
-                        pool: self.pool.clone(),
-                        txns: self.txns.clone(),
-                        xid,
-                        cid: current_cid,
-                        client_id,
-                        waiter: None,
-                        interrupts: self.interrupt_state(client_id),
-                    };
-                    let effect = self
-                        .catalog
-                        .write()
-                        .alter_attribute_acl_mvcc(
-                            relation.relation_oid,
-                            column_index.saturating_add(1) as i16,
-                            (!acl.is_empty()).then_some(acl),
-                            &ctx,
-                        )
-                        .map_err(map_catalog_error)?;
-                    catalog_effects.push(effect);
-                    current_cid = current_cid.saturating_add(1);
                 }
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: current_cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: self.interrupt_state(client_id),
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .alter_attribute_acls_mvcc(
+                        relation.relation_oid,
+                        column_acls
+                            .into_iter()
+                            .map(|(attnum, acl)| (attnum, (!acl.is_empty()).then_some(acl)))
+                            .collect(),
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+                current_cid = current_cid.saturating_add(1);
                 continue;
             }
 
             let catcache = self
                 .backend_catcache(client_id, Some((xid, current_cid)))
                 .map_err(map_catalog_error)?;
+            let privilege_chars = table_privilege_chars(&stmt.privilege)
+                .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
             let mut acl = catcache
                 .class_by_oid(relation.relation_oid)
                 .and_then(|row| row.relacl.clone())
@@ -1112,8 +1169,6 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        let privilege_chars = table_privilege_chars(&stmt.privilege)
-            .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
         if stmt.object_names.is_empty() {
             return Err(ExecError::Parse(ParseError::UnexpectedEof));
         }
@@ -1128,7 +1183,7 @@ impl Database {
             let relation = catalog.lookup_any_relation(object_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(object_name.to_string()))
             })?;
-            if !matches!(relation.relkind, 'r' | 'p') {
+            if !matches!(relation.relkind, 'r' | 'p' | 'v' | 'm' | 'f') {
                 return Err(ExecError::Parse(ParseError::WrongObjectType {
                     name: object_name.to_string(),
                     expected: "table",
@@ -1158,71 +1213,79 @@ impl Database {
                     hint: None,
                     sqlstate: "XX000",
                 })?;
-            if !stmt.columns.is_empty() {
-                if stmt.privilege != GrantObjectPrivilege::SelectOnTable {
-                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                        "column privileges other than SELECT".into(),
-                    )));
-                }
-                for column_name in &stmt.columns {
-                    let Some((column_index, column)) = relation
-                        .desc
-                        .columns
-                        .iter()
-                        .enumerate()
-                        .find(|(_, column)| {
-                            !column.dropped && column.name.eq_ignore_ascii_case(column_name)
-                        })
-                    else {
-                        return Err(ExecError::Parse(ParseError::UnknownColumn(
-                            column_name.clone(),
-                        )));
-                    };
-                    let mut acl = column.attacl.clone().unwrap_or_default();
-                    for grantee_name in &stmt.grantee_names {
-                        let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
-                            String::new()
-                        } else {
-                            auth_catalog
-                                .role_by_name(grantee_name)
-                                .map(|row| row.rolname.clone())
-                                .ok_or_else(|| {
-                                    ExecError::Parse(role_management_error(format!(
-                                        "role \"{}\" does not exist",
-                                        grantee_name
-                                    )))
-                                })?
+            if let Some(column_specs) = table_column_privilege_specs(&stmt.privilege, &stmt.columns)
+            {
+                let mut column_acls = BTreeMap::<i16, Vec<String>>::new();
+                for (column_privilege, columns) in column_specs {
+                    let privilege_chars = table_privilege_chars(&column_privilege)
+                        .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
+                    for column_name in columns {
+                        let Some((column_index, column)) = relation
+                            .desc
+                            .columns
+                            .iter()
+                            .enumerate()
+                            .find(|(_, column)| {
+                                !column.dropped && column.name.eq_ignore_ascii_case(&column_name)
+                            })
+                        else {
+                            return Err(ExecError::Parse(ParseError::UnknownColumn(
+                                column_name.clone(),
+                            )));
                         };
-                        revoke_table_acl_entry(&mut acl, &grantee_acl_name, privilege_chars);
+                        let attnum = column_index.saturating_add(1) as i16;
+                        let acl = column_acls
+                            .entry(attnum)
+                            .or_insert_with(|| column.attacl.clone().unwrap_or_default());
+                        for grantee_name in &stmt.grantee_names {
+                            let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
+                                String::new()
+                            } else {
+                                auth_catalog
+                                    .role_by_name(grantee_name)
+                                    .map(|row| row.rolname.clone())
+                                    .ok_or_else(|| {
+                                        ExecError::Parse(role_management_error(format!(
+                                            "role \"{}\" does not exist",
+                                            grantee_name
+                                        )))
+                                    })?
+                            };
+                            revoke_table_acl_entry(acl, &grantee_acl_name, privilege_chars);
+                        }
                     }
-                    let ctx = CatalogWriteContext {
-                        pool: self.pool.clone(),
-                        txns: self.txns.clone(),
-                        xid,
-                        cid: current_cid,
-                        client_id,
-                        waiter: None,
-                        interrupts: self.interrupt_state(client_id),
-                    };
-                    let effect = self
-                        .catalog
-                        .write()
-                        .alter_attribute_acl_mvcc(
-                            relation.relation_oid,
-                            column_index.saturating_add(1) as i16,
-                            (!acl.is_empty()).then_some(acl),
-                            &ctx,
-                        )
-                        .map_err(map_catalog_error)?;
-                    catalog_effects.push(effect);
-                    current_cid = current_cid.saturating_add(1);
                 }
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: current_cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: self.interrupt_state(client_id),
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .alter_attribute_acls_mvcc(
+                        relation.relation_oid,
+                        column_acls
+                            .into_iter()
+                            .map(|(attnum, acl)| (attnum, (!acl.is_empty()).then_some(acl)))
+                            .collect(),
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+                current_cid = current_cid.saturating_add(1);
                 continue;
             }
 
             let catcache = self
                 .backend_catcache(client_id, Some((xid, current_cid)))
                 .map_err(map_catalog_error)?;
+            let privilege_chars = table_privilege_chars(&stmt.privilege)
+                .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
             let mut acl = catcache
                 .class_by_oid(relation.relation_oid)
                 .and_then(|row| row.relacl.clone())
@@ -1265,6 +1328,65 @@ impl Database {
             current_cid = current_cid.saturating_add(1);
         }
         let _ = stmt.cascade;
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn execute_language_acl_stmt(
+        &self,
+        client_id: ClientId,
+        object_names: &[String],
+        grantee_names: &[String],
+        revoke: bool,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, None, None);
+        let auth_catalog = self
+            .auth_catalog(client_id, None)
+            .map_err(map_catalog_error)?;
+        let auth = self.auth_state(client_id);
+        let is_superuser = auth_catalog
+            .role_by_oid(auth.current_user_oid())
+            .is_some_and(|row| row.rolsuper);
+        for grantee_name in grantee_names {
+            if !grantee_name.eq_ignore_ascii_case("public")
+                && auth_catalog.role_by_name(grantee_name).is_none()
+            {
+                return Err(ExecError::Parse(role_management_error(format!(
+                    "role \"{}\" does not exist",
+                    grantee_name
+                ))));
+            }
+        }
+        for object_name in object_names {
+            let language = catalog.language_row_by_name(object_name).ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: format!("language \"{object_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                }
+            })?;
+            if !language.lanpltrusted {
+                return Err(ExecError::DetailedError {
+                    message: format!("language \"{object_name}\" is not trusted"),
+                    detail: Some(
+                        "GRANT and REVOKE are not allowed on untrusted languages, because only superusers can use untrusted languages."
+                            .into(),
+                    ),
+                    hint: None,
+                    sqlstate: "42501",
+                });
+            }
+            if !is_superuser && !auth.has_effective_membership(language.lanowner, &auth_catalog) {
+                let action = if revoke { "revoked" } else { "granted" };
+                push_warning(format!(
+                    "no privileges were {action} for \"{}\"",
+                    language.lanname
+                ));
+            }
+            // :HACK: pg_language does not carry lanacl in pgrust yet. Validate
+            // existence, trusted-language rules, grantees, and ownership warning
+            // behavior so object-GRANT scripts can proceed until lanacl exists.
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -2194,6 +2316,7 @@ impl Database {
                 if stmt.admin_option {
                     reject_circular_admin_grant(&auth_catalog, role.oid, grantor_oid, grantee.oid)?;
                 }
+                let grant_options = GrantRoleMembershipOptions::from(stmt);
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -2209,9 +2332,8 @@ impl Database {
                     role.oid,
                     grantee.oid,
                     grantor_oid,
-                    stmt.admin_option,
-                    stmt.inherit_option.unwrap_or(true),
-                    stmt.set_option.unwrap_or(true),
+                    grantee.rolinherit,
+                    grant_options,
                     &ctx,
                     catalog_effects,
                 )?;
@@ -2275,15 +2397,18 @@ impl Database {
                     .cloned()
                     .collect::<Vec<_>>();
                 let grantee = lookup_membership_grantee(&auth_catalog, grantee_name)?;
-                let existing_index = role_rows
+                let Some(existing_index) = role_rows
                     .iter()
                     .position(|row| row.member == grantee.oid && row.grantor == grantor_oid)
-                    .ok_or_else(|| {
-                        ExecError::Parse(role_management_error(format!(
-                            "role grant does not exist: \"{}\" to \"{}\"",
-                            role.rolname, grantee.rolname
-                        )))
-                    })?;
+                else {
+                    push_warning(format!(
+                        "role \"{}\" has not been granted membership in role \"{}\" by role \"{}\"",
+                        grantee.rolname,
+                        role.rolname,
+                        role_name_for_oid(self, &auth_catalog, grantor_oid)
+                    ));
+                    continue;
+                };
                 let planned_actions =
                     plan_role_membership_revoke(&role_rows, existing_index, stmt)?;
                 for (row, action) in role_rows.iter().zip(planned_actions.iter()) {
@@ -2583,17 +2708,30 @@ fn upsert_role_membership_in_transaction(
     roleid: u32,
     member: u32,
     grantor: u32,
-    admin_option: bool,
-    inherit_option: bool,
-    set_option: bool,
+    member_inherit_default: bool,
+    options: GrantRoleMembershipOptions,
     ctx: &CatalogWriteContext,
     catalog_effects: &mut Vec<CatalogMutationEffect>,
 ) -> Result<(), ExecError> {
-    if auth_catalog
+    if let Some(existing) = auth_catalog
         .memberships()
         .iter()
-        .any(|row| row.roleid == roleid && row.member == member && row.grantor == grantor)
+        .find(|row| row.roleid == roleid && row.member == member && row.grantor == grantor)
     {
+        let admin_option = if options.admin_option_specified {
+            options.admin_option
+        } else {
+            existing.admin_option
+        };
+        let inherit_option = options.inherit_option.unwrap_or(existing.inherit_option);
+        let set_option = options.set_option.unwrap_or(existing.set_option);
+        if admin_option == existing.admin_option
+            && inherit_option == existing.inherit_option
+            && set_option == existing.set_option
+        {
+            push_role_membership_duplicate_notice(db, auth_catalog, roleid, member, grantor);
+            return Ok(());
+        }
         let (_, effect) = db
             .shared_catalog
             .write()
@@ -2609,6 +2747,13 @@ fn upsert_role_membership_in_transaction(
             .map_err(map_role_grant_error)?;
         catalog_effects.push(effect);
     } else {
+        let admin_option = if options.admin_option_specified {
+            options.admin_option
+        } else {
+            false
+        };
+        let inherit_option = options.inherit_option.unwrap_or(member_inherit_default);
+        let set_option = options.set_option.unwrap_or(true);
         let (_, effect) = db
             .shared_catalog
             .write()
@@ -2629,12 +2774,46 @@ fn upsert_role_membership_in_transaction(
                     member,
                     &member_name(db, auth_catalog, member),
                     roleid,
-                    &role_name(db, auth_catalog, roleid),
+                    &role_name_for_oid(db, auth_catalog, roleid),
                 )
             })?;
         catalog_effects.push(effect);
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct GrantRoleMembershipOptions {
+    admin_option: bool,
+    admin_option_specified: bool,
+    inherit_option: Option<bool>,
+    set_option: Option<bool>,
+}
+
+impl From<&GrantRoleMembershipStatement> for GrantRoleMembershipOptions {
+    fn from(stmt: &GrantRoleMembershipStatement) -> Self {
+        Self {
+            admin_option: stmt.admin_option,
+            admin_option_specified: stmt.admin_option_specified,
+            inherit_option: stmt.inherit_option,
+            set_option: stmt.set_option,
+        }
+    }
+}
+
+fn push_role_membership_duplicate_notice(
+    db: &Database,
+    auth_catalog: &AuthCatalog,
+    roleid: u32,
+    member: u32,
+    grantor: u32,
+) {
+    push_notice(format!(
+        "role \"{}\" has already been granted membership in role \"{}\" by role \"{}\"",
+        member_name(db, auth_catalog, member),
+        role_name_for_oid(db, auth_catalog, roleid),
+        role_name_for_oid(db, auth_catalog, grantor)
+    ));
 }
 
 fn lookup_membership_grantee(
@@ -2705,7 +2884,6 @@ fn resolve_role_grantor(
             });
         }
         if grantor.oid != BOOTSTRAP_SUPERUSER_OID
-            && grantor.oid != role.oid
             && !catalog
                 .memberships()
                 .iter()
@@ -3025,7 +3203,7 @@ fn map_named_role_membership_error(
     }
 }
 
-fn role_name(_db: &Database, auth_catalog: &AuthCatalog, role_oid: u32) -> String {
+fn role_name_for_oid(_db: &Database, auth_catalog: &AuthCatalog, role_oid: u32) -> String {
     auth_catalog
         .role_by_oid(role_oid)
         .map(|row| row.rolname.clone())
@@ -3033,7 +3211,7 @@ fn role_name(_db: &Database, auth_catalog: &AuthCatalog, role_oid: u32) -> Strin
 }
 
 fn member_name(db: &Database, auth_catalog: &AuthCatalog, member_oid: u32) -> String {
-    role_name(db, auth_catalog, member_oid)
+    role_name_for_oid(db, auth_catalog, member_oid)
 }
 
 fn type_namespace_visible(namespace_oid: u32, search_path: &[String]) -> bool {
@@ -3187,6 +3365,43 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_grant_role_membership_emits_notice_without_clearing_options() {
+        let base = temp_dir("grant_role_duplicate_notice");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        crate::backend::utils::misc::notices::take_notices();
+        session.execute(&db, "create role parent").unwrap();
+        session.execute(&db, "create role grantee").unwrap();
+        session
+            .execute(&db, "grant parent to grantee with admin option")
+            .unwrap();
+        crate::backend::utils::misc::notices::take_notices();
+
+        session.execute(&db, "grant parent to grantee").unwrap();
+
+        let notices = crate::backend::utils::misc::notices::take_notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].severity, "NOTICE");
+        assert_eq!(
+            notices[0].message,
+            "role \"grantee\" has already been granted membership in role \"parent\" by role \"postgres\""
+        );
+
+        let parent_oid = role_oid(&db, "parent");
+        let grantee_oid = role_oid(&db, "grantee");
+        let membership = db
+            .catalog
+            .read()
+            .catcache()
+            .unwrap()
+            .auth_members_rows()
+            .into_iter()
+            .find(|row| row.roleid == parent_oid && row.member == grantee_oid)
+            .unwrap();
+        assert!(membership.admin_option);
+    }
+
+    #[test]
     fn grant_role_membership_records_explicit_grantor() {
         let base = temp_dir("grant_role_grantor");
         let db = Database::open(&base, 16).unwrap();
@@ -3278,6 +3493,64 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn explicit_role_grantor_cannot_be_target_role_without_admin_option() {
+        let base = temp_dir("grant_role_self_grantor_admin");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role parent").unwrap();
+        session.execute(&db, "create role member").unwrap();
+
+        let err = session
+            .execute(
+                &db,
+                "grant parent to member with admin option granted by parent",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message, detail, ..
+            } => {
+                assert_eq!(
+                    message,
+                    "permission denied to grant privileges as role \"parent\""
+                );
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("The grantor must have the ADMIN option on role \"parent\".")
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn revoke_missing_role_membership_emits_warning() {
+        let base = temp_dir("revoke_role_missing_warning");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        crate::backend::utils::misc::notices::take_notices();
+        session.execute(&db, "create role parent").unwrap();
+        session.execute(&db, "create role grantor").unwrap();
+        session.execute(&db, "create role grantee").unwrap();
+        session
+            .execute(&db, "grant parent to grantor with admin option")
+            .unwrap();
+        crate::backend::utils::misc::notices::take_notices();
+
+        session
+            .execute(&db, "revoke parent from grantee granted by grantor")
+            .unwrap();
+
+        let notices = crate::backend::utils::misc::notices::take_notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].severity, "WARNING");
+        assert_eq!(
+            notices[0].message,
+            "role \"grantee\" has not been granted membership in role \"parent\" by role \"grantor\""
+        );
     }
 
     #[test]

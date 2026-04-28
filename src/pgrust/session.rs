@@ -16,7 +16,10 @@ use crate::backend::commands::copyto::{
     CopyToDmlEvent, CopyToSink, IoCopyToSink, begin_copy_to, begin_copy_to_dml_capture,
     finish_copy_to, finish_copy_to_dml_capture, write_copy_to, write_copy_to_row,
 };
-use crate::backend::commands::tablecmds::{execute_merge, execute_prepared_insert_row};
+use crate::backend::commands::tablecmds::{
+    check_planned_stmt_select_for_update_privileges, check_planned_stmt_select_privileges,
+    check_relation_column_privileges, execute_merge, execute_prepared_insert_row,
+};
 use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
@@ -7594,24 +7597,23 @@ impl Session {
                                     ));
                                 }
 
-                                execute_planned_stmt(
-                                    pg_plan_query_with_outer_scopes_and_ctes(
-                                        &outer_select,
-                                        &catalog,
-                                        &[],
-                                        &materialized_ctes,
-                                    )?,
-                                    &mut ctx,
-                                )
+                                let planned = pg_plan_query_with_outer_scopes_and_ctes(
+                                    &outer_select,
+                                    &catalog,
+                                    &[],
+                                    &materialized_ctes,
+                                )?;
+                                check_planned_stmt_select_privileges(&planned, &ctx)?;
+                                execute_planned_stmt(planned, &mut ctx)
                             })();
                             result
                         }
                     }
                     Statement::Select(select) if select.locking_clause.is_some() => {
-                        execute_planned_stmt(
-                            pg_plan_query_with_config(&select, &catalog, self.planner_config())?,
-                            &mut ctx,
-                        )
+                        let planned =
+                            pg_plan_query_with_config(&select, &catalog, self.planner_config())?;
+                        check_planned_stmt_select_for_update_privileges(&planned, &ctx)?;
+                        execute_planned_stmt(planned, &mut ctx)
                     }
                     other => execute_readonly_statement_with_config(
                         other,
@@ -9294,12 +9296,17 @@ impl Session {
             return Ok(());
         };
         let catalog = self.catalog_lookup(db);
-        let desc = {
+        let (relation_oid, desc) = {
             let entry = catalog
                 .lookup_any_relation(name)
                 .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(name.to_string())))?;
-            entry.desc.clone()
+            (entry.relation_oid, entry.desc.clone())
         };
+        let snapshot = db
+            .txns
+            .read()
+            .snapshot_for_command(INVALID_TRANSACTION_ID, 0)?;
+        let mut ctx = self.executor_context_for_catalog(db, snapshot, 0, &catalog, None, None);
         let target_indexes = if let Some(columns) = columns {
             let mut indexes = Vec::with_capacity(columns.len());
             for name in columns {
@@ -9316,6 +9323,7 @@ impl Session {
         } else {
             desc.visible_column_indexes()
         };
+        check_relation_column_privileges(&ctx, relation_oid, 'a', target_indexes.iter().copied())?;
         let validation_default_indexes = if copy.options.default_marker.is_some() {
             desc.visible_column_indexes()
         } else {
@@ -9327,13 +9335,7 @@ impl Session {
         if validation_default_indexes.is_empty() {
             return Ok(());
         }
-
         let column_defaults = bind_copy_column_defaults(&desc, &catalog)?;
-        let snapshot = db
-            .txns
-            .read()
-            .snapshot_for_command(INVALID_TRANSACTION_ID, 0)?;
-        let mut ctx = self.executor_context_for_catalog(db, snapshot, 0, &catalog, None, None);
         for column_index in validation_default_indexes {
             let column = &desc.columns[column_index];
             if column.default_sequence_oid.is_some()
@@ -9624,6 +9626,12 @@ impl Session {
                         None,
                     );
                     ctx.interrupts = interrupts;
+                    check_relation_column_privileges(
+                        &ctx,
+                        relation_oid,
+                        'a',
+                        target_indexes.iter().copied(),
+                    )?;
                     let column_defaults = bind_copy_column_defaults(&desc, &catalog)?;
                     let omitted_default_indexes = desc
                         .visible_column_indexes()

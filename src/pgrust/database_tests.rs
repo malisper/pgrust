@@ -9451,6 +9451,136 @@ fn merge_checks_target_and_source_privileges() {
 }
 
 #[test]
+fn relation_privileges_gate_select_dml_copy_and_locking() {
+    fn assert_table_permission_denied(result: Result<StatementResult, ExecError>, table: &str) {
+        match result {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, format!("permission denied for table {table}"));
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected table permission error for {table}, got {other:?}"),
+        }
+    }
+
+    let dir = temp_dir("relation_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create role rel_owner login").unwrap();
+    session
+        .execute(&db, "create role rel_tenant login")
+        .unwrap();
+    session
+        .execute(&db, "create table rel_acl(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table rel_source(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into rel_acl values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into rel_source values (1)")
+        .unwrap();
+    session
+        .execute(&db, "alter table rel_acl owner to rel_owner")
+        .unwrap();
+    session
+        .execute(&db, "alter table rel_source owner to rel_owner")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization rel_tenant")
+        .unwrap();
+
+    assert_table_permission_denied(session.execute(&db, "select * from rel_acl"), "rel_acl");
+    assert_table_permission_denied(session.execute(&db, "select * from pg_class"), "pg_class");
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant select on rel_acl to rel_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization rel_tenant")
+        .unwrap();
+    session.execute(&db, "select * from rel_acl").unwrap();
+    assert_table_permission_denied(
+        session.execute(
+            &db,
+            "select * from rel_acl where exists (select 1 from rel_source)",
+        ),
+        "rel_source",
+    );
+    assert_table_permission_denied(
+        session.execute(&db, "select * from rel_acl for update"),
+        "rel_acl",
+    );
+    assert_table_permission_denied(
+        session.execute(&db, "insert into rel_acl values (2)"),
+        "rel_acl",
+    );
+    assert_table_permission_denied(
+        session
+            .copy_from_rows_into(&db, "rel_acl", None, &[vec!["2".into()]])
+            .map(StatementResult::AffectedRows),
+        "rel_acl",
+    );
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant insert on rel_acl to rel_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization rel_tenant")
+        .unwrap();
+    session
+        .execute(&db, "insert into rel_acl values (2)")
+        .unwrap();
+    session
+        .copy_from_rows_into(&db, "rel_acl", None, &[vec!["3".into()]])
+        .unwrap();
+    assert_table_permission_denied(
+        session.execute(&db, "update rel_acl set id = id + 1"),
+        "rel_acl",
+    );
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant update on rel_acl to rel_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization rel_tenant")
+        .unwrap();
+    session
+        .execute(&db, "select * from rel_acl for update")
+        .unwrap();
+    session
+        .execute(&db, "update rel_acl set id = id + 1")
+        .unwrap();
+    assert_table_permission_denied(session.execute(&db, "delete from rel_acl"), "rel_acl");
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant delete on rel_acl to rel_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization rel_tenant")
+        .unwrap();
+    session.execute(&db, "delete from rel_acl").unwrap();
+    assert_table_permission_denied(session.execute(&db, "truncate rel_acl"), "rel_acl");
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant truncate on rel_acl to rel_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization rel_tenant")
+        .unwrap();
+    session.execute(&db, "truncate rel_acl").unwrap();
+}
+
+#[test]
 fn inherited_update_delete_follow_postgres_targeting_rules() {
     let dir = temp_dir("inheritance_guardrails");
     let db = Database::open(&dir, 128).unwrap();
@@ -36918,6 +37048,100 @@ fn pg_get_acl_returns_relation_owner_acl() {
         vec![vec![Value::Null]]
     );
 }
+
+#[test]
+fn mixed_column_privilege_grant_updates_attribute_acls() {
+    fn assert_table_permission_denied(result: Result<StatementResult, ExecError>, table: &str) {
+        match result {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, format!("permission denied for table {table}"));
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected table permission error for {table}, got {other:?}"),
+        }
+    }
+
+    let dir = temp_dir("mixed_column_privilege_grant");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create role acl_user login").unwrap();
+    db.execute(1, "create role acl_user2 login").unwrap();
+    db.execute(1, "create table col_acl(one int, two int, three int)")
+        .unwrap();
+    db.execute(
+        1,
+        "grant select (one), insert (two), update (three) on col_acl to acl_user",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unnest(pg_get_acl('pg_class'::regclass, 'col_acl'::regclass::oid, 1))"
+        ),
+        vec![vec![Value::Text("acl_user=r/postgres".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unnest(pg_get_acl('pg_class'::regclass, 'col_acl'::regclass::oid, 2))"
+        ),
+        vec![vec![Value::Text("acl_user=a/postgres".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unnest(pg_get_acl('pg_class'::regclass, 'col_acl'::regclass::oid, 3))"
+        ),
+        vec![vec![Value::Text("acl_user=w/postgres".into())]]
+    );
+    db.execute(1, "grant all (one) on col_acl to acl_user2")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unnest(pg_get_acl('pg_class'::regclass, 'col_acl'::regclass::oid, 2))"
+        ),
+        vec![vec![Value::Text("acl_user=a/postgres".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unnest(pg_get_acl('pg_class'::regclass, 'col_acl'::regclass::oid, 3))"
+        ),
+        vec![vec![Value::Text("acl_user=w/postgres".into())]]
+    );
+
+    let mut session = Session::new(2);
+    session
+        .execute(&db, "set session authorization acl_user")
+        .unwrap();
+    session
+        .execute(&db, "insert into col_acl (two) values (2)")
+        .unwrap();
+    session
+        .copy_from_rows_into(&db, "col_acl", Some(&["two".into()]), &[vec!["3".into()]])
+        .unwrap();
+    session
+        .execute(&db, "update col_acl set three = 10")
+        .unwrap();
+    assert_table_permission_denied(
+        session.execute(&db, "insert into col_acl (one) values (1)"),
+        "col_acl",
+    );
+    assert_table_permission_denied(
+        session.execute(&db, "update col_acl set one = 1"),
+        "col_acl",
+    );
+}
+
 fn current_database_function_matches_pg_database_name() {
     let dir = temp_dir("current_database_function");
     let db = Database::open(&dir, 64).unwrap();

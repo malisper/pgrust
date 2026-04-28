@@ -21,12 +21,13 @@ use crate::include::nodes::parsenodes::{
     CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement,
     CreateCompositeTypeStatement, CreateShellTypeStatement, CreateTriggerStatement,
     CreateTypeStatement, DropAggregateStatement, DropCastStatement, DropTriggerStatement,
-    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef,
-    InsertSource, InsertStatement, JoinTreeNode, OverridingKind, PartitionStrategy,
-    PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
-    RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
-    SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec,
-    TriggerLevel, TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
+    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege,
+    GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
+    OverridingKind, PartitionStrategy, PublicationObjectSpec, PublicationOption,
+    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
+    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
+    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
+    TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -4623,6 +4624,7 @@ fn parse_alter_group_add_user_statement() {
             role_names: vec!["regress_group".into()],
             grantee_names: vec!["regress_member".into()],
             admin_option: false,
+            admin_option_specified: false,
             inherit_option: None,
             set_option: None,
             granted_by: None,
@@ -4642,6 +4644,7 @@ fn parse_multiline_alter_group_add_user_statement() {
             role_names: vec!["regress_group".into()],
             grantee_names: vec!["regress_member".into(), "regress_member2".into()],
             admin_option: false,
+            admin_option_specified: false,
             inherit_option: None,
             set_option: None,
             granted_by: None,
@@ -4955,6 +4958,52 @@ fn parse_grant_usage_on_type_statement() {
 }
 
 #[test]
+fn parse_grant_usage_on_domain_statement() {
+    let stmt =
+        parse_statement("grant usage on domain priv_testdomain1 to regress_priv_user2").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnType,
+            columns: Vec::new(),
+            object_names: vec!["priv_testdomain1".into()],
+            grantee_names: vec!["regress_priv_user2".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_all_on_type_statement() {
+    let stmt = parse_statement("grant all privileges on type custom_t to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnType,
+            columns: Vec::new(),
+            object_names: vec!["custom_t".into()],
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_usage_on_language_statement() {
+    let stmt = parse_statement("grant usage on language sql to regress_priv_user1").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnLanguage,
+            columns: Vec::new(),
+            object_names: vec!["sql".into()],
+            grantee_names: vec!["regress_priv_user1".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
 fn parse_grant_usage_on_foreign_data_wrapper_statement() {
     let stmt =
         parse_statement("grant usage on foreign data wrapper foo to regress_test_role").unwrap();
@@ -5017,6 +5066,30 @@ fn parse_grant_column_select_and_insert_on_table_statements() {
         })
     );
 
+    let stmt = parse_statement("grant insert (two) on atest5 to regress_priv_user4").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::InsertOnTable,
+            columns: vec!["two".into()],
+            object_names: vec!["atest5".into()],
+            grantee_names: vec!["regress_priv_user4".into()],
+            with_grant_option: false,
+        })
+    );
+
+    let stmt = parse_statement("grant select (one,two) on atest6 to regress_priv_user4").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::SelectOnTable,
+            columns: vec!["one".into(), "two".into()],
+            object_names: vec!["atest6".into()],
+            grantee_names: vec!["regress_priv_user4".into()],
+            with_grant_option: false,
+        })
+    );
+
     let stmt = parse_statement("grant insert on key_desc to regress_insert_other_user").unwrap();
     assert_eq!(
         stmt,
@@ -5025,6 +5098,52 @@ fn parse_grant_column_select_and_insert_on_table_statements() {
             columns: Vec::new(),
             object_names: vec!["key_desc".into()],
             grantee_names: vec!["regress_insert_other_user".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_mixed_column_privileges_on_table_statement() {
+    let stmt = parse_statement(
+        "grant select (one), insert (two), update (three) on atest5 to regress_priv_user4",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::TableColumnPrivileges(vec![
+                GrantTableColumnPrivilege {
+                    privilege: GrantObjectPrivilege::SelectOnTable,
+                    columns: vec!["one".into()],
+                },
+                GrantTableColumnPrivilege {
+                    privilege: GrantObjectPrivilege::InsertOnTable,
+                    columns: vec!["two".into()],
+                },
+                GrantTableColumnPrivilege {
+                    privilege: GrantObjectPrivilege::UpdateOnTable,
+                    columns: vec!["three".into()],
+                },
+            ]),
+            columns: Vec::new(),
+            object_names: vec!["atest5".into()],
+            grantee_names: vec!["regress_priv_user4".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_on_table_to_group_statement() {
+    let stmt = parse_statement("grant delete on atest3 to group regress_priv_group2").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::DeleteOnTable,
+            columns: Vec::new(),
+            object_names: vec!["atest3".into()],
+            grantee_names: vec!["regress_priv_group2".into()],
             with_grant_option: false,
         })
     );
@@ -5112,6 +5231,22 @@ fn parse_grant_execute_on_function_statement() {
             privilege: GrantObjectPrivilege::ExecuteOnFunction,
             columns: Vec::new(),
             object_names: vec!["f_leak(text)".into()],
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_all_on_function_statement() {
+    let stmt =
+        parse_statement("grant all privileges on function priv_testfunc1(int) to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::ExecuteOnFunction,
+            columns: Vec::new(),
+            object_names: vec!["priv_testfunc1(int)".into()],
             grantee_names: vec!["public".into()],
             with_grant_option: false,
         })
@@ -5207,6 +5342,79 @@ fn parse_revoke_usage_on_type_statement() {
 }
 
 #[test]
+fn parse_revoke_usage_on_domain_statement() {
+    let stmt = parse_statement("revoke usage on domain priv_testdomain1 from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnType,
+            columns: Vec::new(),
+            object_names: vec!["priv_testdomain1".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_all_on_domain_statement() {
+    let stmt = parse_statement("revoke all on domain priv_testdomain1 from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnType,
+            columns: Vec::new(),
+            object_names: vec!["priv_testdomain1".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_usage_on_language_statement() {
+    let stmt = parse_statement("revoke all privileges on language sql from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::AllPrivilegesOnLanguage,
+            columns: Vec::new(),
+            object_names: vec!["sql".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_column_update_from_group_statement() {
+    let stmt =
+        parse_statement("revoke update (three) on atest5 from group regress_priv_group2").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::UpdateOnTable,
+            columns: vec!["three".into()],
+            object_names: vec!["atest5".into()],
+            grantee_names: vec!["regress_priv_group2".into()],
+            cascade: false,
+        })
+    );
+
+    let stmt = parse_statement("revoke all (one,two) on atest5 from regress_priv_user4").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::TablePrivileges("arwx".into()),
+            columns: vec!["one".into(), "two".into()],
+            object_names: vec!["atest5".into()],
+            grantee_names: vec!["regress_priv_user4".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
 fn parse_revoke_all_on_foreign_data_wrapper_statement() {
     let stmt =
         parse_statement("revoke all on foreign data wrapper foo from regress_test_role").unwrap();
@@ -5238,6 +5446,22 @@ fn parse_revoke_execute_on_function_statement() {
 }
 
 #[test]
+fn parse_revoke_all_on_function_statement() {
+    let stmt = parse_statement("revoke all privileges on function priv_testfunc1(int) from public")
+        .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::ExecuteOnFunction,
+            columns: Vec::new(),
+            object_names: vec!["priv_testfunc1(int)".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
 fn parse_grant_role_membership_with_options_statement() {
     let stmt =
         parse_statement("grant regress_tenant2 to regress_createrole with inherit true, set false")
@@ -5248,6 +5472,7 @@ fn parse_grant_role_membership_with_options_statement() {
             role_names: vec!["regress_tenant2".into()],
             grantee_names: vec!["regress_createrole".into()],
             admin_option: false,
+            admin_option_specified: false,
             inherit_option: Some(true),
             set_option: Some(false),
             granted_by: None,
@@ -5268,6 +5493,7 @@ fn parse_grant_role_membership_granted_by_statement() {
             role_names: vec!["regress_tenant2".into()],
             grantee_names: vec!["regress_createrole".into()],
             admin_option: true,
+            admin_option_specified: true,
             inherit_option: None,
             set_option: None,
             granted_by: Some(RoleGrantorSpec::CurrentRole),
