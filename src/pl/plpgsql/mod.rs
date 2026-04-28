@@ -48,6 +48,7 @@ pub(crate) fn validate_create_function_body_with_options(
 ) -> Result<Vec<PlpgsqlValidationNotice>, ParseError> {
     let block = parse_block(body)?;
     validate_declared_cursor_arguments(&block)?;
+    validate_raise_placeholders(&block)?;
     if !has_output_args {
         let mut notices = Vec::new();
         validate_shadowed_variables(&block, arg_names, gucs, &mut notices)?;
@@ -64,6 +65,99 @@ pub(crate) fn validate_create_function_body_with_options(
     let mut notices = Vec::new();
     validate_shadowed_variables(&block, arg_names, gucs, &mut notices)?;
     Ok(notices)
+}
+
+fn validate_raise_placeholders(block: &Block) -> Result<(), ParseError> {
+    for stmt in &block.statements {
+        validate_raise_placeholders_in_stmt(stmt)?;
+    }
+    for handler in &block.exception_handlers {
+        for stmt in &handler.statements {
+            validate_raise_placeholders_in_stmt(stmt)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_raise_placeholders_in_stmt(stmt: &Stmt) -> Result<(), ParseError> {
+    match stmt {
+        Stmt::WithLine { stmt, .. } => validate_raise_placeholders_in_stmt(stmt),
+        Stmt::Block(block) => validate_raise_placeholders(block),
+        Stmt::If {
+            branches,
+            else_branch,
+        } => {
+            for (_, body) in branches {
+                for stmt in body {
+                    validate_raise_placeholders_in_stmt(stmt)?;
+                }
+            }
+            for stmt in else_branch {
+                validate_raise_placeholders_in_stmt(stmt)?;
+            }
+            Ok(())
+        }
+        Stmt::While { body, .. }
+        | Stmt::Loop { body }
+        | Stmt::ForInt { body, .. }
+        | Stmt::ForQuery { body, .. }
+        | Stmt::ForEach { body, .. } => {
+            for stmt in body {
+                validate_raise_placeholders_in_stmt(stmt)?;
+            }
+            Ok(())
+        }
+        Stmt::Raise {
+            message: Some(message),
+            params,
+            ..
+        } => {
+            let placeholder_count = count_raise_placeholders(message);
+            if placeholder_count < params.len() {
+                return Err(raise_placeholder_error(
+                    "too many parameters specified for RAISE",
+                ));
+            }
+            if placeholder_count > params.len() {
+                return Err(raise_placeholder_error(
+                    "too few parameters specified for RAISE",
+                ));
+            }
+            Ok(())
+        }
+        Stmt::Raise {
+            message: None,
+            params,
+            ..
+        } if !params.is_empty() => Err(raise_placeholder_error(
+            "too many parameters specified for RAISE",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn count_raise_placeholders(message: &str) -> usize {
+    let mut count = 0usize;
+    let mut chars = message.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            if chars.peek() == Some(&'%') {
+                chars.next();
+            } else {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn raise_placeholder_error(message: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42601",
+    }
 }
 
 fn validate_declared_cursor_arguments(block: &Block) -> Result<(), ParseError> {

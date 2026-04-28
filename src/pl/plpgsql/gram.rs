@@ -487,10 +487,22 @@ fn build_assign_target(pair: Pair<'_, Rule>) -> Result<AssignTarget, ParseError>
     let raw = pair.as_str().to_string();
     let parts = pair
         .into_inner()
-        .filter(|part| part.as_rule() == Rule::ident)
-        .map(build_ident)
+        .filter_map(|part| match part.as_rule() {
+            Rule::ident => Some(build_ident(part)),
+            Rule::positional_param => Some(part.as_str().to_string()),
+            _ => None,
+        })
         .collect::<Vec<_>>();
     match parts.as_slice() {
+        [param] if param.starts_with('$') => {
+            let index = param[1..]
+                .parse::<usize>()
+                .map_err(|_| ParseError::UnexpectedToken {
+                    expected: "positional parameter assignment target",
+                    actual: raw.clone(),
+                })?;
+            Ok(AssignTarget::Parameter(index))
+        }
         [name] => Ok(AssignTarget::Name(name.clone())),
         [relation, field] => Ok(AssignTarget::Field {
             relation: relation.clone(),
@@ -2245,6 +2257,24 @@ mod tests {
         assert!(*strict);
         assert_eq!(into_targets, &vec![AssignTarget::Name("rec".into())]);
         assert_eq!(using_exprs, &vec!["1".to_string()]);
+    }
+
+    #[test]
+    fn parse_positional_parameter_assignment_target() {
+        let block = parse_block(
+            "
+            begin
+                $1 := -1;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::Assign { target, expr } = unline(&block.statements[0]) else {
+            panic!("expected assignment statement");
+        };
+        assert_eq!(target, &AssignTarget::Parameter(1));
+        assert_eq!(expr, "-1");
     }
 
     #[test]

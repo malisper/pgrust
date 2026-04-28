@@ -4602,6 +4602,13 @@ fn resolve_assign_target(
     env: &CompileEnv,
 ) -> Result<(usize, SqlType), ParseError> {
     match target {
+        AssignTarget::Parameter(index) => env
+            .get_parameter(*index)
+            .map(|var| (var.slot, var.ty))
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "existing positional parameter assignment target",
+                actual: format!("${index}"),
+            }),
         AssignTarget::Name(name) => env
             .get_var(name)
             .map(|var| (var.slot, var.ty))

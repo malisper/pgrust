@@ -76,6 +76,7 @@ pub struct RaiseUsingOption {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssignTarget {
     Name(String),
+    Parameter(usize),
     Field { relation: String, field: String },
 }
 

@@ -48827,6 +48827,54 @@ fn plpgsql_dynamic_execute_statement_supports_into_and_using() {
 }
 
 #[test]
+fn plpgsql_out_parameter_assignment_supports_positional_target() {
+    let dir = temp_dir("plpgsql_out_param_assignment");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function out_param_rows(out int4, out int4) returns setof record language plpgsql as $$ begin $1 := -1; $2 := -2; return next; $1 := 10; $2 := 20; return next; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from out_param_rows()"),
+        vec![
+            vec![Value::Int32(-1), Value::Int32(-2)],
+            vec![Value::Int32(10), Value::Int32(20)],
+        ]
+    );
+}
+
+#[test]
+fn plpgsql_raise_placeholder_mismatch_fails_at_create_time() {
+    let dir = temp_dir("plpgsql_raise_placeholder_validation");
+    let db = Database::open(&dir, 64).unwrap();
+
+    let too_many = db
+        .execute(
+            1,
+            "create function bad_raise_many(x int4) returns int4 language plpgsql as $$ begin raise notice 'missing placeholder', x; return x; end $$",
+        )
+        .unwrap_err();
+    assert!(
+        format!("{too_many:?}").contains("too many parameters specified for RAISE"),
+        "{too_many:?}"
+    );
+
+    let too_few = db
+        .execute(
+            1,
+            "create function bad_raise_few(x int4) returns int4 language plpgsql as $$ begin raise notice '%, %', x; return x; end $$",
+        )
+        .unwrap_err();
+    assert!(
+        format!("{too_few:?}").contains("too few parameters specified for RAISE"),
+        "{too_few:?}"
+    );
+}
+
+#[test]
 fn plpgsql_return_query_execute_supports_using() {
     let dir = temp_dir("plpgsql_return_query_execute_using");
     let db = Database::open(&dir, 64).unwrap();
