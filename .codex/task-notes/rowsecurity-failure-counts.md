@@ -137,3 +137,12 @@ Catalog readability bucket:
 - `scripts/cargo_isolated.sh check` passed.
 - Latest rowsecurity regression result: `655/774` matched, `119` mismatches,
   `2083` diff lines. New diff copied to `/tmp/diffs/rowsecurity.diff`.
+
+COPY FROM RLS bucket:
+- Protocol `COPY FROM STDIN` start validation now rejects ordinary RLS users
+  before entering copy mode, matching PostgreSQL's "COPY FROM not supported
+  with row-level security" behavior.
+- Focused COPY wire-protocol and row-loading tests passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result: `656/774` matched, `118` mismatches,
+  `2068` diff lines. New diff copied to `/tmp/diffs/rowsecurity.diff`.

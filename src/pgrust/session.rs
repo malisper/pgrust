@@ -12366,6 +12366,18 @@ impl Session {
             desc.visible_column_indexes()
         };
         check_relation_column_privileges(&ctx, relation_oid, 'a', target_indexes.iter().copied())?;
+        if relation_row_security_is_enabled_for_user(
+            relation_oid,
+            catalog.current_user_oid(),
+            &catalog,
+        )? {
+            return Err(ExecError::DetailedError {
+                message: "COPY FROM not supported with row-level security".into(),
+                detail: None,
+                hint: Some("Use INSERT statements instead.".into()),
+                sqlstate: "0A000",
+            });
+        }
         let validation_default_indexes = if copy.options.default_marker.is_some() {
             desc.visible_column_indexes()
         } else {
