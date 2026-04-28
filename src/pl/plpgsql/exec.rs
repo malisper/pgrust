@@ -2830,6 +2830,10 @@ fn execute_for_query_source(
         CompiledForQuerySource::Static { plan } => {
             execute_function_query_result(plan, compiled, state, ctx)
         }
+        CompiledForQuerySource::NoTuples { sql } => Err(with_sql_statement_context(
+            select_into_no_tuples_error(),
+            Some(sql),
+        )),
         CompiledForQuerySource::Dynamic {
             sql_expr,
             using_exprs,
@@ -3628,7 +3632,8 @@ fn execute_dynamic_for_query(
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<FunctionQueryResult, ExecError> {
-    let result = execute_dynamic_statement(sql_expr, using_exprs, compiled, state, ctx)?;
+    let sql = eval_dynamic_sql(sql_expr, using_exprs, state, ctx)?;
+    let result = execute_dynamic_sql_statement(&sql, true, compiled, state, ctx)?;
     statement_result_to_query_result(result, "PL/pgSQL EXECUTE did not produce rows")
 }
 
@@ -3675,6 +3680,16 @@ fn execute_dynamic_statement(
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
+    let sql = eval_dynamic_sql(sql_expr, using_exprs, state, ctx)?;
+    execute_dynamic_sql_statement(&sql, false, compiled, state, ctx)
+}
+
+fn eval_dynamic_sql(
+    sql_expr: &CompiledExpr,
+    using_exprs: &[CompiledExpr],
+    state: &FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<String, ExecError> {
     let sql_value = eval_function_expr(sql_expr, &state.values, ctx)?;
     if matches!(sql_value, Value::Null) {
         return Err(function_runtime_error(
@@ -3703,8 +3718,16 @@ fn execute_dynamic_statement(
         // SQL literals here until that lower layer exists.
         substitute_dynamic_query_params(sql_text, &using_values, ctx)?
     };
-    let sql = sql.trim().trim_end_matches(';').trim_end().to_string();
+    Ok(sql.trim().trim_end_matches(';').trim_end().to_string())
+}
 
+fn execute_dynamic_sql_statement(
+    sql: &str,
+    must_return_tuples: bool,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
     let catalog = ctx.catalog.clone().ok_or_else(|| {
         function_runtime_error(
             "user-defined functions require executor catalog context",
@@ -3740,6 +3763,16 @@ fn execute_dynamic_statement(
                 .map_err(ExecError::Parse)?,
                 ctx,
             ),
+            crate::backend::parser::Statement::CreateTableAs(_) if must_return_tuples => {
+                Err(select_into_no_tuples_error())
+            }
+            crate::backend::parser::Statement::Unsupported(unsupported)
+                if must_return_tuples
+                    && unsupported.feature == "SELECT form"
+                    && unsupported.sql.to_ascii_lowercase().contains(" into ") =>
+            {
+                Err(select_into_no_tuples_error())
+            }
             crate::backend::parser::Statement::Insert(stmt) => {
                 let xid = ctx.ensure_write_xid()?;
                 let cid = ctx.next_command_id;
@@ -3823,6 +3856,7 @@ fn execute_dynamic_statement(
         source: Box::new(err),
         context: format!("SQL statement \"{sql}\""),
     })
+    .map_err(|err| with_sql_statement_context(err, Some(sql)))
 }
 
 fn resolve_dynamic_prepared_statement(
@@ -5989,6 +6023,10 @@ fn function_runtime_error(
     sqlstate: &'static str,
 ) -> ExecError {
     function_runtime_error_with_hint(message, detail, None, sqlstate)
+}
+
+fn select_into_no_tuples_error() -> ExecError {
+    function_runtime_error("SELECT INTO query does not return tuples", None, "42601")
 }
 
 fn function_runtime_error_with_hint(

@@ -49675,6 +49675,49 @@ fn plpgsql_return_query_execute_supports_using() {
 }
 
 #[test]
+fn plpgsql_return_query_select_into_reports_no_tuples() {
+    let dir = temp_dir("plpgsql_return_query_select_into_no_tuples");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function static_return_query_select_into() returns setof int4 language plpgsql as $$
+         begin
+           return query select 10 into no_such_table;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function dynamic_return_query_select_into() returns setof int4 language plpgsql as $$
+         begin
+           return query execute 'select 10 into no_such_table';
+         end
+         $$",
+    )
+    .unwrap();
+
+    for function_name in [
+        "static_return_query_select_into",
+        "dynamic_return_query_select_into",
+    ] {
+        let err = db
+            .execute(1, &format!("select * from {function_name}()"))
+            .unwrap_err();
+        let (message, sqlstate) = exec_error_detailed_message_sqlstate(&err)
+            .unwrap_or_else(|| panic!("expected detailed no-tuples error, got {err:?}"));
+        assert_eq!(message, "SELECT INTO query does not return tuples");
+        assert_eq!(sqlstate, "42601");
+        assert!(exec_error_context_contains(
+            &err,
+            "SQL statement \"select 10 into no_such_table\""
+        ));
+        assert!(exec_error_context_contains(&err, "at RETURN QUERY"));
+    }
+}
+
+#[test]
 fn plpgsql_open_cursor_for_execute_supports_using() {
     let dir = temp_dir("plpgsql_open_cursor_execute_using");
     let db = Database::open(&dir, 64).unwrap();

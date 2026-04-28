@@ -171,6 +171,9 @@ pub(crate) enum CompiledForQuerySource {
     Static {
         plan: PlannedStmt,
     },
+    NoTuples {
+        sql: String,
+    },
     Dynamic {
         sql_expr: CompiledExpr,
         using_exprs: Vec<CompiledExpr>,
@@ -2004,14 +2007,7 @@ fn compile_return_query_stmt(
     }
 
     let source = match source {
-        ForQuerySource::Static(sql) => CompiledForQuerySource::Static {
-            plan: compile_static_query_source(
-                sql,
-                catalog,
-                env,
-                "RETURN QUERY SELECT ... or RETURN QUERY VALUES (...)",
-            )?,
-        },
+        ForQuerySource::Static(sql) => compile_return_query_static_source(sql, catalog, env)?,
         ForQuerySource::Execute {
             sql_expr,
             using_exprs,
@@ -2030,6 +2026,41 @@ fn compile_return_query_stmt(
         }
     };
     Ok(CompiledStmt::ReturnQuery { source })
+}
+
+fn compile_return_query_static_source(
+    sql: &str,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<CompiledForQuerySource, ParseError> {
+    let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
+    match parse_statement(&rewritten_sql)? {
+        Statement::Select(stmt) => Ok(CompiledForQuerySource::Static {
+            plan: plan_select_for_env(&stmt, catalog, env)?,
+        }),
+        Statement::Values(stmt) => Ok(CompiledForQuerySource::Static {
+            plan: plan_values_for_env(&stmt, catalog, env)?,
+        }),
+        Statement::CreateTableAs(_) => Ok(CompiledForQuerySource::NoTuples {
+            sql: normalize_sql_context_text(&rewritten_sql),
+        }),
+        Statement::Unsupported(unsupported)
+            if unsupported.feature == "SELECT form"
+                && find_next_top_level_keyword(&unsupported.sql, &["into"]).is_some() =>
+        {
+            Ok(CompiledForQuerySource::NoTuples {
+                sql: normalize_sql_context_text(&unsupported.sql),
+            })
+        }
+        other => Err(ParseError::UnexpectedToken {
+            expected: "RETURN QUERY SELECT ... or RETURN QUERY VALUES (...)",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+fn normalize_sql_context_text(sql: &str) -> String {
+    sql.trim().trim_end_matches(';').trim_end().to_string()
 }
 
 fn compile_perform_stmt(
