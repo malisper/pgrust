@@ -18,7 +18,8 @@ use super::tablecmds::{
     index_key_values_for_row, insert_index_entry_for_row, materialize_generated_columns,
     project_returning_row_with_old_new, rollback_inserted_row, row_matches_index_predicate,
     slot_toast_context, temporal_arbiter_conflicts_with_existing_row,
-    validate_pending_no_action_checks, write_insert_heap_row, write_updated_row,
+    validate_pending_no_action_checks, validate_pending_outbound_foreign_key_checks,
+    write_insert_heap_row, write_updated_row,
 };
 use super::trigger::{RuntimeTriggers, TriggerTransitionCapture};
 
@@ -270,7 +271,13 @@ fn run_conflict_update(
         None,
     )?;
     match write_result {
-        WriteUpdatedRowResult::Updated(_new_tid, no_action_checks) => {
+        WriteUpdatedRowResult::Updated(
+            _new_tid,
+            _write_info,
+            no_action_checks,
+            outbound_checks,
+        ) => {
+            validate_pending_outbound_foreign_key_checks(outbound_checks, ctx)?;
             validate_pending_no_action_checks(no_action_checks, ctx)?;
             if let Some(triggers) = triggers {
                 if let Some(capture) = transition_capture {

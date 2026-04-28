@@ -49,7 +49,9 @@ use super::explain::{
     format_explain_plan_with_subplans, format_verbose_explain_plan_json_with_catalog,
     format_verbose_explain_plan_with_catalog, push_explain_line,
 };
-use super::partition::{exec_find_partition, exec_setup_partition_tuple_routing};
+use super::partition::{
+    exec_find_partition, exec_setup_partition_tuple_routing, partition_root_oid,
+};
 use super::trigger::RuntimeTriggers;
 use super::upsert::execute_insert_on_conflict_rows;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
@@ -975,9 +977,23 @@ fn validate_maintenance_targets(
 
 #[derive(Debug, Clone)]
 pub(crate) enum WriteUpdatedRowResult {
-    Updated(ItemPointerData, Vec<PendingNoActionForeignKeyCheck>),
+    Updated(
+        ItemPointerData,
+        UpdatedRowWriteInfo,
+        Vec<PendingNoActionForeignKeyCheck>,
+        Vec<PendingOutboundForeignKeyCheck>,
+    ),
     TupleUpdated(ItemPointerData),
     AlreadyModified,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct UpdatedRowWriteInfo {
+    relation_oid: u32,
+    relation_name: String,
+    desc: RelationDesc,
+    constraints: BoundRelationConstraints,
+    values: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1860,6 +1876,213 @@ pub(crate) fn rollback_inserted_row(
     Ok(())
 }
 
+struct PartitionUpdateDestination {
+    relation_info: PartitionResultRelInfo,
+    values: Vec<Value>,
+}
+
+fn route_updated_partition_row(
+    catalog: &dyn CatalogLookup,
+    relation_name: &str,
+    relation_oid: u32,
+    relation_constraints: &BoundRelationConstraints,
+    indexes: &[BoundIndexRelation],
+    toast_index: Option<&BoundIndexRelation>,
+    current_values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Option<PartitionUpdateDestination>, ExecError> {
+    let Some(current_relation) = catalog.relation_by_oid(relation_oid) else {
+        return Ok(None);
+    };
+    if !current_relation.relispartition {
+        return Ok(None);
+    }
+    let root_oid = partition_root_oid(catalog, relation_oid)?.unwrap_or(relation_oid);
+    let Some(root_relation) = catalog.relation_by_oid(root_oid) else {
+        return Ok(None);
+    };
+    let Some(root_values) =
+        remap_child_row_to_parent(current_values, &current_relation.desc, &root_relation.desc)
+    else {
+        return Ok(None);
+    };
+    let mut proute = exec_setup_partition_tuple_routing(catalog, &root_relation)?;
+    let routed = exec_find_partition(catalog, &mut proute, &root_relation, &root_values, ctx)?;
+    if routed.relation_oid == relation_oid {
+        return Ok(None);
+    }
+    let routed_values = remap_partition_row(&root_values, &root_relation.desc, &routed.desc)?;
+    let relation_info = PartitionResultRelInfo::new(
+        catalog,
+        relation_name,
+        relation_oid,
+        relation_constraints,
+        indexes,
+        toast_index,
+        routed,
+    )?;
+    Ok(Some(PartitionUpdateDestination {
+        relation_info,
+        values: routed_values,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn move_updated_row_to_partition(
+    relation_name: &str,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    desc: &RelationDesc,
+    referenced_by_foreign_keys: &[BoundReferencedByForeignKey],
+    destination: PartitionUpdateDestination,
+    current_tid: ItemPointerData,
+    current_old_values: &[Value],
+    current_values: &[Value],
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+) -> Result<WriteUpdatedRowResult, ExecError> {
+    apply_inbound_foreign_key_actions_on_update(
+        relation_name,
+        referenced_by_foreign_keys,
+        current_old_values,
+        current_values,
+        ForeignKeyActionPhase::BeforeParentWrite,
+        ctx,
+        xid,
+        cid,
+        waiter,
+    )?;
+
+    let destination = destination;
+    let inserted_tid = write_insert_heap_row(
+        &destination.relation_info.relation_name,
+        destination.relation_info.relation.rel,
+        destination.relation_info.relation.toast,
+        destination.relation_info.toast_index.as_ref(),
+        &destination.relation_info.relation.desc,
+        &destination.relation_info.relation_constraints,
+        &[],
+        &destination.values,
+        ctx,
+        xid,
+        cid,
+    )?;
+    maintain_indexes_for_row(
+        destination.relation_info.relation.rel,
+        &destination.relation_info.relation.desc,
+        &destination.relation_info.indexes,
+        &destination.values,
+        inserted_tid,
+        ctx,
+    )?;
+    crate::backend::executor::enforce_outbound_foreign_keys_for_insert(
+        &destination.relation_info.relation_name,
+        destination.relation_info.relation.rel,
+        &destination.relation_info.relation_constraints.foreign_keys,
+        &destination.values,
+        crate::backend::executor::InsertForeignKeyCheckPhase::AfterIndexInsert,
+        ctx,
+    )?;
+
+    let old_tuple = if toast.is_some() {
+        Some(heap_fetch(&*ctx.pool, ctx.client_id, rel, current_tid)?)
+    } else {
+        None
+    };
+    let delete_snapshot = ctx.snapshot.clone();
+    match heap_delete_with_waiter(
+        &*ctx.pool,
+        ctx.client_id,
+        rel,
+        &ctx.txns,
+        xid,
+        current_tid,
+        &delete_snapshot,
+        waiter,
+    ) {
+        Ok(()) => {}
+        Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+            let _ = rollback_inserted_row(
+                destination.relation_info.relation.rel,
+                destination.relation_info.relation.toast,
+                &destination.relation_info.relation.desc,
+                inserted_tid,
+                ctx,
+                xid,
+            );
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_update());
+            }
+            return Ok(WriteUpdatedRowResult::TupleUpdated(new_ctid));
+        }
+        Err(HeapError::TupleAlreadyModified(_)) => {
+            let _ = rollback_inserted_row(
+                destination.relation_info.relation.rel,
+                destination.relation_info.relation.toast,
+                &destination.relation_info.relation.desc,
+                inserted_tid,
+                ctx,
+                xid,
+            );
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_update());
+            }
+            return Ok(WriteUpdatedRowResult::AlreadyModified);
+        }
+        Err(err) => {
+            let _ = rollback_inserted_row(
+                destination.relation_info.relation.rel,
+                destination.relation_info.relation.toast,
+                &destination.relation_info.relation.desc,
+                inserted_tid,
+                ctx,
+                xid,
+            );
+            return Err(err.into());
+        }
+    }
+    if let (Some(toast), Some(old_tuple)) = (toast, old_tuple.as_ref()) {
+        delete_external_from_tuple(ctx, toast, desc, old_tuple, xid)?;
+    }
+    let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
+        relation_name,
+        referenced_by_foreign_keys,
+        current_old_values,
+        current_values,
+        ForeignKeyActionPhase::AfterParentWrite,
+        ctx,
+        xid,
+        cid,
+        waiter,
+    )?;
+    validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
+    let pending_no_action_checks = collect_no_action_checks_on_update(
+        relation_name,
+        referenced_by_foreign_keys,
+        current_old_values,
+        current_values,
+        ctx,
+    )?;
+    Ok(WriteUpdatedRowResult::Updated(
+        inserted_tid,
+        UpdatedRowWriteInfo {
+            relation_oid: destination.relation_info.relation.relation_oid,
+            relation_name: destination.relation_info.relation_name,
+            desc: destination.relation_info.relation.desc,
+            constraints: destination.relation_info.relation_constraints,
+            values: destination.values,
+        },
+        pending_no_action_checks,
+        Vec::new(),
+    ))
+}
+
 pub(crate) fn write_updated_row(
     relation_name: &str,
     rel: crate::backend::storage::smgr::RelFileLocator,
@@ -1913,6 +2136,34 @@ pub(crate) fn write_updated_row(
         &current_values,
         ctx,
     )?;
+    if let Some(catalog) = ctx.catalog.clone()
+        && let Some(destination) = route_updated_partition_row(
+            catalog.as_ref(),
+            relation_name,
+            relation_oid,
+            relation_constraints,
+            indexes,
+            toast_index,
+            &current_values,
+            ctx,
+        )?
+    {
+        return move_updated_row_to_partition(
+            relation_name,
+            rel,
+            toast,
+            desc,
+            referenced_by_foreign_keys,
+            destination,
+            current_tid,
+            current_old_values,
+            &current_values,
+            ctx,
+            xid,
+            cid,
+            waiter,
+        );
+    }
     crate::backend::executor::enforce_relation_constraints(
         relation_name,
         desc,
@@ -1940,9 +2191,15 @@ pub(crate) fn write_updated_row(
         Some(current_tid),
         ctx,
     )?;
+    let (pending_outbound_foreign_keys, immediate_outbound_foreign_keys): (Vec<_>, Vec<_>) =
+        relation_constraints
+            .foreign_keys
+            .iter()
+            .cloned()
+            .partition(|constraint| constraint.period_column_index.is_some());
     crate::backend::executor::enforce_outbound_foreign_keys(
         relation_name,
-        &relation_constraints.foreign_keys,
+        &immediate_outbound_foreign_keys,
         Some(current_old_values),
         &current_values,
         ctx,
@@ -2009,9 +2266,28 @@ pub(crate) fn write_updated_row(
                 &current_values,
                 ctx,
             )?;
+            let pending_outbound_checks = (!pending_outbound_foreign_keys.is_empty()).then(|| {
+                PendingOutboundForeignKeyCheck {
+                    relation_name: relation_name.to_string(),
+                    constraints: pending_outbound_foreign_keys,
+                    old_values: current_old_values
+                        .iter()
+                        .map(Value::to_owned_value)
+                        .collect(),
+                    new_values: current_values.iter().map(Value::to_owned_value).collect(),
+                }
+            });
             Ok(WriteUpdatedRowResult::Updated(
                 new_tid,
+                UpdatedRowWriteInfo {
+                    relation_oid,
+                    relation_name: relation_name.to_string(),
+                    desc: desc.clone(),
+                    constraints: relation_constraints.clone(),
+                    values: current_values.iter().map(Value::to_owned_value).collect(),
+                },
                 pending_no_action_checks,
+                pending_outbound_checks.into_iter().collect(),
             ))
         }
         Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
@@ -2284,6 +2560,41 @@ pub(crate) fn enforce_exclusion_constraints_against_values(
                     constraint,
                     values,
                     existing,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn enforce_temporal_constraints_against_values(
+    relation_name: &str,
+    desc: &RelationDesc,
+    constraints: &BoundRelationConstraints,
+    values: &[Value],
+    existing_rows: &[Vec<Value>],
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+) -> Result<(), ExecError> {
+    for constraint in &constraints.temporal {
+        if !constraint.enforced {
+            continue;
+        }
+        validate_temporal_period_value(relation_name, desc, constraint, values)?;
+        if temporal_constraint_skips_conflict_check(constraint, values) {
+            continue;
+        }
+        for existing in existing_rows {
+            if temporal_constraint_skips_conflict_check(constraint, existing) {
+                continue;
+            }
+            if temporal_rows_conflict(constraint, values, existing)? {
+                return Err(temporal_exclusion_violation(
+                    desc,
+                    relation_name,
+                    constraint,
+                    values,
+                    existing,
+                    datetime_config,
                 ));
             }
         }
@@ -3071,6 +3382,25 @@ pub(crate) struct PendingNoActionForeignKeyCheck {
     relation_name: String,
     inbound_constraint: BoundReferencedByForeignKey,
     old_key_values: Vec<Value>,
+    old_parent_values: Option<Vec<Value>>,
+    replacement_parent_values: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingOutboundForeignKeyCheck {
+    relation_name: String,
+    constraints: Vec<BoundForeignKeyConstraint>,
+    old_values: Vec<Value>,
+    new_values: Vec<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingUpdatedExclusionCheck {
+    relation_oid: u32,
+    relation_name: String,
+    desc: RelationDesc,
+    constraints: BoundRelationConstraints,
+    values: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3108,6 +3438,16 @@ pub(crate) fn validate_pending_no_action_checks(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     for recheck in pending {
+        if let Some(old_parent_values) = recheck.old_parent_values.as_deref() {
+            crate::backend::executor::enforce_deferred_inbound_foreign_key_check(
+                &recheck.relation_name,
+                &recheck.inbound_constraint,
+                old_parent_values,
+                recheck.replacement_parent_values.as_deref(),
+                ctx,
+            )?;
+            continue;
+        }
         if referenced_row_exists_for_no_action(
             &recheck.inbound_constraint,
             &recheck.old_key_values,
@@ -3119,6 +3459,54 @@ pub(crate) fn validate_pending_no_action_checks(
             &recheck.relation_name,
             &recheck.inbound_constraint,
             &recheck.old_key_values,
+            ctx,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_pending_updated_exclusion_checks(
+    pending: &[PendingUpdatedExclusionCheck],
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    for (index, check) in pending.iter().enumerate() {
+        let previous_values = pending[..index]
+            .iter()
+            .filter(|previous| previous.relation_oid == check.relation_oid)
+            .map(|previous| previous.values.clone())
+            .collect::<Vec<_>>();
+        if previous_values.is_empty() {
+            continue;
+        }
+        enforce_temporal_constraints_against_values(
+            &check.relation_name,
+            &check.desc,
+            &check.constraints,
+            &check.values,
+            &previous_values,
+            &ctx.datetime_config,
+        )?;
+        enforce_exclusion_constraints_against_values(
+            &check.relation_name,
+            &check.desc,
+            &check.constraints,
+            &check.values,
+            &previous_values,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_pending_outbound_foreign_key_checks(
+    pending: Vec<PendingOutboundForeignKeyCheck>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for check in pending {
+        crate::backend::executor::enforce_outbound_foreign_keys(
+            &check.relation_name,
+            &check.constraints,
+            Some(&check.old_values),
+            &check.new_values,
             ctx,
         )?;
     }
@@ -3183,7 +3571,10 @@ fn foreign_key_key_values(values: &[Value], indexes: &[usize]) -> Vec<Value> {
 }
 
 fn defer_foreign_key_if_needed(
+    relation_name: &str,
     constraint: &BoundReferencedByForeignKey,
+    old_parent_values: &[Value],
+    replacement_parent_values: Option<&[Value]>,
     ctx: &ExecutorContext,
 ) -> bool {
     if ctx.constraint_timing(
@@ -3195,7 +3586,16 @@ fn defer_foreign_key_if_needed(
         return false;
     }
     if let Some(tracker) = ctx.deferred_foreign_keys.as_ref() {
-        tracker.record(constraint.constraint_oid);
+        tracker.record_parent_foreign_key_check(
+            constraint.constraint_oid,
+            relation_name.to_string(),
+            old_parent_values
+                .iter()
+                .map(Value::to_owned_value)
+                .collect::<Vec<_>>(),
+            replacement_parent_values
+                .map(|values| values.iter().map(Value::to_owned_value).collect::<Vec<_>>()),
+        );
     }
     true
 }
@@ -3222,17 +3622,33 @@ fn collect_no_action_checks_on_update(
         {
             continue;
         }
-        if defer_foreign_key_if_needed(constraint, ctx) {
+        if defer_foreign_key_if_needed(
+            relation_name,
+            constraint,
+            previous_values,
+            Some(values),
+            ctx,
+        ) {
             continue;
         }
         if constraint.referenced_period_column_index.is_some() {
-            crate::backend::executor::enforce_inbound_foreign_keys_on_update(
-                relation_name,
-                std::slice::from_ref(constraint),
-                previous_values,
-                values,
-                ctx,
-            )?;
+            pending.push(PendingNoActionForeignKeyCheck {
+                relation_name: relation_name.to_string(),
+                inbound_constraint: constraint.clone(),
+                old_key_values: foreign_key_key_values(
+                    previous_values,
+                    &constraint.referenced_column_indexes,
+                ),
+                old_parent_values: Some(
+                    previous_values
+                        .iter()
+                        .map(Value::to_owned_value)
+                        .collect::<Vec<_>>(),
+                ),
+                replacement_parent_values: Some(
+                    values.iter().map(Value::to_owned_value).collect::<Vec<_>>(),
+                ),
+            });
             continue;
         }
         pending.push(PendingNoActionForeignKeyCheck {
@@ -3242,6 +3658,8 @@ fn collect_no_action_checks_on_update(
                 previous_values,
                 &constraint.referenced_column_indexes,
             ),
+            old_parent_values: None,
+            replacement_parent_values: None,
         });
     }
     Ok(pending)
@@ -3263,22 +3681,30 @@ fn collect_no_action_checks_on_delete(
         {
             continue;
         }
-        if defer_foreign_key_if_needed(constraint, ctx) {
+        if defer_foreign_key_if_needed(relation_name, constraint, values, None, ctx) {
             continue;
         }
         if constraint.referenced_period_column_index.is_some() {
-            crate::backend::executor::enforce_inbound_foreign_keys_on_delete(
-                relation_name,
-                std::slice::from_ref(constraint),
-                values,
-                ctx,
-            )?;
+            pending.push(PendingNoActionForeignKeyCheck {
+                relation_name: relation_name.to_string(),
+                inbound_constraint: constraint.clone(),
+                old_key_values: foreign_key_key_values(
+                    values,
+                    &constraint.referenced_column_indexes,
+                ),
+                old_parent_values: Some(
+                    values.iter().map(Value::to_owned_value).collect::<Vec<_>>(),
+                ),
+                replacement_parent_values: None,
+            });
             continue;
         }
         pending.push(PendingNoActionForeignKeyCheck {
             relation_name: relation_name.to_string(),
             inbound_constraint: constraint.clone(),
             old_key_values: foreign_key_key_values(values, &constraint.referenced_column_indexes),
+            old_parent_values: None,
+            replacement_parent_values: None,
         });
     }
     Ok(pending)
@@ -8197,6 +8623,8 @@ pub fn execute_update_with_waiter(
                 )?,
             };
             let mut pending_no_action_checks = Vec::new();
+            let mut pending_outbound_checks = Vec::new();
+            let mut pending_updated_exclusion_checks = Vec::new();
 
             for (tid, original_values) in target_rows {
                 ctx.check_for_interrupts()?;
@@ -8256,8 +8684,21 @@ pub fn execute_update_with_waiter(
                         cid,
                         waiter,
                     ) {
-                        Ok(WriteUpdatedRowResult::Updated(_new_tid, no_action_checks)) => {
+                        Ok(WriteUpdatedRowResult::Updated(
+                            _new_tid,
+                            write_info,
+                            no_action_checks,
+                            outbound_checks,
+                        )) => {
                             pending_no_action_checks.extend(no_action_checks);
+                            pending_outbound_checks.extend(outbound_checks);
+                            pending_updated_exclusion_checks.push(PendingUpdatedExclusionCheck {
+                                relation_oid: write_info.relation_oid,
+                                relation_name: write_info.relation_name,
+                                desc: write_info.desc,
+                                constraints: write_info.constraints,
+                                values: write_info.values,
+                            });
                             ctx.session_stats
                                 .write()
                                 .note_relation_update(target.relation_oid);
@@ -8340,6 +8781,8 @@ pub fn execute_update_with_waiter(
                     }
                 }
             }
+            validate_pending_updated_exclusion_checks(&pending_updated_exclusion_checks, ctx)?;
+            validate_pending_outbound_foreign_key_checks(pending_outbound_checks, ctx)?;
             validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
 
             if let Some(triggers) = &triggers {
@@ -8561,6 +9004,8 @@ fn execute_update_from_joined_input(
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
         let mut pending_no_action_checks = Vec::new();
+        let mut pending_outbound_checks = Vec::new();
+        let mut pending_updated_exclusion_checks = Vec::new();
 
         while let Some(slot) = state.exec_proc_node(ctx)? {
             ctx.check_for_interrupts()?;
@@ -8647,8 +9092,21 @@ fn execute_update_from_joined_input(
                     cid,
                     waiter,
                 )? {
-                    WriteUpdatedRowResult::Updated(new_tid, no_action_checks) => {
+                    WriteUpdatedRowResult::Updated(
+                        new_tid,
+                        write_info,
+                        no_action_checks,
+                        outbound_checks,
+                    ) => {
                         pending_no_action_checks.extend(no_action_checks);
+                        pending_outbound_checks.extend(outbound_checks);
+                        pending_updated_exclusion_checks.push(PendingUpdatedExclusionCheck {
+                            relation_oid: write_info.relation_oid,
+                            relation_name: write_info.relation_name,
+                            desc: write_info.desc,
+                            constraints: write_info.constraints,
+                            values: write_info.values,
+                        });
                         ctx.session_stats
                             .write()
                             .note_relation_update(target.relation_oid);
@@ -8711,6 +9169,8 @@ fn execute_update_from_joined_input(
             }
         }
 
+        validate_pending_updated_exclusion_checks(&pending_updated_exclusion_checks, ctx)?;
+        validate_pending_outbound_foreign_key_checks(pending_outbound_checks, ctx)?;
         validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
 
         if stmt.returning.is_empty() {

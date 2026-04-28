@@ -4056,7 +4056,27 @@ impl Database {
                         )?;
                         if let Some(parent_oid) = lowered.partition_parent_oid {
                             let next_cid = self
+                                .reconcile_partitioned_parent_keys_for_attached_child_in_transaction(
+                                    client_id,
+                                    xid,
+                                    next_cid,
+                                    parent_oid,
+                                    relation.relation_oid,
+                                    configured_search_path,
+                                    catalog_effects,
+                                )?;
+                            let next_cid = self
                                 .reconcile_partitioned_parent_indexes_for_attached_child_in_transaction(
+                                    client_id,
+                                    xid,
+                                    next_cid,
+                                    parent_oid,
+                                    relation.relation_oid,
+                                    configured_search_path,
+                                    catalog_effects,
+                                )?;
+                            let next_cid = self
+                                .reconcile_partitioned_parent_foreign_keys_for_attached_child_in_transaction(
                                     client_id,
                                     xid,
                                     next_cid,
@@ -4204,7 +4224,27 @@ impl Database {
                 )?;
                 if let Some(parent_oid) = lowered.partition_parent_oid {
                     let next_cid = self
+                        .reconcile_partitioned_parent_keys_for_attached_child_in_transaction(
+                            client_id,
+                            xid,
+                            next_cid,
+                            parent_oid,
+                            relation.relation_oid,
+                            configured_search_path,
+                            catalog_effects,
+                        )?;
+                    let next_cid = self
                         .reconcile_partitioned_parent_indexes_for_attached_child_in_transaction(
+                            client_id,
+                            xid,
+                            next_cid,
+                            parent_oid,
+                            relation.relation_oid,
+                            configured_search_path,
+                            catalog_effects,
+                        )?;
+                    let next_cid = self
+                        .reconcile_partitioned_parent_foreign_keys_for_attached_child_in_transaction(
                             client_id,
                             xid,
                             next_cid,

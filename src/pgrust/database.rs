@@ -99,8 +99,8 @@ use crate::pl::plpgsql::PlpgsqlFunctionCache;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
     ensure_can_set_role, ensure_relation_owner, map_catalog_error,
-    reject_column_with_foreign_key_dependencies, reject_index_with_referencing_foreign_keys,
-    reject_relation_with_dependent_views, validate_alter_table_add_column,
+    reject_index_with_referencing_foreign_keys, reject_relation_with_dependent_views,
+    validate_alter_table_add_column,
 };
 pub(crate) use large_objects::LargeObjectRuntime;
 use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};

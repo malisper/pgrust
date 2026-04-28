@@ -58,6 +58,37 @@ fn maybe_defer_constraint(
     true
 }
 
+fn maybe_defer_parent_constraint(
+    ctx: &ExecutorContext,
+    relation_name: &str,
+    constraint: &BoundReferencedByForeignKey,
+    old_parent_values: &[Value],
+    replacement_parent_values: Option<&[Value]>,
+) -> bool {
+    if ctx.constraint_timing(
+        constraint.constraint_oid,
+        constraint.deferrable,
+        constraint.initially_deferred,
+    ) != ConstraintTiming::Deferred
+    {
+        return false;
+    }
+    let Some(tracker) = ctx.deferred_foreign_keys.as_ref() else {
+        return false;
+    };
+    tracker.record_parent_foreign_key_check(
+        constraint.constraint_oid,
+        relation_name.to_string(),
+        old_parent_values
+            .iter()
+            .map(Value::to_owned_value)
+            .collect::<Vec<_>>(),
+        replacement_parent_values
+            .map(|values| values.iter().map(Value::to_owned_value).collect::<Vec<_>>()),
+    );
+    true
+}
+
 fn foreign_key_check_trigger_enabled(
     constraint: &BoundForeignKeyConstraint,
     is_update: bool,
@@ -316,11 +347,12 @@ pub(crate) fn enforce_inbound_foreign_keys_on_update(
         ) {
             continue;
         }
-        if maybe_defer_constraint(
+        if maybe_defer_parent_constraint(
             ctx,
-            constraint.constraint_oid,
-            constraint.deferrable,
-            constraint.initially_deferred,
+            relation_name,
+            constraint,
+            previous_values,
+            Some(values),
         ) {
             continue;
         }
@@ -362,12 +394,7 @@ pub(crate) fn enforce_inbound_foreign_keys_on_delete(
         if !foreign_key_action_trigger_enabled_on_delete(constraint, ctx) {
             continue;
         }
-        if maybe_defer_constraint(
-            ctx,
-            constraint.constraint_oid,
-            constraint.deferrable,
-            constraint.initially_deferred,
-        ) {
+        if maybe_defer_parent_constraint(ctx, relation_name, constraint, values, None) {
             continue;
         }
         if constraint.referenced_period_column_index.is_some() {
@@ -409,6 +436,48 @@ pub(crate) fn enforce_inbound_foreign_key_reference(
     Ok(())
 }
 
+pub(crate) fn enforce_deferred_inbound_foreign_key_check(
+    relation_name: &str,
+    constraint: &BoundReferencedByForeignKey,
+    old_parent_values: &[Value],
+    replacement_parent_values: Option<&[Value]>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let key_values = extract_key_values(old_parent_values, &constraint.referenced_column_indexes);
+    if key_values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(());
+    }
+    if constraint.referenced_period_column_index.is_some() {
+        if temporal_child_reference_would_be_invalid(
+            constraint,
+            old_parent_values,
+            replacement_parent_values,
+            ctx,
+        )? {
+            return Err(inbound_foreign_key_violation(
+                relation_name,
+                constraint,
+                &key_values,
+                ctx,
+            ));
+        }
+        return Ok(());
+    }
+    if replacement_parent_values.is_some_and(|replacement| {
+        row_matches_key(
+            replacement,
+            &constraint.referenced_column_indexes,
+            &key_values,
+        )
+    }) {
+        return Ok(());
+    }
+    if referenced_parent_key_exists_for_no_action(constraint, &key_values, ctx)? {
+        return Ok(());
+    }
+    enforce_inbound_foreign_key_reference(relation_name, constraint, &key_values, ctx)
+}
+
 fn enforce_inbound_foreign_key(
     relation_name: &str,
     constraint: &BoundReferencedByForeignKey,
@@ -440,6 +509,52 @@ fn enforce_inbound_foreign_key_restrict(
     Ok(())
 }
 
+fn referenced_parent_key_exists_for_no_action(
+    constraint: &BoundReferencedByForeignKey,
+    key_values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    let mut snapshot = ctx.snapshot.clone();
+    snapshot.current_cid = CommandId::MAX;
+    let partitioned_catalog = ctx.catalog.as_ref().and_then(|catalog| {
+        catalog
+            .relation_by_oid(constraint.referenced_relation_oid)
+            .is_some_and(|relation| relation.relkind == 'p')
+            .then(|| catalog.clone())
+    });
+    if let Some(catalog) = partitioned_catalog {
+        for leaf in partition_leaf_relations(catalog.as_ref(), constraint.referenced_relation_oid)?
+        {
+            let leaf_key_indexes = map_column_indexes_by_name(
+                &constraint.referenced_desc,
+                &leaf.desc,
+                &constraint.referenced_column_indexes,
+            )?;
+            if heap_has_matching_row(
+                leaf.rel,
+                leaf.toast,
+                &leaf.desc,
+                &leaf_key_indexes,
+                key_values,
+                &snapshot,
+                ctx,
+            )? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    heap_has_matching_row(
+        constraint.referenced_rel,
+        constraint.referenced_toast,
+        &constraint.referenced_desc,
+        &constraint.referenced_column_indexes,
+        key_values,
+        &snapshot,
+        ctx,
+    )
+}
+
 fn inbound_foreign_key_violation(
     relation_name: &str,
     constraint: &BoundReferencedByForeignKey,
@@ -452,19 +567,19 @@ fn inbound_foreign_key_violation(
                 "Key ({})=({}) is still referenced from table \"{}\".",
                 constraint.referenced_column_names.join(", "),
                 render_key_values(key_values, ctx),
-                constraint.child_relation_name
+                constraint.display_child_relation_name
             )
         } else {
             format!(
                 "Key is still referenced from table \"{}\".",
-                constraint.child_relation_name
+                constraint.display_child_relation_name
             )
         };
     ExecError::ForeignKeyViolation {
-        constraint: constraint.constraint_name.clone(),
+        constraint: constraint.display_constraint_name.clone(),
         message: format!(
             "update or delete on table \"{relation_name}\" violates foreign key constraint \"{}\" on table \"{}\"",
-            constraint.constraint_name, constraint.child_relation_name
+            constraint.display_constraint_name, constraint.display_child_relation_name
         ),
         detail: Some(detail),
     }
@@ -482,19 +597,19 @@ fn inbound_restrict_foreign_key_violation(
                 "Key ({})=({}) is referenced from table \"{}\".",
                 constraint.referenced_column_names.join(", "),
                 render_key_values(key_values, ctx),
-                constraint.child_relation_name
+                constraint.display_child_relation_name
             )
         } else {
             format!(
                 "Key is referenced from table \"{}\".",
-                constraint.child_relation_name
+                constraint.display_child_relation_name
             )
         };
     ExecError::ForeignKeyViolation {
-        constraint: constraint.constraint_name.clone(),
+        constraint: constraint.display_constraint_name.clone(),
         message: format!(
             "update or delete on table \"{relation_name}\" violates RESTRICT setting of foreign key constraint \"{}\" on table \"{}\"",
-            constraint.constraint_name, constraint.child_relation_name
+            constraint.display_constraint_name, constraint.display_child_relation_name
         ),
         detail: Some(detail),
     }
@@ -635,6 +750,43 @@ fn temporal_referenced_key_exists(
     };
     let mut snapshot = ctx.snapshot.clone();
     snapshot.current_cid = CommandId::MAX;
+    if let Some(catalog) = ctx.catalog.clone()
+        && catalog
+            .relation_by_oid(constraint.referenced_relation_oid)
+            .is_some_and(|relation| relation.relkind == 'p')
+    {
+        let mut parent_periods = Vec::new();
+        for leaf in partition_leaf_relations(catalog.as_ref(), constraint.referenced_relation_oid)?
+        {
+            let leaf_key_indexes = map_column_indexes_by_name(
+                &constraint.referenced_desc,
+                &leaf.desc,
+                &constraint.referenced_column_indexes,
+            )?;
+            let leaf_period_index = map_column_indexes_by_name(
+                &constraint.referenced_desc,
+                &leaf.desc,
+                &[referenced_period_index],
+            )?
+            .into_iter()
+            .next();
+            parent_periods.extend(collect_temporal_parent_periods(
+                leaf.rel,
+                leaf.toast,
+                &leaf.desc,
+                &constraint.column_indexes,
+                Some(period_index),
+                values,
+                &leaf_key_indexes,
+                leaf_period_index,
+                None,
+                None,
+                &snapshot,
+                ctx,
+            )?);
+        }
+        return temporal_periods_cover(&parent_periods, child_period);
+    }
     let parent_periods = collect_temporal_parent_periods(
         constraint.referenced_rel,
         constraint.referenced_toast,

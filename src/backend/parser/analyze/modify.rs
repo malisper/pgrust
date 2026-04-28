@@ -3268,20 +3268,6 @@ pub(crate) fn bind_update_with_outer_scopes(
         &[],
     )?;
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
-    if entry.relkind == 'p'
-        && let Some(partitioned) = entry.partitioned_table.as_ref()
-    {
-        let assigned = assignments_partition_key_update(
-            &stmt.assignments,
-            &entry.desc,
-            partitioned.partattrs.as_slice(),
-        );
-        if assigned {
-            return Err(ParseError::FeatureNotSupported(
-                "updating partition key columns on partitioned tables".into(),
-            ));
-        }
-    }
     if stmt.from.is_some() {
         return bind_update_from(stmt, catalog, outer_scopes, &local_ctes, &entry);
     }
@@ -3803,19 +3789,4 @@ pub(crate) fn bind_delete_with_outer_scopes(
         required_privileges: vec![delete_privilege_requirement(&entry, &stmt.table_name)],
         subplans: Vec::new(),
     })
-}
-
-fn assignments_partition_key_update(
-    assignments: &[crate::include::nodes::parsenodes::Assignment],
-    desc: &RelationDesc,
-    partattrs: &[i16],
-) -> bool {
-    let key_columns = partattrs
-        .iter()
-        .filter_map(|attnum| desc.columns.get(attnum.saturating_sub(1) as usize))
-        .map(|column| column.name.to_ascii_lowercase())
-        .collect::<std::collections::BTreeSet<_>>();
-    assignments
-        .iter()
-        .any(|assignment| key_columns.contains(&assignment.target.column.to_ascii_lowercase()))
 }

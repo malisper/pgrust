@@ -92,3 +92,48 @@ in focused smoke output. Remaining diffs are broader: missing USING INDEX rename
 notice, DROP COLUMN CASCADE dependency behavior, temporal FK debug-value detail
 formatting, temporal FK update/delete semantics, and REFERENCES to partitioned
 tables.
+
+2026-04-28 implementation update:
+Goal:
+Finish the remaining `without_overlaps` failures after commit `b6a13c229`.
+
+Key decisions:
+Prevalidated PERIOD FK actions before compound/multi ALTER execution so invalid
+constraints are rejected before catalog writes. Used existing FK drop machinery
+for DROP COLUMN CASCADE. Split deferred FK tracking into outbound child-row
+checks and inbound parent-row checks so deferred parent update/delete reports
+the PostgreSQL parent-side error. Bound partition leaf FKs/reference-side FKs
+from partitioned parents and added display metadata for PostgreSQL-style
+partitioned referenced-side FK names. Allowed partition-key UPDATE on
+partitioned roots and implemented leaf row movement. Added statement-end
+temporal/exclusion checks for updated rows before deferred outbound FK checks.
+Threaded DateStyle into ALTER ADD CONSTRAINT FK validation and coerced range
+string defaults through range input.
+
+Files touched:
+src/backend/commands/tablecmds.rs
+src/backend/commands/upsert.rs
+src/backend/executor/foreign_keys.rs
+src/backend/executor/mod.rs
+src/backend/parser/analyze/constraints.rs
+src/backend/parser/analyze/modify.rs
+src/pgrust/database.rs
+src/pgrust/database/commands/alter_column_default.rs
+src/pgrust/database/commands/constraint.rs
+src/pgrust/database/commands/create.rs
+src/pgrust/database/commands/drop_column.rs
+src/pgrust/database/commands/partition.rs
+src/pgrust/database/ddl.rs
+src/pgrust/database/foreign_keys.rs
+src/pgrust/database_tests.rs
+src/pgrust/session.rs
+
+Tests run:
+scripts/cargo_isolated.sh check
+scripts/cargo_isolated.sh test --lib --quiet without_overlaps_remaining
+scripts/cargo_isolated.sh test --lib --quiet partitioned_root_dml_routes_rows_and_only_root_is_empty
+scripts/run_regression.sh --test without_overlaps --results-dir /tmp/pgrust_regress_without_overlaps_final4 --timeout 180 --port 55480
+  Result: PASS, 643/643 queries matched.
+
+Remaining:
+No remaining `without_overlaps` regression diffs in the focused run.
