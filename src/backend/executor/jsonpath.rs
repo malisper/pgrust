@@ -66,6 +66,10 @@ enum Expr {
         inner: Box<Expr>,
         method: Method,
     },
+    Access {
+        inner: Box<Expr>,
+        step: Step,
+    },
     Filter {
         inner: Box<Expr>,
         predicate: Box<Expr>,
@@ -317,6 +321,10 @@ fn jsonpath_expr_datatype_status(
             jsonpath_expr_datatype_status(inner, ctx);
             jsonpath_method_datatype_status(method, ctx)
         }
+        Expr::Access { inner, step } => {
+            let status = jsonpath_expr_datatype_status(inner, ctx);
+            jsonpath_step_datatype_status(step, status, ctx)
+        }
         Expr::And(left, right) | Expr::Or(left, right) => {
             jsonpath_expr_datatype_status(left, ctx);
             jsonpath_expr_datatype_status(right, ctx);
@@ -498,6 +506,10 @@ fn eval_expr(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<Vec<JsonbValue>, E
                     out.extend(apply_method_values(&value, method, ctx)?);
                     Ok(out)
                 })
+        }
+        Expr::Access { inner, step } => {
+            let values = eval_expr(inner, ctx)?;
+            apply_step(values, step, ctx)
         }
         Expr::Filter { inner, predicate } => {
             eval_expr(inner, ctx)?
@@ -3026,6 +3038,10 @@ fn render_expr(expr: &Expr, out: &mut String) {
             render_operand(inner, out);
             render_method(method, out);
         }
+        Expr::Access { inner, step } => {
+            render_access_base(inner, out);
+            render_step(step, out);
+        }
         Expr::Filter { inner, predicate } => {
             render_operand(inner, out);
             out.push_str(" ? (");
@@ -3072,6 +3088,17 @@ fn render_operand(expr: &Expr, out: &mut String) {
             out.push(')');
         }
         _ => render_expr(expr, out),
+    }
+}
+
+fn render_access_base(expr: &Expr, out: &mut String) {
+    match expr {
+        Expr::Path { .. } | Expr::Access { .. } => render_expr(expr, out),
+        _ => {
+            out.push('(');
+            render_expr(expr, out);
+            out.push(')');
+        }
     }
 }
 
@@ -3221,6 +3248,22 @@ fn jsonpath_syntax_error_near(token: impl AsRef<str>) -> ExecError {
     ))
 }
 
+fn jsonpath_syntax_error_end() -> ExecError {
+    exec_jsonpath_error("syntax error at end of jsonpath input")
+}
+
+fn jsonpath_numeric_trailing_junk_error(token: &str) -> ExecError {
+    exec_jsonpath_error(&format!(
+        "trailing junk after numeric literal at or near \"{token}\" of jsonpath input"
+    ))
+}
+
+fn jsonpath_invalid_numeric_literal_error(token: &str) -> ExecError {
+    exec_jsonpath_error(&format!(
+        "invalid numeric literal at or near \"{token}\" of jsonpath input"
+    ))
+}
+
 fn render_subscript_selection(selection: &SubscriptSelection, out: &mut String) {
     match selection {
         SubscriptSelection::Index(expr) => render_subscript_expr(expr, out),
@@ -3293,6 +3336,262 @@ fn render_quoted_string(text: &str, out: &mut String) {
     out.push('"');
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonPathNumberKind {
+    Decimal,
+    NonDecimal,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct JsonPathNumberMatch {
+    end: usize,
+    kind: JsonPathNumberKind,
+}
+
+fn scan_jsonpath_number(
+    input: &str,
+    start: usize,
+) -> Result<Option<JsonPathNumberMatch>, ExecError> {
+    let bytes = input.as_bytes();
+    let Some(&first) = bytes.get(start) else {
+        return Ok(None);
+    };
+    if !first.is_ascii_digit()
+        && !(first == b'.' && bytes.get(start + 1).is_some_and(u8::is_ascii_digit))
+    {
+        return Ok(None);
+    }
+
+    if bytes.get(start) == Some(&b'0')
+        && matches!(
+            bytes.get(start + 1).copied(),
+            Some(b'b' | b'B' | b'o' | b'O' | b'x' | b'X')
+        )
+        && bytes.get(start + 2) == Some(&b'_')
+    {
+        return Err(jsonpath_syntax_error_end());
+    }
+
+    let mut best: Option<JsonPathNumberMatch> = None;
+    for candidate in [
+        scan_jsonpath_real(bytes, start).map(|end| JsonPathNumberMatch {
+            end,
+            kind: JsonPathNumberKind::Decimal,
+        }),
+        scan_jsonpath_decimal(bytes, start).map(|end| JsonPathNumberMatch {
+            end,
+            kind: JsonPathNumberKind::Decimal,
+        }),
+        scan_jsonpath_decinteger(bytes, start).map(|end| JsonPathNumberMatch {
+            end,
+            kind: JsonPathNumberKind::Decimal,
+        }),
+        scan_jsonpath_nondecimal_integer(bytes, start, b'x', b'X', |byte| byte.is_ascii_hexdigit())
+            .map(|end| JsonPathNumberMatch {
+                end,
+                kind: JsonPathNumberKind::NonDecimal,
+            }),
+        scan_jsonpath_nondecimal_integer(bytes, start, b'o', b'O', |byte| {
+            matches!(byte, b'0'..=b'7')
+        })
+        .map(|end| JsonPathNumberMatch {
+            end,
+            kind: JsonPathNumberKind::NonDecimal,
+        }),
+        scan_jsonpath_nondecimal_integer(bytes, start, b'b', b'B', |byte| {
+            matches!(byte, b'0' | b'1')
+        })
+        .map(|end| JsonPathNumberMatch {
+            end,
+            kind: JsonPathNumberKind::NonDecimal,
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if match best {
+            Some(current) => candidate.end > current.end,
+            None => true,
+        } {
+            best = Some(candidate);
+        }
+    }
+
+    let Some(number) = best else {
+        return Ok(None);
+    };
+    if number.kind == JsonPathNumberKind::Decimal
+        && let Some(err) = jsonpath_decimal_trailing_error(input, start, number.end)
+    {
+        return Err(err);
+    }
+    Ok(Some(number))
+}
+
+fn scan_jsonpath_real(bytes: &[u8], start: usize) -> Option<usize> {
+    [
+        scan_jsonpath_decimal(bytes, start),
+        scan_jsonpath_decinteger(bytes, start),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|mantissa_end| {
+        if !matches!(bytes.get(mantissa_end).copied(), Some(b'e' | b'E')) {
+            return None;
+        }
+        scan_jsonpath_exponent(bytes, mantissa_end + 1)
+    })
+    .max()
+}
+
+fn scan_jsonpath_decimal(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) == Some(&b'.') {
+        return scan_jsonpath_digits(bytes, start + 1, |byte| byte.is_ascii_digit());
+    }
+
+    let whole_end = scan_jsonpath_decinteger(bytes, start)?;
+    if bytes.get(whole_end) != Some(&b'.') {
+        return None;
+    }
+    let fraction_start = whole_end + 1;
+    Some(
+        scan_jsonpath_digits(bytes, fraction_start, |byte| byte.is_ascii_digit())
+            .unwrap_or(fraction_start),
+    )
+}
+
+fn scan_jsonpath_decinteger(bytes: &[u8], start: usize) -> Option<usize> {
+    match bytes.get(start).copied()? {
+        b'0' => Some(start + 1),
+        b'1'..=b'9' => scan_jsonpath_digits(bytes, start, |byte| byte.is_ascii_digit()),
+        _ => None,
+    }
+}
+
+fn scan_jsonpath_nondecimal_integer(
+    bytes: &[u8],
+    start: usize,
+    lower_prefix: u8,
+    upper_prefix: u8,
+    valid_digit: impl Fn(u8) -> bool + Copy,
+) -> Option<usize> {
+    if bytes.get(start) != Some(&b'0')
+        || !matches!(bytes.get(start + 1).copied(), Some(prefix) if prefix == lower_prefix || prefix == upper_prefix)
+    {
+        return None;
+    }
+    scan_jsonpath_digits(bytes, start + 2, valid_digit)
+}
+
+fn scan_jsonpath_exponent(bytes: &[u8], mut start: usize) -> Option<usize> {
+    if matches!(bytes.get(start).copied(), Some(b'+' | b'-')) {
+        start += 1;
+    }
+    scan_jsonpath_digits(bytes, start, |byte| byte.is_ascii_digit())
+}
+
+fn scan_jsonpath_digits(
+    bytes: &[u8],
+    mut offset: usize,
+    valid_digit: impl Fn(u8) -> bool + Copy,
+) -> Option<usize> {
+    if !bytes.get(offset).copied().is_some_and(valid_digit) {
+        return None;
+    }
+    offset += 1;
+    while offset < bytes.len() {
+        if bytes[offset] == b'_' {
+            if bytes.get(offset + 1).copied().is_some_and(valid_digit) {
+                offset += 2;
+            } else {
+                break;
+            }
+        } else if valid_digit(bytes[offset]) {
+            offset += 1;
+        } else {
+            break;
+        }
+    }
+    Some(offset)
+}
+
+fn jsonpath_decimal_trailing_error(input: &str, start: usize, end: usize) -> Option<ExecError> {
+    let next = input[end..].chars().next()?;
+    if !is_jsonpath_other_char(next) {
+        return None;
+    }
+
+    if next == 'e' || next == 'E' {
+        let after_e = end + next.len_utf8();
+        if let Some(sign @ ('+' | '-')) = input[after_e..].chars().next() {
+            let after_sign = after_e + sign.len_utf8();
+            if !input[after_sign..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_digit())
+            {
+                return Some(jsonpath_invalid_numeric_literal_error(
+                    &input[start..after_sign],
+                ));
+            }
+        }
+    }
+
+    if next.is_ascii_digit()
+        && input[start..end] == *"0"
+        && input[end + next.len_utf8()..]
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+    if next == '_'
+        && input[end + next.len_utf8()..]
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_')
+    {
+        return None;
+    }
+
+    let token_end = end + next.len_utf8();
+    Some(jsonpath_numeric_trailing_junk_error(
+        &input[start..token_end],
+    ))
+}
+
+fn is_jsonpath_other_char(ch: char) -> bool {
+    !matches!(
+        ch,
+        '?' | '%'
+            | '$'
+            | '.'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '('
+            | ')'
+            | '|'
+            | '&'
+            | '!'
+            | '='
+            | '<'
+            | '>'
+            | '@'
+            | '#'
+            | ','
+            | '*'
+            | ':'
+            | '-'
+            | '+'
+            | '/'
+            | '\\'
+            | '"'
+    ) && !ch.is_whitespace()
+}
+
 struct Parser<'a> {
     input: &'a str,
     offset: usize,
@@ -3322,7 +3621,7 @@ impl<'a> Parser<'a> {
         let expr = self.parse_or_expr()?;
         self.skip_ws();
         if !self.is_eof() {
-            return Err(exec_jsonpath_error("unexpected trailing jsonpath input"));
+            return Err(jsonpath_syntax_error_end());
         }
         Ok(JsonPath { mode, expr })
     }
@@ -3500,10 +3799,10 @@ impl<'a> Parser<'a> {
             });
         }
         let expr = self.parse_primary()?;
-        self.parse_postfix_methods(expr)
+        self.parse_postfix_expr(expr)
     }
 
-    fn parse_postfix_methods(&mut self, mut expr: Expr) -> Result<Expr, ExecError> {
+    fn parse_postfix_expr(&mut self, mut expr: Expr) -> Result<Expr, ExecError> {
         loop {
             let saved = self.offset;
             self.skip_ws();
@@ -3519,23 +3818,55 @@ impl<'a> Parser<'a> {
                 };
                 continue;
             }
-            if !self.consume(".") {
-                self.offset = saved;
-                return Ok(expr);
+            if self.consume("[") {
+                expr = Expr::Access {
+                    inner: Box::new(expr),
+                    step: self.parse_subscript_step()?,
+                };
+                continue;
             }
-            let Some(ident) = self.parse_ident() else {
-                self.offset = saved;
-                return Ok(expr);
-            };
-            if !self.consume("(") {
-                self.offset = saved;
-                return Ok(expr);
+            if self.consume(".") {
+                if self.consume("*") {
+                    let step = if self.consume("*") {
+                        let (min_depth, max_depth) = self.parse_recursive_quantifier()?;
+                        Step::Recursive {
+                            min_depth,
+                            max_depth,
+                        }
+                    } else {
+                        Step::MemberWildcard
+                    };
+                    expr = Expr::Access {
+                        inner: Box::new(expr),
+                        step,
+                    };
+                    continue;
+                }
+                if let Some(ident) = self.parse_ident() {
+                    if self.consume("(") {
+                        let method = self.parse_method(&ident)?;
+                        expr = Expr::MethodCall {
+                            inner: Box::new(expr),
+                            method,
+                        };
+                    } else {
+                        expr = Expr::Access {
+                            inner: Box::new(expr),
+                            step: Step::Member(ident),
+                        };
+                    }
+                    continue;
+                }
+                if let Some(key) = self.parse_string()? {
+                    expr = Expr::Access {
+                        inner: Box::new(expr),
+                        step: Step::Member(key),
+                    };
+                    continue;
+                }
             }
-            let method = self.parse_method(&ident)?;
-            expr = Expr::MethodCall {
-                inner: Box::new(expr),
-                method,
-            };
+            self.offset = saved;
+            return Ok(expr);
         }
     }
 
@@ -3588,6 +3919,9 @@ impl<'a> Parser<'a> {
         if let Some(number) = self.parse_number()? {
             return Ok(Expr::Literal(number));
         }
+        if matches!(self.peek(), Some(ch) if ch == '_' || ch.is_ascii_alphabetic()) {
+            return Err(jsonpath_syntax_error_end());
+        }
         Err(exec_jsonpath_error("invalid jsonpath expression"))
     }
 
@@ -3621,39 +3955,7 @@ impl<'a> Parser<'a> {
                     }
                 }
             } else if self.consume("[") {
-                self.skip_ws();
-                if self.consume("*") {
-                    self.skip_ws();
-                    self.expect("]")?;
-                    steps.push(Step::IndexWildcard);
-                } else {
-                    let mut selections = Vec::new();
-                    loop {
-                        let start = self.parse_subscript_expr()?;
-                        self.skip_ws();
-                        if self.consume_keyword("to") {
-                            self.skip_ws();
-                            let allow_postfix_filter = self.allow_postfix_filter;
-                            self.allow_postfix_filter = false;
-                            let end = self.parse_additive_expr();
-                            self.allow_postfix_filter = allow_postfix_filter;
-                            let end = end?;
-                            selections.push(SubscriptSelection::Range(
-                                subscript_expr_to_expr(start)?,
-                                end,
-                            ));
-                        } else {
-                            selections.push(SubscriptSelection::Index(start));
-                        }
-                        self.skip_ws();
-                        if !self.consume(",") {
-                            break;
-                        }
-                        self.skip_ws();
-                    }
-                    self.expect("]")?;
-                    steps.push(Step::Subscripts(selections));
-                }
+                steps.push(self.parse_subscript_step()?);
             } else if self.consume("?") {
                 self.skip_ws();
                 self.expect("(")?;
@@ -3687,6 +3989,42 @@ impl<'a> Parser<'a> {
         self.skip_ws();
         self.expect("}")?;
         Ok((start, end))
+    }
+
+    fn parse_subscript_step(&mut self) -> Result<Step, ExecError> {
+        self.skip_ws();
+        if self.consume("*") {
+            self.skip_ws();
+            self.expect("]")?;
+            return Ok(Step::IndexWildcard);
+        }
+
+        let mut selections = Vec::new();
+        loop {
+            let start = self.parse_subscript_expr()?;
+            self.skip_ws();
+            if self.consume_keyword("to") {
+                self.skip_ws();
+                let allow_postfix_filter = self.allow_postfix_filter;
+                self.allow_postfix_filter = false;
+                let end = self.parse_additive_expr();
+                self.allow_postfix_filter = allow_postfix_filter;
+                let end = end?;
+                selections.push(SubscriptSelection::Range(
+                    subscript_expr_to_expr(start)?,
+                    end,
+                ));
+            } else {
+                selections.push(SubscriptSelection::Index(start));
+            }
+            self.skip_ws();
+            if !self.consume(",") {
+                break;
+            }
+            self.skip_ws();
+        }
+        self.expect("]")?;
+        Ok(Step::Subscripts(selections))
     }
 
     fn parse_recursive_bound(&mut self) -> Result<RecursiveBound, ExecError> {
@@ -3825,25 +4163,13 @@ impl<'a> Parser<'a> {
 
     fn parse_number(&mut self) -> Result<Option<JsonbValue>, ExecError> {
         let start = self.offset;
-        let _ = self.consume("-");
-        let Some(int_part) = self.take_while(|ch| ch.is_ascii_digit()) else {
-            self.offset = start;
+        let Some(number) = scan_jsonpath_number(self.input, start)? else {
             return Ok(None);
         };
-        let mut text = String::new();
-        if self.input[start..].starts_with('-') {
-            text.push('-');
-        }
-        text.push_str(int_part);
-        if self.consume(".") {
-            text.push('.');
-            let frac = self
-                .take_while(|ch| ch.is_ascii_digit())
-                .ok_or_else(|| exec_jsonpath_error("invalid jsonpath numeric literal"))?;
-            text.push_str(frac);
-        }
+        let text = &self.input[start..number.end];
         let numeric = parse_numeric_text(&text)
             .ok_or_else(|| exec_jsonpath_error("invalid jsonpath numeric literal"))?;
+        self.offset = number.end;
         Ok(Some(JsonbValue::Numeric(numeric)))
     }
 

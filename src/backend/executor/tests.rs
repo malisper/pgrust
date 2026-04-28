@@ -20904,6 +20904,175 @@ fn jsonpath_builtin_method_calls_work() {
 }
 
 #[test]
+fn jsonpath_postfix_access_after_expression_work() {
+    assert_eq!(
+        jsonpath::canonicalize_jsonpath("($).a.b").unwrap(),
+        "$.\"a\".\"b\""
+    );
+    assert_eq!(
+        jsonpath::canonicalize_jsonpath("($.a.b).c.d").unwrap(),
+        "$.\"a\".\"b\".\"c\".\"d\""
+    );
+    assert_eq!(
+        jsonpath::canonicalize_jsonpath("(1.2).e").unwrap(),
+        "(1.2).\"e\""
+    );
+    assert_eq!(
+        jsonpath::canonicalize_jsonpath("1.2.e").unwrap(),
+        "(1.2).\"e\""
+    );
+
+    let base = temp_dir("jsonpath_postfix_access_after_expression");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('{\"a\":{\"b\":1}}', '($).a.b')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            match &rows[0][0] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "1"
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonpath_numeric_literals_work() {
+    for (input, expected) in [
+        (".001", "0.001"),
+        (".001e1", "0.01"),
+        ("1.", "1"),
+        ("1.e1", "10"),
+        ("1e3", "1000"),
+        ("1.2e3", "1200"),
+        ("1..e", "(1).\"e\""),
+        ("1.e3.e", "(1000).\"e\""),
+        ("1.e3.e4", "(1000).\"e4\""),
+        ("0b100101", "37"),
+        ("0o273", "187"),
+        ("0x42F", "1071"),
+        ("1_000_000", "1000000"),
+        ("0x1EEE_FFFF", "518979583"),
+        ("1_000.000_005", "1000.000005"),
+        ("1_000.5e0_1", "10005"),
+    ] {
+        assert_eq!(jsonpath::canonicalize_jsonpath(input).unwrap(), expected);
+    }
+}
+
+#[test]
+fn jsonpath_numeric_literals_error() {
+    fn jsonpath_error_details(input: &str) -> String {
+        match jsonpath::canonicalize_jsonpath(input).unwrap_err() {
+            ExecError::InvalidStorageValue { column, details } if column == "jsonpath" => details,
+            other => panic!("expected jsonpath storage error, got {other:?}"),
+        }
+    }
+
+    for (input, expected) in [
+        (
+            "00",
+            "trailing junk after numeric literal at or near \"00\" of jsonpath input",
+        ),
+        (
+            "1a",
+            "trailing junk after numeric literal at or near \"1a\" of jsonpath input",
+        ),
+        (
+            "1e",
+            "trailing junk after numeric literal at or near \"1e\" of jsonpath input",
+        ),
+        (
+            "1.e",
+            "trailing junk after numeric literal at or near \"1.e\" of jsonpath input",
+        ),
+        (
+            "1.2e",
+            "trailing junk after numeric literal at or near \"1.2e\" of jsonpath input",
+        ),
+        (
+            "100_",
+            "trailing junk after numeric literal at or near \"100_\" of jsonpath input",
+        ),
+        (
+            "1_000_.5",
+            "trailing junk after numeric literal at or near \"1_000_\" of jsonpath input",
+        ),
+        (
+            "1_000.5e_1",
+            "trailing junk after numeric literal at or near \"1_000.5e\" of jsonpath input",
+        ),
+        (
+            "0b",
+            "trailing junk after numeric literal at or near \"0b\" of jsonpath input",
+        ),
+        (
+            "0x",
+            "trailing junk after numeric literal at or near \"0x\" of jsonpath input",
+        ),
+        ("100__000", "syntax error at end of jsonpath input"),
+        ("0b0x", "syntax error at end of jsonpath input"),
+        ("0x0y", "syntax error at end of jsonpath input"),
+        ("0b_10_0101", "syntax error at end of jsonpath input"),
+    ] {
+        assert_eq!(jsonpath_error_details(input), expected);
+    }
+}
+
+#[test]
+fn jsonpath_numeric_pg_input_error_info() {
+    let base = temp_dir("jsonpath_numeric_pg_input_error_info");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select message, detail, hint, sql_error_code from pg_input_error_info('00', 'jsonpath')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text(
+                "trailing junk after numeric literal at or near \"00\" of jsonpath input".into(),
+            ),
+            Value::Null,
+            Value::Null,
+            Value::Text("42601".into()),
+        ]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select message, detail, hint, sql_error_code from pg_input_error_info('1a', 'jsonpath')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text(
+                "trailing junk after numeric literal at or near \"1a\" of jsonpath input".into(),
+            ),
+            Value::Null,
+            Value::Null,
+            Value::Text("42601".into()),
+        ]],
+    );
+}
+
+#[test]
 fn jsonpath_datetime_method_calls_errors() {
     let base = temp_dir("jsonpath_datetime_method_calls_errors");
     let txns = TransactionManager::new_durable(&base).unwrap();

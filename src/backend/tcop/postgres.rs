@@ -64,6 +64,11 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::JsonInput { sqlstate, .. } => sqlstate,
         ExecError::XmlInput { sqlstate, .. } => sqlstate,
         ExecError::DetailedError { sqlstate, .. } => sqlstate,
+        ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath" && is_jsonpath_parse_error(details) =>
+        {
+            "42601"
+        }
         ExecError::Parse(crate::backend::parser::ParseError::InvalidInteger(_))
         | ExecError::Parse(crate::backend::parser::ParseError::InvalidNumeric(_))
         | ExecError::InvalidIntegerInput { .. }
@@ -561,8 +566,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::InvalidFloatInput { value, .. } => value.as_str(),
         ExecError::FloatOutOfRange { value, .. } => value.as_str(),
         ExecError::InvalidStorageValue { details, .. } => {
-            if is_jsonpath_syntax_error(details)
+            if is_jsonpath_parse_error(details)
                 && let Some(position) = find_jsonpath_literal_position(sql)
+                    .or_else(|| find_first_string_literal_position(sql))
             {
                 return Some(position);
             }
@@ -1207,6 +1213,15 @@ fn extract_quoted_error_value(message: &str) -> Option<&str> {
 
 fn is_jsonpath_syntax_error(message: &str) -> bool {
     message.starts_with("syntax error at or near ") && message.ends_with(" of jsonpath input")
+}
+
+fn is_jsonpath_parse_error(message: &str) -> bool {
+    is_jsonpath_syntax_error(message)
+        || message == "syntax error at end of jsonpath input"
+        || message.starts_with("trailing junk after numeric literal at or near ")
+            && message.ends_with(" of jsonpath input")
+        || message.starts_with("invalid numeric literal at or near ")
+            && message.ends_with(" of jsonpath input")
 }
 
 fn is_jsonpath_sql_surface(sql: &str) -> bool {
