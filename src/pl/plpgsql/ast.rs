@@ -106,6 +106,10 @@ pub enum ExceptionCondition {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
+    WithLine {
+        line: usize,
+        stmt: Box<Stmt>,
+    },
     Block(Block),
     Assign {
         target: AssignTarget,

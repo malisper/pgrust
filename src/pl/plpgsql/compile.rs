@@ -199,6 +199,10 @@ pub(crate) enum TriggerReturnedRow {
 
 #[derive(Debug, Clone)]
 pub(crate) enum CompiledStmt {
+    WithLine {
+        line: usize,
+        stmt: Box<CompiledStmt>,
+    },
     Block(CompiledBlock),
     Assign {
         slot: usize,
@@ -1164,6 +1168,10 @@ fn compile_stmt(
     return_contract: Option<&FunctionReturnContract>,
 ) -> Result<CompiledStmt, ParseError> {
     Ok(match stmt {
+        Stmt::WithLine { line, stmt } => CompiledStmt::WithLine {
+            line: *line,
+            stmt: Box::new(compile_stmt(stmt, catalog, env, return_contract)?),
+        },
         Stmt::Block(block) => {
             CompiledStmt::Block(compile_block(block, catalog, env, return_contract)?)
         }

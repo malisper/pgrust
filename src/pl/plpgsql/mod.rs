@@ -55,6 +55,7 @@ fn block_contains_return_expr(block: &Block) -> bool {
 
 fn stmt_contains_return_expr(stmt: &Stmt) -> bool {
     match stmt {
+        Stmt::WithLine { stmt, .. } => stmt_contains_return_expr(stmt),
         Stmt::Return { expr: Some(_) } => true,
         Stmt::Continue => false,
         Stmt::Block(block) => block_contains_return_expr(block),
@@ -67,9 +68,11 @@ fn stmt_contains_return_expr(stmt: &Stmt) -> bool {
                 .any(|(_, body)| body.iter().any(stmt_contains_return_expr))
                 || else_branch.iter().any(stmt_contains_return_expr)
         }
-        Stmt::While { body, .. } | Stmt::ForInt { body, .. } | Stmt::ForQuery { body, .. } => {
-            body.iter().any(stmt_contains_return_expr)
-        }
+        Stmt::While { body, .. }
+        | Stmt::Loop { body }
+        | Stmt::ForInt { body, .. }
+        | Stmt::ForQuery { body, .. }
+        | Stmt::ForEach { body, .. } => body.iter().any(stmt_contains_return_expr),
         _ => false,
     }
 }
@@ -152,6 +155,13 @@ mod tests {
     use super::*;
     use crate::backend::executor::StatementResult;
 
+    fn unline(stmt: &Stmt) -> &Stmt {
+        match stmt {
+            Stmt::WithLine { stmt, .. } => stmt,
+            stmt => stmt,
+        }
+    }
+
     fn run_plpgsql_test<F>(name: &str, f: F)
     where
         F: FnOnce() + Send + 'static,
@@ -200,14 +210,8 @@ mod tests {
             assert_eq!(
                 take_notices(),
                 vec![
-                    PlpgsqlNotice {
-                        level: RaiseLevel::Notice,
-                        message: "value 1".into(),
-                    },
-                    PlpgsqlNotice {
-                        level: RaiseLevel::Notice,
-                        message: "done 7".into(),
-                    }
+                    PlpgsqlNotice::new(RaiseLevel::Notice, "value 1"),
+                    PlpgsqlNotice::new(RaiseLevel::Notice, "done 7"),
                 ]
             );
         });
@@ -236,10 +240,7 @@ mod tests {
             assert_eq!(result, StatementResult::AffectedRows(0));
             assert_eq!(
                 take_notices(),
-                vec![PlpgsqlNotice {
-                    level: RaiseLevel::Notice,
-                    message: "elsif".into(),
-                }]
+                vec![PlpgsqlNotice::new(RaiseLevel::Notice, "elsif")]
             );
         });
     }
@@ -276,10 +277,7 @@ mod tests {
             assert_eq!(execute_do(&stmt).unwrap(), StatementResult::AffectedRows(0));
             assert_eq!(
                 take_notices(),
-                vec![PlpgsqlNotice {
-                    level: RaiseLevel::Info,
-                    message: "r = t".into(),
-                }]
+                vec![PlpgsqlNotice::new(RaiseLevel::Info, "r = t")]
             );
         });
     }
@@ -319,10 +317,7 @@ mod tests {
             assert_eq!(execute_do(&stmt).unwrap(), StatementResult::AffectedRows(0));
             assert_eq!(
                 take_notices(),
-                vec![PlpgsqlNotice {
-                    level: RaiseLevel::Notice,
-                    message: "handled".into(),
-                }]
+                vec![PlpgsqlNotice::new(RaiseLevel::Notice, "handled")]
             );
         });
     }
@@ -347,10 +342,7 @@ mod tests {
             assert_eq!(execute_do(&stmt).unwrap(), StatementResult::AffectedRows(0));
             assert_eq!(
                 take_notices(),
-                vec![PlpgsqlNotice {
-                    level: RaiseLevel::Notice,
-                    message: "handled".into(),
-                }]
+                vec![PlpgsqlNotice::new(RaiseLevel::Notice, "handled")]
             );
         });
     }
@@ -402,10 +394,7 @@ mod tests {
                 assert_eq!(execute_do(&stmt).unwrap(), StatementResult::AffectedRows(0));
                 assert_eq!(
                     take_notices(),
-                    vec![PlpgsqlNotice {
-                        level: RaiseLevel::Notice,
-                        message: "handled".into(),
-                    }]
+                    vec![PlpgsqlNotice::new(RaiseLevel::Notice, "handled")]
                 );
             },
         );
@@ -471,10 +460,7 @@ mod tests {
             assert_eq!(result, StatementResult::AffectedRows(0));
             assert_eq!(
                 take_notices(),
-                vec![PlpgsqlNotice {
-                    level: RaiseLevel::Notice,
-                    message: "done".into(),
-                }]
+                vec![PlpgsqlNotice::new(RaiseLevel::Notice, "done")]
             );
         });
     }
@@ -491,10 +477,7 @@ mod tests {
             assert_eq!(result, StatementResult::AffectedRows(0));
             assert_eq!(
                 take_notices(),
-                vec![PlpgsqlNotice {
-                    level: RaiseLevel::Info,
-                    message: "progress: 3".into(),
-                }]
+                vec![PlpgsqlNotice::new(RaiseLevel::Info, "progress: 3")]
             );
         });
     }
@@ -510,10 +493,7 @@ mod tests {
             assert_eq!(execute_do(&stmt).unwrap(), StatementResult::AffectedRows(0));
             assert_eq!(
                 take_notices(),
-                vec![PlpgsqlNotice {
-                    level: RaiseLevel::Notice,
-                    message: "done %".into(),
-                }]
+                vec![PlpgsqlNotice::new(RaiseLevel::Notice, "done %")]
             );
         });
     }
@@ -565,18 +545,9 @@ mod tests {
             assert_eq!(
                 take_notices(),
                 vec![
-                    PlpgsqlNotice {
-                        level: RaiseLevel::Notice,
-                        message: "2".into(),
-                    },
-                    PlpgsqlNotice {
-                        level: RaiseLevel::Notice,
-                        message: "4".into(),
-                    },
-                    PlpgsqlNotice {
-                        level: RaiseLevel::Notice,
-                        message: "7".into(),
-                    }
+                    PlpgsqlNotice::new(RaiseLevel::Notice, "2"),
+                    PlpgsqlNotice::new(RaiseLevel::Notice, "4"),
+                    PlpgsqlNotice::new(RaiseLevel::Notice, "7"),
                 ]
             );
         });
@@ -692,9 +663,21 @@ mod tests {
             &block.declarations[2],
             Decl::Var(decl) if decl.name == "x" && decl.strict
         ));
-        assert!(matches!(&block.statements[0], Stmt::OpenCursor { .. }));
-        assert!(matches!(&block.statements[1], Stmt::FetchCursor { .. }));
-        assert!(matches!(&block.statements[2], Stmt::CloseCursor { .. }));
-        assert!(matches!(&block.statements[3], Stmt::GetDiagnostics { .. }));
+        assert!(matches!(
+            unline(&block.statements[0]),
+            Stmt::OpenCursor { .. }
+        ));
+        assert!(matches!(
+            unline(&block.statements[1]),
+            Stmt::FetchCursor { .. }
+        ));
+        assert!(matches!(
+            unline(&block.statements[2]),
+            Stmt::CloseCursor { .. }
+        ));
+        assert!(matches!(
+            unline(&block.statements[3]),
+            Stmt::GetDiagnostics { .. }
+        ));
     }
 }

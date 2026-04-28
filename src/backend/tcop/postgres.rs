@@ -19,11 +19,12 @@ use crate::backend::libpq::pqformat::{
     infer_command_tag, infer_dml_returning_command_tag, send_auth_ok, send_backend_key_data,
     send_bind_complete, send_close_complete, send_command_complete, send_copy_data, send_copy_done,
     send_copy_in_response, send_copy_out_response, send_empty_query, send_error,
-    send_error_with_hint, send_error_with_internal_fields, send_no_data, send_notice,
-    send_notice_with_hint, send_notice_with_severity, send_notification_response,
-    send_parameter_description, send_parameter_status, send_parse_complete, send_portal_suspended,
-    send_query_result, send_ready_for_query, send_row_description,
-    send_row_description_with_formats, send_typed_data_row, validate_binary_result_formats,
+    send_error_with_fields, send_error_with_hint, send_error_with_internal_fields, send_no_data,
+    send_notice, send_notice_with_fields, send_notice_with_hint, send_notice_with_severity,
+    send_notification_response, send_parameter_description, send_parameter_status,
+    send_parse_complete, send_portal_suspended, send_query_result, send_ready_for_query,
+    send_row_description, send_row_description_with_formats, send_typed_data_row,
+    validate_binary_result_formats,
 };
 use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
@@ -9445,14 +9446,22 @@ fn handle_close(
 
 fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> io::Result<()> {
     for notice in notices {
-        let (severity, sqlstate) = match notice.level {
-            RaiseLevel::Info => ("INFO", "00000"),
+        let severity = match notice.level {
+            RaiseLevel::Info => "INFO",
             RaiseLevel::Log => continue,
-            RaiseLevel::Notice => ("NOTICE", "00000"),
-            RaiseLevel::Warning => ("WARNING", "01000"),
+            RaiseLevel::Notice => "NOTICE",
+            RaiseLevel::Warning => "WARNING",
             RaiseLevel::Exception => continue,
         };
-        send_notice_with_severity(stream, severity, sqlstate, &notice.message, None, None)?;
+        send_notice_with_fields(
+            stream,
+            severity,
+            &notice.sqlstate,
+            &notice.message,
+            notice.detail.as_deref(),
+            notice.hint.as_deref(),
+            None,
+        )?;
     }
     Ok(())
 }

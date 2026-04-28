@@ -1921,7 +1921,7 @@ pub(crate) fn send_notice(
     detail: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
-    send_notice_with_severity(w, "NOTICE", "00000", message, detail, position)
+    send_notice_with_fields(w, "NOTICE", "00000", message, detail, None, position)
 }
 
 pub(crate) fn send_notice_with_severity(
@@ -1930,6 +1930,18 @@ pub(crate) fn send_notice_with_severity(
     sqlstate: &str,
     message: &str,
     detail: Option<&str>,
+    position: Option<usize>,
+) -> io::Result<()> {
+    send_notice_with_fields(w, severity, sqlstate, message, detail, None, position)
+}
+
+pub(crate) fn send_notice_with_fields(
+    w: &mut impl Write,
+    severity: &str,
+    sqlstate: &str,
+    message: &str,
+    detail: Option<&str>,
+    hint: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
     let mut body = Vec::new();
@@ -1948,6 +1960,11 @@ pub(crate) fn send_notice_with_severity(
     if let Some(detail) = detail {
         body.push(b'D');
         body.extend_from_slice(detail.as_bytes());
+        body.push(0);
+    }
+    if let Some(hint) = hint {
+        body.push(b'H');
+        body.extend_from_slice(hint.as_bytes());
         body.push(0);
     }
     if let Some(position) = position {

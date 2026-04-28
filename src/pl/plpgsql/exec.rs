@@ -54,7 +54,26 @@ use super::compile::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlpgsqlNotice {
     pub level: RaiseLevel,
+    pub sqlstate: String,
     pub message: String,
+    pub detail: Option<String>,
+    pub hint: Option<String>,
+}
+
+impl PlpgsqlNotice {
+    pub fn new(level: RaiseLevel, message: impl Into<String>) -> Self {
+        let sqlstate = match &level {
+            RaiseLevel::Warning => "01000",
+            _ => "00000",
+        };
+        Self {
+            level,
+            sqlstate: sqlstate.into(),
+            message: message.into(),
+            detail: None,
+            hint: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +148,12 @@ enum FunctionControl {
     LoopContinue,
     Return,
     ExitLoop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtraCheckLevel {
+    Warning,
+    Error,
 }
 
 #[derive(Debug)]
@@ -1476,6 +1501,7 @@ fn exec_do_stmt(
     gucs: &HashMap<String, String>,
 ) -> Result<DoControl, ExecError> {
     match stmt {
+        CompiledStmt::WithLine { stmt, .. } => exec_do_stmt(stmt, values, gucs),
         CompiledStmt::Block(block) => exec_do_block(block, values, gucs),
         CompiledStmt::Assign { slot, ty, expr } => {
             values[*slot] = cast_value(eval_do_expr(expr, values)?, *ty)?;
@@ -1884,6 +1910,9 @@ fn exec_function_stmt(
     ctx: &mut ExecutorContext,
 ) -> Result<FunctionControl, ExecError> {
     match stmt {
+        CompiledStmt::WithLine { stmt, .. } => {
+            exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx)
+        }
         CompiledStmt::Block(block) => {
             exec_function_block(block, compiled, expected_record_shape, state, ctx)
         }
@@ -2450,40 +2479,74 @@ fn assign_query_rows_into_targets(
         state.values[compiled.found_slot] = Value::Bool(false);
         return Ok(());
     };
-    if strict && rows.len() > 1 {
-        return Err(function_runtime_error(
-            "query returned more than one row",
-            None,
-            "P0003",
-        ));
+    if rows.len() > 1 {
+        let check_level = if strict {
+            Some(ExtraCheckLevel::Error)
+        } else {
+            plpgsql_extra_check_level(&ctx.gucs, "too_many_rows")
+        };
+        match check_level {
+            Some(ExtraCheckLevel::Error) => {
+                return Err(function_runtime_error_with_hint(
+                    "query returned more than one row",
+                    None,
+                    Some("Make sure the query returns a single row, or use LIMIT 1.".into()),
+                    "P0003",
+                ));
+            }
+            Some(ExtraCheckLevel::Warning) => queue_plpgsql_warning(
+                "query returned more than one row",
+                None,
+                Some("Make sure the query returns a single row, or use LIMIT 1.".into()),
+            ),
+            None => {}
+        }
     }
 
     match targets {
         [CompiledSelectIntoTarget { slot, ty }]
             if matches!(ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite) =>
         {
+            let descriptor = record_descriptor_for_query_target(*ty, columns, ctx)?;
+            if row.len() != descriptor.fields.len() {
+                handle_strict_multi_assignment_or_unexpected_shape(
+                    &ctx.gucs,
+                    descriptor.fields.len(),
+                    row.len(),
+                )?;
+            }
             state.values[*slot] = Value::Record(RecordValue::from_descriptor(
-                anonymous_record_descriptor_for_columns(columns),
-                row.clone(),
+                descriptor.clone(),
+                descriptor
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .map(|(index, field)| {
+                        cast_function_value(
+                            row.get(index).cloned().unwrap_or(Value::Null),
+                            columns.get(index).map(|column| column.sql_type),
+                            field.sql_type,
+                            ctx,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
             ));
         }
         [CompiledSelectIntoTarget { slot, ty }] => {
+            if row.len() != 1 {
+                handle_strict_multi_assignment(&ctx.gucs)?;
+            }
             let value = row.first().cloned().unwrap_or(Value::Null);
             state.values[*slot] = cast_value_with_config(value, *ty, &ctx.datetime_config)?;
         }
         _ => {
             if row.len() != targets.len() {
-                return Err(function_runtime_error(
-                    "query returned an unexpected row shape",
-                    Some(format!(
-                        "expected {} columns, got {}",
-                        targets.len(),
-                        row.len()
-                    )),
-                    "42804",
-                ));
+                handle_strict_multi_assignment(&ctx.gucs)?;
             }
-            for (target, value) in targets.iter().zip(row.iter()) {
+            for (target, value) in targets
+                .iter()
+                .zip(row.iter().chain(std::iter::repeat(&Value::Null)))
+            {
                 state.values[target.slot] =
                     cast_value_with_config(value.clone(), target.ty, &ctx.datetime_config)?;
             }
@@ -3651,32 +3714,27 @@ fn assign_query_row_to_targets(
         {
             let descriptor = record_descriptor_for_query_target(*ty, columns, ctx)?;
             if row.len() != descriptor.fields.len() {
-                return Err(function_runtime_error(
-                    "query returned an unexpected row shape",
-                    Some(format!(
-                        "expected {} columns, got {}",
-                        descriptor.fields.len(),
-                        row.len()
-                    )),
-                    "42804",
-                ));
+                handle_strict_multi_assignment(&ctx.gucs)?;
             }
-            let values = row
+            let values = descriptor
+                .fields
                 .iter()
-                .cloned()
-                .zip(descriptor.fields.iter())
-                .map(|(value, field)| cast_value(value, field.sql_type))
+                .enumerate()
+                .map(|(index, field)| {
+                    cast_function_value(
+                        row.get(index).cloned().unwrap_or(Value::Null),
+                        columns.get(index).map(|column| column.sql_type),
+                        field.sql_type,
+                        ctx,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             state.values[*slot] = Value::Record(RecordValue::from_descriptor(descriptor, values));
             Ok(())
         }
         [CompiledSelectIntoTarget { slot, ty }] => {
             if require_exact_single_scalar_width && row.len() != 1 {
-                return Err(function_runtime_error(
-                    "query returned an unexpected row shape",
-                    Some(format!("expected 1 column, got {}", row.len())),
-                    "42804",
-                ));
+                handle_strict_multi_assignment_or_unexpected_shape(&ctx.gucs, 1, row.len())?;
             }
             let value = row.first().cloned().unwrap_or(Value::Null);
             state.values[*slot] = cast_function_value(
@@ -3689,23 +3747,62 @@ fn assign_query_row_to_targets(
         }
         _ => {
             if row.len() != targets.len() {
-                return Err(function_runtime_error(
-                    "query returned an unexpected row shape",
-                    Some(format!(
-                        "expected {} columns, got {}",
-                        targets.len(),
-                        row.len()
-                    )),
-                    "42804",
-                ));
+                handle_strict_multi_assignment(&ctx.gucs)?;
             }
-            for (index, (target, value)) in targets.iter().zip(row.iter()).enumerate() {
+            for (index, (target, value)) in targets
+                .iter()
+                .zip(row.iter().chain(std::iter::repeat(&Value::Null)))
+                .enumerate()
+            {
                 let source_type = columns.get(index).map(|column| column.sql_type);
                 state.values[target.slot] =
                     cast_function_value(value.clone(), source_type, target.ty, ctx)?;
             }
             Ok(())
         }
+    }
+}
+
+fn handle_strict_multi_assignment(gucs: &HashMap<String, String>) -> Result<(), ExecError> {
+    let detail_for_level =
+        |level_name: &str| format!("strict_multi_assignment check of {level_name} is active.");
+    match plpgsql_extra_check_level(gucs, "strict_multi_assignment") {
+        Some(ExtraCheckLevel::Error) => Err(function_runtime_error_with_hint(
+            "number of source and target fields in assignment does not match",
+            Some(detail_for_level("extra_errors")),
+            Some("Make sure the query returns the exact list of columns.".into()),
+            "42804",
+        )),
+        Some(ExtraCheckLevel::Warning) => {
+            queue_plpgsql_warning(
+                "number of source and target fields in assignment does not match",
+                Some(detail_for_level("extra_warnings")),
+                Some("Make sure the query returns the exact list of columns.".into()),
+            );
+            Ok(())
+        }
+        None => Ok(()),
+    }
+}
+
+fn handle_strict_multi_assignment_or_unexpected_shape(
+    gucs: &HashMap<String, String>,
+    expected: usize,
+    got: usize,
+) -> Result<(), ExecError> {
+    if plpgsql_extra_check_level(gucs, "strict_multi_assignment").is_some() {
+        handle_strict_multi_assignment(gucs)
+    } else {
+        let detail = if expected == 1 {
+            format!("expected 1 column, got {got}")
+        } else {
+            format!("expected {expected} columns, got {got}")
+        };
+        Err(function_runtime_error(
+            "query returned an unexpected row shape",
+            Some(detail),
+            "42804",
+        ))
     }
 }
 
@@ -4505,17 +4602,23 @@ fn finish_raise(
     hint: Option<String>,
 ) -> Result<(), ExecError> {
     let rendered = render_raise_message(message, params)?;
+    let resolved_sqlstate = match level {
+        RaiseLevel::Exception => sqlstate.and_then(resolve_raise_sqlstate).unwrap_or("P0001"),
+        RaiseLevel::Warning => sqlstate.and_then(resolve_raise_sqlstate).unwrap_or("01000"),
+        RaiseLevel::Info | RaiseLevel::Notice => {
+            sqlstate.and_then(resolve_raise_sqlstate).unwrap_or("00000")
+        }
+    };
     match level {
         RaiseLevel::Exception => {
-            let sqlstate = sqlstate.and_then(static_sqlstate).unwrap_or("P0001");
-            if sqlstate == "P0001" && detail.is_none() && hint.is_none() {
+            if resolved_sqlstate == "P0001" && detail.is_none() && hint.is_none() {
                 Err(ExecError::RaiseException(rendered))
             } else {
                 Err(ExecError::DetailedError {
                     message: rendered,
                     detail,
                     hint,
-                    sqlstate,
+                    sqlstate: resolved_sqlstate,
                 })
             }
         }
@@ -4524,12 +4627,19 @@ fn finish_raise(
             NOTICE_QUEUE.with(|queue| {
                 queue.borrow_mut().push(PlpgsqlNotice {
                     level: level.clone(),
+                    sqlstate: resolved_sqlstate.into(),
                     message: rendered,
+                    detail,
+                    hint,
                 })
             });
             Ok(())
         }
     }
+}
+
+fn resolve_raise_sqlstate(value: &str) -> Option<&'static str> {
+    static_sqlstate(value).or_else(|| exception_condition_name_sqlstate(value))
 }
 
 fn static_sqlstate(sqlstate: &str) -> Option<&'static str> {
@@ -4672,10 +4782,19 @@ fn function_runtime_error(
     detail: Option<String>,
     sqlstate: &'static str,
 ) -> ExecError {
+    function_runtime_error_with_hint(message, detail, None, sqlstate)
+}
+
+fn function_runtime_error_with_hint(
+    message: &str,
+    detail: Option<String>,
+    hint: Option<String>,
+    sqlstate: &'static str,
+) -> ExecError {
     ExecError::DetailedError {
         message: message.into(),
         detail,
-        hint: None,
+        hint,
         sqlstate,
     }
 }
@@ -4688,6 +4807,41 @@ fn plpgsql_compile_error(err: ParseError, row: &PgProcRow) -> ExecError {
             row.proname
         ),
     }
+}
+
+fn queue_plpgsql_warning(message: &str, detail: Option<String>, hint: Option<String>) {
+    NOTICE_QUEUE.with(|queue| {
+        queue.borrow_mut().push(PlpgsqlNotice {
+            level: RaiseLevel::Warning,
+            sqlstate: "01000".into(),
+            message: message.into(),
+            detail,
+            hint,
+        })
+    });
+}
+
+fn plpgsql_extra_check_level(
+    gucs: &HashMap<String, String>,
+    check: &str,
+) -> Option<ExtraCheckLevel> {
+    if plpgsql_extra_check_enabled(gucs.get("plpgsql.extra_errors"), check) {
+        Some(ExtraCheckLevel::Error)
+    } else if plpgsql_extra_check_enabled(gucs.get("plpgsql.extra_warnings"), check) {
+        Some(ExtraCheckLevel::Warning)
+    } else {
+        None
+    }
+}
+
+fn plpgsql_extra_check_enabled(value: Option<&String>, check: &str) -> bool {
+    value.is_some_and(|value| {
+        let value = value.trim();
+        value.eq_ignore_ascii_case("all")
+            || value
+                .split(',')
+                .any(|item| item.trim().eq_ignore_ascii_case(check))
+    })
 }
 
 fn with_plpgsql_context(err: ExecError, compiled: &CompiledFunction, action: &str) -> ExecError {
@@ -4763,6 +4917,7 @@ fn has_plpgsql_context_for(err: &ExecError, function_name: &str) -> bool {
 
 fn stmt_context_line(stmt: &CompiledStmt) -> usize {
     match stmt {
+        CompiledStmt::WithLine { line, .. } => *line,
         CompiledStmt::Perform { line, .. } => *line,
         CompiledStmt::Raise { line, .. } => *line,
         CompiledStmt::DynamicExecute { line, .. } => *line,
@@ -4772,6 +4927,7 @@ fn stmt_context_line(stmt: &CompiledStmt) -> usize {
 
 fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
     match stmt {
+        CompiledStmt::WithLine { stmt, .. } => stmt_context_action(stmt),
         CompiledStmt::Block(_) => "statement block",
         CompiledStmt::Assign { .. } => "assignment",
         CompiledStmt::Null => "NULL",

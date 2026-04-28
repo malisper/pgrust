@@ -286,7 +286,8 @@ fn build_alias_target(pair: Pair<'_, Rule>) -> Result<AliasTarget, ParseError> {
 
 fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
-    match inner.as_rule() {
+    let line = inner.as_span().start_pos().line_col().0;
+    let stmt = match inner.as_rule() {
         Rule::nested_block_stmt => {
             let block = inner
                 .into_inner()
@@ -319,7 +320,11 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
             expected: "plpgsql statement",
             actual: inner.as_str().into(),
         }),
-    }
+    }?;
+    Ok(Stmt::WithLine {
+        line,
+        stmt: Box::new(stmt),
+    })
 }
 
 fn build_assign_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
@@ -1364,6 +1369,13 @@ mod tests {
     use super::*;
     use crate::backend::parser::SqlTypeKind;
 
+    fn unline(stmt: &Stmt) -> &Stmt {
+        match stmt {
+            Stmt::WithLine { stmt, .. } => stmt,
+            stmt => stmt,
+        }
+    }
+
     #[test]
     fn parse_basic_block_with_declare_if_for_and_raise() {
         let block = parse_block(
@@ -1409,7 +1421,8 @@ mod tests {
         .unwrap();
 
         assert!(block.declarations.is_empty());
-        assert_eq!(block.statements, vec![Stmt::Null]);
+        assert_eq!(block.statements.len(), 1);
+        assert!(matches!(unline(&block.statements[0]), Stmt::Null));
     }
 
     #[test]
@@ -1454,7 +1467,7 @@ mod tests {
 
         let Stmt::Raise {
             message, params, ..
-        } = &block.statements[0]
+        } = unline(&block.statements[0])
         else {
             panic!("expected raise statement");
         };
@@ -1485,7 +1498,7 @@ mod tests {
             message,
             params,
             ..
-        } = &block.statements[0]
+        } = unline(&block.statements[0])
         else {
             panic!("expected first RAISE statement");
         };
@@ -1495,7 +1508,7 @@ mod tests {
 
         let Stmt::Raise {
             message, params, ..
-        } = &block.statements[1]
+        } = unline(&block.statements[1])
         else {
             panic!("expected second RAISE statement");
         };
@@ -1519,7 +1532,7 @@ mod tests {
             message,
             params,
             ..
-        } = &block.statements[0]
+        } = unline(&block.statements[0])
         else {
             panic!("expected RAISE statement");
         };
@@ -1550,7 +1563,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            &block.statements[0],
+            unline(&block.statements[0]),
             Stmt::Raise {
                 message: Some(message),
                 using_options,
@@ -1558,7 +1571,7 @@ mod tests {
             } if message == "check me" && using_options.len() == 2
         ));
         assert!(matches!(
-            &block.statements[1],
+            unline(&block.statements[1]),
             Stmt::Raise {
                 message: Some(message),
                 params,
@@ -1567,7 +1580,7 @@ mod tests {
             } if message == "value %" && params == &vec!["v".to_string()] && using_options.len() == 1
         ));
         assert!(matches!(
-            &block.statements[2],
+            unline(&block.statements[2]),
             Stmt::Raise {
                 message: None,
                 using_options,
@@ -1575,13 +1588,13 @@ mod tests {
             } if using_options.len() == 2
         ));
         assert!(matches!(
-            &block.statements[3],
+            unline(&block.statements[3]),
             Stmt::Raise {
                 using_options, ..
             } if using_options.len() == 5
         ));
         assert!(matches!(
-            &block.statements[4],
+            unline(&block.statements[4]),
             Stmt::Raise {
                 message: None,
                 using_options,
@@ -1606,7 +1619,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(block.declarations.len(), 1);
-        assert!(matches!(block.statements[0], Stmt::Null));
+        assert!(matches!(unline(&block.statements[0]), Stmt::Null));
     }
 
     #[test]
@@ -1622,7 +1635,7 @@ mod tests {
         )
         .unwrap();
 
-        let Stmt::While { condition, body } = &block.statements[0] else {
+        let Stmt::While { condition, body } = unline(&block.statements[0]) else {
             panic!("expected top-level while statement");
         };
         assert_eq!(condition, "current_value is not null");
@@ -1646,11 +1659,12 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            &block.statements[0],
-            Stmt::Loop { body } if matches!(body.as_slice(), [Stmt::Exit { condition: Some(condition) }] if condition == "not found")
+            unline(&block.statements[0]),
+            Stmt::Loop { body } if body.len() == 1
+                && matches!(unline(&body[0]), Stmt::Exit { condition: Some(condition) } if condition == "not found")
         ));
         assert!(matches!(
-            &block.statements[1],
+            unline(&block.statements[1]),
             Stmt::ForEach {
                 target: ForTarget::List(targets),
                 slice: 1,
@@ -1682,7 +1696,7 @@ mod tests {
         let Stmt::If {
             branches,
             else_branch,
-        } = &block.statements[0]
+        } = unline(&block.statements[0])
         else {
             panic!("expected top-level if statement");
         };
@@ -1706,7 +1720,7 @@ mod tests {
             ",
         )
         .unwrap();
-        assert!(matches!(block.statements[0], Stmt::Block(_)));
+        assert!(matches!(unline(&block.statements[0]), Stmt::Block(_)));
     }
 
     #[test]
@@ -1724,7 +1738,7 @@ mod tests {
         )
         .unwrap();
 
-        let Stmt::Block(nested) = &block.statements[0] else {
+        let Stmt::Block(nested) = unline(&block.statements[0]) else {
             panic!("expected nested block statement");
         };
         assert_eq!(nested.exception_handlers.len(), 1);
@@ -1747,13 +1761,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(block.statements[0], Stmt::Assert { .. }));
+        assert!(matches!(unline(&block.statements[0]), Stmt::Assert { .. }));
         let Stmt::DynamicExecute {
             sql_expr,
             into_targets,
             using_exprs,
             ..
-        } = &block.statements[1]
+        } = unline(&block.statements[1])
         else {
             panic!("expected dynamic EXECUTE statement");
         };
@@ -1780,9 +1794,9 @@ mod tests {
         assert_eq!(block.declarations.len(), 2);
         assert!(matches!(block.declarations[0], Decl::Alias(_)));
         assert!(matches!(block.declarations[1], Decl::Var(_)));
-        assert!(matches!(block.statements[0], Stmt::ExecSql { .. }));
-        assert!(matches!(block.statements[1], Stmt::ExecSql { .. }));
-        assert!(matches!(block.statements[2], Stmt::Perform { .. }));
+        assert!(matches!(unline(&block.statements[0]), Stmt::ExecSql { .. }));
+        assert!(matches!(unline(&block.statements[1]), Stmt::ExecSql { .. }));
+        assert!(matches!(unline(&block.statements[2]), Stmt::Perform { .. }));
     }
 
     #[test]
@@ -1833,7 +1847,7 @@ mod tests {
             target,
             source,
             body,
-        } = &block.statements[0]
+        } = unline(&block.statements[0])
         else {
             panic!("expected query FOR loop");
         };
@@ -1898,7 +1912,7 @@ mod tests {
         )
         .unwrap();
 
-        let Stmt::ForQuery { target, source, .. } = &block.statements[0] else {
+        let Stmt::ForQuery { target, source, .. } = unline(&block.statements[0]) else {
             panic!("expected query FOR loop");
         };
         assert_eq!(target, &ForTarget::Single(AssignTarget::Name("ln".into())));
@@ -1924,7 +1938,7 @@ mod tests {
         )
         .unwrap();
 
-        let Stmt::ForQuery { target, .. } = &block.statements[0] else {
+        let Stmt::ForQuery { target, .. } = unline(&block.statements[0]) else {
             panic!("expected query FOR loop");
         };
         assert_eq!(
