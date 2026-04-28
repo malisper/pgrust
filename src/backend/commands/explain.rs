@@ -1527,15 +1527,15 @@ fn aggregate_group_key_input_names(
     {
         return names;
     }
-    if const_false_filter_result_plan(input).is_none()
-        && let Some(names) = qualified_scan_output_names(input)
-    {
-        return names;
-    }
     if qualify_base_scan {
+        if const_false_filter_result_plan(input).is_none()
+            && let Some(names) = qualified_scan_output_names(input)
+        {
+            return names;
+        }
         return plan_join_output_exprs(input, ctx, true);
     }
-    plan_join_output_exprs(input, ctx, true)
+    input.column_names()
 }
 
 fn group_key_refs_projection_alias(expr: &Expr, input: &Plan, rendered: &str) -> bool {
@@ -3128,7 +3128,13 @@ fn explain_plan_children_with_context(
                     show_costs,
                     verbose,
                     true,
-                    false,
+                    matches!(
+                        plan,
+                        Plan::Append { .. }
+                            | Plan::MergeAppend { .. }
+                            | Plan::OrderBy { .. }
+                            | Plan::IncrementalSort { .. }
+                    ),
                     &child_ctx,
                     lines,
                 );
@@ -3187,7 +3193,7 @@ fn format_partitionwise_aggregate_append_children(
             show_costs,
             verbose,
             true,
-            false,
+            true,
             &child_ctx,
             lines,
         );
@@ -3257,6 +3263,20 @@ fn context_for_sibling_scan(
     reserve_append_parent_alias: bool,
 ) -> VerboseExplainContext {
     let mut child_ctx = ctx.clone();
+    if reserve_append_parent_alias {
+        let inherited_sources =
+            inherited_relation_leaf_sources(child, ctx.alias_through_aggregate_children);
+        if inherited_sources.len() > 1 {
+            for (base_name, alias_base) in inherited_sources {
+                let seen = relations_seen.entry(alias_base.clone()).or_default();
+                child_ctx
+                    .relation_scan_aliases
+                    .insert(base_name, format!("{alias_base}_{}", *seen + 1));
+                *seen += 1;
+            }
+            return child_ctx;
+        }
+    }
     match child_leaf_scan_source(
         child,
         reserve_append_parent_alias,
@@ -3291,6 +3311,98 @@ fn context_for_sibling_scan(
         None => {}
     }
     child_ctx
+}
+
+fn inherited_relation_leaf_sources(
+    plan: &Plan,
+    alias_through_aggregate_children: bool,
+) -> Vec<(String, String)> {
+    let mut sources = Vec::new();
+    collect_inherited_relation_leaf_sources(plan, alias_through_aggregate_children, &mut sources);
+    sources
+}
+
+fn collect_inherited_relation_leaf_sources(
+    plan: &Plan,
+    alias_through_aggregate_children: bool,
+    sources: &mut Vec<(String, String)>,
+) {
+    match plan {
+        Plan::SeqScan { relation_name, .. }
+        | Plan::IndexOnlyScan { relation_name, .. }
+        | Plan::IndexScan { relation_name, .. }
+        | Plan::BitmapHeapScan { relation_name, .. } => {
+            if let Some((_, alias)) = relation_name.rsplit_once(' ') {
+                let root_alias = inherited_root_alias(alias).unwrap_or(alias);
+                sources.push((
+                    relation_name_base(relation_name).to_string(),
+                    root_alias.to_string(),
+                ));
+            }
+        }
+        Plan::Aggregate { input, .. } if alias_through_aggregate_children => {
+            collect_inherited_relation_leaf_sources(
+                input,
+                alias_through_aggregate_children,
+                sources,
+            )
+        }
+        Plan::Aggregate { .. } => {}
+        Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => collect_inherited_relation_leaf_sources(
+            input,
+            alias_through_aggregate_children,
+            sources,
+        ),
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. }
+        | Plan::BitmapOr { children, .. } => {
+            for child in children {
+                collect_inherited_relation_leaf_sources(
+                    child,
+                    alias_through_aggregate_children,
+                    sources,
+                );
+            }
+        }
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. }
+        | Plan::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => {
+            collect_inherited_relation_leaf_sources(
+                left,
+                alias_through_aggregate_children,
+                sources,
+            );
+            collect_inherited_relation_leaf_sources(
+                right,
+                alias_through_aggregate_children,
+                sources,
+            );
+        }
+        Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::Result { .. }
+        | Plan::Values { .. }
+        | Plan::WorkTableScan { .. } => {}
+    }
 }
 
 enum LeafScanSource {
