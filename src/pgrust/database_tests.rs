@@ -8466,6 +8466,31 @@ fn partitioned_key_coverage_checks_fire_for_root_partition_of_and_attach_partiti
             && sqlstate == "0A000" => {}
         other => panic!("expected ATTACH PARTITION coverage error, got {other:?}"),
     }
+
+    session
+        .execute(
+            &db,
+            "create table attach_parent_cols (a int, b int) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table attach_child_extra (b int, c int, a int)")
+        .unwrap();
+    match session.execute(
+        &db,
+        "alter table attach_parent_cols attach partition attach_child_extra for values in (1)",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        }) if message
+            == "table \"attach_child_extra\" contains column \"c\" not found in parent \"attach_parent_cols\""
+            && detail == "The new partition may contain only the columns present in parent."
+            && sqlstate == "42804" => {}
+        other => panic!("expected ATTACH PARTITION extra-column error, got {other:?}"),
+    }
 }
 
 #[test]

@@ -1211,6 +1211,24 @@ pub(crate) fn validate_partition_relation_compatibility(
         .iter()
         .filter(|column| !column.dropped)
         .collect::<Vec<_>>();
+    for child_column in &child_columns {
+        if !parent_columns
+            .iter()
+            .any(|parent_column| parent_column.name.eq_ignore_ascii_case(&child_column.name))
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "table \"{child_name}\" contains column \"{}\" not found in parent \"{parent_name}\"",
+                    child_column.name
+                ),
+                detail: Some(
+                    "The new partition may contain only the columns present in parent.".to_string(),
+                ),
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+    }
     if parent_columns.len() != child_columns.len() {
         return Err(ExecError::DetailedError {
             message: format!(
