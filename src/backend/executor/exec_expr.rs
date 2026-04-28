@@ -129,9 +129,12 @@ use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, LoweredPartitionSpec, ParseError, PartitionBoundSpec, PartitionRangeDatumValue,
     PartitionStrategy, SerializedPartitionValue, SqlType, SqlTypeKind, SubqueryComparisonOp,
-    deserialize_partition_bound, partition_value_to_value, relation_partition_spec,
+    bind_relation_expr, deserialize_partition_bound, partition_value_to_value,
+    relation_partition_spec,
 };
-use crate::backend::rewrite::{format_stored_rule_definition_with_catalog, format_view_definition};
+use crate::backend::rewrite::{
+    format_stored_rule_definition_with_catalog, format_view_definition, render_relation_expr_sql,
+};
 use crate::backend::statistics::{
     render_pg_dependencies_text, render_pg_mcv_list_text, render_pg_ndistinct_text,
 };
@@ -3063,7 +3066,12 @@ fn eval_pg_get_expr_text(
             ));
         }
     }
-    Ok(Value::Text(text.into()))
+    let catalog = executor_catalog(ctx)?;
+    Ok(Value::Text(
+        canonicalize_catalog_expr_sql(text, relation_oid, catalog)
+            .unwrap_or_else(|| text.to_string())
+            .into(),
+    ))
 }
 
 fn eval_pg_get_partkeydef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -3737,6 +3745,40 @@ fn partition_key_collation_display_name(
         .map(|row| quote_identifier_if_needed(&row.collname))
 }
 
+fn canonicalize_catalog_expr_sql(
+    expr_sql: &str,
+    relation_oid: u32,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    if !contains_sql_json_query_function(expr_sql) {
+        return None;
+    }
+    let relation = catalog.lookup_relation_by_oid(relation_oid);
+    let relation_name = relation
+        .as_ref()
+        .and_then(|_| catalog.class_row_by_oid(relation_oid))
+        .map(|row| row.relname);
+    let empty_desc = RelationDesc {
+        columns: Vec::new(),
+    };
+    let desc = relation
+        .as_ref()
+        .map(|relation| &relation.desc)
+        .unwrap_or(&empty_desc);
+    let bound = bind_relation_expr(expr_sql, relation_name.as_deref(), desc, catalog).ok()?;
+    Some(render_relation_expr_sql(
+        &bound,
+        relation_name.as_deref(),
+        desc,
+        catalog,
+    ))
+}
+
+fn contains_sql_json_query_function(expr_sql: &str) -> bool {
+    let upper = expr_sql.to_ascii_uppercase();
+    upper.contains("JSON_QUERY(") || upper.contains("JSON_VALUE(") || upper.contains("JSON_EXISTS(")
+}
+
 fn eval_pg_get_constraintdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
     let constraint_oid = match values {
         [Value::Null] | [Value::Null, _] | [_, Value::Null] => return Ok(Value::Null),
@@ -3764,10 +3806,11 @@ fn format_constraintdef_for_catalog(
 ) -> Option<String> {
     match row.contype {
         CONSTRAINT_NOTNULL => Some("NOT NULL".into()),
-        CONSTRAINT_CHECK => row
-            .conbin
-            .as_deref()
-            .map(|expr_sql| format!("CHECK ({expr_sql})")),
+        CONSTRAINT_CHECK => row.conbin.as_deref().map(|expr_sql| {
+            let expr_sql = canonicalize_catalog_expr_sql(expr_sql, row.conrelid, catalog)
+                .unwrap_or_else(|| expr_sql.to_string());
+            format!("CHECK ({expr_sql})")
+        }),
         CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE => {
             format_index_backed_constraintdef_for_catalog(catalog, row)
         }

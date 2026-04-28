@@ -8939,6 +8939,113 @@ fn unnest_single_and_multi_arg_work() {
 }
 
 #[test]
+fn unnest_composite_array_expands_record_fields() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create type comp_unnest_test as (a int, b text)")
+        .unwrap();
+    match session
+        .execute(
+            &db,
+            "select * from unnest(JSON_QUERY(jsonb '[{\"a\":1,\"b\":\"x\"},{\"a\":2,\"b\":\"y\"}]', '$' RETURNING comp_unnest_test[]))",
+        )
+        .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["a", "b"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Text("x".into())],
+                    vec![Value::Int32(2), Value::Text("y".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+    match session
+        .execute(
+            &db,
+            "select (unnest(JSON_QUERY(jsonb '[{\"a\":3,\"b\":\"z\"}]', '$' RETURNING comp_unnest_test[]))).*",
+        )
+        .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["a", "b"]);
+            assert_eq!(rows, vec![vec![Value::Int32(3), Value::Text("z".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn check_constraint_violation_includes_failing_row_detail() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create table check_detail_test(a int check (a > 0))")
+        .unwrap();
+    let err = session
+        .execute(&db, "insert into check_detail_test values (0)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::CheckViolation {
+            detail: Some(detail),
+            ..
+        } if detail == "Failing row contains (0)."
+    ));
+}
+
+#[test]
+fn sql_json_check_constraint_deparse_matches_pg_style() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+    session
+        .execute(
+            &db,
+        "create table sqljson_deparse_test(
+            js text,
+            i int,
+            x jsonb default JSON_QUERY(jsonb '[1,2]', '$[*]' WITH WRAPPER),
+            constraint sqljson_deparse_check check (
+                JSON_QUERY(js::jsonb, '$.a' RETURNING char(5) OMIT QUOTES EMPTY ARRAY ON EMPTY) > 'a' COLLATE \"C\"
+            )
+        )",
+        )
+        .unwrap();
+    assert_query_rows(
+        session
+            .execute(
+                &db,
+                "select pg_get_expr(adbin, adrelid) from pg_attrdef where adrelid = 'sqljson_deparse_test'::regclass",
+            )
+            .unwrap(),
+        vec![vec![Value::Text(
+            "JSON_QUERY('[1, 2]'::jsonb, '$[*]' RETURNING jsonb WITH UNCONDITIONAL WRAPPER KEEP QUOTES)"
+                .into(),
+        )]],
+    );
+    assert_query_rows(
+        session
+            .execute(
+                &db,
+                "select check_clause from information_schema.check_constraints where constraint_name = 'sqljson_deparse_check'",
+            )
+            .unwrap(),
+        vec![vec![Value::Text(
+            "(JSON_QUERY((js)::jsonb, '$.\"a\"' RETURNING character(5) WITHOUT WRAPPER OMIT QUOTES EMPTY ARRAY ON EMPTY) > ('a'::bpchar COLLATE \"C\"))"
+                .into(),
+        )]],
+    );
+}
+
+#[test]
 fn unnest_with_ordinality_aliases_and_counts_rows() {
     let base = temp_dir("unnest_with_ordinality");
     let txns = TransactionManager::new_durable(&base).unwrap();

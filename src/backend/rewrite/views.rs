@@ -1,4 +1,4 @@
-use crate::backend::executor::jsonb::render_jsonb_bytes;
+use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{parse_interval_text_value, render_interval_text_with_config};
 use crate::backend::parser::analyze::analyze_select_query_with_outer;
@@ -11,19 +11,21 @@ use crate::backend::utils::misc::guc_datetime::{
 use crate::backend::utils::time::timestamp::{
     format_timestamp_text, format_timestamptz_text, parse_timestamp_text, parse_timestamptz_text,
 };
+use crate::include::catalog::DEFAULT_COLLATION_OID;
+use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::{IntervalValue, Value};
 use crate::include::nodes::parsenodes::{
-    JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, SelectStatement, SetOperator,
-    ViewCheckOption, WindowFrameExclusion, WindowFrameMode,
+    JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RangeTblEref, SelectStatement,
+    SetOperator, ViewCheckOption, WindowFrameExclusion, WindowFrameMode,
 };
 use crate::include::nodes::primnodes::{
-    Aggref, BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, JoinType, OpExprKind,
+    Aggref, BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, JoinType, OpExpr, OpExprKind,
     RelationDesc, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, ScalarFunctionImpl,
-    SetReturningCall, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
-    SqlJsonTableColumnKind, SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable,
-    SqlXmlTableColumnKind, SubLink, SubLinkType, TABLE_OID_ATTR_NO, TargetEntry, Var, WindowClause,
-    WindowFrameBound, WindowFuncExpr, WindowFuncKind, attrno_index, expr_sql_type_hint,
-    user_attrno,
+    SetReturningCall, SqlJsonQueryFunction, SqlJsonQueryFunctionKind, SqlJsonTable,
+    SqlJsonTableBehavior, SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePlan,
+    SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumnKind, SubLink,
+    SubLinkType, TABLE_OID_ATTR_NO, TargetEntry, Var, WindowClause, WindowFrameBound,
+    WindowFuncExpr, WindowFuncKind, attrno_index, expr_sql_type_hint, user_attrno,
 };
 
 const RETURN_RULE_NAME: &str = "_RETURN";
@@ -33,14 +35,30 @@ struct ViewDeparseContext<'a> {
     catalog: &'a dyn CatalogLookup,
     query: &'a Query,
     outers: Vec<&'a Query>,
+    options: ViewDeparseOptions,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ViewDeparseOptions {
+    parenthesize_var_cast: bool,
+    parenthesize_sql_json_passing_exprs: bool,
 }
 
 impl<'a> ViewDeparseContext<'a> {
     fn root(query: &'a Query, catalog: &'a dyn CatalogLookup) -> Self {
+        Self::root_with_options(query, catalog, ViewDeparseOptions::default())
+    }
+
+    fn root_with_options(
+        query: &'a Query,
+        catalog: &'a dyn CatalogLookup,
+        options: ViewDeparseOptions,
+    ) -> Self {
         Self {
             catalog,
             query,
             outers: Vec::new(),
+            options,
         }
     }
 
@@ -52,6 +70,7 @@ impl<'a> ViewDeparseContext<'a> {
             catalog: self.catalog,
             query,
             outers,
+            options: self.options,
         }
     }
 
@@ -70,6 +89,7 @@ impl<'a> ViewDeparseContext<'a> {
             catalog: self.catalog,
             query,
             outers,
+            options: self.options,
         })
     }
 }
@@ -132,6 +152,89 @@ pub(crate) fn render_view_query_sql(query: &Query, catalog: &dyn CatalogLookup) 
     let rendered = render_view_query(query, catalog);
     let body = rendered.strip_suffix(';').unwrap_or(&rendered).trim_start();
     normalize_deparsed_view_sql_for_parser(body)
+}
+
+pub(crate) fn render_relation_expr_sql(
+    expr: &Expr,
+    relation_name: Option<&str>,
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    render_relation_expr_sql_with_options(
+        expr,
+        relation_name,
+        desc,
+        catalog,
+        ViewDeparseOptions::default(),
+    )
+}
+
+pub(crate) fn render_relation_expr_sql_for_information_schema(
+    expr: &Expr,
+    relation_name: Option<&str>,
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    render_relation_expr_sql_with_options(
+        expr,
+        relation_name,
+        desc,
+        catalog,
+        ViewDeparseOptions {
+            parenthesize_var_cast: true,
+            parenthesize_sql_json_passing_exprs: true,
+        },
+    )
+}
+
+fn render_relation_expr_sql_with_options(
+    expr: &Expr,
+    relation_name: Option<&str>,
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+    options: ViewDeparseOptions,
+) -> String {
+    let query = Query {
+        command_type: CommandType::Select,
+        depends_on_row_security: false,
+        rtable: vec![RangeTblEntry {
+            alias: None,
+            alias_preserves_source_names: true,
+            eref: RangeTblEref {
+                aliasname: relation_name.unwrap_or("").to_string(),
+                colnames: desc
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect(),
+            },
+            desc: desc.clone(),
+            inh: false,
+            security_quals: Vec::new(),
+            permission: None,
+            kind: RangeTblEntryKind::Result,
+        }],
+        jointree: None,
+        target_list: Vec::new(),
+        distinct: false,
+        distinct_on: Vec::new(),
+        where_qual: None,
+        group_by: Vec::new(),
+        accumulators: Vec::new(),
+        window_clauses: Vec::new(),
+        having_qual: None,
+        sort_clause: Vec::new(),
+        constraint_deps: Vec::new(),
+        limit_count: None,
+        limit_offset: 0,
+        locking_clause: None,
+        row_marks: Vec::new(),
+        has_target_srfs: false,
+        recursive_union: None,
+        set_operation: None,
+    };
+    let ctx = ViewDeparseContext::root_with_options(&query, catalog, options);
+    render_expr(expr, &ctx)
 }
 
 fn normalize_deparsed_view_sql_for_parser(sql: &str) -> String {
@@ -1360,9 +1463,15 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
                 return rendered;
             }
             if matches!(**inner, Expr::Const(_) | Expr::Var(_)) {
+                let rendered_inner = render_expr(inner, ctx);
+                let rendered_inner =
+                    if ctx.options.parenthesize_var_cast && matches!(**inner, Expr::Var(_)) {
+                        format!("({rendered_inner})")
+                    } else {
+                        rendered_inner
+                    };
                 format!(
-                    "{}::{}",
-                    render_expr(inner, ctx),
+                    "{rendered_inner}::{}",
                     render_sql_type_with_catalog(*ty, ctx.catalog)
                 )
             } else {
@@ -1389,10 +1498,11 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
                 .collect::<Vec<_>>()
                 .join(" OR "),
         },
-        Expr::Op(op) => render_op(op.op, &op.args, ctx),
+        Expr::Op(op) => render_op(op, ctx),
         Expr::SubLink(sublink) => render_sublink(sublink, ctx),
         Expr::ScalarArrayOp(saop) => render_scalar_array_op(saop, ctx),
         Expr::Func(func) => render_function(func, ctx),
+        Expr::SqlJsonQueryFunction(func) => render_sql_json_query_function(func, ctx),
         Expr::WindowFunc(window_func) => render_window_function(window_func, ctx),
         Expr::IsNull(inner) => format!("{} IS NULL", render_wrapped_expr(inner, ctx)),
         Expr::IsNotNull(inner) => {
@@ -1446,6 +1556,16 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
                 quote_identifier_if_needed(field)
             )
         }
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => {
+            format!(
+                "{} COLLATE {}",
+                render_wrapped_expr(expr, ctx),
+                render_collation_name(*collation_oid, ctx)
+            )
+        }
         Expr::CurrentDate => "CURRENT_DATE".into(),
         Expr::CurrentCatalog => "CURRENT_CATALOG".into(),
         Expr::CurrentSchema => "CURRENT_SCHEMA".into(),
@@ -1491,6 +1611,10 @@ fn render_datetime_cast_literal(expr: &Expr, ty: SqlType) -> Option<String> {
                 render_view_interval_text(interval).replace('\'', "''")
             )
         }),
+        SqlTypeKind::Jsonb => parse_jsonb_text(text)
+            .ok()
+            .and_then(|bytes| render_jsonb_bytes(&bytes).ok())
+            .map(|json| format!("'{}'::jsonb", json.replace('\'', "''"))),
         _ => None,
     }
 }
@@ -1516,7 +1640,7 @@ fn render_view_interval_text(interval: IntervalValue) -> String {
 
 fn render_wrapped_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
     match expr {
-        Expr::Op(_) | Expr::Bool(_) | Expr::ScalarArrayOp(_) => {
+        Expr::Op(_) | Expr::Bool(_) | Expr::ScalarArrayOp(_) | Expr::Collate { .. } => {
             format!("({})", render_expr(expr, ctx))
         }
         _ => render_expr(expr, ctx),
@@ -1754,6 +1878,13 @@ fn render_window_frame_offset_expr(
 fn render_function(func: &FuncExpr, ctx: &ViewDeparseContext<'_>) -> String {
     if matches!(
         func.implementation,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::BpcharToText)
+    ) && func.args.len() == 1
+    {
+        return render_expr(&func.args[0], ctx);
+    }
+    if matches!(
+        func.implementation,
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Timezone)
     ) {
         return render_timezone_function(func, ctx);
@@ -1775,6 +1906,178 @@ fn render_function(func: &FuncExpr, ctx: &ViewDeparseContext<'_>) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+fn render_sql_json_query_function(
+    func: &SqlJsonQueryFunction,
+    ctx: &ViewDeparseContext<'_>,
+) -> String {
+    let name = match func.kind {
+        SqlJsonQueryFunctionKind::Exists => "JSON_EXISTS",
+        SqlJsonQueryFunctionKind::Value => "JSON_VALUE",
+        SqlJsonQueryFunctionKind::Query => "JSON_QUERY",
+    };
+    let context = render_expr(&func.context, ctx);
+    let path = render_sql_json_path_expr(&func.path, ctx);
+    let mut parts = Vec::new();
+    if !func.passing.is_empty() {
+        parts.push(format!(
+            "PASSING {}",
+            func.passing
+                .iter()
+                .map(|arg| {
+                    format!(
+                        "{} AS {}",
+                        render_sql_json_passing_expr(&arg.expr, ctx),
+                        quote_json_table_column_name(&arg.name)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !matches!(func.kind, SqlJsonQueryFunctionKind::Exists) {
+        parts.push(format!(
+            "RETURNING {}",
+            render_sql_type_with_catalog(func.result_type, ctx.catalog)
+        ));
+    }
+    if matches!(func.kind, SqlJsonQueryFunctionKind::Query) {
+        parts.push(render_sql_json_query_wrapper(func.wrapper).into());
+        parts.push(render_sql_json_query_quotes(func.quotes).into());
+    }
+    if !matches!(func.kind, SqlJsonQueryFunctionKind::Exists) {
+        append_sql_json_query_behavior(&mut parts, &func.on_empty, "EMPTY", func.result_type, ctx);
+    }
+    append_sql_json_query_behavior(&mut parts, &func.on_error, "ERROR", func.result_type, ctx);
+    let mut rendered = format!("{name}({context}, {path}");
+    if !parts.is_empty() {
+        rendered.push(' ');
+        rendered.push_str(&parts.join(" "));
+    }
+    rendered.push(')');
+    rendered
+}
+
+fn render_sql_json_path_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
+    let path = match expr {
+        Expr::Const(Value::JsonPath(path)) => Some(path.as_str()),
+        Expr::Const(value) => value.as_text(),
+        _ => None,
+    };
+    if let Some(path) = path {
+        let canonical = canonicalize_jsonpath(path).unwrap_or_else(|_| path.to_string());
+        return format!("'{}'", canonical.replace('\'', "''"));
+    }
+    render_expr(expr, ctx)
+}
+
+fn render_sql_json_passing_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
+    let rendered = render_expr(expr, ctx);
+    if ctx.options.parenthesize_sql_json_passing_exprs && matches!(expr, Expr::Op(_)) {
+        format!("({rendered})")
+    } else {
+        rendered
+    }
+}
+
+fn render_sql_json_query_wrapper(wrapper: SqlJsonTableWrapper) -> &'static str {
+    match wrapper {
+        SqlJsonTableWrapper::Unspecified | SqlJsonTableWrapper::Without => "WITHOUT WRAPPER",
+        SqlJsonTableWrapper::Conditional => "WITH CONDITIONAL WRAPPER",
+        SqlJsonTableWrapper::Unconditional => "WITH UNCONDITIONAL WRAPPER",
+    }
+}
+
+fn render_sql_json_query_quotes(quotes: SqlJsonTableQuotes) -> &'static str {
+    match quotes {
+        SqlJsonTableQuotes::Unspecified | SqlJsonTableQuotes::Keep => "KEEP QUOTES",
+        SqlJsonTableQuotes::Omit => "OMIT QUOTES",
+    }
+}
+
+fn append_sql_json_query_behavior(
+    parts: &mut Vec<String>,
+    behavior: &SqlJsonTableBehavior,
+    target: &'static str,
+    target_type: SqlType,
+    ctx: &ViewDeparseContext<'_>,
+) {
+    if sql_json_query_behavior_is_default(behavior, target) {
+        return;
+    }
+    parts.push(render_sql_json_query_behavior(
+        behavior,
+        target,
+        target_type,
+        ctx,
+    ));
+}
+
+fn sql_json_query_behavior_is_default(
+    behavior: &SqlJsonTableBehavior,
+    target: &'static str,
+) -> bool {
+    match target {
+        "EMPTY" => matches!(behavior, SqlJsonTableBehavior::Null),
+        "ERROR" => matches!(
+            behavior,
+            SqlJsonTableBehavior::Null | SqlJsonTableBehavior::False
+        ),
+        _ => false,
+    }
+}
+
+fn render_sql_json_query_behavior(
+    behavior: &SqlJsonTableBehavior,
+    target: &'static str,
+    target_type: SqlType,
+    ctx: &ViewDeparseContext<'_>,
+) -> String {
+    match behavior {
+        SqlJsonTableBehavior::Null => format!("NULL ON {target}"),
+        SqlJsonTableBehavior::Error => format!("ERROR ON {target}"),
+        SqlJsonTableBehavior::Empty => format!("EMPTY ON {target}"),
+        SqlJsonTableBehavior::EmptyArray => format!("EMPTY ARRAY ON {target}"),
+        SqlJsonTableBehavior::EmptyObject => format!("EMPTY OBJECT ON {target}"),
+        SqlJsonTableBehavior::Default(expr) => {
+            format!(
+                "DEFAULT {} ON {target}",
+                render_sql_json_default_expr(expr, target_type, ctx)
+            )
+        }
+        SqlJsonTableBehavior::True => format!("TRUE ON {target}"),
+        SqlJsonTableBehavior::False => format!("FALSE ON {target}"),
+        SqlJsonTableBehavior::Unknown => format!("UNKNOWN ON {target}"),
+    }
+}
+
+fn render_sql_json_default_expr(
+    expr: &Expr,
+    target_type: SqlType,
+    ctx: &ViewDeparseContext<'_>,
+) -> String {
+    if !target_type.is_array
+        && matches!(
+            target_type.kind,
+            SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+        )
+        && let Expr::Const(value) = expr
+        && let Some(text) = value.as_text()
+        && text.parse::<i64>().is_ok()
+    {
+        return text.to_string();
+    }
+    render_expr(expr, ctx)
+}
+
+fn render_collation_name(collation_oid: u32, ctx: &ViewDeparseContext<'_>) -> String {
+    ctx.catalog
+        .collation_rows()
+        .into_iter()
+        .find(|row| row.oid == collation_oid)
+        .map(|row| quote_identifier_if_needed(&row.collname))
+        .unwrap_or_else(|| collation_oid.to_string())
 }
 
 fn render_timezone_function(func: &FuncExpr, ctx: &ViewDeparseContext<'_>) -> String {
@@ -1832,18 +2135,97 @@ fn render_aggregate(aggref: &Aggref, ctx: &ViewDeparseContext<'_>) -> String {
     format!("{name}({})", args.join(", "))
 }
 
-fn render_op(op: OpExprKind, args: &[Expr], ctx: &ViewDeparseContext<'_>) -> String {
-    match (op, args) {
+fn render_op(op: &OpExpr, ctx: &ViewDeparseContext<'_>) -> String {
+    match (op.op, op.args.as_slice()) {
         (OpExprKind::UnaryPlus, [arg]) => format!("+{}", render_wrapped_expr(arg, ctx)),
         (OpExprKind::Negate, [arg]) => format!("-{}", render_wrapped_expr(arg, ctx)),
         (OpExprKind::BitNot, [arg]) => format!("~{}", render_wrapped_expr(arg, ctx)),
-        (_, [left, right]) => format!(
+        (op_kind, [left, right])
+            if binary_op_is_comparison(op_kind)
+                && (expr_has_bpchar_display_type(left) || expr_has_bpchar_display_type(right)) =>
+        {
+            let left = strip_bpchar_to_text(left);
+            let right = strip_bpchar_to_text(right);
+            let mut rendered_right = render_bpchar_comparison_operand(right, ctx);
+            if let Some(collation_oid) = op.collation_oid
+                && collation_oid != 0
+                && collation_oid != DEFAULT_COLLATION_OID
+            {
+                rendered_right = format!(
+                    "({rendered_right} COLLATE {})",
+                    render_collation_name(collation_oid, ctx)
+                );
+            }
+            format!(
+                "{} {} {}",
+                render_wrapped_expr(left, ctx),
+                render_binary_operator(op_kind),
+                rendered_right
+            )
+        }
+        (op_kind, [left, right]) => format!(
             "{} {} {}",
             render_wrapped_expr(left, ctx),
-            render_binary_operator(op),
+            render_binary_operator(op_kind),
             render_wrapped_expr(right, ctx)
         ),
         _ => format!("{op:?}"),
+    }
+}
+
+fn binary_op_is_comparison(op: OpExprKind) -> bool {
+    matches!(
+        op,
+        OpExprKind::Eq
+            | OpExprKind::NotEq
+            | OpExprKind::Lt
+            | OpExprKind::LtEq
+            | OpExprKind::Gt
+            | OpExprKind::GtEq
+    )
+}
+
+fn expr_has_bpchar_display_type(expr: &Expr) -> bool {
+    if expr_sql_type_hint(expr).is_some_and(|ty| !ty.is_array && ty.kind == SqlTypeKind::Char) {
+        return true;
+    }
+    matches!(
+        expr,
+        Expr::Func(func)
+            if matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(BuiltinScalarFunction::BpcharToText)
+            )
+    )
+}
+
+fn strip_bpchar_to_text(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Func(func)
+            if matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(BuiltinScalarFunction::BpcharToText)
+            ) && func.args.len() == 1 =>
+        {
+            strip_bpchar_to_text(&func.args[0])
+        }
+        Expr::Cast(inner, ty)
+            if !ty.is_array
+                && ty.kind == SqlTypeKind::Char
+                && expr_sql_type_hint(inner).is_some_and(|inner_ty| {
+                    !inner_ty.is_array && inner_ty.kind == SqlTypeKind::Char
+                }) =>
+        {
+            strip_bpchar_to_text(inner)
+        }
+        _ => expr,
+    }
+}
+
+fn render_bpchar_comparison_operand(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
+    match expr {
+        Expr::Const(value) => format!("{}::bpchar", render_literal(value)),
+        _ => render_wrapped_expr(expr, ctx),
     }
 }
 

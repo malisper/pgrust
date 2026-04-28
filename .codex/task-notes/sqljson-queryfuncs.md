@@ -61,3 +61,96 @@ JSON_QUERY composite display and composite-array unnest column expansion,
 jsonpath input error wording, DROP DOMAIN dependency cleanup, DROP FUNCTION
 without explicit args, information_schema.check_constraints, check-violation
 failing-row details, and pg_get_expr/\d canonical rendering differences.
+
+2026-04-28 diagnostics slice: fixed the two LINE/caret buckets in
+sqljson_queryfuncs by suppressing inferred positions for runtime SQL/JSON
+query-function input/coercion errors and adding formatter-side positions for
+unpositioned SQL/JSON validation errors. The remaining regression diff is 128
+lines / 14 mismatched queries and no longer contains the requested extra or
+missing SQL/JSON diagnostic-position failures.
+
+Tests run:
+cargo fmt
+scripts/cargo_isolated.sh test --lib --quiet exec_error_position
+scripts/run_regression.sh --test sqljson_queryfuncs --results-dir /tmp/pgrust_sqljson_queryfuncs_fix
+scripts/cargo_isolated.sh check
+
+2026-04-28 remaining-failures implementation:
+
+Goal:
+Finish the remaining sqljson_queryfuncs mismatches after the diagnostic-position
+slice.
+
+Key decisions:
+Expanded composite-array unnest from named/anonymous composite element metadata
+in FROM and select-list field expansion paths, and made single-arg composite
+unnest execution return multi-column tuple slots. Added failing-row DETAIL text
+for check violations in executor and validation paths. Added a synthetic
+information_schema.check_constraints view for check constraints.
+
+Implemented canonical SQL/JSON query-function deparse for stored defaults,
+check constraints, pg_get_expr, pg_get_constraintdef, and information_schema
+check_clause output, including jsonpath canonicalization, RETURNING,
+PASSING aliases, wrapper/quotes, and ON EMPTY/ON ERROR clauses. Preserved
+jsonpath parser errors for RETURNING jsonpath coercion, improved trailing-token
+jsonpath errors, and carried named composite row identities through whole-row
+type inference so bad SQL/JSON path-type errors name the base relation type.
+
+Files touched:
+src/backend/executor/constraints.rs
+src/backend/executor/exec_expr.rs
+src/backend/executor/jsonpath.rs
+src/backend/executor/mod.rs
+src/backend/executor/srf.rs
+src/backend/executor/tests.rs
+src/backend/libpq/pqformat.rs
+src/backend/parser/analyze/create_table.rs
+src/backend/parser/analyze/expr.rs
+src/backend/parser/analyze/expr/targets.rs
+src/backend/parser/analyze/infer.rs
+src/backend/parser/analyze/scope.rs
+src/backend/parser/analyze/system_views.rs
+src/backend/rewrite/mod.rs
+src/backend/rewrite/views.rs
+src/backend/tcop/postgres.rs
+src/backend/utils/cache/system_view_registry.rs
+src/pgrust/database/commands/constraint.rs
+src/pgrust/database_tests.rs
+
+Tests run:
+cargo fmt
+scripts/cargo_isolated.sh test --lib --quiet unnest_composite_array_expands_record_fields
+scripts/cargo_isolated.sh test --lib --quiet check_constraint_violation_includes_failing_row_detail
+scripts/cargo_isolated.sh test --lib --quiet sql_json_check_constraint_deparse_matches_pg_style
+scripts/cargo_isolated.sh check
+scripts/run_regression.sh --test sqljson_queryfuncs --port 55473 --results-dir /tmp/pgrust_sqljson_queryfuncs_final_after_tests
+
+Remaining:
+None for sqljson_queryfuncs; the final focused regression run passed all 314
+queries.
+
+2026-04-28 CI jsonpath numeric-literal fix:
+
+Goal:
+Fix failing cargo-test-run job on
+backend::executor::tests::jsonpath_numeric_literals_error after the trailing
+jsonpath token diagnostic change.
+
+Key decisions:
+Kept near-token diagnostics for general trailing jsonpath tokens, but restored
+PostgreSQL-compatible "syntax error at end of jsonpath input" for malformed
+numeric literal tails that survive number scanning without whitespace.
+
+Files touched:
+src/backend/executor/jsonpath.rs
+
+Tests run:
+cargo fmt
+scripts/cargo_isolated.sh test --lib --quiet jsonpath_numeric_literals_error
+scripts/cargo_isolated.sh test --lib --quiet jsonpath_numeric_pg_input_error_info
+scripts/cargo_isolated.sh test --lib --quiet jsonpath_numeric
+scripts/cargo_isolated.sh check
+scripts/run_regression.sh --test sqljson_queryfuncs --ignore-deps --port 55503 --results-dir /tmp/pgrust_sqljson_queryfuncs_jsonpath_ci_fix
+
+Remaining:
+None locally; let GitHub Actions rerun after the amended PR commit is pushed.

@@ -1741,6 +1741,20 @@ fn eval_unnest(
     let mut rows = Vec::with_capacity(max_len);
     for idx in 0..max_len {
         ctx.check_for_interrupts()?;
+        if args.len() == 1 {
+            let value = arrays
+                .first()
+                .and_then(|array| array.as_ref())
+                .and_then(|values| values.get(idx))
+                .cloned()
+                .unwrap_or(Value::Null);
+            if let Value::Record(record) = value {
+                rows.push(TupleSlot::virtual_row(record.fields));
+            } else {
+                rows.push(TupleSlot::virtual_row(vec![value]));
+            }
+            continue;
+        }
         let mut row = Vec::with_capacity(arrays.len());
         for array in &arrays {
             match array {

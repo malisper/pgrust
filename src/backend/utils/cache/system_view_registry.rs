@@ -31,6 +31,7 @@ pub enum SyntheticSystemViewKind {
     InformationSchemaViews,
     InformationSchemaColumns,
     InformationSchemaColumnColumnUsage,
+    InformationSchemaCheckConstraints,
     InformationSchemaTriggers,
     InformationSchemaForeignDataWrappers,
     InformationSchemaForeignDataWrapperOptions,
@@ -149,6 +150,8 @@ const INFORMATION_SCHEMA_VIEWS_ALIASES: &[&str] = &["information_schema.views"];
 const INFORMATION_SCHEMA_COLUMNS_ALIASES: &[&str] = &["information_schema.columns"];
 const INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_ALIASES: &[&str] =
     &["information_schema.column_column_usage"];
+const INFORMATION_SCHEMA_CHECK_CONSTRAINTS_ALIASES: &[&str] =
+    &["information_schema.check_constraints"];
 const INFORMATION_SCHEMA_TRIGGERS_ALIASES: &[&str] = &["information_schema.triggers"];
 const INFORMATION_SCHEMA_FOREIGN_DATA_WRAPPERS_ALIASES: &[&str] =
     &["information_schema.foreign_data_wrappers"];
@@ -707,6 +710,13 @@ const INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_COLUMNS: &[SyntheticSystemViewColum
     SyntheticSystemViewColumn::text("dependent_column"),
 ];
 
+const INFORMATION_SCHEMA_CHECK_CONSTRAINTS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("constraint_catalog"),
+    SyntheticSystemViewColumn::text("constraint_schema"),
+    SyntheticSystemViewColumn::text("constraint_name"),
+    SyntheticSystemViewColumn::text("check_clause"),
+];
+
 const INFORMATION_SCHEMA_FOREIGN_DATA_WRAPPERS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("foreign_data_wrapper_catalog"),
     SyntheticSystemViewColumn::text("foreign_data_wrapper_name"),
@@ -780,7 +790,7 @@ const INFORMATION_SCHEMA_FOREIGN_TABLE_OPTIONS_COLUMNS: &[SyntheticSystemViewCol
     SyntheticSystemViewColumn::text("option_value"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 39] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 40] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgEnum,
         canonical_name: "pg_catalog.pg_enum",
@@ -975,6 +985,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 39] = [
         canonical_name: "information_schema.column_column_usage",
         aliases: INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_ALIASES,
         columns: INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::InformationSchemaCheckConstraints,
+        canonical_name: "information_schema.check_constraints",
+        aliases: INFORMATION_SCHEMA_CHECK_CONSTRAINTS_ALIASES,
+        columns: INFORMATION_SCHEMA_CHECK_CONSTRAINTS_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {
