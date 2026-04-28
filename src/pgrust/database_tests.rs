@@ -18834,6 +18834,62 @@ fn create_gist_box_index_explain_and_query_use_it() {
 }
 
 #[test]
+fn create_gist_box_index_with_forced_buffering_matches_queries() {
+    let base = temp_dir("gist_box_forced_buffering");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table buffered_boxes (id int4 not null, b box)")
+        .unwrap();
+    for start in (0..5000).step_by(250) {
+        let values = (start..start + 250)
+            .map(|i| format!("({i}, '({i},{i}),({},{})'::box)", i + 1, i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        db.execute(1, &format!("insert into buffered_boxes values {values}"))
+            .unwrap();
+    }
+
+    db.execute(
+        1,
+        "create index buffered_boxes_b_gist on buffered_boxes using gist (b) with (buffering=on)",
+    )
+    .unwrap();
+
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select id from buffered_boxes where b && '(2500.25,2500.25),(2500.75,2500.75)'::box",
+        "buffered_boxes_b_gist",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from buffered_boxes \
+             where b && '(2500.25,2500.25),(2500.75,2500.75)'::box \
+             order by id",
+        ),
+        vec![vec![Value::Int32(2500)]]
+    );
+
+    db.execute(
+        1,
+        "insert into buffered_boxes values (6000, '(2500.5,2500.5),(2500.6,2500.6)'::box)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from buffered_boxes \
+             where b && '(2500.25,2500.25),(2500.75,2500.75)'::box \
+             order by id",
+        ),
+        vec![vec![Value::Int32(2500)], vec![Value::Int32(6000)]]
+    );
+}
+
+#[test]
 fn create_gist_point_index_explain_and_query_use_it() {
     let base = temp_dir("gist_point_index_scan_explain");
     let db = Database::open(&base, 16).unwrap();

@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use crate::backend::catalog::CatalogError;
 use crate::backend::executor::expr_geometry::GEOMETRY_EPSILON;
 use crate::include::nodes::datum::{GeoBox, GeoCircle, GeoPoint, GeoPolygon, Value};
@@ -225,11 +227,62 @@ pub(crate) fn same(left: &Value, right: &Value) -> Result<bool, CatalogError> {
     }
 }
 
+pub(crate) fn sort_compare(left: &Value, right: &Value) -> Ordering {
+    match (left, right) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => Ordering::Less,
+        (_, Value::Null) => Ordering::Greater,
+        (Value::Point(left), Value::Point(right)) => compare_points_zorder(left, right),
+        _ => format!("{left:?}").cmp(&format!("{right:?}")),
+    }
+}
+
+fn compare_points_zorder(left: &GeoPoint, right: &GeoPoint) -> Ordering {
+    if left.x == right.x && left.y == right.y {
+        return Ordering::Equal;
+    }
+    point_zorder(left)
+        .cmp(&point_zorder(right))
+        .then_with(|| left.x.total_cmp(&right.x))
+        .then_with(|| left.y.total_cmp(&right.y))
+}
+
+fn point_zorder(point: &GeoPoint) -> u64 {
+    let x = ieee_float32_to_uint32(point.x as f32);
+    let y = ieee_float32_to_uint32(point.y as f32);
+    part_bits32_by2(x) | (part_bits32_by2(y) << 1)
+}
+
+fn ieee_float32_to_uint32(value: f32) -> u32 {
+    if value.is_nan() {
+        return 0xFFFF_FFFF;
+    }
+    let mut bits = value.to_bits();
+    if bits & 0x8000_0000 != 0 {
+        bits ^= 0xFFFF_FFFF;
+    } else {
+        bits |= 0x8000_0000;
+    }
+    bits
+}
+
+fn part_bits32_by2(value: u32) -> u64 {
+    let mut n = u64::from(value);
+    n = (n | (n << 16)) & 0x0000_FFFF_0000_FFFF;
+    n = (n | (n << 8)) & 0x00FF_00FF_00FF_00FF;
+    n = (n | (n << 4)) & 0x0F0F_0F0F_0F0F_0F0F;
+    n = (n | (n << 2)) & 0x3333_3333_3333_3333;
+    n = (n | (n << 1)) & 0x5555_5555_5555_5555;
+    n
+}
+
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
+
     use crate::include::nodes::datum::{GeoPoint, Value};
 
-    use super::picksplit;
+    use super::{picksplit, sort_compare};
 
     fn point(x: f64, y: f64) -> Value {
         Value::Point(GeoPoint { x, y })
@@ -244,5 +297,29 @@ mod tests {
         assert!(!split.left.is_empty());
         assert!(!split.right.is_empty());
         assert!(split.left.len().abs_diff(split.right.len()) <= 1);
+    }
+
+    #[test]
+    fn sortsupport_uses_stable_z_order() {
+        let mut values = vec![
+            point(1.0, 1.0),
+            point(-1.0, -1.0),
+            point(0.0, 1.0),
+            point(1.0, 0.0),
+            Value::Null,
+        ];
+
+        values.sort_by(sort_compare);
+
+        assert_eq!(values[0], Value::Null);
+        assert!(
+            values
+                .windows(2)
+                .all(|pair| sort_compare(&pair[0], &pair[1]) != Ordering::Greater)
+        );
+        assert_eq!(
+            sort_compare(&point(0.0, 0.0), &point(-0.0, 0.0)),
+            Ordering::Equal
+        );
     }
 }

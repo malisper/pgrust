@@ -68,6 +68,7 @@ use crate::backend::executor::{
 use crate::include::access::amapi::IndexUniqueCheck;
 use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
+use crate::include::access::gist::{GistBufferingMode, GistOptions};
 use crate::include::access::hash::HashOptions;
 use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
@@ -4526,6 +4527,32 @@ fn resolve_hash_options(options: &[RelOption]) -> Result<HashOptions, ExecError>
     Ok(resolved)
 }
 
+fn resolve_gist_options(options: &[RelOption]) -> Result<GistOptions, ExecError> {
+    let mut resolved = GistOptions::default();
+    for option in options {
+        if option.name.eq_ignore_ascii_case("buffering") {
+            resolved.buffering_mode = match option.value.to_ascii_lowercase().as_str() {
+                "auto" => GistBufferingMode::Auto,
+                "on" => GistBufferingMode::On,
+                "off" => GistBufferingMode::Off,
+                _ => {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "GiST buffering option auto, on, or off",
+                        actual: option.value.clone(),
+                    }));
+                }
+            };
+            continue;
+        }
+
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+            "GiST option \"{}\"",
+            option.name
+        ))));
+    }
+    Ok(resolved)
+}
+
 fn index_reloptions(options: &[RelOption]) -> Option<Vec<String>> {
     (!options.is_empty()).then(|| {
         options
@@ -4748,21 +4775,23 @@ fn resolve_create_index_build_options(
         indoption.push(option);
     }
 
-    let (btree_options, brin_options, gin_options, hash_options) = match access_method.oid {
-        BTREE_AM_OID => (resolve_btree_options(options)?, None, None, None),
-        BRIN_AM_OID => (None, Some(resolve_brin_options(options)?), None, None),
-        GIN_AM_OID => (None, None, Some(resolve_gin_options(options)?), None),
-        HASH_AM_OID => (None, None, None, Some(resolve_hash_options(options)?)),
-        _ => {
-            if !options.is_empty() {
-                return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "simple index definition",
-                    actual: "unsupported CREATE INDEX feature".into(),
-                }));
+    let (btree_options, brin_options, gist_options, gin_options, hash_options) =
+        match access_method.oid {
+            BTREE_AM_OID => (resolve_btree_options(options)?, None, None, None, None),
+            BRIN_AM_OID => (None, Some(resolve_brin_options(options)?), None, None, None),
+            GIST_AM_OID => (None, None, Some(resolve_gist_options(options)?), None, None),
+            GIN_AM_OID => (None, None, None, Some(resolve_gin_options(options)?), None),
+            HASH_AM_OID => (None, None, None, None, Some(resolve_hash_options(options)?)),
+            _ => {
+                if !options.is_empty() {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "simple index definition",
+                        actual: "unsupported CREATE INDEX feature".into(),
+                    }));
+                }
+                (None, None, None, None, None)
             }
-            (None, None, None, None)
-        }
-    };
+        };
 
     Ok(crate::backend::catalog::CatalogIndexBuildOptions {
         am_oid: access_method.oid,
@@ -4776,6 +4805,7 @@ fn resolve_create_index_build_options(
         indimmediate: true,
         btree_options,
         brin_options,
+        gist_options,
         gin_options,
         hash_options,
     })

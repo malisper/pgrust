@@ -22,6 +22,7 @@ use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
+use crate::include::access::gist::GistOptions;
 use crate::include::access::hash::HashOptions;
 use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::{
@@ -216,6 +217,7 @@ fn build_catalog_index_entry(
                 .map(str::to_string),
             btree_options: resolved_options.btree_options,
             brin_options: resolved_options.brin_options,
+            gist_options: resolved_options.gist_options,
             gin_options: resolved_options.gin_options,
             hash_options: resolved_options.hash_options,
         }),
@@ -346,6 +348,8 @@ fn default_index_build_options_for_entry(
         btree_options: None,
         brin_options: (am_oid == crate::include::catalog::BRIN_AM_OID)
             .then(crate::include::access::brin::BrinOptions::default),
+        gist_options: (am_oid == crate::include::catalog::GIST_AM_OID)
+            .then(crate::include::access::gist::GistOptions::default),
         gin_options: (am_oid == crate::include::catalog::GIN_AM_OID)
             .then(crate::include::access::gin::GinOptions::default),
         hash_options: (am_oid == crate::include::catalog::HASH_AM_OID)
@@ -397,6 +401,7 @@ pub struct CatalogIndexMeta {
     pub indpred: Option<String>,
     pub btree_options: Option<BtreeOptions>,
     pub brin_options: Option<BrinOptions>,
+    pub gist_options: Option<GistOptions>,
     pub gin_options: Option<GinOptions>,
     pub hash_options: Option<HashOptions>,
 }
@@ -414,6 +419,7 @@ pub struct CatalogIndexBuildOptions {
     pub indimmediate: bool,
     pub btree_options: Option<BtreeOptions>,
     pub brin_options: Option<BrinOptions>,
+    pub gist_options: Option<GistOptions>,
     pub gin_options: Option<GinOptions>,
     pub hash_options: Option<HashOptions>,
 }
@@ -1744,6 +1750,7 @@ impl Catalog {
             indimmediate: true,
             btree_options: None,
             brin_options: None,
+            gist_options: None,
             gin_options: None,
             hash_options: None,
         })

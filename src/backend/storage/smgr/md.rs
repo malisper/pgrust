@@ -770,6 +770,33 @@ impl StorageManager for MdStorageManager {
         Ok(())
     }
 
+    fn reserve_block(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        block: BlockNumber,
+        skip_fsync: bool,
+    ) -> Result<(), SmgrError> {
+        let nblocks = self.nblocks(rel, fork)?;
+        if block != nblocks {
+            return Err(SmgrError::BlockOutOfRange { rel, fork, block });
+        }
+
+        let (segno, seg_offset) = seg_for_block(block);
+        let len = (seg_offset as u64 + 1) * BLCKSZ as u64;
+        let seg = self.get_or_create_seg(rel, fork, segno)?;
+        seg.file.set_len(len)?;
+
+        if !skip_fsync {
+            crate::backend::storage::fsync_file(&seg.file)?;
+        } else if let Some(sync_queue) = self.sync_queue.as_ref() {
+            sync_queue.register(rel, fork);
+        }
+
+        self.nblocks_cache.insert((rel, fork), block + 1);
+        Ok(())
+    }
+
     fn nblocks(&mut self, rel: RelFileLocator, fork: ForkNumber) -> Result<BlockNumber, SmgrError> {
         if let Some(&cached) = self.nblocks_cache.get(&(rel, fork)) {
             return Ok(cached);

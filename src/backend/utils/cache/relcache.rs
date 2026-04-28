@@ -12,6 +12,7 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
 use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
+use crate::include::access::gist::GistOptions;
 use crate::include::access::hash::HashOptions;
 use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::PgTypeRow;
@@ -81,6 +82,8 @@ pub struct IndexRelCacheEntry {
     pub rd_indpred: Option<Option<Expr>>,
     pub btree_options: Option<BtreeOptions>,
     pub brin_options: Option<BrinOptions>,
+    #[serde(default)]
+    pub gist_options: Option<GistOptions>,
     pub gin_options: Option<GinOptions>,
     pub hash_options: Option<HashOptions>,
 }
@@ -634,6 +637,7 @@ impl RelCache {
                             rd_indpred: None,
                             btree_options: None,
                             brin_options: None,
+                            gist_options: None,
                             gin_options: None,
                             hash_options: None,
                         };
@@ -677,6 +681,7 @@ impl RelCache {
                         rd_indpred: None,
                         btree_options: None,
                         brin_options: None,
+                        gist_options: None,
                         gin_options: None,
                         hash_options: None,
                     }
@@ -916,6 +921,7 @@ fn from_catalog_entry(entry: &CatalogEntry, support_lookup: &IndexSupportLookup)
                 rd_indpred: None,
                 btree_options: index.btree_options,
                 brin_options: index.brin_options.clone(),
+                gist_options: index.gist_options,
                 gin_options: index.gin_options.clone(),
                 hash_options: index.hash_options,
             }
@@ -1009,6 +1015,7 @@ mod tests {
                     indimmediate: true,
                     btree_options: None,
                     brin_options: None,
+                    gist_options: None,
                     gin_options: None,
                     hash_options: None,
                 },
@@ -1067,6 +1074,7 @@ mod tests {
                     indimmediate: true,
                     btree_options: None,
                     brin_options: None,
+                    gist_options: None,
                     gin_options: None,
                     hash_options: None,
                 },
@@ -1090,6 +1098,7 @@ mod tests {
                     indimmediate: true,
                     btree_options: None,
                     brin_options: None,
+                    gist_options: None,
                     gin_options: None,
                     hash_options: None,
                 },
@@ -1152,6 +1161,7 @@ mod tests {
                     indimmediate: true,
                     btree_options: None,
                     brin_options: None,
+                    gist_options: None,
                     gin_options: None,
                     hash_options: None,
                 },
@@ -1213,6 +1223,7 @@ mod tests {
             rd_indpred: None,
             btree_options: None,
             brin_options: None,
+            gist_options: None,
             gin_options: None,
             hash_options: None,
         };
@@ -1282,6 +1293,7 @@ mod tests {
             rd_indpred: None,
             btree_options: None,
             brin_options: None,
+            gist_options: None,
             gin_options: None,
             hash_options: None,
         };

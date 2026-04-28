@@ -286,6 +286,13 @@ pub trait StorageManager {
         nblocks: u32,
         skip_fsync: bool,
     ) -> Result<(), SmgrError>;
+    fn reserve_block(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        block: BlockNumber,
+        skip_fsync: bool,
+    ) -> Result<(), SmgrError>;
     fn nblocks(&mut self, rel: RelFileLocator, fork: ForkNumber) -> Result<BlockNumber, SmgrError>;
     fn truncate(
         &mut self,

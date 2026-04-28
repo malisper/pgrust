@@ -698,6 +698,7 @@ fn int4_btree_options(num_keys: usize, indnullsnotdistinct: bool) -> CatalogInde
         indimmediate: true,
         btree_options: None,
         brin_options: None,
+        gist_options: None,
         gin_options: None,
         hash_options: None,
     }
@@ -716,6 +717,7 @@ fn box_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
         indimmediate: true,
         btree_options: None,
         brin_options: None,
+        gist_options: None,
         gin_options: None,
         hash_options: None,
     }
@@ -734,6 +736,7 @@ fn polygon_spgist_options(num_keys: usize) -> CatalogIndexBuildOptions {
         indimmediate: true,
         btree_options: None,
         brin_options: None,
+        gist_options: None,
         gin_options: None,
         hash_options: None,
     }
@@ -1048,6 +1051,7 @@ fn catalog_with_inherited_indexed_items()
             indimmediate: true,
             btree_options: None,
             brin_options: None,
+            gist_options: None,
             gin_options: None,
             hash_options: None,
         }

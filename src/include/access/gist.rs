@@ -6,6 +6,33 @@ use crate::backend::storage::smgr::BLCKSZ;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::itup::IndexTupleData;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum GistBufferingMode {
+    Auto,
+    On,
+    Off,
+}
+
+impl Default for GistBufferingMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GistOptions {
+    #[serde(default)]
+    pub buffering_mode: GistBufferingMode,
+}
+
+impl Default for GistOptions {
+    fn default() -> Self {
+        Self {
+            buffering_mode: GistBufferingMode::Auto,
+        }
+    }
+}
+
 pub const GIST_ROOT_BLKNO: u32 = 0;
 pub const GIST_INVALID_BLOCKNO: u32 = u32::MAX;
 pub const GIST_PAGE_ID: u16 = 0xFF81;

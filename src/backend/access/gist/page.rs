@@ -1,5 +1,5 @@
 use crate::backend::access::transam::xlog::{
-    INVALID_LSN, XLOG_GIST_PAGE_INIT, XLOG_GIST_SPLIT_COMPLETE,
+    INVALID_LSN, XLOG_FPI, XLOG_GIST_PAGE_INIT, XLOG_GIST_SPLIT_COMPLETE,
 };
 use crate::backend::catalog::CatalogError;
 use crate::backend::storage::page::bufpage::page_header;
@@ -17,6 +17,15 @@ pub(crate) struct GistLoggedPage<'a> {
     pub(crate) page: &'a [u8; crate::backend::storage::smgr::BLCKSZ],
     pub(crate) will_init: bool,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GistPageWriteMode {
+    Normal,
+    Build,
+    BuildNoExtend,
+}
+
+const GIST_BUILD_RANGE_LOG_CHUNK_BLOCKS: u32 = 32;
 
 fn pin_gist_block<'a>(
     pool: &'a BufferPool<SmgrStorageBackend>,
@@ -53,7 +62,29 @@ pub(crate) fn write_buffered_page(
     page: &[u8; crate::backend::storage::smgr::BLCKSZ],
     wal_info: u8,
 ) -> Result<u64, CatalogError> {
-    write_logged_pages(
+    write_buffered_page_with_mode(
+        pool,
+        client_id,
+        xid,
+        rel,
+        block,
+        page,
+        wal_info,
+        GistPageWriteMode::Normal,
+    )
+}
+
+pub(crate) fn write_buffered_page_with_mode(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    xid: u32,
+    rel: RelFileLocator,
+    block: u32,
+    page: &[u8; crate::backend::storage::smgr::BLCKSZ],
+    wal_info: u8,
+    mode: GistPageWriteMode,
+) -> Result<u64, CatalogError> {
+    write_logged_pages_with_mode(
         pool,
         client_id,
         xid,
@@ -64,6 +95,7 @@ pub(crate) fn write_buffered_page(
             page,
             will_init: false,
         }],
+        mode,
     )
 }
 
@@ -75,11 +107,45 @@ pub(crate) fn write_logged_pages(
     wal_info: u8,
     pages: &[GistLoggedPage<'_>],
 ) -> Result<u64, CatalogError> {
+    write_logged_pages_with_mode(
+        pool,
+        client_id,
+        xid,
+        rel,
+        wal_info,
+        pages,
+        GistPageWriteMode::Normal,
+    )
+}
+
+pub(crate) fn write_logged_pages_with_mode(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    xid: u32,
+    rel: RelFileLocator,
+    wal_info: u8,
+    pages: &[GistLoggedPage<'_>],
+    mode: GistPageWriteMode,
+) -> Result<u64, CatalogError> {
     for logged in pages {
-        pool.ensure_block_exists(rel, ForkNumber::Main, logged.block)
-            .map_err(|err| CatalogError::Io(format!("gist extend failed: {err:?}")))?;
+        if mode == GistPageWriteMode::BuildNoExtend
+            || (mode == GistPageWriteMode::Build && !logged.will_init)
+        {
+            continue;
+        }
+        if mode == GistPageWriteMode::Build {
+            reserve_blocks_through(pool, rel, logged.block)?;
+        } else {
+            pool.ensure_block_exists(rel, ForkNumber::Main, logged.block)
+                .map_err(|err| CatalogError::Io(format!("gist extend failed: {err:?}")))?;
+        }
     }
-    let lsn = if let Some(wal) = pool.wal_writer() {
+    let lsn = if matches!(
+        mode,
+        GistPageWriteMode::Build | GistPageWriteMode::BuildNoExtend
+    ) {
+        INVALID_LSN
+    } else if let Some(wal) = pool.wal_writer() {
         let blocks = pages
             .iter()
             .enumerate()
@@ -148,18 +214,70 @@ pub(crate) fn allocate_new_block(
     Ok(block)
 }
 
+pub(crate) fn allocate_new_block_with_mode(
+    pool: &BufferPool<SmgrStorageBackend>,
+    rel: RelFileLocator,
+    mode: GistPageWriteMode,
+) -> Result<u32, CatalogError> {
+    if !matches!(
+        mode,
+        GistPageWriteMode::Build | GistPageWriteMode::BuildNoExtend
+    ) {
+        return allocate_new_block(pool, rel);
+    }
+
+    pool.with_storage_mut(|storage| {
+        let block = storage.smgr.nblocks(rel, ForkNumber::Main)?;
+        storage
+            .smgr
+            .reserve_block(rel, ForkNumber::Main, block, true)?;
+        Ok::<_, crate::backend::storage::smgr::SmgrError>(block)
+    })
+    .map_err(|err| CatalogError::Io(format!("gist reserve block failed: {err}")))
+}
+
+fn reserve_blocks_through(
+    pool: &BufferPool<SmgrStorageBackend>,
+    rel: RelFileLocator,
+    block: u32,
+) -> Result<(), CatalogError> {
+    pool.ensure_relation_fork(rel, ForkNumber::Main)
+        .map_err(|err| CatalogError::Io(format!("gist ensure relation failed: {err:?}")))?;
+    pool.with_storage_mut(|storage| {
+        let mut nblocks = storage.smgr.nblocks(rel, ForkNumber::Main)?;
+        while nblocks <= block {
+            storage
+                .smgr
+                .reserve_block(rel, ForkNumber::Main, nblocks, true)?;
+            nblocks += 1;
+        }
+        Ok::<_, crate::backend::storage::smgr::SmgrError>(())
+    })
+    .map_err(|err| CatalogError::Io(format!("gist reserve block failed: {err}")))
+}
+
 pub(crate) fn ensure_empty_gist(
     pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     xid: u32,
     rel: RelFileLocator,
 ) -> Result<(), CatalogError> {
+    ensure_empty_gist_with_mode(pool, client_id, xid, rel, GistPageWriteMode::Normal)
+}
+
+pub(crate) fn ensure_empty_gist_with_mode(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    xid: u32,
+    rel: RelFileLocator,
+    mode: GistPageWriteMode,
+) -> Result<(), CatalogError> {
     ensure_relation_exists(pool, rel)?;
     truncate_relation(pool, rel)?;
     let mut root = [0u8; crate::backend::storage::smgr::BLCKSZ];
     gist_page_init(&mut root, F_LEAF)
         .map_err(|err| CatalogError::Io(format!("gist root init failed: {err:?}")))?;
-    write_logged_pages(
+    write_logged_pages_with_mode(
         pool,
         client_id,
         xid,
@@ -170,7 +288,38 @@ pub(crate) fn ensure_empty_gist(
             page: &root,
             will_init: true,
         }],
+        mode,
     )?;
+    Ok(())
+}
+
+pub(crate) fn log_gist_build_newpage_range(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    xid: u32,
+    rel: RelFileLocator,
+) -> Result<(), CatalogError> {
+    let nblocks = relation_nblocks(pool, rel)?;
+    let mut start = 0u32;
+    while start < nblocks {
+        let end = start
+            .saturating_add(GIST_BUILD_RANGE_LOG_CHUNK_BLOCKS)
+            .min(nblocks);
+        let mut images = Vec::with_capacity((end - start) as usize);
+        for block in start..end {
+            images.push((block, read_buffered_page(pool, client_id, rel, block)?));
+        }
+        let logged_pages = images
+            .iter()
+            .map(|(block, page)| GistLoggedPage {
+                block: *block,
+                page,
+                will_init: true,
+            })
+            .collect::<Vec<_>>();
+        write_logged_pages(pool, client_id, xid, rel, XLOG_FPI, &logged_pages)?;
+        start = end;
+    }
     Ok(())
 }
 
@@ -186,6 +335,26 @@ pub(crate) fn clear_follow_right(
     block: u32,
     nsn: u64,
 ) -> Result<(), CatalogError> {
+    clear_follow_right_with_mode(
+        pool,
+        client_id,
+        xid,
+        rel,
+        block,
+        nsn,
+        GistPageWriteMode::Normal,
+    )
+}
+
+pub(crate) fn clear_follow_right_with_mode(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    xid: u32,
+    rel: RelFileLocator,
+    block: u32,
+    nsn: u64,
+    mode: GistPageWriteMode,
+) -> Result<(), CatalogError> {
     let mut page = read_buffered_page(pool, client_id, rel, block)?;
     let mut opaque = gist_page_get_opaque(&page)
         .map_err(|err| CatalogError::Io(format!("gist opaque read failed: {err:?}")))?;
@@ -196,7 +365,7 @@ pub(crate) fn clear_follow_right(
     opaque.nsn = opaque.nsn.max(nsn);
     gist_page_set_opaque(&mut page, opaque)
         .map_err(|err| CatalogError::Io(format!("gist opaque write failed: {err:?}")))?;
-    write_buffered_page(
+    write_buffered_page_with_mode(
         pool,
         client_id,
         xid,
@@ -204,6 +373,7 @@ pub(crate) fn clear_follow_right(
         block,
         &page,
         XLOG_GIST_SPLIT_COMPLETE,
+        mode,
     )?;
     Ok(())
 }

@@ -240,6 +240,7 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         (5, GIST_POINT_PENALTY_PROC_OID),
         (6, GIST_POINT_PICKSPLIT_PROC_OID),
         (7, GIST_POINT_SAME_PROC_OID),
+        (11, GIST_POINT_SORTSUPPORT_PROC_OID),
     ] {
         rows.push(PgAmprocRow {
             oid,
