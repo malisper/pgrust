@@ -1,12 +1,14 @@
 use super::super::*;
 use crate::backend::parser::{
     AlterPolicyAction, AlterPolicyStatement, CatalogLookup, CreatePolicyStatement,
-    DropPolicyStatement, ParseError, SqlTypeKind, bind_policy_expr_in_named_relation_scope,
+    DropPolicyStatement, ParseError, SqlExpr, SqlTypeKind,
+    bind_policy_expr_in_named_relation_scope, parse_expr,
 };
 use crate::include::catalog::PgPolicyRow;
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_table_or_partitioned_table_for_alter_table,
 };
+use crate::pgrust::database::relation_refs::collect_direct_relation_oids_from_sql_exprs;
 
 const PUBLIC_ROLE_OID: u32 = 0;
 
@@ -83,6 +85,10 @@ impl Database {
             polqual: stmt.using_sql.clone(),
             polwithcheck: stmt.with_check_sql.clone(),
         };
+        let referenced_relation_oids = policy_referenced_relation_oids(
+            &catalog,
+            [stmt.using_expr.as_ref(), stmt.with_check_expr.as_ref()],
+        );
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -95,7 +101,7 @@ impl Database {
         let (_oid, effect) = self
             .catalog
             .write()
-            .create_policy_mvcc(policy_row, &ctx)
+            .create_policy_mvcc(policy_row, &referenced_relation_oids, &ctx)
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         self.plan_cache.invalidate_all();
@@ -205,6 +211,22 @@ impl Database {
                 }
             }
         };
+        let parsed_using = updated
+            .polqual
+            .as_deref()
+            .map(parse_expr)
+            .transpose()
+            .map_err(ExecError::Parse)?;
+        let parsed_with_check = updated
+            .polwithcheck
+            .as_deref()
+            .map(parse_expr)
+            .transpose()
+            .map_err(ExecError::Parse)?;
+        let referenced_relation_oids = policy_referenced_relation_oids(
+            &catalog,
+            [parsed_using.as_ref(), parsed_with_check.as_ref()],
+        );
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -217,7 +239,7 @@ impl Database {
         let (_oid, effect) = self
             .catalog
             .write()
-            .replace_policy_mvcc(&existing, updated, &ctx)
+            .replace_policy_mvcc(&existing, updated, &referenced_relation_oids, &ctx)
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         self.plan_cache.invalidate_all();
@@ -331,6 +353,15 @@ fn resolve_policy_roles(
                     sqlstate: "42704",
                 })
         })
+        .collect()
+}
+
+fn policy_referenced_relation_oids<'a>(
+    catalog: &dyn CatalogLookup,
+    exprs: impl IntoIterator<Item = Option<&'a SqlExpr>>,
+) -> Vec<u32> {
+    collect_direct_relation_oids_from_sql_exprs(exprs.into_iter().flatten(), catalog)
+        .into_iter()
         .collect()
 }
 

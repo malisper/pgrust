@@ -11,9 +11,9 @@ use crate::include::catalog::{
     PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
     PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
     PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    PgUserMappingRow, bootstrap_composite_type_rows, builtin_type_row_by_oid,
+    PgShdependRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow,
+    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    PgTypeRow, PgUserMappingRow, bootstrap_composite_type_rows, builtin_type_row_by_oid,
     composite_array_type_row, composite_type_row,
 };
 
@@ -24,6 +24,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub attributes: Vec<PgAttributeRow>,
     pub attrdefs: Vec<PgAttrdefRow>,
     pub depends: Vec<PgDependRow>,
+    pub shdepends: Vec<PgShdependRow>,
     pub inherits: Vec<PgInheritsRow>,
     pub partitioned_tables: Vec<PgPartitionedTableRow>,
     pub descriptions: Vec<PgDescriptionRow>,
@@ -161,6 +162,7 @@ pub(crate) fn drop_relation_delete_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgAttribute,
         BootstrapCatalogKind::PgClass,
         BootstrapCatalogKind::PgDepend,
+        BootstrapCatalogKind::PgShdepend,
         BootstrapCatalogKind::PgInherits,
         BootstrapCatalogKind::PgForeignTable,
         BootstrapCatalogKind::PgDescription,
@@ -185,6 +187,7 @@ pub(crate) fn extend_physical_catalog_rows(
     target.attributes.extend(source.attributes);
     target.attrdefs.extend(source.attrdefs);
     target.depends.extend(source.depends);
+    target.shdepends.extend(source.shdepends);
     target.inherits.extend(source.inherits);
     target.partitioned_tables.extend(source.partitioned_tables);
     target.descriptions.extend(source.descriptions);
@@ -199,6 +202,7 @@ pub(crate) fn extend_physical_catalog_rows(
     target.sequences.extend(source.sequences);
     target.triggers.extend(source.triggers);
     target.event_triggers.extend(source.event_triggers);
+    target.policies.extend(source.policies);
     target.publications.extend(source.publications);
     target.publication_rels.extend(source.publication_rels);
     target
@@ -243,6 +247,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         attributes: catcache.attribute_rows(),
         attrdefs: catcache.attrdef_rows(),
         depends: catcache.depend_rows(),
+        shdepends: Vec::new(),
         inherits: catcache.inherit_rows(),
         partitioned_tables: catcache.partitioned_table_rows(),
         descriptions,

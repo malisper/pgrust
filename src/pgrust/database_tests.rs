@@ -43356,6 +43356,100 @@ fn create_policy_resolves_roles_created_in_same_transaction() {
 }
 
 #[test]
+fn policy_catalog_dependencies_track_roles_and_referenced_tables() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role policy_dep_role nologin")
+        .unwrap();
+    session
+        .execute(&db, "create role policy_dep_role2 nologin")
+        .unwrap();
+    session
+        .execute(&db, "create table policy_dep_base (c1 int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table policy_dep_lookup (c1 int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy dep_p1 on policy_dep_base to policy_dep_role using \
+             (c1 > (select max(policy_dep_lookup.c1) from policy_dep_lookup))",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*)::int4 from pg_depend \
+             where classid = 'pg_policy'::regclass \
+               and objid = (select oid from pg_policy where polname = 'dep_p1') \
+               and refobjid = 'policy_dep_base'::regclass \
+               and deptype = 'a'"
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*)::int4 from pg_depend \
+             where classid = 'pg_policy'::regclass \
+               and objid = (select oid from pg_policy where polname = 'dep_p1') \
+               and refobjid = 'policy_dep_lookup'::regclass"
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*)::int4 from pg_shdepend \
+             where classid = 'pg_policy'::regclass \
+               and objid = (select oid from pg_policy where polname = 'dep_p1') \
+               and refclassid = 'pg_authid'::regclass \
+               and refobjid = 'policy_dep_role'::regrole \
+               and deptype = 'r'"
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+
+    session
+        .execute(
+            &db,
+            "alter policy dep_p1 on policy_dep_base to policy_dep_role, policy_dep_role2 \
+             using (true)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*)::int4 from pg_depend \
+             where classid = 'pg_policy'::regclass \
+               and objid = (select oid from pg_policy where polname = 'dep_p1') \
+               and refobjid = 'policy_dep_lookup'::regclass"
+        ),
+        vec![vec![Value::Int32(0)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*)::int4 from pg_shdepend \
+             where classid = 'pg_policy'::regclass \
+               and objid = (select oid from pg_policy where polname = 'dep_p1') \
+               and refobjid in ('policy_dep_role'::regrole, 'policy_dep_role2'::regrole)"
+        ),
+        vec![vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
 fn create_policy_with_exists_subquery_on_rls_table_returns() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

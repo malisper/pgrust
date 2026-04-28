@@ -525,6 +525,18 @@ pub(super) fn collect_rels_from_planned_stmt(
     }
 }
 
+pub(crate) fn collect_direct_relation_oids_from_sql_exprs<'a>(
+    exprs: impl IntoIterator<Item = &'a SqlExpr>,
+    catalog: &dyn CatalogLookup,
+) -> BTreeSet<u32> {
+    let mut rels = BTreeSet::new();
+    let mut visible_ctes = Vec::new();
+    for expr in exprs {
+        collect_direct_relation_oids_from_sql_expr(expr, catalog, &mut visible_ctes, &mut rels);
+    }
+    rels
+}
+
 pub(super) fn collect_direct_relation_oids_from_select(
     select: &crate::backend::parser::SelectStatement,
     catalog: &dyn CatalogLookup,

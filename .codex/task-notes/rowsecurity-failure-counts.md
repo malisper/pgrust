@@ -300,3 +300,23 @@ Policy role dependency bucket:
   `/tmp/diffs/rowsecurity.diff`.
 - Remaining dependency-related gaps are generated `pg_depend`/`pg_shdepend`
   rows for policies and `DROP OWNED BY` cleanup of policy role references.
+
+Policy catalog dependency rows bucket:
+- Added physical `pg_shdepend` row support and policy dependency row maintenance
+  for `CREATE POLICY`, `ALTER POLICY`, `DROP POLICY`, and relation drops.
+- Policy dependencies now include the owning table as an auto dependency,
+  relation references found inside policy expressions as normal dependencies,
+  and policy-target role rows in `pg_shdepend`.
+- Added focused coverage for policy dependency rows surviving role-only alter,
+  expression dependencies being removed by `ALTER POLICY ... USING (true)`, and
+  both policy target roles appearing in `pg_shdepend`.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  policy_catalog_dependencies_track_roles_and_referenced_tables` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  drop_role_reports_table_acl_and_policy_dependencies` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `689/774` matched, `85` mismatches, `1633` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.
+- Remaining dependency-related gap is `DROP OWNED BY` policy cleanup behavior.
