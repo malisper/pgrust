@@ -17116,6 +17116,33 @@ fn parse_join_using_clause() {
 }
 
 #[test]
+fn parse_join_rhs_can_be_join_tree() {
+    let stmt =
+        parse_select("select * from a join b left join c on b.id = c.id on a.id = b.id").unwrap();
+    assert!(matches!(
+        stmt.from,
+        Some(FromItem::Join {
+            right,
+            constraint: JoinConstraint::On(_),
+            ..
+        }) if matches!(*right, FromItem::Join { kind: JoinKind::Left, .. })
+    ));
+}
+
+#[test]
+fn parse_delete_using_clause() {
+    let stmt = parse_statement("delete from t3 using t1 table1 where t3.x = table1.a").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::Delete(DeleteStatement {
+            table_name,
+            using: Some(FromItem::Alias { alias, .. }),
+            ..
+        }) if table_name == "t3" && alias == "table1"
+    ));
+}
+
+#[test]
 fn parse_natural_left_join_clause() {
     let stmt = parse_select("select * from people natural left join pets").unwrap();
     assert!(matches!(

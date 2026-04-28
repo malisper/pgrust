@@ -3860,6 +3860,58 @@ fn delete_sql_deletes_matching_rows() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn delete_using_deletes_rows_matching_join_source() {
+    let base = temp_dir("delete_using_join_source");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table t1(a int)").unwrap();
+    db.execute(1, "create table t3(x int, y int)").unwrap();
+    db.execute(1, "insert into t1 values (5), (500)").unwrap();
+    db.execute(1, "insert into t3 values (5, 20), (6, 7), (500, 100)")
+        .unwrap();
+
+    assert_eq!(
+        db.execute(1, "delete from t3 using t1 table1 where t3.x = table1.a")
+            .unwrap(),
+        StatementResult::AffectedRows(2)
+    );
+    match db.execute(1, "select * from t3 order by x").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(6), Value::Int32(7)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn delete_using_join_using_allows_qualified_merged_column() {
+    let base = temp_dir("delete_using_join_using_qualified");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table t1(a int)").unwrap();
+    db.execute(1, "create table t2(a int)").unwrap();
+    db.execute(1, "create table t3(x int, y int)").unwrap();
+    db.execute(1, "insert into t1 values (5)").unwrap();
+    db.execute(1, "insert into t2 values (5)").unwrap();
+    db.execute(1, "insert into t3 values (5, 20), (6, 7), (7, 8)")
+        .unwrap();
+
+    assert_eq!(
+        db.execute(
+            1,
+            "delete from t3 using t1 join t2 using (a) where t3.x > t1.a"
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(2)
+    );
+    match db.execute(1, "select * from t3 order by x").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(5), Value::Int32(20)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn order_by_limit_offset_returns_expected_rows() {
     let mut harness = SeededSqlHarness::new("order_by_limit_offset", catalog());
@@ -12364,6 +12416,183 @@ fn lateral_values_can_reference_left_columns() {
 }
 
 #[test]
+fn nested_join_rhs_lateral_can_reference_prior_from_item() {
+    let base = temp_dir("nested_join_rhs_lateral_outer_ref");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select x, z
+         from (values (1),(2)) a(x),
+              (values (10)) b(y) join lateral (values (a.x)) ss(z) on true
+         order by x, z",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int32(1)],
+                    vec![Value::Int32(2), Value::Int32(2)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn derived_table_in_correlated_subquery_can_reference_outer_query() {
+    let base = temp_dir("derived_table_correlated_subquery");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table int8_tbl(q1 int8, q2 int8)")
+        .unwrap();
+    db.execute(1, "insert into int8_tbl values (123, 456)")
+        .unwrap();
+    match db
+        .execute(
+            1,
+            "select q1, q2, (select r from (select q1 as q2) x, (select q2 as r) y)
+             from int8_tbl",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int64(123),
+                    Value::Int64(456),
+                    Value::Int64(456),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn lateral_subquery_can_reference_left_join_output() {
+    let base = temp_dir("lateral_references_left_join_output");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select x, y, z
+         from (select 1 as x) ss1 left join (select 2 as y) ss2 on true,
+              lateral (select ss2.y as z limit 1) ss3",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(1), Value::Int32(2), Value::Int32(2)]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn lateral_inside_join_can_reference_prior_from_item_in_join_qual() {
+    let base = temp_dir("lateral_nested_join_prior_ref_qual");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select x, y, z
+         from (values (1),(2)) a(x),
+              (values (10),(1),(2)) b(y)
+              left join lateral (select a.x from (values (0)) d(n)) ss(z)
+                on b.y = ss.z
+         order by x, y",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int32(1), Value::Int32(1)],
+                    vec![Value::Int32(1), Value::Int32(2), Value::Null],
+                    vec![Value::Int32(1), Value::Int32(10), Value::Null],
+                    vec![Value::Int32(2), Value::Int32(1), Value::Null],
+                    vec![Value::Int32(2), Value::Int32(2), Value::Int32(2)],
+                    vec![Value::Int32(2), Value::Int32(10), Value::Null],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn lateral_nested_sublink_preserves_outer_values_binding() {
+    let base = temp_dir("lateral_nested_sublink_outer_values");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table int4_tbl(f1 int4)").unwrap();
+    db.execute(1, "insert into int4_tbl values (0),(1),(2)")
+        .unwrap();
+    db.execute(1, "create table tenk1(unique1 int4, unique2 int4)")
+        .unwrap();
+    db.execute(1, "insert into tenk1 values (0,9998),(5,1000)")
+        .unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "select id, x, f1
+             from (values (0,9998), (1,1000)) v(id,x),
+                  lateral (
+                    select f1 from int4_tbl
+                    where f1 = any (
+                        select unique1 from tenk1
+                        where unique2 = v.x
+                        offset 0
+                    )
+                  ) ss
+             order by id, f1",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(0), Value::Int32(9998), Value::Int32(0)]],
+    );
+}
+
+#[test]
+fn right_full_join_lateral_cannot_reference_left_side() {
+    let base = temp_dir("right_full_lateral_invalid_left_ref");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let right_err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from (values (1)) a(f1)
+         right join lateral generate_series(0, a.f1) g on true",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(right_err, ExecError::Parse(ParseError::InvalidFromClauseReference(name)) if name == "a")
+    );
+
+    let full_err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from (values (1)) a(f1)
+         full join lateral generate_series(0, a.f1) g on true",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(full_err, ExecError::Parse(ParseError::InvalidFromClauseReference(name)) if name == "a")
+    );
+}
+
+#[test]
 fn lateral_values_can_reference_zero_column_whole_row() {
     let base = temp_dir("lateral_values_zero_column_whole_row");
     let db = Database::open(&base, 16).unwrap();
@@ -14819,6 +15048,7 @@ from (values (1),(2)) v1(r1)
         ) as ss1 on true
         full join generate_series(1, v1.r1) as gs4 on false
     ) as ss0 on true
+order by r1, gs1 nulls first, gs4 nulls last, gs2 nulls first, gs3 nulls first
 "#;
     match run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap() {
         StatementResult::Query {

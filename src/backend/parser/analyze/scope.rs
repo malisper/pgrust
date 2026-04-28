@@ -646,6 +646,45 @@ fn from_item_is_lateral(item: &FromItem) -> bool {
     }
 }
 
+fn from_item_contains_lateral(item: &FromItem) -> bool {
+    if from_item_is_lateral(item) {
+        return true;
+    }
+    match item {
+        FromItem::Join { left, right, .. } => {
+            from_item_contains_lateral(left) || from_item_contains_lateral(right)
+        }
+        _ => false,
+    }
+}
+
+fn invalid_lateral_outer_scope(mut scope: BoundScope) -> BoundScope {
+    for column in &mut scope.columns {
+        for name in std::mem::take(&mut column.relation_names) {
+            if !column
+                .hidden_invalid_relation_names
+                .iter()
+                .any(|hidden| hidden.eq_ignore_ascii_case(&name))
+            {
+                column.hidden_invalid_relation_names.push(name);
+            }
+        }
+    }
+    for relation in &mut scope.relations {
+        for name in std::mem::take(&mut relation.relation_names) {
+            if !relation
+                .hidden_invalid_relation_names
+                .iter()
+                .any(|hidden| hidden.eq_ignore_ascii_case(&name))
+            {
+                relation.hidden_invalid_relation_names.push(name);
+            }
+        }
+        relation.system_varno = None;
+    }
+    scope
+}
+
 fn scopes_match(left: &BoundScope, right: &BoundScope) -> bool {
     left.columns == right.columns && left.desc == right.desc
 }
@@ -782,7 +821,7 @@ pub(super) fn bind_from_item_with_ctes(
             let (plan, _) = analyze_select_query_with_outer(
                 select,
                 catalog,
-                &[],
+                outer_scopes,
                 None,
                 visible_agg_scope.as_ref(),
                 ctes,
@@ -838,8 +877,13 @@ pub(super) fn bind_from_item_with_ctes(
                 expanded_views,
             )?;
             let mut right_outer_scopes = outer_scopes.to_vec();
-            if from_item_is_lateral(right) {
-                right_outer_scopes.insert(0, left_scope.clone());
+            if from_item_contains_lateral(right) {
+                let lateral_scope = if matches!(kind, JoinKind::Right | JoinKind::Full) {
+                    invalid_lateral_outer_scope(left_scope.clone())
+                } else {
+                    left_scope.clone()
+                };
+                right_outer_scopes.insert(0, lateral_scope);
             }
             let (right_plan, right_scope) = bind_from_item_with_ctes(
                 right,
@@ -4338,11 +4382,20 @@ fn bind_join_using_projection(
         joinleftcols.push(*left_index + 1);
         joinrightcols.push(*right_index + 1);
         desc_columns.push(column_desc(name.clone(), left_ty, true));
+        let mut relation_names = left_scope.columns[*left_index].relation_names.clone();
+        for relation in &right_scope.columns[*right_index].relation_names {
+            if !relation_names
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(relation))
+            {
+                relation_names.push(relation.clone());
+            }
+        }
         scope_columns.push(ScopeColumn {
             output_name: name.clone(),
             hidden: false,
             qualified_only: false,
-            relation_names: vec![],
+            relation_names,
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
             source_relation_oid: None,

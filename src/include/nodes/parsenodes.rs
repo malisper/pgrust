@@ -4691,6 +4691,7 @@ pub struct DeleteStatement {
     pub with: Vec<CommonTableExpr>,
     pub table_name: String,
     pub only: bool,
+    pub using: Option<FromItem>,
     pub where_clause: Option<SqlExpr>,
     pub returning: Vec<SelectItem>,
 }

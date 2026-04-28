@@ -17937,7 +17937,7 @@ fn consume_join_part(
     natural: &mut bool,
 ) -> Result<(), ParseError> {
     match part.as_rule() {
-        Rule::aliased_from_item => *right = Some(build_from_item(part)?),
+        Rule::aliased_from_item | Rule::joined_from_item => *right = Some(build_from_item(part)?),
         Rule::expr => *constraint = JoinConstraint::On(build_expr(part)?),
         Rule::join_using_clause => {
             let mut columns = Vec::new();
@@ -20904,6 +20904,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
     let mut with = Vec::new();
     let mut table_name = None;
     let mut only = false;
+    let mut using = None;
     let mut where_clause = None;
     let mut returning = Vec::new();
     for part in pair.into_inner() {
@@ -20915,6 +20916,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
             }
             Rule::only_clause => only = true,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::from_item => using = Some(build_from_item(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
             Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
@@ -20925,6 +20927,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
         with,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         only,
+        using,
         where_clause,
         returning,
     })
