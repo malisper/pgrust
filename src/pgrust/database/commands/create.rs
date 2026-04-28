@@ -308,11 +308,7 @@ fn validate_partitioned_table_ddl(
     table_name: &str,
     lowered: &crate::backend::parser::LoweredCreateTable,
 ) -> Result<(), ExecError> {
-    if lowered.partition_spec.is_some() && !lowered.foreign_key_actions.is_empty() {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
-            "foreign keys on partitioned table \"{table_name}\""
-        ))));
-    }
+    let _ = (table_name, lowered);
     Ok(())
 }
 
@@ -2132,11 +2128,13 @@ impl Database {
                             && index.index_meta.indkey == referenced_attnums
                     })
                     .ok_or_else(|| {
-                        ExecError::Parse(ParseError::UnexpectedToken {
-                            expected: "referenced UNIQUE or PRIMARY KEY index",
-                            actual: format!(
-                                "table \"{table_name}\" lacks an exact matching unique key"
+                        ExecError::Parse(ParseError::DetailedError {
+                            message: format!(
+                                "there is no unique constraint matching given keys for referenced table \"{table_name}\""
                             ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42830",
                         })
                     })?;
                 (referenced_relation, referenced_index)
@@ -2202,18 +2200,25 @@ impl Database {
                     foreign_key_match_code(action.match_type),
                     delete_set_attnums.as_deref(),
                     action.period.is_some(),
+                    0,
+                    true,
+                    0,
                     &constraint_ctx,
                 )
                 .map_err(map_catalog_error)?;
             self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
             catalog_effects.push(constraint_effect);
-            next_foreign_key_cid = self.create_foreign_key_triggers_in_transaction(
-                client_id,
-                xid,
-                constraint_cid.saturating_add(1),
-                &constraint_row,
-                catalog_effects,
-            )?;
+            next_foreign_key_cid = if action.enforced {
+                self.create_foreign_key_triggers_in_transaction(
+                    client_id,
+                    xid,
+                    constraint_cid.saturating_add(1),
+                    &constraint_row,
+                    catalog_effects,
+                )?
+            } else {
+                constraint_cid.saturating_add(1)
+            };
         }
 
         Ok(next_foreign_key_cid)

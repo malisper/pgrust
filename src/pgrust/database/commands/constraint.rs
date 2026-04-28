@@ -16,8 +16,7 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::pgrust::database::ddl::{
-    is_system_column_name, lookup_heap_relation_for_alter_table,
-    lookup_table_or_partitioned_table_for_alter_table,
+    is_system_column_name, lookup_table_or_partitioned_table_for_alter_table,
 };
 
 fn relation_basename(name: &str) -> &str {
@@ -521,6 +520,67 @@ fn column_attnums_for_names(
         .collect()
 }
 
+fn attnums_by_parent_column_names(
+    parent_desc: &crate::backend::executor::RelationDesc,
+    child_desc: &crate::backend::executor::RelationDesc,
+    parent_attnums: &[i16],
+) -> Result<Vec<i16>, ExecError> {
+    parent_attnums
+        .iter()
+        .map(|attnum| {
+            let index = usize::try_from(attnum.saturating_sub(1)).map_err(|_| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "user column attnum",
+                    actual: attnum.to_string(),
+                })
+            })?;
+            let parent_column = parent_desc.columns.get(index).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "user column attnum",
+                    actual: attnum.to_string(),
+                })
+            })?;
+            child_desc
+                .columns
+                .iter()
+                .enumerate()
+                .find_map(|(child_index, child_column)| {
+                    (!child_column.dropped
+                        && child_column.name.eq_ignore_ascii_case(&parent_column.name))
+                    .then_some(child_index as i16 + 1)
+                })
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnknownColumn(parent_column.name.clone()))
+                })
+        })
+        .collect()
+}
+
+fn partition_descendants(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> Result<Vec<crate::backend::parser::BoundRelation>, ExecError> {
+    let mut descendants = Vec::new();
+    let mut queue = std::collections::VecDeque::from([relation_oid]);
+    while let Some(parent_oid) = queue.pop_front() {
+        let mut children = catalog.inheritance_children(parent_oid);
+        children.sort_by_key(|row| (row.inhseqno, row.inhrelid));
+        for child in children.into_iter().filter(|row| !row.inhdetachpending) {
+            let relation = catalog.relation_by_oid(child.inhrelid).ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: format!("missing partition relation {}", child.inhrelid),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                }
+            })?;
+            queue.push_back(relation.relation_oid);
+            descendants.push(relation);
+        }
+    }
+    Ok(descendants)
+}
+
 fn validate_foreign_key_rows(
     db: &Database,
     relation: &crate::backend::parser::BoundRelation,
@@ -832,6 +892,30 @@ impl Database {
                     ),
                 })
             })?;
+        if alter_stmt.not_valid {
+            return Err(ExecError::DetailedError {
+                message: "constraints cannot be altered to be NOT VALID".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+        if alter_stmt.no_inherit {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "constraint \"{}\" of relation \"{}\" is not a not-null constraint",
+                    alter_stmt.constraint_name,
+                    relation_basename(&alter_stmt.table_name)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: if row.contype == CONSTRAINT_NOTNULL {
+                    "0A000"
+                } else {
+                    "42809"
+                },
+            });
+        }
         if row.contype != CONSTRAINT_FOREIGN {
             return Err(ExecError::DetailedError {
                 message: format!(
@@ -934,6 +1018,16 @@ impl Database {
             waiter: None,
             interrupts,
         };
+        if row.conenforced && !enforced {
+            self.drop_foreign_key_triggers_in_transaction(
+                client_id,
+                xid,
+                cid,
+                &row,
+                &catalog,
+                catalog_effects,
+            )?;
+        }
         let effect = self
             .catalog
             .write()
@@ -947,8 +1041,192 @@ impl Database {
                 &ctx,
             )
             .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
+        let mut updated_row = row.clone();
+        updated_row.condeferrable = deferrable;
+        updated_row.condeferred = initially_deferred;
+        updated_row.conenforced = enforced;
+        updated_row.convalidated = validated;
+        if !row.conenforced && enforced {
+            self.create_foreign_key_triggers_in_transaction(
+                client_id,
+                xid,
+                cid.saturating_add(catalog_effects.len() as u32),
+                &updated_row,
+                catalog_effects,
+            )?;
+        } else if row.conenforced && enforced {
+            self.alter_foreign_key_trigger_deferrability_in_transaction(
+                client_id,
+                xid,
+                cid.saturating_add(catalog_effects.len() as u32),
+                &updated_row,
+                &catalog,
+                catalog_effects,
+            )?;
+        }
+        if relation.relkind == 'p' {
+            self.alter_partition_child_foreign_key_constraints_in_transaction(
+                client_id,
+                xid,
+                cid.saturating_add(catalog_effects.len() as u32),
+                &row,
+                deferrable,
+                initially_deferred,
+                enforced,
+                validated,
+                &catalog,
+                catalog_effects,
+            )?;
+        }
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn alter_partition_child_foreign_key_constraints_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent_constraint: &PgConstraintRow,
+        deferrable: bool,
+        initially_deferred: bool,
+        enforced: bool,
+        validated: bool,
+        catalog: &dyn CatalogLookup,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let child_rows = catalog
+            .constraint_rows()
+            .into_iter()
+            .filter(|row| {
+                row.contype == CONSTRAINT_FOREIGN && row.conparentid == parent_constraint.oid
+            })
+            .collect::<Vec<_>>();
+        let interrupts = self.interrupt_state(client_id);
+        let mut next_cid = cid;
+        for child_row in child_rows {
+            let child_relation = catalog.relation_by_oid(child_row.conrelid).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnknownTable(child_row.conrelid.to_string()))
+            })?;
+            if child_row.conenforced && !enforced {
+                self.drop_foreign_key_triggers_in_transaction(
+                    client_id,
+                    xid,
+                    next_cid,
+                    &child_row,
+                    catalog,
+                    catalog_effects,
+                )?;
+                next_cid = next_cid.saturating_add(1);
+            }
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid,
+                client_id,
+                waiter: None,
+                interrupts: std::sync::Arc::clone(&interrupts),
+            };
+            next_cid = next_cid.saturating_add(1);
+            let child_validated = if !enforced {
+                false
+            } else if !child_row.conenforced {
+                true
+            } else {
+                validated
+            };
+            let effect = self
+                .catalog
+                .write()
+                .alter_foreign_key_constraint_attributes_mvcc(
+                    child_relation.relation_oid,
+                    &child_row.conname,
+                    deferrable,
+                    initially_deferred,
+                    enforced,
+                    child_validated,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            let mut updated_child = child_row.clone();
+            updated_child.condeferrable = deferrable;
+            updated_child.condeferred = initially_deferred;
+            updated_child.conenforced = enforced;
+            updated_child.convalidated = child_validated;
+            if !child_row.conenforced && enforced {
+                next_cid = self.create_foreign_key_check_triggers_in_transaction(
+                    client_id,
+                    xid,
+                    next_cid,
+                    &updated_child,
+                    catalog_effects,
+                )?;
+            } else if child_row.conenforced && enforced {
+                self.alter_foreign_key_trigger_deferrability_in_transaction(
+                    client_id,
+                    xid,
+                    next_cid,
+                    &updated_child,
+                    catalog,
+                    catalog_effects,
+                )?;
+                next_cid = next_cid.saturating_add(1);
+            }
+        }
+        Ok(next_cid)
+    }
+
+    fn drop_partition_child_foreign_key_constraints_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent_constraint: &PgConstraintRow,
+        catalog: &dyn CatalogLookup,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let child_rows = catalog
+            .constraint_rows()
+            .into_iter()
+            .filter(|row| {
+                row.contype == CONSTRAINT_FOREIGN && row.conparentid == parent_constraint.oid
+            })
+            .collect::<Vec<_>>();
+        let interrupts = self.interrupt_state(client_id);
+        let mut next_cid = cid;
+        for child_row in child_rows {
+            self.drop_foreign_key_triggers_in_transaction(
+                client_id,
+                xid,
+                next_cid,
+                &child_row,
+                catalog,
+                catalog_effects,
+            )?;
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid.saturating_add(catalog_effects.len() as u32),
+                client_id,
+                waiter: None,
+                interrupts: std::sync::Arc::clone(&interrupts),
+            };
+            let (_removed, effect) = self
+                .catalog
+                .write()
+                .drop_relation_constraint_mvcc(child_row.conrelid, &child_row.conname, &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            next_cid = next_cid.saturating_add(1);
+        }
+        Ok(next_cid)
     }
 
     pub(crate) fn execute_alter_table_rename_constraint_stmt_with_search_path(
@@ -959,7 +1237,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -1002,7 +1280,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -1613,6 +1891,18 @@ impl Database {
                 catalog_effects.push(effect);
             }
             crate::backend::parser::NormalizedAlterTableConstraint::ForeignKey(action) => {
+                if alter_stmt.only && relation.relkind == 'p' {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot use ONLY for foreign key on partitioned table \"{}\" referencing relation \"{}\"",
+                            relation_basename(&alter_stmt.table_name),
+                            action.referenced_table
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42809",
+                    });
+                }
                 if !action.not_valid {
                     if action.enforced {
                         validate_foreign_key_rows(
@@ -1657,7 +1947,7 @@ impl Database {
                     .write()
                     .create_foreign_key_constraint_mvcc(
                         relation.relation_oid,
-                        action.constraint_name,
+                        action.constraint_name.clone(),
                         action.deferrable,
                         action.initially_deferred,
                         action.enforced,
@@ -1671,21 +1961,285 @@ impl Database {
                         foreign_key_match_code(action.match_type),
                         delete_set_attnums.as_deref(),
                         action.period.is_some(),
+                        0,
+                        true,
+                        0,
                         &ctx,
                     )
                     .map_err(map_catalog_error)?;
                 catalog_effects.push(effect);
-                self.create_foreign_key_triggers_in_transaction(
+                if action.enforced {
+                    self.create_foreign_key_triggers_in_transaction(
+                        client_id,
+                        xid,
+                        cid.saturating_add(1),
+                        &constraint_row,
+                        catalog_effects,
+                    )?;
+                }
+                if relation.relkind == 'p' {
+                    self.create_partition_child_foreign_key_constraints_in_transaction(
+                        client_id,
+                        xid,
+                        cid.saturating_add(catalog_effects.len() as u32),
+                        &relation,
+                        &constraint_row,
+                        &action,
+                        &local_attnums,
+                        &referenced_attnums,
+                        delete_set_attnums.as_deref(),
+                        configured_search_path,
+                        catalog_effects,
+                    )?;
+                }
+            }
+        }
+
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_partition_child_foreign_key_constraints_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent: &crate::backend::parser::BoundRelation,
+        parent_constraint: &PgConstraintRow,
+        action: &ForeignKeyConstraintAction,
+        parent_attnums: &[i16],
+        referenced_attnums: &[i16],
+        delete_set_attnums: Option<&[i16]>,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let children = partition_descendants(&catalog, parent.relation_oid)?;
+        let interrupts = self.interrupt_state(client_id);
+        let mut next_cid = cid;
+        for child in children {
+            let local_attnums =
+                attnums_by_parent_column_names(&parent.desc, &child.desc, parent_attnums)?;
+            let child_delete_set_attnums = delete_set_attnums
+                .map(|attnums| attnums_by_parent_column_names(&parent.desc, &child.desc, attnums))
+                .transpose()?;
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid,
+                client_id,
+                waiter: None,
+                interrupts: std::sync::Arc::clone(&interrupts),
+            };
+            next_cid = next_cid.saturating_add(1);
+            let (constraint_row, effect) = self
+                .catalog
+                .write()
+                .create_foreign_key_constraint_mvcc(
+                    child.relation_oid,
+                    action.constraint_name.clone(),
+                    action.deferrable,
+                    action.initially_deferred,
+                    action.enforced,
+                    action.enforced && !action.not_valid,
+                    &local_attnums,
+                    action.referenced_relation_oid,
+                    action.referenced_index_oid,
+                    referenced_attnums,
+                    foreign_key_action_code(action.on_update),
+                    foreign_key_action_code(action.on_delete),
+                    foreign_key_match_code(action.match_type),
+                    child_delete_set_attnums.as_deref(),
+                    action.period.is_some(),
+                    parent_constraint.oid,
+                    false,
+                    1,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            if action.enforced {
+                next_cid = self.create_foreign_key_check_triggers_in_transaction(
                     client_id,
                     xid,
-                    cid.saturating_add(1),
+                    next_cid,
                     &constraint_row,
                     catalog_effects,
                 )?;
             }
         }
+        Ok(next_cid)
+    }
 
-        Ok(StatementResult::AffectedRows(0))
+    pub(super) fn reconcile_partitioned_parent_foreign_keys_for_attached_child_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent_oid: u32,
+        child_oid: u32,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let parent = catalog
+            .relation_by_oid(parent_oid)
+            .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(parent_oid.to_string())))?;
+        let child = catalog
+            .relation_by_oid(child_oid)
+            .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(child_oid.to_string())))?;
+        let mut target_relations = vec![child];
+        target_relations.extend(partition_descendants(&catalog, child_oid)?);
+        let parent_constraints = catalog
+            .constraint_rows_for_relation(parent_oid)
+            .into_iter()
+            .filter(|row| row.contype == CONSTRAINT_FOREIGN)
+            .collect::<Vec<_>>();
+        let interrupts = self.interrupt_state(client_id);
+        let mut next_cid = cid;
+        for parent_constraint in parent_constraints {
+            let parent_attnums = parent_constraint.conkey.clone().ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "foreign key columns",
+                    actual: format!("missing conkey for {}", parent_constraint.conname),
+                })
+            })?;
+            let referenced_attnums = parent_constraint.confkey.clone().ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "referenced foreign key columns",
+                    actual: format!("missing confkey for {}", parent_constraint.conname),
+                })
+            })?;
+            for target in &target_relations {
+                let local_attnums =
+                    attnums_by_parent_column_names(&parent.desc, &target.desc, &parent_attnums)?;
+                let delete_set_attnums = parent_constraint
+                    .confdelsetcols
+                    .as_deref()
+                    .map(|attnums| {
+                        attnums_by_parent_column_names(&parent.desc, &target.desc, attnums)
+                    })
+                    .transpose()?;
+                let existing = catalog
+                    .constraint_rows_for_relation(target.relation_oid)
+                    .into_iter()
+                    .find(|row| {
+                        row.contype == CONSTRAINT_FOREIGN
+                            && row.conname.eq_ignore_ascii_case(&parent_constraint.conname)
+                    });
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: std::sync::Arc::clone(&interrupts),
+                };
+                next_cid = next_cid.saturating_add(1);
+                let constraint_row = if let Some(existing) = existing {
+                    let effect = self
+                        .catalog
+                        .write()
+                        .update_foreign_key_constraint_inheritance_mvcc(
+                            target.relation_oid,
+                            existing.oid,
+                            parent_constraint.oid,
+                            existing.conislocal,
+                            existing.coninhcount.saturating_add(1),
+                            &ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                    let mut row = existing.clone();
+                    row.conparentid = parent_constraint.oid;
+                    row.coninhcount = row.coninhcount.saturating_add(1);
+                    if row.condeferrable != parent_constraint.condeferrable
+                        || row.condeferred != parent_constraint.condeferred
+                        || row.conenforced != parent_constraint.conenforced
+                        || row.convalidated != parent_constraint.convalidated
+                    {
+                        let attr_ctx = CatalogWriteContext {
+                            pool: self.pool.clone(),
+                            txns: self.txns.clone(),
+                            xid,
+                            cid: next_cid,
+                            client_id,
+                            waiter: None,
+                            interrupts: std::sync::Arc::clone(&interrupts),
+                        };
+                        next_cid = next_cid.saturating_add(1);
+                        let effect = self
+                            .catalog
+                            .write()
+                            .alter_foreign_key_constraint_attributes_mvcc(
+                                target.relation_oid,
+                                &row.conname,
+                                parent_constraint.condeferrable,
+                                parent_constraint.condeferred,
+                                parent_constraint.conenforced,
+                                parent_constraint.convalidated,
+                                &attr_ctx,
+                            )
+                            .map_err(map_catalog_error)?;
+                        self.apply_catalog_mutation_effect_immediate(&effect)?;
+                        catalog_effects.push(effect);
+                        row.condeferrable = parent_constraint.condeferrable;
+                        row.condeferred = parent_constraint.condeferred;
+                        row.conenforced = parent_constraint.conenforced;
+                        row.convalidated = parent_constraint.convalidated;
+                    }
+                    row
+                } else {
+                    let (constraint_row, effect) = self
+                        .catalog
+                        .write()
+                        .create_foreign_key_constraint_mvcc(
+                            target.relation_oid,
+                            parent_constraint.conname.clone(),
+                            parent_constraint.condeferrable,
+                            parent_constraint.condeferred,
+                            parent_constraint.conenforced,
+                            parent_constraint.convalidated,
+                            &local_attnums,
+                            parent_constraint.confrelid,
+                            parent_constraint.conindid,
+                            &referenced_attnums,
+                            parent_constraint.confupdtype,
+                            parent_constraint.confdeltype,
+                            parent_constraint.confmatchtype,
+                            delete_set_attnums.as_deref(),
+                            parent_constraint.conperiod,
+                            parent_constraint.oid,
+                            false,
+                            1,
+                            &ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                    constraint_row
+                };
+                if parent_constraint.conenforced
+                    && catalog
+                        .trigger_rows_for_relation(target.relation_oid)
+                        .into_iter()
+                        .all(|row| row.tgconstraint != constraint_row.oid)
+                {
+                    next_cid = self.create_foreign_key_check_triggers_in_transaction(
+                        client_id,
+                        xid,
+                        next_cid,
+                        &constraint_row,
+                        catalog_effects,
+                    )?;
+                }
+            }
+        }
+        Ok(next_cid)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1823,7 +2377,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &drop_stmt.table_name,
             drop_stmt.if_exists,
@@ -1865,7 +2419,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &drop_stmt.table_name,
             drop_stmt.if_exists,
@@ -1912,6 +2466,16 @@ impl Database {
         match row.contype {
             CONSTRAINT_CHECK | CONSTRAINT_FOREIGN => {
                 if row.contype == CONSTRAINT_FOREIGN {
+                    if relation.relkind == 'p' {
+                        self.drop_partition_child_foreign_key_constraints_in_transaction(
+                            client_id,
+                            xid,
+                            cid,
+                            &row,
+                            &catalog,
+                            catalog_effects,
+                        )?;
+                    }
                     self.drop_foreign_key_triggers_in_transaction(
                         client_id,
                         xid,
@@ -2110,7 +2674,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -2152,7 +2716,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -2251,7 +2815,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -2293,7 +2857,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -2385,7 +2949,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -2431,7 +2995,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -2563,30 +3127,32 @@ impl Database {
                             actual: format!("missing foreign key binding for {}", row.conname),
                         })
                     })?;
-                let mut ctx = ddl_executor_context(
-                    self,
-                    &catalog,
-                    client_id,
-                    xid,
-                    cid,
-                    &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-                    std::sync::Arc::clone(&interrupts),
-                )?;
-                let rows = collect_matching_rows_heap(
-                    relation.rel,
-                    &relation.desc,
-                    relation.toast,
-                    None,
-                    &mut ctx,
-                )?;
-                for (_, values) in rows {
-                    crate::backend::executor::enforce_outbound_foreign_keys(
-                        relation_basename(&alter_stmt.table_name),
-                        std::slice::from_ref(&constraint),
+                if relation.relkind != 'p' {
+                    let mut ctx = ddl_executor_context(
+                        self,
+                        &catalog,
+                        client_id,
+                        xid,
+                        cid,
+                        &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                        std::sync::Arc::clone(&interrupts),
+                    )?;
+                    let rows = collect_matching_rows_heap(
+                        relation.rel,
+                        &relation.desc,
+                        relation.toast,
                         None,
-                        &values,
                         &mut ctx,
                     )?;
+                    for (_, values) in rows {
+                        crate::backend::executor::enforce_outbound_foreign_keys(
+                            relation_basename(&alter_stmt.table_name),
+                            std::slice::from_ref(&constraint),
+                            None,
+                            &values,
+                            &mut ctx,
+                        )?;
+                    }
                 }
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
@@ -2607,10 +3173,124 @@ impl Database {
                     )
                     .map_err(map_catalog_error)?;
                 catalog_effects.push(effect);
+                if relation.relkind == 'p' {
+                    self.validate_partition_child_foreign_key_constraints_in_transaction(
+                        client_id,
+                        xid,
+                        cid.saturating_add(catalog_effects.len() as u32),
+                        &row,
+                        &catalog,
+                        catalog_effects,
+                    )?;
+                }
             }
             _ => {}
         }
 
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn validate_partition_child_foreign_key_constraints_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent_constraint: &PgConstraintRow,
+        catalog: &dyn CatalogLookup,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let child_rows = catalog
+            .constraint_rows()
+            .into_iter()
+            .filter(|row| {
+                row.contype == CONSTRAINT_FOREIGN
+                    && row.conparentid == parent_constraint.oid
+                    && !row.convalidated
+            })
+            .collect::<Vec<_>>();
+        let interrupts = self.interrupt_state(client_id);
+        let datetime_config = crate::backend::utils::misc::guc_datetime::DateTimeConfig::default();
+        let mut next_cid = cid;
+        for child_row in child_rows {
+            if !child_row.conenforced {
+                continue;
+            }
+            let child_relation = catalog.relation_by_oid(child_row.conrelid).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnknownTable(child_row.conrelid.to_string()))
+            })?;
+            let relation_name = relation_basename(
+                &catalog
+                    .class_row_by_oid(child_relation.relation_oid)
+                    .map(|row| row.relname)
+                    .unwrap_or_else(|| child_relation.relation_oid.to_string()),
+            )
+            .to_string();
+            let constraints = crate::backend::parser::bind_relation_constraints(
+                Some(&relation_name),
+                child_relation.relation_oid,
+                &child_relation.desc,
+                catalog,
+            )
+            .map_err(ExecError::Parse)?;
+            let constraint = constraints
+                .foreign_keys
+                .into_iter()
+                .find(|constraint| constraint.constraint_oid == child_row.oid)
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "bound foreign key constraint",
+                        actual: format!("missing foreign key binding for {}", child_row.conname),
+                    })
+                })?;
+            if child_relation.relkind != 'p' {
+                let mut ctx = ddl_executor_context(
+                    self,
+                    catalog,
+                    client_id,
+                    xid,
+                    next_cid,
+                    &datetime_config,
+                    std::sync::Arc::clone(&interrupts),
+                )?;
+                let rows = collect_matching_rows_heap(
+                    child_relation.rel,
+                    &child_relation.desc,
+                    child_relation.toast,
+                    None,
+                    &mut ctx,
+                )?;
+                for (_, values) in rows {
+                    crate::backend::executor::enforce_outbound_foreign_keys(
+                        &relation_name,
+                        std::slice::from_ref(&constraint),
+                        None,
+                        &values,
+                        &mut ctx,
+                    )?;
+                }
+            }
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid,
+                client_id,
+                waiter: None,
+                interrupts: std::sync::Arc::clone(&interrupts),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .validate_foreign_key_constraint_mvcc(
+                    child_relation.relation_oid,
+                    &child_row.conname,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            next_cid = next_cid.saturating_add(1);
+        }
+        Ok(next_cid)
     }
 }

@@ -66,6 +66,22 @@ fn relation_has_table_select_privilege(
     auth_members_rows: &[PgAuthMembersRow],
     current_user_oid: u32,
 ) -> bool {
+    relation_has_table_privilege(
+        class_row,
+        authid_rows,
+        auth_members_rows,
+        current_user_oid,
+        'r',
+    )
+}
+
+pub(crate) fn relation_has_table_privilege(
+    class_row: &PgClassRow,
+    authid_rows: &[PgAuthIdRow],
+    auth_members_rows: &[PgAuthMembersRow],
+    current_user_oid: u32,
+    privilege: char,
+) -> bool {
     if has_effective_membership(
         current_user_oid,
         class_row.relowner,
@@ -84,7 +100,7 @@ fn relation_has_table_select_privilege(
         .iter()
         .any(|item| {
             parse_acl_item(item).is_some_and(|(grantee, privileges)| {
-                effective_names.contains(grantee) && privileges.contains('r')
+                effective_names.contains(grantee) && privileges.contains(privilege)
             })
         })
 }

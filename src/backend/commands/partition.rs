@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use crate::backend::commands::tablecmds::collect_matching_rows_heap;
 use crate::backend::executor::value_io::format_failing_row_detail;
 use crate::backend::executor::{
-    ExecError, ExecutorContext, TupleSlot, compare_order_values, eval_expr,
+    ExecError, ExecutorContext, RelationDesc, TupleSlot, compare_order_values, eval_expr,
     execute_scalar_function_value_call, render_datetime_value_text_with_config,
 };
 use crate::backend::parser::{
@@ -1367,8 +1367,11 @@ pub(crate) fn exec_find_partition(
     if target.relispartition {
         let target_name = relation_name_for_oid(catalog, target.relation_oid);
         let mut child = target.clone();
+        let mut current_row = row.to_vec();
         while let Some(parent) = declarative_parent(catalog, &child)? {
-            let selected = find_partition_child(catalog, proute, &parent, row, ctx)?
+            let parent_row =
+                remap_partition_row_to_parent_layout(&current_row, &child.desc, &parent.desc)?;
+            let selected = find_partition_child(catalog, proute, &parent, &parent_row, ctx)?
                 .map(|lookup| lookup.reldesc);
             if selected
                 .as_ref()
@@ -1380,28 +1383,128 @@ pub(crate) fn exec_find_partition(
                     &ctx.datetime_config,
                 ));
             }
+            current_row = parent_row;
             child = parent;
         }
     }
 
     let mut current = target.clone();
+    let mut current_row = row.to_vec();
     loop {
         if current.relkind != 'p' {
             return Ok(current);
         }
 
-        let Some(selected) = find_partition_child(catalog, proute, &current, row, ctx)? else {
+        let Some(selected) = find_partition_child(catalog, proute, &current, &current_row, ctx)?
+        else {
             let dispatch = proute.dispatch_info_for_relation(catalog, &current)?;
             return Err(no_partition_for_row(
                 &relation_name_for_oid(catalog, current.relation_oid),
-                no_partition_detail(catalog, &current, &dispatch.key, row, ctx)?,
+                no_partition_detail(catalog, &current, &dispatch.key, &current_row, ctx)?,
             ));
         };
         if selected.is_leaf {
             return Ok(selected.reldesc);
         }
+        current_row = remap_partition_row_to_child_layout(
+            &current_row,
+            &current.desc,
+            &selected.reldesc.desc,
+        )?;
         current = selected.reldesc;
     }
+}
+
+fn remap_partition_row_to_child_layout(
+    row: &[Value],
+    parent_desc: &RelationDesc,
+    child_desc: &RelationDesc,
+) -> Result<Vec<Value>, ExecError> {
+    let mut child_row = vec![Value::Null; child_desc.columns.len()];
+    for (child_idx, child_column) in child_desc.columns.iter().enumerate() {
+        if child_column.dropped {
+            continue;
+        }
+        let Some((parent_idx, parent_column)) =
+            parent_desc
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(_, parent_column)| {
+                    !parent_column.dropped
+                        && parent_column.name.eq_ignore_ascii_case(&child_column.name)
+                })
+        else {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "partition column \"{}\" is missing from partitioned table",
+                    child_column.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        };
+        if parent_column.sql_type != child_column.sql_type {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "partition column \"{}\" has different type than partitioned table",
+                    child_column.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+        child_row[child_idx] = row.get(parent_idx).cloned().unwrap_or(Value::Null);
+    }
+    Ok(child_row)
+}
+
+fn remap_partition_row_to_parent_layout(
+    row: &[Value],
+    child_desc: &RelationDesc,
+    parent_desc: &RelationDesc,
+) -> Result<Vec<Value>, ExecError> {
+    let mut parent_row = vec![Value::Null; parent_desc.columns.len()];
+    for (parent_idx, parent_column) in parent_desc.columns.iter().enumerate() {
+        if parent_column.dropped {
+            continue;
+        }
+        let Some((child_idx, child_column)) =
+            child_desc
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(_, child_column)| {
+                    !child_column.dropped
+                        && child_column.name.eq_ignore_ascii_case(&parent_column.name)
+                })
+        else {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "partition column \"{}\" is missing from partitioned table",
+                    parent_column.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        };
+        if child_column.sql_type != parent_column.sql_type {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "partition column \"{}\" has different type than partitioned table",
+                    parent_column.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+        parent_row[parent_idx] = row.get(child_idx).cloned().unwrap_or(Value::Null);
+    }
+    Ok(parent_row)
 }
 
 struct PartitionLookup {

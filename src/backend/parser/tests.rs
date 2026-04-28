@@ -3585,6 +3585,8 @@ fn parse_alter_table_constraint_statements() {
             only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
+            not_valid: false,
+            no_inherit: false,
             deferrable: Some(true),
             initially_deferred: Some(true),
             enforced: None,
@@ -3602,9 +3604,29 @@ fn parse_alter_table_constraint_statements() {
             only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
+            not_valid: false,
+            no_inherit: false,
             deferrable: Some(false),
             initially_deferred: None,
             enforced: Some(false),
+        })
+    );
+
+    let stmt =
+        parse_statement("alter table items alter constraint items_id_check not valid no inherit")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterConstraint(AlterTableAlterConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            constraint_name: "items_id_check".into(),
+            not_valid: true,
+            no_inherit: true,
+            deferrable: None,
+            initially_deferred: None,
+            enforced: None,
         })
     );
 
@@ -3613,8 +3635,8 @@ fn parse_alter_table_constraint_statements() {
             .unwrap_err();
     assert!(matches!(
         err,
-        ParseError::FeatureNotSupportedMessage(message)
-            if message == "multiple ENFORCED/NOT ENFORCED clauses not allowed"
+        ParseError::DetailedError { message, .. }
+            if message == "conflicting constraint properties"
     ));
 
     let stmt =
@@ -13138,6 +13160,83 @@ fn lower_create_table_preserves_key_constraint_deferrability() {
             && action.deferrable
             && !action.initially_deferred
     }));
+}
+
+#[test]
+fn lower_create_table_uses_foreign_key_column_errors() {
+    let catalog = catalog_with_people_primary_key();
+
+    let stmt = parse_statement(
+        "create table fktable (
+            ftest1 int4,
+            constraint fkfail1 foreign key (ftest2) references people
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let err = lower_create_table(&ct, &catalog).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ParseError::DetailedError {
+                message,
+                sqlstate,
+                ..
+            } if message == "column \"ftest2\" referenced in foreign key constraint does not exist"
+                && *sqlstate == "42703"
+        ),
+        "unexpected error: {err:?}"
+    );
+
+    let stmt = parse_statement(
+        "create table fktable (
+            ftest1 int4,
+            constraint fkfail1 foreign key (tableoid) references people(id)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let err = lower_create_table(&ct, &catalog).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ParseError::DetailedError {
+                message,
+                sqlstate,
+                ..
+            } if message == "system columns cannot be used in foreign keys"
+                && *sqlstate == "0A000"
+        ),
+        "unexpected error: {err:?}"
+    );
+
+    let stmt = parse_statement(
+        "create table fktable (
+            ftest1 int4,
+            constraint fkfail1 foreign key (ftest1) references people(tableoid)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let err = lower_create_table(&ct, &catalog).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ParseError::DetailedError {
+                message,
+                sqlstate,
+                ..
+            } if message == "system columns cannot be used in foreign keys"
+                && *sqlstate == "0A000"
+        ),
+        "unexpected error: {err:?}"
+    );
 }
 
 #[test]

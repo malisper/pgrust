@@ -18662,6 +18662,22 @@ fn set_enforced_attribute(enforced: &mut Option<bool>, value: bool) -> Result<()
     Ok(())
 }
 
+fn set_alter_constraint_enforced_attribute(
+    enforced: &mut Option<bool>,
+    value: bool,
+) -> Result<(), ParseError> {
+    if enforced.is_some() {
+        return Err(ParseError::DetailedError {
+            message: "conflicting constraint properties".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+    *enforced = Some(value);
+    Ok(())
+}
+
 fn set_deferrable_attribute(
     deferrable: &mut Option<bool>,
     initially_deferred: Option<bool>,
@@ -21486,6 +21502,8 @@ fn build_alter_table_alter_constraint(
     let mut only = false;
     let mut table_name = None;
     let mut constraint_name = None;
+    let mut not_valid = false;
+    let mut no_inherit = false;
     let mut deferrable = None;
     let mut initially_deferred = None;
     let mut enforced = None;
@@ -21505,6 +21523,8 @@ fn build_alter_table_alter_constraint(
             Rule::alter_table_constraint_action => {
                 for inner in part.into_inner() {
                     match inner.as_rule() {
+                        Rule::not_valid_constraint_attribute => not_valid = true,
+                        Rule::no_inherit_constraint_attribute => no_inherit = true,
                         Rule::deferrable_constraint_attribute => {
                             set_deferrable_attribute(&mut deferrable, initially_deferred, true)?
                         }
@@ -21526,10 +21546,10 @@ fn build_alter_table_alter_constraint(
                             )?
                         }
                         Rule::enforced_constraint_attribute => {
-                            set_enforced_attribute(&mut enforced, true)?
+                            set_alter_constraint_enforced_attribute(&mut enforced, true)?
                         }
                         Rule::not_enforced_constraint_attribute => {
-                            set_enforced_attribute(&mut enforced, false)?
+                            set_alter_constraint_enforced_attribute(&mut enforced, false)?
                         }
                         _ => {}
                     }
@@ -21543,6 +21563,8 @@ fn build_alter_table_alter_constraint(
         only,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         constraint_name: constraint_name.ok_or(ParseError::UnexpectedEof)?,
+        not_valid,
+        no_inherit,
         deferrable,
         initially_deferred,
         enforced,

@@ -59,7 +59,7 @@ use crate::backend::executor::value_io::{
     coerce_assignment_value_with_config, encode_tuple_values_with_config,
 };
 use crate::backend::executor::{
-    ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef,
+    ConstraintTiming, ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef,
     apply_jsonb_subscript_assignment, cast_value_with_source_type_catalog_and_config,
     compare_order_values, create_query_desc, executor_start,
 };
@@ -959,9 +959,9 @@ fn validate_maintenance_targets(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) enum WriteUpdatedRowResult {
-    Updated(ItemPointerData),
+    Updated(ItemPointerData, Vec<PendingNoActionForeignKeyCheck>),
     TupleUpdated(ItemPointerData),
     AlreadyModified,
 }
@@ -1933,11 +1933,12 @@ pub(crate) fn write_updated_row(
         &current_values,
         ctx,
     )?;
-    let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
+    apply_inbound_foreign_key_actions_on_update(
         relation_name,
         referenced_by_foreign_keys,
         current_old_values,
         &current_values,
+        ForeignKeyActionPhase::BeforeParentWrite,
         ctx,
         xid,
         cid,
@@ -1975,8 +1976,29 @@ pub(crate) fn write_updated_row(
                 Some(current_tid),
                 ctx,
             )?;
+            let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
+                relation_name,
+                referenced_by_foreign_keys,
+                current_old_values,
+                &current_values,
+                ForeignKeyActionPhase::AfterParentWrite,
+                ctx,
+                xid,
+                cid,
+                waiter,
+            )?;
             validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
-            Ok(WriteUpdatedRowResult::Updated(new_tid))
+            let pending_no_action_checks = collect_no_action_checks_on_update(
+                relation_name,
+                referenced_by_foreign_keys,
+                current_old_values,
+                &current_values,
+                ctx,
+            )?;
+            Ok(WriteUpdatedRowResult::Updated(
+                new_tid,
+                pending_no_action_checks,
+            ))
         }
         Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
             cleanup_toast_attempt(toast, &toasted, ctx, xid)?;
@@ -2815,8 +2837,18 @@ fn collect_referencing_rows(
     if key_values.iter().any(|value| matches!(value, Value::Null)) {
         return Ok(Vec::new());
     }
-    if let Some(index) = &constraint.child_index {
-        return collect_matching_rows_index(
+    let original_snapshot = ctx.snapshot.clone();
+    ctx.snapshot.current_cid = CommandId::MAX;
+    let partitioned_catalog = ctx.catalog.as_ref().and_then(|catalog| {
+        catalog
+            .relation_by_oid(constraint.child_relation_oid)
+            .is_some_and(|relation| relation.relkind == 'p')
+            .then(|| catalog.clone())
+    });
+    let result = if let Some(catalog) = partitioned_catalog {
+        partitioned_referencing_rows(constraint, key_values, catalog.as_ref(), ctx)
+    } else if let Some(index) = &constraint.child_index {
+        collect_matching_rows_index(
             constraint.child_rel,
             &constraint.child_desc,
             constraint.child_toast,
@@ -2824,19 +2856,109 @@ fn collect_referencing_rows(
             &build_equality_scan_keys(key_values),
             None,
             ctx,
+        )
+    } else {
+        collect_matching_rows_heap(
+            constraint.child_rel,
+            &constraint.child_desc,
+            constraint.child_toast,
+            None,
+            ctx,
+        )
+        .map(|rows| {
+            rows.into_iter()
+                .filter(|(_, values)| {
+                    row_matches_key(values, &constraint.child_column_indexes, key_values)
+                })
+                .collect()
+        })
+    };
+    ctx.snapshot = original_snapshot;
+    result
+}
+
+fn partitioned_referencing_rows(
+    constraint: &BoundReferencedByForeignKey,
+    key_values: &[Value],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
+    let mut rows = Vec::new();
+    for leaf in partition_leaf_relations(catalog, constraint.child_relation_oid)? {
+        let leaf_key_indexes = map_column_indexes_by_name(
+            &constraint.child_desc,
+            &leaf.desc,
+            &constraint.child_column_indexes,
+        )?;
+        rows.extend(
+            collect_matching_rows_heap(leaf.rel, &leaf.desc, leaf.toast, None, ctx)?
+                .into_iter()
+                .filter(|(_, values)| row_matches_key(values, &leaf_key_indexes, key_values)),
         );
     }
-    let rows = collect_matching_rows_heap(
-        constraint.child_rel,
-        &constraint.child_desc,
-        constraint.child_toast,
-        None,
-        ctx,
-    )?;
-    Ok(rows
-        .into_iter()
-        .filter(|(_, values)| row_matches_key(values, &constraint.child_column_indexes, key_values))
-        .collect())
+    Ok(rows)
+}
+
+fn partition_leaf_relations(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> Result<Vec<crate::backend::parser::BoundRelation>, ExecError> {
+    let mut children = catalog.inheritance_children(relation_oid);
+    children.sort_by_key(|row| (row.inhseqno, row.inhrelid));
+    let mut leaves = Vec::new();
+    for child in children.into_iter().filter(|row| !row.inhdetachpending) {
+        let relation =
+            catalog
+                .relation_by_oid(child.inhrelid)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: "foreign key validation failed".into(),
+                    detail: Some("missing partition relation".into()),
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+        if relation.relkind == 'p' {
+            leaves.extend(partition_leaf_relations(catalog, relation.relation_oid)?);
+        } else {
+            leaves.push(relation);
+        }
+    }
+    Ok(leaves)
+}
+
+fn map_column_indexes_by_name(
+    parent_desc: &RelationDesc,
+    child_desc: &RelationDesc,
+    parent_indexes: &[usize],
+) -> Result<Vec<usize>, ExecError> {
+    parent_indexes
+        .iter()
+        .map(|parent_index| {
+            let parent_column =
+                parent_desc
+                    .columns
+                    .get(*parent_index)
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: "foreign key validation failed".into(),
+                        detail: Some("invalid parent column index".into()),
+                        hint: None,
+                        sqlstate: "XX000",
+                    })?;
+            child_desc
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(_, column)| {
+                    !column.dropped && column.name.eq_ignore_ascii_case(&parent_column.name)
+                })
+                .map(|(index, _)| index)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: "foreign key validation failed".into(),
+                    detail: Some("missing partition foreign key column".into()),
+                    hint: None,
+                    sqlstate: "XX000",
+                })
+        })
+        .collect()
 }
 
 fn evaluate_default_value(
@@ -2930,6 +3052,19 @@ struct PendingSetDefaultRecheck {
     updated_rows: Vec<Vec<Value>>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PendingNoActionForeignKeyCheck {
+    relation_name: String,
+    inbound_constraint: BoundReferencedByForeignKey,
+    old_key_values: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForeignKeyActionPhase {
+    BeforeParentWrite,
+    AfterParentWrite,
+}
+
 fn validate_pending_set_default_rechecks(
     pending: Vec<PendingSetDefaultRecheck>,
     ctx: &mut ExecutorContext,
@@ -2952,6 +3087,187 @@ fn validate_pending_set_default_rechecks(
         }
     }
     Ok(())
+}
+
+pub(crate) fn validate_pending_no_action_checks(
+    pending: Vec<PendingNoActionForeignKeyCheck>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for recheck in pending {
+        if referenced_row_exists_for_no_action(
+            &recheck.inbound_constraint,
+            &recheck.old_key_values,
+            ctx,
+        )? {
+            continue;
+        }
+        crate::backend::executor::enforce_inbound_foreign_key_reference(
+            &recheck.relation_name,
+            &recheck.inbound_constraint,
+            &recheck.old_key_values,
+            ctx,
+        )?;
+    }
+    Ok(())
+}
+
+fn referenced_row_exists_for_no_action(
+    constraint: &BoundReferencedByForeignKey,
+    key_values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    if key_values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(true);
+    }
+    let original_snapshot = ctx.snapshot.clone();
+    ctx.snapshot.current_cid = CommandId::MAX;
+    let partitioned_catalog = ctx.catalog.as_ref().and_then(|catalog| {
+        catalog
+            .relation_by_oid(constraint.referenced_relation_oid)
+            .is_some_and(|relation| relation.relkind == 'p')
+            .then(|| catalog.clone())
+    });
+    let result = if let Some(catalog) = partitioned_catalog {
+        let mut exists = false;
+        for leaf in partition_leaf_relations(catalog.as_ref(), constraint.referenced_relation_oid)?
+        {
+            let leaf_key_indexes = map_column_indexes_by_name(
+                &constraint.referenced_desc,
+                &leaf.desc,
+                &constraint.referenced_column_indexes,
+            )?;
+            if collect_matching_rows_heap(leaf.rel, &leaf.desc, leaf.toast, None, ctx)?
+                .into_iter()
+                .any(|(_, values)| row_matches_key(&values, &leaf_key_indexes, key_values))
+            {
+                exists = true;
+                break;
+            }
+        }
+        Ok(exists)
+    } else {
+        let rows = collect_matching_rows_heap(
+            constraint.referenced_rel,
+            &constraint.referenced_desc,
+            constraint.referenced_toast,
+            None,
+            ctx,
+        )?;
+        Ok(rows.into_iter().any(|(_, values)| {
+            row_matches_key(&values, &constraint.referenced_column_indexes, key_values)
+        }))
+    };
+    ctx.snapshot = original_snapshot;
+    result
+}
+
+fn foreign_key_key_values(values: &[Value], indexes: &[usize]) -> Vec<Value> {
+    indexes
+        .iter()
+        .map(|index| values.get(*index).cloned().unwrap_or(Value::Null))
+        .collect()
+}
+
+fn defer_foreign_key_if_needed(
+    constraint: &BoundReferencedByForeignKey,
+    ctx: &ExecutorContext,
+) -> bool {
+    if ctx.constraint_timing(
+        constraint.constraint_oid,
+        constraint.deferrable,
+        constraint.initially_deferred,
+    ) != ConstraintTiming::Deferred
+    {
+        return false;
+    }
+    if let Some(tracker) = ctx.deferred_foreign_keys.as_ref() {
+        tracker.record(constraint.constraint_oid);
+    }
+    true
+}
+
+fn collect_no_action_checks_on_update(
+    relation_name: &str,
+    constraints: &[BoundReferencedByForeignKey],
+    previous_values: &[Value],
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<PendingNoActionForeignKeyCheck>, ExecError> {
+    let mut pending = Vec::new();
+    for constraint in constraints {
+        if !constraint.enforced
+            || constraint.on_update != ForeignKeyAction::NoAction
+            || !key_columns_changed(
+                previous_values,
+                values,
+                &constraint.referenced_column_indexes,
+            )
+            || !crate::backend::executor::foreign_key_action_trigger_enabled_on_update(
+                constraint, ctx,
+            )
+        {
+            continue;
+        }
+        if defer_foreign_key_if_needed(constraint, ctx) {
+            continue;
+        }
+        if constraint.referenced_period_column_index.is_some() {
+            crate::backend::executor::enforce_inbound_foreign_keys_on_update(
+                relation_name,
+                std::slice::from_ref(constraint),
+                previous_values,
+                values,
+                ctx,
+            )?;
+            continue;
+        }
+        pending.push(PendingNoActionForeignKeyCheck {
+            relation_name: relation_name.to_string(),
+            inbound_constraint: constraint.clone(),
+            old_key_values: foreign_key_key_values(
+                previous_values,
+                &constraint.referenced_column_indexes,
+            ),
+        });
+    }
+    Ok(pending)
+}
+
+fn collect_no_action_checks_on_delete(
+    relation_name: &str,
+    constraints: &[BoundReferencedByForeignKey],
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<PendingNoActionForeignKeyCheck>, ExecError> {
+    let mut pending = Vec::new();
+    for constraint in constraints {
+        if !constraint.enforced
+            || constraint.on_delete != ForeignKeyAction::NoAction
+            || !crate::backend::executor::foreign_key_action_trigger_enabled_on_delete(
+                constraint, ctx,
+            )
+        {
+            continue;
+        }
+        if defer_foreign_key_if_needed(constraint, ctx) {
+            continue;
+        }
+        if constraint.referenced_period_column_index.is_some() {
+            crate::backend::executor::enforce_inbound_foreign_keys_on_delete(
+                relation_name,
+                std::slice::from_ref(constraint),
+                values,
+                ctx,
+            )?;
+            continue;
+        }
+        pending.push(PendingNoActionForeignKeyCheck {
+            relation_name: relation_name.to_string(),
+            inbound_constraint: constraint.clone(),
+            old_key_values: foreign_key_key_values(values, &constraint.referenced_column_indexes),
+        });
+    }
+    Ok(pending)
 }
 
 fn apply_referential_action_to_rows(
@@ -3140,6 +3456,7 @@ fn apply_inbound_foreign_key_actions_on_update(
     constraints: &[BoundReferencedByForeignKey],
     previous_values: &[Value],
     values: &[Value],
+    phase: ForeignKeyActionPhase,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
@@ -3165,7 +3482,11 @@ fn apply_inbound_foreign_key_actions_on_update(
             continue;
         }
         match constraint.on_update {
-            ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => {
+            ForeignKeyAction::NoAction => {}
+            ForeignKeyAction::Restrict => {
+                if phase != ForeignKeyActionPhase::BeforeParentWrite {
+                    continue;
+                }
                 crate::backend::executor::enforce_inbound_foreign_keys_on_update(
                     relation_name,
                     std::slice::from_ref(constraint),
@@ -3175,6 +3496,9 @@ fn apply_inbound_foreign_key_actions_on_update(
                 )?;
             }
             ForeignKeyAction::Cascade => {
+                if phase != ForeignKeyActionPhase::AfterParentWrite {
+                    continue;
+                }
                 let old_key_values = constraint
                     .referenced_column_indexes
                     .iter()
@@ -3198,6 +3522,9 @@ fn apply_inbound_foreign_key_actions_on_update(
                 )?;
             }
             ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault => {
+                if phase != ForeignKeyActionPhase::AfterParentWrite {
+                    continue;
+                }
                 let old_key_values = constraint
                     .referenced_column_indexes
                     .iter()
@@ -3233,6 +3560,7 @@ fn apply_inbound_foreign_key_actions_on_delete(
     relation_name: &str,
     constraints: &[BoundReferencedByForeignKey],
     values: &[Value],
+    phase: ForeignKeyActionPhase,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     waiter: Option<(
@@ -3252,7 +3580,11 @@ fn apply_inbound_foreign_key_actions_on_delete(
             continue;
         }
         match constraint.on_delete {
-            ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => {
+            ForeignKeyAction::NoAction => {}
+            ForeignKeyAction::Restrict => {
+                if phase != ForeignKeyActionPhase::BeforeParentWrite {
+                    continue;
+                }
                 crate::backend::executor::enforce_inbound_foreign_keys_on_delete(
                     relation_name,
                     std::slice::from_ref(constraint),
@@ -3261,6 +3593,9 @@ fn apply_inbound_foreign_key_actions_on_delete(
                 )?;
             }
             ForeignKeyAction::Cascade => {
+                if phase != ForeignKeyActionPhase::AfterParentWrite {
+                    continue;
+                }
                 let key_values = constraint
                     .referenced_column_indexes
                     .iter()
@@ -3320,6 +3655,9 @@ fn apply_inbound_foreign_key_actions_on_delete(
                 triggers.after_statement(Some(&transition_capture), ctx)?;
             }
             ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault => {
+                if phase != ForeignKeyActionPhase::AfterParentWrite {
+                    continue;
+                }
                 let key_values = constraint
                     .referenced_column_indexes
                     .iter()
@@ -5259,11 +5597,12 @@ fn execute_merge_update_row(
         &updated_values,
         ctx,
     )?;
-    let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
+    apply_inbound_foreign_key_actions_on_update(
         &stmt.relation_name,
         &stmt.referenced_by_foreign_keys,
         original_values,
         &updated_values,
+        ForeignKeyActionPhase::BeforeParentWrite,
         ctx,
         xid,
         cid,
@@ -5302,7 +5641,26 @@ fn execute_merge_update_row(
                 Some(target_tid),
                 ctx,
             )?;
+            let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
+                &stmt.relation_name,
+                &stmt.referenced_by_foreign_keys,
+                original_values,
+                &updated_values,
+                ForeignKeyActionPhase::AfterParentWrite,
+                ctx,
+                xid,
+                cid,
+                None,
+            )?;
             validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
+            let pending_no_action_checks = collect_no_action_checks_on_update(
+                &stmt.relation_name,
+                &stmt.referenced_by_foreign_keys,
+                original_values,
+                &updated_values,
+                ctx,
+            )?;
+            validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
             ctx.session_stats
                 .write()
                 .note_relation_update(stmt.relation_oid);
@@ -5336,10 +5694,11 @@ fn execute_merge_delete_row(
     ctx: &mut ExecutorContext,
     xid: TransactionId,
 ) -> Result<bool, ExecError> {
-    let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_delete(
+    apply_inbound_foreign_key_actions_on_delete(
         &stmt.relation_name,
         &stmt.referenced_by_foreign_keys,
         original_values,
+        ForeignKeyActionPhase::BeforeParentWrite,
         ctx,
         xid,
         None,
@@ -5363,7 +5722,23 @@ fn execute_merge_delete_row(
             if let (Some(toast), Some(old_tuple)) = (stmt.toast, old_tuple.as_ref()) {
                 delete_external_from_tuple(ctx, toast, &stmt.desc, old_tuple, xid)?;
             }
+            let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_delete(
+                &stmt.relation_name,
+                &stmt.referenced_by_foreign_keys,
+                original_values,
+                ForeignKeyActionPhase::AfterParentWrite,
+                ctx,
+                xid,
+                None,
+            )?;
             validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
+            let pending_no_action_checks = collect_no_action_checks_on_delete(
+                &stmt.relation_name,
+                &stmt.referenced_by_foreign_keys,
+                original_values,
+                ctx,
+            )?;
+            validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
             ctx.session_stats
                 .write()
                 .note_relation_delete(stmt.relation_oid);
@@ -7630,6 +8005,7 @@ pub fn execute_update_with_waiter(
                     ctx,
                 )?,
             };
+            let mut pending_no_action_checks = Vec::new();
 
             for (tid, original_values) in target_rows {
                 ctx.check_for_interrupts()?;
@@ -7689,7 +8065,8 @@ pub fn execute_update_with_waiter(
                         cid,
                         waiter,
                     ) {
-                        Ok(WriteUpdatedRowResult::Updated(_new_tid)) => {
+                        Ok(WriteUpdatedRowResult::Updated(_new_tid, no_action_checks)) => {
+                            pending_no_action_checks.extend(no_action_checks);
                             ctx.session_stats
                                 .write()
                                 .note_relation_update(target.relation_oid);
@@ -7765,6 +8142,7 @@ pub fn execute_update_with_waiter(
                     }
                 }
             }
+            validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
 
             if let Some(triggers) = &triggers {
                 if let Some(capture) = transition_capture.as_ref() {
@@ -7981,6 +8359,7 @@ fn execute_update_from_joined_input(
         let mut state = executor_start(input_plan.plan_tree.clone());
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
+        let mut pending_no_action_checks = Vec::new();
 
         while let Some(slot) = state.exec_proc_node(ctx)? {
             ctx.check_for_interrupts()?;
@@ -8067,7 +8446,8 @@ fn execute_update_from_joined_input(
                     cid,
                     waiter,
                 )? {
-                    WriteUpdatedRowResult::Updated(new_tid) => {
+                    WriteUpdatedRowResult::Updated(new_tid, no_action_checks) => {
+                        pending_no_action_checks.extend(no_action_checks);
                         ctx.session_stats
                             .write()
                             .note_relation_update(target.relation_oid);
@@ -8128,6 +8508,8 @@ fn execute_update_from_joined_input(
                 }
             }
         }
+
+        validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
 
         if stmt.returning.is_empty() {
             Ok(StatementResult::AffectedRows(affected_rows))
@@ -8254,6 +8636,7 @@ pub fn execute_delete_with_waiter(
                 )?,
             };
             let snapshot = ctx.snapshot.clone();
+            let mut pending_no_action_checks = Vec::new();
 
             for (tid, values) in &targets {
                 let mut current_tid = *tid;
@@ -8282,10 +8665,11 @@ pub fn execute_delete_with_waiter(
                         }
                     }
                     capture_copy_to_dml_notices();
-                    let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_delete(
+                    apply_inbound_foreign_key_actions_on_delete(
                         &target.relation_name,
                         &target.referenced_by_foreign_keys,
                         &current_values,
+                        ForeignKeyActionPhase::BeforeParentWrite,
                         ctx,
                         xid,
                         waiter,
@@ -8322,10 +8706,26 @@ pub fn execute_delete_with_waiter(
                                     xid,
                                 )?;
                             }
+                            let pending_set_default_rechecks =
+                                apply_inbound_foreign_key_actions_on_delete(
+                                    &target.relation_name,
+                                    &target.referenced_by_foreign_keys,
+                                    &current_values,
+                                    ForeignKeyActionPhase::AfterParentWrite,
+                                    ctx,
+                                    xid,
+                                    waiter,
+                                )?;
                             validate_pending_set_default_rechecks(
                                 pending_set_default_rechecks,
                                 ctx,
                             )?;
+                            pending_no_action_checks.extend(collect_no_action_checks_on_delete(
+                                &target.relation_name,
+                                &target.referenced_by_foreign_keys,
+                                &current_values,
+                                ctx,
+                            )?);
                             ctx.session_stats
                                 .write()
                                 .note_relation_delete(target.relation_oid);
@@ -8378,6 +8778,7 @@ pub fn execute_delete_with_waiter(
                     }
                 }
             }
+            validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
 
             if let Some(triggers) = &triggers {
                 if let Some(capture) = transition_capture.as_ref() {
@@ -8634,11 +9035,12 @@ pub(crate) fn apply_base_update_row(
             &current_values,
             ctx,
         )?;
-        let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
+        apply_inbound_foreign_key_actions_on_update(
             &target.relation_name,
             &target.referenced_by_foreign_keys,
             &current_old_values,
             &current_values,
+            ForeignKeyActionPhase::BeforeParentWrite,
             ctx,
             xid,
             cid,
@@ -8677,7 +9079,26 @@ pub(crate) fn apply_base_update_row(
                     Some(current_tid),
                     ctx,
                 )?;
+                let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
+                    &target.relation_name,
+                    &target.referenced_by_foreign_keys,
+                    &current_old_values,
+                    &current_values,
+                    ForeignKeyActionPhase::AfterParentWrite,
+                    ctx,
+                    xid,
+                    cid,
+                    waiter,
+                )?;
                 validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
+                let pending_no_action_checks = collect_no_action_checks_on_update(
+                    &target.relation_name,
+                    &target.referenced_by_foreign_keys,
+                    &current_old_values,
+                    &current_values,
+                    ctx,
+                )?;
+                validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
                 return Ok(true);
             }
             Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
@@ -8815,10 +9236,11 @@ pub(crate) fn apply_base_delete_row(
                 true,
             )?;
         }
-        let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_delete(
+        apply_inbound_foreign_key_actions_on_delete(
             &target.relation_name,
             &target.referenced_by_foreign_keys,
             &current_values,
+            ForeignKeyActionPhase::BeforeParentWrite,
             ctx,
             xid,
             waiter,
@@ -8847,7 +9269,23 @@ pub(crate) fn apply_base_delete_row(
                 if let (Some(toast), Some(old_tuple)) = (target.toast, old_tuple.as_ref()) {
                     delete_external_from_tuple(ctx, toast, &target.desc, old_tuple, xid)?;
                 }
+                let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_delete(
+                    &target.relation_name,
+                    &target.referenced_by_foreign_keys,
+                    &current_values,
+                    ForeignKeyActionPhase::AfterParentWrite,
+                    ctx,
+                    xid,
+                    waiter,
+                )?;
                 validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
+                let pending_no_action_checks = collect_no_action_checks_on_delete(
+                    &target.relation_name,
+                    &target.referenced_by_foreign_keys,
+                    &current_values,
+                    ctx,
+                )?;
+                validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
                 return Ok(true);
             }
             Err(HeapError::TupleAlreadyModified(_)) => {

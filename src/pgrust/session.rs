@@ -4703,6 +4703,17 @@ impl Session {
                     );
                     return Ok(StatementResult::AffectedRows(0));
                 }
+                if self.active_txn.as_ref().is_some_and(|txn| txn.failed) {
+                    let txn = self.active_txn.take().unwrap();
+                    let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
+                    self.abort_taken_transaction(db, &txn);
+                    for rel in held_locks {
+                        db.table_locks.unlock_table(rel, self.client_id);
+                    }
+                    self.restore_guc_state(db, txn.guc_start_state);
+                    self.portals.drop_transaction_portals(false);
+                    return Ok(StatementResult::AffectedRows(0));
+                }
                 let result = self
                     .validate_constraints_for_active_txn(db, false)
                     .map(|_| StatementResult::AffectedRows(0));
@@ -8987,6 +8998,12 @@ impl Session {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "active transaction",
                         actual: "no active transaction for prepared insert".into(),
+                    }));
+                }
+                if self.transaction_failed() {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "ROLLBACK",
+                        actual: "current transaction is aborted, commands ignored until end of transaction block".into(),
                     }));
                 }
                 let xid = self.ensure_active_xid(db);

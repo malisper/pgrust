@@ -465,6 +465,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(position) = find_detailed_operator_position(sql, message) {
                 return Some(position);
             }
+            if message == "conflicting constraint properties" {
+                return find_constraint_enforcement_attribute_position(sql);
+            }
             if message == "range lower bound must be less than or equal to range upper bound" {
                 return find_range_literal_position(sql);
             }
@@ -504,7 +507,18 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             ) {
                 return find_case_insensitive_token_position(sql, "ON UPDATE");
             }
+            if message == "constraint declared INITIALLY DEFERRED must be DEFERRABLE" {
+                return find_case_insensitive_token_position(sql, "INITIALLY");
+            }
+            if message == "multiple ENFORCED/NOT ENFORCED clauses not allowed" {
+                return find_constraint_enforcement_attribute_position(sql);
+            }
             return None;
+        }
+        ExecError::DetailedError { message, .. }
+            if message == "constraints cannot be altered to be NOT VALID" =>
+        {
+            return find_case_insensitive_token_position(sql, "NOT VALID");
         }
         ExecError::Parse(crate::backend::parser::ParseError::InvalidPublicationTableName(name))
         | ExecError::Parse(crate::backend::parser::ParseError::InvalidPublicationSchemaName(
@@ -1854,6 +1868,16 @@ fn find_last_case_insensitive_token_position(sql: &str, token: &str) -> Option<u
     sql.to_ascii_lowercase()
         .rfind(&token_lower)
         .map(|index| index + 1)
+}
+
+fn find_constraint_enforcement_attribute_position(sql: &str) -> Option<usize> {
+    [
+        find_case_insensitive_token_position(sql, "NOT ENFORCED"),
+        find_case_insensitive_token_position(sql, "ENFORCED"),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
 }
 
 fn find_type_name_before_typmod_position(sql: &str) -> Option<usize> {
@@ -12447,6 +12471,45 @@ ORDER BY 1, 2;";
         );
 
         assert_eq!(exec_error_position(sql, &err), Some(91));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_alter_constraint_fk_options() {
+        let initially_sql = "ALTER TABLE fktable ALTER CONSTRAINT fktable_fk_fkey NOT DEFERRABLE INITIALLY DEFERRED;";
+        let initially_err = ExecError::Parse(
+            crate::backend::parser::ParseError::FeatureNotSupportedMessage(
+                "constraint declared INITIALLY DEFERRED must be DEFERRABLE".into(),
+            ),
+        );
+        assert_eq!(
+            exec_error_position(initially_sql, &initially_err),
+            find_case_insensitive_token_position(initially_sql, "INITIALLY")
+        );
+
+        let not_valid_sql = "ALTER TABLE fktable ALTER CONSTRAINT fktable_fk_fkey NOT VALID;";
+        let not_valid_err = ExecError::DetailedError {
+            message: "constraints cannot be altered to be NOT VALID".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        };
+        assert_eq!(
+            exec_error_position(not_valid_sql, &not_valid_err),
+            find_case_insensitive_token_position(not_valid_sql, "NOT VALID")
+        );
+
+        let enforced_sql =
+            "ALTER TABLE fktable ALTER CONSTRAINT fktable_fk_fkey ENFORCED NOT ENFORCED;";
+        let enforced_err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "conflicting constraint properties".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+        assert_eq!(
+            exec_error_position(enforced_sql, &enforced_err),
+            find_case_insensitive_token_position(enforced_sql, "ENFORCED")
+        );
     }
 
     #[test]
