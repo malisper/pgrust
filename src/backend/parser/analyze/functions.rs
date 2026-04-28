@@ -4325,6 +4325,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("dpow", BuiltinScalarFunction::Power),
         ("numeric_power", BuiltinScalarFunction::Power),
         ("exp", BuiltinScalarFunction::Exp),
+        ("dexp", BuiltinScalarFunction::Exp),
         ("numeric_exp", BuiltinScalarFunction::Exp),
         ("ln", BuiltinScalarFunction::Ln),
         ("numeric_ln", BuiltinScalarFunction::Ln),

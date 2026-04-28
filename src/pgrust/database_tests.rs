@@ -33718,6 +33718,130 @@ fn procedure_catalog_display_helpers_read_pg_proc_metadata() {
 }
 
 #[test]
+fn pg_get_function_helpers_render_catalog_signature_types() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select pg_get_function_arguments(1037::oid), \
+                pg_get_function_result(1037::oid), \
+                pg_get_function_arguments(1689::oid), \
+                pg_get_function_result(1689::oid), \
+                pg_get_function_result(6184::oid)",
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], Value::Text("aclitem[], aclitem".into()));
+    assert_eq!(rows[0][1], Value::Text("boolean".into()));
+    assert_eq!(
+        rows[0][2],
+        Value::Text(
+            "acl aclitem[], OUT grantor oid, OUT grantee oid, OUT privilege_type text, OUT is_grantable boolean"
+                .into()
+        )
+    );
+    assert_eq!(rows[0][3], Value::Text("SETOF record".into()));
+    assert_eq!(rows[0][4], Value::Text("SETOF record".into()));
+
+    let def_rows = session_query_rows(
+        &mut session,
+        &db,
+        "select pg_get_functiondef(1848::oid), \
+                pg_get_functiondef(6184::oid), \
+                pg_get_functiondef(78221::oid)",
+    );
+    let interval_def = def_rows[0][0].as_text().unwrap();
+    assert!(interval_def.contains("CREATE OR REPLACE FUNCTION pg_catalog.interval_pl_time"));
+    assert!(interval_def.contains("RETURNS time without time zone"));
+    assert!(interval_def.contains("IMMUTABLE PARALLEL SAFE STRICT COST 1"));
+    assert!(interval_def.contains("RETURN ($2 + $1)"));
+    assert!(!interval_def.contains("AS $function$"));
+
+    let ts_debug_def = def_rows[0][1].as_text().unwrap();
+    assert!(ts_debug_def.contains("document text"));
+    assert!(ts_debug_def.contains("dictionaries regdictionary[]"));
+    assert!(ts_debug_def.contains("RETURNS SETOF record"));
+    assert!(ts_debug_def.contains("STABLE PARALLEL SAFE STRICT"));
+    assert!(ts_debug_def.contains("FROM ts_debug(get_current_ts_config(), ts_debug.document)"));
+
+    let index_position_def = def_rows[0][2].as_text().unwrap();
+    assert!(
+        index_position_def
+            .contains("CREATE OR REPLACE FUNCTION information_schema._pg_index_position")
+    );
+    assert!(index_position_def.contains("RETURNS integer"));
+    assert!(index_position_def.contains("STABLE STRICT"));
+    assert!(index_position_def.contains("information_schema._pg_expandarray"));
+}
+
+#[test]
+fn create_function_sql_standard_body_catalogs_security_definer() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function psql_df_sql_standard (x integer) \
+             returns integer \
+             security definer \
+             begin atomic select x + 1; end",
+        )
+        .unwrap();
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select pg_get_function_arguments(oid), \
+                pg_get_function_result(oid), \
+                prosecdef, \
+                pg_get_functiondef(oid) \
+           from pg_proc \
+          where proname = 'psql_df_sql_standard'",
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], Value::Text("x integer".into()));
+    assert_eq!(rows[0][1], Value::Text("integer".into()));
+    assert_eq!(rows[0][2], Value::Bool(true));
+    let definition = rows[0][3].as_text().unwrap();
+    assert!(definition.contains("LANGUAGE sql"));
+    assert!(definition.contains("SECURITY DEFINER"));
+    assert!(definition.to_ascii_lowercase().contains("begin atomic"));
+}
+
+#[test]
+fn operator_metadata_for_psql_do_patterns() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select oprkind, pg_get_function_arguments(oprcode), \
+                obj_description(oid, 'pg_operator') \
+           from pg_operator \
+          where oid in (558, 2750) \
+          order by oid",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                Value::Text("l".into()),
+                Value::Text("integer".into()),
+                Value::Text("negate".into()),
+            ],
+            vec![
+                Value::Text("b".into()),
+                Value::Text("anyarray, anyarray".into()),
+                Value::Text("overlaps".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn sql_standard_procedure_body_displays_and_executes() {
     let base = temp_dir("sql_standard_procedure_body");
     let db = Database::open(&base, 16).unwrap();

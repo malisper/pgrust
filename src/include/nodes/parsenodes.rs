@@ -762,6 +762,7 @@ pub struct CreateFunctionStatement {
     pub return_spec: CreateFunctionReturnSpec,
     pub strict: bool,
     pub leakproof: bool,
+    pub security_definer: bool,
     pub volatility: FunctionVolatility,
     pub parallel: FunctionParallel,
     pub language: String,

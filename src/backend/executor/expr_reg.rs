@@ -118,6 +118,27 @@ fn normalize_optional_pg_catalog_name(input: &str) -> Result<Option<String>, Exe
     }
 }
 
+fn parse_optional_schema_name(input: &str) -> Result<(Option<String>, String), ExecError> {
+    let parts = parse_sql_name_parts(input)?;
+    match parts.as_slice() {
+        [name] => Ok((None, name.clone())),
+        [schema, name] => Ok((Some(schema.clone()), name.clone())),
+        _ => Err(detailed_error("invalid name syntax", "42601")),
+    }
+}
+
+fn proc_schema_matches(
+    row: &crate::include::catalog::PgProcRow,
+    schema: Option<&str>,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    schema.is_none_or(|schema| {
+        catalog
+            .namespace_row_by_oid(row.pronamespace)
+            .is_some_and(|namespace| namespace.nspname == schema)
+    })
+}
+
 fn parse_operator_name(input: &str) -> Option<(Option<&str>, &str)> {
     let input = input.trim();
     if input.is_empty() {
@@ -142,13 +163,12 @@ pub(crate) fn resolve_regproc_oid(
         return Ok(oid);
     }
     let lookup = effective_catalog(catalog);
-    let Some(name) = normalize_optional_pg_catalog_name(input)? else {
-        return Err(detailed_error(
-            format!("function \"{}\" does not exist", input.trim()),
-            "42883",
-        ));
-    };
-    let matches = lookup.proc_rows_by_name(&name);
+    let (schema, name) = parse_optional_schema_name(input)?;
+    let matches = lookup
+        .proc_rows_by_name(&name)
+        .into_iter()
+        .filter(|row| proc_schema_matches(row, schema.as_deref(), lookup))
+        .collect::<Vec<_>>();
     match matches.as_slice() {
         [row] => Ok(row.oid),
         [] => Err(detailed_error(
@@ -171,16 +191,12 @@ pub(crate) fn resolve_regprocedure_oid(
     }
     let (name_sql, arg_sql) = parse_signature(input, "function")?;
     let lookup = effective_catalog(catalog);
-    let Some(name) = normalize_optional_pg_catalog_name(name_sql)? else {
-        return Err(detailed_error(
-            format!("function \"{}\" does not exist", input.trim()),
-            "42883",
-        ));
-    };
+    let (schema, name) = parse_optional_schema_name(name_sql)?;
     let arg_oids = parse_signature_arg_oids(arg_sql, lookup)?;
     lookup
         .proc_rows_by_name(&name)
         .into_iter()
+        .filter(|row| proc_schema_matches(row, schema.as_deref(), lookup))
         .find(|row| parse_oid_list(&row.proargtypes).as_deref() == Some(arg_oids.as_slice()))
         .map(|row| row.oid)
         .ok_or_else(|| {
@@ -1022,13 +1038,19 @@ fn parse_single_i32_typmod(input: &str, type_name: &str) -> Option<i32> {
 mod tests {
     use super::*;
     use crate::include::catalog::{
-        BIT_TYPE_OID, INT4_TYPE_OID, NUMERIC_TYPE_OID, POSIX_COLLATION_OID, TIMESTAMP_TYPE_OID,
-        VARCHAR_TYPE_OID,
+        ACLITEM_ARRAY_TYPE_OID, ACLITEM_TYPE_OID, BIT_TYPE_OID,
+        INFORMATION_SCHEMA_INDEX_POSITION_PROC_OID, INT4_TYPE_OID, NUMERIC_TYPE_OID,
+        POSIX_COLLATION_OID, REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID,
+        TIMESTAMP_TYPE_OID, VARCHAR_TYPE_OID, VOID_TYPE_OID,
     };
 
     #[test]
     fn regproc_regoper_regcollation_helpers_resolve_and_format() {
         assert_eq!(resolve_regproc_oid("pg_catalog.now", None).unwrap(), 1299);
+        assert_eq!(
+            resolve_regproc_oid("information_schema._pg_index_position", None).unwrap(),
+            INFORMATION_SCHEMA_INDEX_POSITION_PROC_OID
+        );
         assert_eq!(resolve_regoper_oid("pg_catalog.||/", None).unwrap(), 597);
         assert_eq!(
             resolve_regcollation_oid("pg_catalog.\"POSIX\"", None).unwrap(),
@@ -1068,6 +1090,26 @@ mod tests {
         assert_eq!(
             format_type_text(NUMERIC_TYPE_OID, None, &BOOTSTRAP_LOOKUP),
             "numeric"
+        );
+        assert_eq!(
+            format_type_text(ACLITEM_TYPE_OID, None, &BOOTSTRAP_LOOKUP),
+            "aclitem"
+        );
+        assert_eq!(
+            format_type_text(ACLITEM_ARRAY_TYPE_OID, None, &BOOTSTRAP_LOOKUP),
+            "aclitem[]"
+        );
+        assert_eq!(
+            format_type_text(REGDICTIONARY_TYPE_OID, None, &BOOTSTRAP_LOOKUP),
+            "regdictionary"
+        );
+        assert_eq!(
+            format_type_text(REGDICTIONARY_ARRAY_TYPE_OID, None, &BOOTSTRAP_LOOKUP),
+            "regdictionary[]"
+        );
+        assert_eq!(
+            format_type_text(VOID_TYPE_OID, None, &BOOTSTRAP_LOOKUP),
+            "void"
         );
         assert_eq!(format_type_text(9_999_999, None, &BOOTSTRAP_LOOKUP), "???");
     }

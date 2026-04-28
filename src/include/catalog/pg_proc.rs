@@ -336,7 +336,10 @@ pub const OIDVECTOR_CMP_EQ_PROC_OID: u32 = 679;
 pub const OIDVECTOR_CMP_GE_PROC_OID: u32 = 680;
 pub const OIDVECTOR_CMP_GT_PROC_OID: u32 = 681;
 pub const INT4_MINUS_PROC_OID: u32 = 181;
-pub const INT4_PLUS_PROC_OID: u32 = 7004;
+pub const INT4_PLUS_PROC_OID: u32 = 177;
+pub const INT4_UMINUS_PROC_OID: u32 = 212;
+pub const INFORMATION_SCHEMA_EXPANDARRAY_PROC_OID: u32 = 78220;
+pub const INFORMATION_SCHEMA_INDEX_POSITION_PROC_OID: u32 = 78221;
 pub const EQSEL_PROC_OID: u32 = 101;
 pub const EQJOINSEL_PROC_OID: u32 = 105;
 pub const AGG_TRANSITION_PROC_OID_BASE: u32 = 880_000;
@@ -5153,11 +5156,35 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
-            6209,
+            1344,
             "sqrt",
             FLOAT8_TYPE_OID,
             &oid_argtypes(&[FLOAT8_TYPE_OID]),
             "dsqrt",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            230,
+            "dsqrt",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID]),
+            "dsqrt",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1347,
+            "exp",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID]),
+            "dexp",
             1,
             false,
             true,
@@ -5237,8 +5264,20 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
-            6270,
+            1730,
             "sqrt",
+            NUMERIC_TYPE_OID,
+            &oid_argtypes(&[NUMERIC_TYPE_OID]),
+            "numeric_sqrt",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1731,
+            "numeric_sqrt",
             NUMERIC_TYPE_OID,
             &oid_argtypes(&[NUMERIC_TYPE_OID]),
             "numeric_sqrt",
@@ -5261,8 +5300,20 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
-            6272,
+            1732,
             "exp",
+            NUMERIC_TYPE_OID,
+            &oid_argtypes(&[NUMERIC_TYPE_OID]),
+            "numeric_exp",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1733,
+            "numeric_exp",
             NUMERIC_TYPE_OID,
             &oid_argtypes(&[NUMERIC_TYPE_OID]),
             "numeric_exp",
@@ -5942,12 +5993,132 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             1,
         ),
         proc_row(
+            176,
+            "int2pl",
+            INT2_TYPE_OID,
+            &oid_argtypes(&[INT2_TYPE_OID, INT2_TYPE_OID]),
+            "int2pl",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            178,
+            "int24pl",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[INT2_TYPE_OID, INT4_TYPE_OID]),
+            "int24pl",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            179,
+            "int42pl",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID, INT2_TYPE_OID]),
+            "int42pl",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            463,
+            "int8pl",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[INT8_TYPE_OID, INT8_TYPE_OID]),
+            "int8pl",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            837,
+            "int82pl",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[INT8_TYPE_OID, INT2_TYPE_OID]),
+            "int82pl",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            841,
+            "int28pl",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[INT2_TYPE_OID, INT8_TYPE_OID]),
+            "int28pl",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1274,
+            "int84pl",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[INT8_TYPE_OID, INT4_TYPE_OID]),
+            "int84pl",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1278,
+            "int48pl",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID, INT8_TYPE_OID]),
+            "int48pl",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1169,
+            "interval_pl",
+            INTERVAL_TYPE_OID,
+            &oid_argtypes(&[INTERVAL_TYPE_OID, INTERVAL_TYPE_OID]),
+            "interval_pl",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
             INT4_MINUS_PROC_OID,
             "int4mi",
             INT4_TYPE_OID,
             &oid_argtypes(&[INT4_TYPE_OID, INT4_TYPE_OID]),
             "int4mi",
             2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            INT4_UMINUS_PROC_OID,
+            "int4um",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID]),
+            "int4um",
+            1,
             false,
             true,
             'f',
@@ -6016,6 +6187,90 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
         aggregate_row(2147, "count", INT8_TYPE_OID, &oid_argtypes(&[ANYOID]), 1),
         aggregate_row(2803, "count", INT8_TYPE_OID, &oid_argtypes(&[]), 0),
         aggregate_row(6293, "any_value", ANYOID, &oid_argtypes(&[ANYOID]), 1),
+        aggregate_row(
+            2236,
+            "bit_and",
+            INT2_TYPE_OID,
+            &oid_argtypes(&[INT2_TYPE_OID]),
+            1,
+        ),
+        aggregate_row(
+            2237,
+            "bit_or",
+            INT2_TYPE_OID,
+            &oid_argtypes(&[INT2_TYPE_OID]),
+            1,
+        ),
+        aggregate_row(
+            6164,
+            "bit_xor",
+            INT2_TYPE_OID,
+            &oid_argtypes(&[INT2_TYPE_OID]),
+            1,
+        ),
+        aggregate_row(
+            2238,
+            "bit_and",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID]),
+            1,
+        ),
+        aggregate_row(
+            2239,
+            "bit_or",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID]),
+            1,
+        ),
+        aggregate_row(
+            6165,
+            "bit_xor",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID]),
+            1,
+        ),
+        aggregate_row(
+            2240,
+            "bit_and",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[INT8_TYPE_OID]),
+            1,
+        ),
+        aggregate_row(
+            2241,
+            "bit_or",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[INT8_TYPE_OID]),
+            1,
+        ),
+        aggregate_row(
+            6166,
+            "bit_xor",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[INT8_TYPE_OID]),
+            1,
+        ),
+        aggregate_row(
+            2242,
+            "bit_and",
+            BIT_TYPE_OID,
+            &oid_argtypes(&[BIT_TYPE_OID]),
+            1,
+        ),
+        aggregate_row(
+            2243,
+            "bit_or",
+            BIT_TYPE_OID,
+            &oid_argtypes(&[BIT_TYPE_OID]),
+            1,
+        ),
+        aggregate_row(
+            6167,
+            "bit_xor",
+            BIT_TYPE_OID,
+            &oid_argtypes(&[BIT_TYPE_OID]),
+            1,
+        ),
         aggregate_row(
             6219,
             "range_agg",
@@ -6839,6 +7094,10 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'v',
         ),
     ];
+    rows.push(aclexplode_proc_row());
+    rows.push(interval_pl_time_proc_row());
+    rows.extend(information_schema_proc_rows());
+    rows.extend(database_privilege_proc_rows());
     rows.extend(foreign_privilege_proc_rows());
     rows.extend(pg_proc_alias_pair_rows());
     rows.extend(aggregate_support_proc_rows());
@@ -7471,35 +7730,17 @@ fn text_search_proc_rows() -> Vec<PgProcRow> {
                 ("nentry", INT4_TYPE_OID),
             ],
         ),
-        record_out_proc_row(
+        ts_debug_proc_row(
             6183,
-            "ts_debug",
-            &oid_argtypes(&[REGCONFIG_TYPE_OID, TEXT_TYPE_OID]),
-            "ts_debug",
-            2,
-            &[
-                ("alias", TEXT_TYPE_OID),
-                ("description", TEXT_TYPE_OID),
-                ("token", TEXT_TYPE_OID),
-                ("dictionaries", REGDICTIONARY_ARRAY_TYPE_OID),
-                ("dictionary", REGDICTIONARY_TYPE_OID),
-                ("lexemes", TEXT_ARRAY_TYPE_OID),
-            ],
+            &[REGCONFIG_TYPE_OID, TEXT_TYPE_OID],
+            &["config", "document"],
+            "BEGIN ATOMIC\n SELECT tt.alias AS alias,\n     tt.description AS description,\n     parse.token AS token,\n     ARRAY( SELECT m.mapdict::regdictionary\n            FROM pg_ts_config_map m\n           WHERE ((m.mapcfg = $1) AND (m.maptokentype = parse.tokid))\n           ORDER BY m.mapseqno) AS dictionaries,\n     ( SELECT m.mapdict::regdictionary\n           FROM pg_ts_config_map m\n          WHERE ((m.mapcfg = $1) AND (m.maptokentype = parse.tokid))\n          ORDER BY (ts_lexize(m.mapdict, parse.token) IS NULL), m.mapseqno\n         LIMIT 1) AS dictionary,\n     ( SELECT ts_lexize(m.mapdict, parse.token) AS ts_lexize\n           FROM pg_ts_config_map m\n          WHERE ((m.mapcfg = $1) AND (m.maptokentype = parse.tokid))\n          ORDER BY (ts_lexize(m.mapdict, parse.token) IS NULL), m.mapseqno\n         LIMIT 1) AS lexemes\n    FROM ts_parse(( SELECT pg_ts_config.cfgparser\n             FROM pg_ts_config\n            WHERE (pg_ts_config.oid = $1)), $2) parse(tokid, token),\n     ts_token_type(( SELECT pg_ts_config.cfgparser\n             FROM pg_ts_config\n            WHERE (pg_ts_config.oid = $1))) tt(tokid, alias, description)\n   WHERE (tt.tokid = parse.tokid);\nEND",
         ),
-        record_out_proc_row(
+        ts_debug_proc_row(
             6184,
-            "ts_debug",
-            &oid_argtypes(&[TEXT_TYPE_OID]),
-            "ts_debug",
-            1,
-            &[
-                ("alias", TEXT_TYPE_OID),
-                ("description", TEXT_TYPE_OID),
-                ("token", TEXT_TYPE_OID),
-                ("dictionaries", REGDICTIONARY_ARRAY_TYPE_OID),
-                ("dictionary", REGDICTIONARY_TYPE_OID),
-                ("lexemes", TEXT_ARRAY_TYPE_OID),
-            ],
+            &[TEXT_TYPE_OID],
+            &["document"],
+            "BEGIN ATOMIC\n SELECT ts_debug.alias,\n     ts_debug.description,\n     ts_debug.token,\n     ts_debug.dictionaries,\n     ts_debug.dictionary,\n     ts_debug.lexemes\n    FROM ts_debug(get_current_ts_config(), ts_debug.document) ts_debug(alias, description, token, dictionaries, dictionary, lexemes);\nEND",
         ),
     ];
     rows.push(PgProcRow {
@@ -8087,6 +8328,57 @@ fn foreign_privilege_proc_rows() -> Vec<PgProcRow> {
         proc_row(
             oid,
             proname,
+            BOOL_TYPE_OID,
+            &oid_argtypes(argtypes),
+            prosrc,
+            argtypes.len() as i16,
+            false,
+            false,
+            'f',
+            's',
+        )
+    })
+    .collect()
+}
+
+fn database_privilege_proc_rows() -> Vec<PgProcRow> {
+    [
+        (
+            2250,
+            &[NAME_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_database_privilege_name_name",
+        ),
+        (
+            2251,
+            &[NAME_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_database_privilege_name_id",
+        ),
+        (
+            2252,
+            &[OID_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_database_privilege_id_name",
+        ),
+        (
+            2253,
+            &[OID_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_database_privilege_id_id",
+        ),
+        (
+            2254,
+            &[TEXT_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_database_privilege_name",
+        ),
+        (
+            2255,
+            &[OID_TYPE_OID, TEXT_TYPE_OID][..],
+            "has_database_privilege_id",
+        ),
+    ]
+    .into_iter()
+    .map(|(oid, argtypes, prosrc)| {
+        proc_row(
+            oid,
+            "has_database_privilege",
             BOOL_TYPE_OID,
             &oid_argtypes(argtypes),
             prosrc,
@@ -11842,6 +12134,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("dpow", BuiltinScalarFunction::Power),
         ("numeric_power", BuiltinScalarFunction::Power),
         ("exp", BuiltinScalarFunction::Exp),
+        ("dexp", BuiltinScalarFunction::Exp),
         ("numeric_exp", BuiltinScalarFunction::Exp),
         ("ln", BuiltinScalarFunction::Ln),
         ("numeric_ln", BuiltinScalarFunction::Ln),
@@ -17463,6 +17756,213 @@ fn record_out_proc_row(
             .collect(),
     );
     row
+}
+
+fn sql_function_proc_row(
+    oid: u32,
+    proname: &str,
+    namespace_oid: u32,
+    prorettype: u32,
+    arg_oids: &[u32],
+    prosrc: &str,
+    proisstrict: bool,
+    proretset: bool,
+    provolatile: char,
+    proparallel: char,
+    procost: f64,
+) -> PgProcRow {
+    let mut row = proc_row_with_parallel(
+        oid,
+        proname,
+        prorettype,
+        &oid_argtypes(arg_oids),
+        prosrc,
+        arg_oids.len() as i16,
+        proretset,
+        proisstrict,
+        'f',
+        provolatile,
+        proparallel,
+    );
+    row.pronamespace = namespace_oid;
+    row.prolang = PG_LANGUAGE_SQL_OID;
+    row.procost = procost;
+    row
+}
+
+struct RecordOutArg<'a> {
+    name: &'a str,
+    type_oid: u32,
+}
+
+fn sql_record_out_proc_row(
+    oid: u32,
+    proname: &str,
+    namespace_oid: u32,
+    arg_oids: &[u32],
+    input_names: &[&str],
+    out_args: &[RecordOutArg<'_>],
+    prosrc: &str,
+    proisstrict: bool,
+    provolatile: char,
+    proparallel: char,
+) -> PgProcRow {
+    let mut row = sql_function_proc_row(
+        oid,
+        proname,
+        namespace_oid,
+        RECORD_TYPE_OID,
+        arg_oids,
+        prosrc,
+        proisstrict,
+        true,
+        provolatile,
+        proparallel,
+        100.0,
+    );
+    row.proallargtypes = Some(
+        arg_oids
+            .iter()
+            .copied()
+            .chain(out_args.iter().map(|arg| arg.type_oid))
+            .collect(),
+    );
+    row.proargmodes = Some(
+        std::iter::repeat_n(b'i', arg_oids.len())
+            .chain(std::iter::repeat_n(b'o', out_args.len()))
+            .collect(),
+    );
+    row.proargnames = Some(
+        input_names
+            .iter()
+            .map(|name| (*name).to_string())
+            .chain(out_args.iter().map(|arg| arg.name.to_string()))
+            .collect(),
+    );
+    row
+}
+
+fn aclexplode_proc_row() -> PgProcRow {
+    let mut row = record_out_proc_row(
+        1689,
+        "aclexplode",
+        &oid_argtypes(&[ACLITEM_ARRAY_TYPE_OID]),
+        "aclexplode",
+        1,
+        &[
+            ("grantor", OID_TYPE_OID),
+            ("grantee", OID_TYPE_OID),
+            ("privilege_type", TEXT_TYPE_OID),
+            ("is_grantable", BOOL_TYPE_OID),
+        ],
+    );
+    row.prorows = 10.0;
+    row.provolatile = 's';
+    row.proargnames = Some(vec![
+        "acl".into(),
+        "grantor".into(),
+        "grantee".into(),
+        "privilege_type".into(),
+        "is_grantable".into(),
+    ]);
+    row
+}
+
+fn interval_pl_time_proc_row() -> PgProcRow {
+    sql_function_proc_row(
+        1848,
+        "interval_pl_time",
+        PG_CATALOG_NAMESPACE_OID,
+        TIME_TYPE_OID,
+        &[INTERVAL_TYPE_OID, TIME_TYPE_OID],
+        "RETURN ($2 + $1)",
+        true,
+        false,
+        'i',
+        's',
+        1.0,
+    )
+}
+
+fn ts_debug_proc_row(oid: u32, arg_oids: &[u32], input_names: &[&str], prosrc: &str) -> PgProcRow {
+    sql_record_out_proc_row(
+        oid,
+        "ts_debug",
+        PG_CATALOG_NAMESPACE_OID,
+        arg_oids,
+        input_names,
+        &[
+            RecordOutArg {
+                name: "alias",
+                type_oid: TEXT_TYPE_OID,
+            },
+            RecordOutArg {
+                name: "description",
+                type_oid: TEXT_TYPE_OID,
+            },
+            RecordOutArg {
+                name: "token",
+                type_oid: TEXT_TYPE_OID,
+            },
+            RecordOutArg {
+                name: "dictionaries",
+                type_oid: REGDICTIONARY_ARRAY_TYPE_OID,
+            },
+            RecordOutArg {
+                name: "dictionary",
+                type_oid: REGDICTIONARY_TYPE_OID,
+            },
+            RecordOutArg {
+                name: "lexemes",
+                type_oid: TEXT_ARRAY_TYPE_OID,
+            },
+        ],
+        prosrc,
+        true,
+        's',
+        's',
+    )
+}
+
+fn information_schema_proc_rows() -> Vec<PgProcRow> {
+    let mut expandarray = sql_record_out_proc_row(
+        INFORMATION_SCHEMA_EXPANDARRAY_PROC_OID,
+        "_pg_expandarray",
+        INFORMATION_SCHEMA_NAMESPACE_OID,
+        &[ANYARRAYOID],
+        &[""],
+        &[
+            RecordOutArg {
+                name: "x",
+                type_oid: ANYELEMENTOID,
+            },
+            RecordOutArg {
+                name: "n",
+                type_oid: INT4_TYPE_OID,
+            },
+        ],
+        "SELECT * FROM pg_catalog.unnest($1) WITH ORDINALITY",
+        true,
+        'i',
+        's',
+    );
+    expandarray.prorows = 100.0;
+
+    let index_position = sql_function_proc_row(
+        INFORMATION_SCHEMA_INDEX_POSITION_PROC_OID,
+        "_pg_index_position",
+        INFORMATION_SCHEMA_NAMESPACE_OID,
+        INT4_TYPE_OID,
+        &[OID_TYPE_OID, INT2_TYPE_OID],
+        "BEGIN ATOMIC\n SELECT (ss.a).n AS n\n    FROM ( SELECT information_schema._pg_expandarray(pg_index.indkey) AS a\n            FROM pg_index\n           WHERE (pg_index.indexrelid = $1)) ss\n   WHERE ((ss.a).x = $2);\nEND",
+        true,
+        false,
+        's',
+        'u',
+        100.0,
+    );
+
+    vec![expandarray, index_position]
 }
 
 fn pg_monitor_record_out_proc_row(
