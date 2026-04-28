@@ -8982,10 +8982,24 @@ fn alter_table_set_not_null_rejects_existing_no_inherit_constraint() {
     db.execute(1, "create table p1 (a int not null no inherit)")
         .unwrap();
     match db.execute(1, "alter table p1 alter column a set not null") {
-        Err(ExecError::Parse(ParseError::InvalidTableDefinition(message)))
-            if message
-                == "cannot change NO INHERIT status of NOT NULL constraint \"p1_a_not_null\" on relation \"p1\"" =>
-            {}
+        Err(ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(
+                message,
+                "cannot change NO INHERIT status of NOT NULL constraint \"p1_a_not_null\" on relation \"p1\""
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some(
+                    "You might need to make the existing constraint inheritable using ALTER TABLE ... ALTER CONSTRAINT ... INHERIT."
+                )
+            );
+            assert_eq!(sqlstate, "0A000");
+        }
         other => panic!("expected existing NO INHERIT SET NOT NULL failure, got {other:?}"),
     }
 }
@@ -17595,12 +17609,14 @@ fn alter_table_add_column_temp_not_null_validates_inherited_child_rows() {
         .unwrap();
 
     match session.execute(&db, "alter table parent1 add column a1 int4 not null") {
-        Err(ExecError::NotNullViolation {
-            relation,
-            column,
-            constraint,
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
             ..
-        }) if relation == "child1" && column == "a1" && constraint == "parent1_a1_not_null" => {}
+        }) if message == "column \"a1\" of relation \"child1\" contains null values"
+            && detail.is_none()
+            && sqlstate == "23502" => {}
         other => panic!("expected inherited child validation failure, got {other:?}"),
     }
 }
@@ -25091,12 +25107,14 @@ fn alter_table_add_constraints_support_not_valid_and_validate() {
         1,
         "alter table items validate constraint items_note_required",
     ) {
-        Err(ExecError::NotNullViolation {
-            relation,
-            column,
-            constraint,
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
             ..
-        }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
+        }) if message == "column \"note\" of relation \"items\" contains null values"
+            && detail.is_none()
+            && sqlstate == "23502" => {}
         other => panic!("expected NOT NULL validate failure, got {other:?}"),
     }
 
@@ -25127,6 +25145,380 @@ fn alter_table_add_constraints_support_not_valid_and_validate() {
             vec![Value::Text("items_note_required".into()), Value::Bool(true)],
         ]
     );
+}
+
+#[test]
+fn not_null_not_valid_blocks_pk_and_identity_until_validated() {
+    let base = temp_dir("not_null_not_valid_pk_identity");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nn_pk_identity (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "insert into nn_pk_identity values (null, 1), (2, 2)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table nn_pk_identity add constraint nn_a not null a not valid",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table nn_pk_identity add primary key (a)") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        }) => {
+            assert_eq!(message, "cannot create primary key on column \"a\"");
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "The constraint \"nn_a\" on column \"a\" of table \"nn_pk_identity\", marked NOT VALID, is incompatible with a primary key."
+                )
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT.")
+            );
+            assert_eq!(sqlstate, "55000");
+        }
+        other => panic!("expected invalid NOT NULL to block primary key, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "alter table nn_pk_identity alter column a add generated always as identity",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(
+                message,
+                "incompatible NOT VALID constraint \"nn_a\" on relation \"nn_pk_identity\""
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT.")
+            );
+            assert_eq!(sqlstate, "55000");
+        }
+        other => panic!("expected invalid NOT NULL to block identity, got {other:?}"),
+    }
+
+    match db.execute(1, "alter table nn_pk_identity alter column a set not null") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        }) if message == "column \"a\" of relation \"nn_pk_identity\" contains null values"
+            && detail.is_none()
+            && sqlstate == "23502" => {}
+        other => panic!("expected SET NOT NULL validation failure, got {other:?}"),
+    }
+
+    db.execute(1, "update nn_pk_identity set a = 1 where a is null")
+        .unwrap();
+    db.execute(1, "alter table nn_pk_identity alter column a set not null")
+        .unwrap();
+    db.execute(1, "alter table nn_pk_identity add primary key (a)")
+        .unwrap();
+}
+
+#[test]
+fn no_inherit_not_null_blocks_primary_key() {
+    let base = temp_dir("not_null_no_inherit_pk");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nn_noinh_pk (a int4)").unwrap();
+    db.execute(
+        1,
+        "alter table nn_noinh_pk add constraint nn_noinh not null a no inherit",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table nn_noinh_pk add primary key (a)") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        }) => {
+            assert_eq!(message, "cannot create primary key on column \"a\"");
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "The constraint \"nn_noinh\" on column \"a\" of table \"nn_noinh_pk\", marked NO INHERIT, is incompatible with a primary key."
+                )
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some(
+                    "You might need to make the existing constraint inheritable using ALTER TABLE ... ALTER CONSTRAINT ... INHERIT."
+                )
+            );
+            assert_eq!(sqlstate, "55000");
+        }
+        other => panic!("expected NO INHERIT NOT NULL to block primary key, got {other:?}"),
+    }
+}
+
+#[test]
+fn not_null_inheritance_metadata_and_alter_constraint_inheritability() {
+    let base = temp_dir("not_null_inheritance_metadata");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nn_inh_parent (a int4)")
+        .unwrap();
+    db.execute(1, "create table nn_inh_child () inherits (nn_inh_parent)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table nn_inh_parent add constraint nn_parent not null a not valid",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, conname, convalidated, conislocal, coninhcount::int4, connoinherit
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where c.relname in ('nn_inh_parent', 'nn_inh_child')
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("nn_inh_child".into()),
+                Value::Text("nn_parent".into()),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Int32(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("nn_inh_parent".into()),
+                Value::Text("nn_parent".into()),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Int32(0),
+                Value::Bool(false),
+            ],
+        ]
+    );
+
+    db.execute(
+        1,
+        "alter table nn_inh_parent alter constraint nn_parent no inherit",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, conislocal, coninhcount::int4, connoinherit
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where c.relname in ('nn_inh_parent', 'nn_inh_child')
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("nn_inh_child".into()),
+                Value::Bool(true),
+                Value::Int32(0),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("nn_inh_parent".into()),
+                Value::Bool(true),
+                Value::Int32(0),
+                Value::Bool(true),
+            ],
+        ]
+    );
+
+    db.execute(
+        1,
+        "alter table nn_inh_parent alter constraint nn_parent inherit",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, conislocal, coninhcount::int4, connoinherit
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where c.relname in ('nn_inh_parent', 'nn_inh_child')
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("nn_inh_child".into()),
+                Value::Bool(true),
+                Value::Int32(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("nn_inh_parent".into()),
+                Value::Bool(true),
+                Value::Int32(0),
+                Value::Bool(false),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn alter_table_inherit_validates_not_null_constraints() {
+    let base = temp_dir("alter_table_inherit_not_null");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nn_ai_parent (a int4)").unwrap();
+    db.execute(
+        1,
+        "alter table nn_ai_parent add constraint nn_parent not null a not valid",
+    )
+    .unwrap();
+    db.execute(1, "create table nn_ai_child (a int4)").unwrap();
+
+    match db.execute(1, "alter table nn_ai_child inherit nn_ai_parent") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "column \"a\" in child table \"nn_ai_child\" must be marked NOT NULL"
+            );
+            assert_eq!(sqlstate, "42804");
+        }
+        other => panic!("expected missing child NOT NULL inherit failure, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "alter table nn_ai_child add constraint nn_child not null a not valid",
+    )
+    .unwrap();
+    db.execute(1, "alter table nn_ai_child inherit nn_ai_parent")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, convalidated, conislocal, coninhcount::int4
+               from pg_constraint
+              where conrelid = (select oid from pg_class where relname = 'nn_ai_child')",
+        ),
+        vec![vec![
+            Value::Text("nn_child".into()),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Int32(1),
+        ]]
+    );
+
+    db.execute(1, "create table nn_ai_valid_parent (a int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table nn_ai_valid_parent add constraint nn_valid_parent not null a",
+    )
+    .unwrap();
+    db.execute(1, "create table nn_ai_invalid_child (a int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table nn_ai_invalid_child add constraint nn_invalid_child not null a not valid",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "alter table nn_ai_invalid_child inherit nn_ai_valid_parent",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "constraint \"nn_invalid_child\" conflicts with NOT VALID constraint on child table \"nn_ai_invalid_child\""
+            );
+            assert_eq!(sqlstate, "42P17");
+        }
+        other => panic!("expected invalid child NOT NULL inherit failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_table_inheritance_local_not_null_names_override_inherited_names() {
+    let base = temp_dir("create_inherit_not_null_names");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table nn_name_parent (a int4 primary key initially deferred)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table nn_name_child_pk (primary key (a) deferrable) inherits (nn_name_parent)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table nn_name_child_named (primary key (a) deferrable, constraint a_nn not null a) inherits (nn_name_parent)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, k.conname, k.conislocal, k.coninhcount::int4
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where c.relname in ('nn_name_child_pk', 'nn_name_child_named')
+                and k.contype = 'n'
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("nn_name_child_named".into()),
+                Value::Text("a_nn".into()),
+                Value::Bool(true),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Text("nn_name_child_pk".into()),
+                Value::Text("nn_name_child_pk_a_not_null".into()),
+                Value::Bool(true),
+                Value::Int32(1),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn partitioned_table_rejects_not_null_no_inherit() {
+    let base = temp_dir("partitioned_not_null_no_inherit");
+    let db = Database::open(&base, 16).unwrap();
+
+    match db.execute(
+        1,
+        "create table nn_part_noinh (a int4, not null a no inherit) partition by list (a)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(
+                message,
+                "not-null constraints on partitioned tables cannot be NO INHERIT"
+            );
+            assert_eq!(sqlstate, "42P16");
+        }
+        other => panic!("expected partitioned NOT NULL NO INHERIT failure, got {other:?}"),
+    }
 }
 
 #[test]
@@ -26815,12 +27207,14 @@ fn alter_table_set_and_drop_not_null_updates_enforcement_and_catalog() {
         .unwrap();
 
     match db.execute(1, "alter table items alter column note set not null") {
-        Err(ExecError::NotNullViolation {
-            relation,
-            column,
-            constraint,
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
             ..
-        }) if relation == "items" && column == "note" && constraint == "items_note_not_null" => {}
+        }) if message == "column \"note\" of relation \"items\" contains null values"
+            && detail.is_none()
+            && sqlstate == "23502" => {}
         other => panic!("expected SET NOT NULL validation failure, got {other:?}"),
     }
 

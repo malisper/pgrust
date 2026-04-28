@@ -183,6 +183,7 @@ pub struct NormalizedAddColumnConstraints {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NormalizedAlterTableConstraint {
+    Noop,
     NotNull(NotNullConstraintAction),
     Check(CheckConstraintAction),
     IndexBacked(IndexBackedConstraintAction),
@@ -1139,20 +1140,54 @@ pub fn normalize_alter_table_add_constraint(
             } else {
                 let existing = &desc.columns[column_index];
                 if existing.not_null_constraint_no_inherit != attributes.no_inherit {
-                    Err(ParseError::InvalidTableDefinition(format!(
-                        "cannot change NO INHERIT status of NOT NULL constraint \"{}\" on relation \"{}\"",
-                        existing
-                            .not_null_constraint_name
-                            .as_deref()
-                            .unwrap_or(column),
-                        table_name,
-                    )))
-                } else {
-                    Err(ParseError::UnexpectedToken {
-                        expected: "nullable column for NOT NULL constraint",
-                        actual: format!("column \"{}\" is already marked NOT NULL", column),
-                    })
+                    return Err(ParseError::DetailedError {
+                        message: format!(
+                            "cannot change NO INHERIT status of NOT NULL constraint \"{}\" on relation \"{}\"",
+                            existing.not_null_constraint_name.as_deref().unwrap_or(column),
+                            table_name,
+                        ),
+                        detail: None,
+                        hint: Some(
+                            "You might need to make the existing constraint inheritable using ALTER TABLE ... ALTER CONSTRAINT ... INHERIT.".into(),
+                        ),
+                        sqlstate: "0A000",
+                    });
                 }
+                if !existing.not_null_constraint_validated {
+                    return Err(ParseError::DetailedError {
+                        message: format!(
+                            "incompatible NOT VALID constraint \"{}\" on relation \"{}\"",
+                            existing.not_null_constraint_name.as_deref().unwrap_or(column),
+                            table_name,
+                        ),
+                        detail: None,
+                        hint: Some(
+                            "You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT.".into(),
+                        ),
+                        sqlstate: "55000",
+                    });
+                }
+                if let Some(incoming_name) = attributes.name.as_deref() {
+                    let existing_name = existing
+                        .not_null_constraint_name
+                        .as_deref()
+                        .unwrap_or(column);
+                    if !incoming_name.eq_ignore_ascii_case(existing_name) {
+                        return Err(ParseError::DetailedError {
+                            message: format!(
+                                "cannot create not-null constraint \"{}\" on column \"{}\" of table \"{}\"",
+                                incoming_name, existing.name, table_name,
+                            ),
+                            detail: Some(format!(
+                                "A not-null constraint named \"{}\" already exists for this column.",
+                                existing_name,
+                            )),
+                            hint: None,
+                            sqlstate: "42P16",
+                        });
+                    }
+                }
+                Ok(NormalizedAlterTableConstraint::Noop)
             }
         }
         TableConstraint::Check {
@@ -2590,10 +2625,9 @@ fn merge_not_null_constraint(
         (entry.explicit_name.as_deref(), attributes.name.as_deref())
         && !existing.eq_ignore_ascii_case(incoming)
     {
-        return Err(ParseError::UnexpectedToken {
-            expected: "matching NOT NULL constraint names",
-            actual: format!("conflicting NOT NULL constraint names for column \"{column_name}\""),
-        });
+        return Err(ParseError::InvalidTableDefinition(format!(
+            "conflicting not-null constraint names \"{existing}\" and \"{incoming}\""
+        )));
     }
 
     if entry.explicit_name.is_none() {

@@ -70,6 +70,22 @@ fn ensure_identity_add_allowed(
             sqlstate: "55000",
         });
     }
+    if !column.not_null_constraint_validated {
+        let constraint_name = column
+            .not_null_constraint_name
+            .as_deref()
+            .unwrap_or(&column.name);
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "incompatible NOT VALID constraint \"{constraint_name}\" on relation \"{relation_name}\""
+            ),
+            detail: None,
+            hint: Some(
+                "You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT.".into(),
+            ),
+            sqlstate: "55000",
+        });
+    }
     if column.default_expr.is_some() || column.default_sequence_oid.is_some() {
         return Err(ExecError::DetailedError {
             message: format!(

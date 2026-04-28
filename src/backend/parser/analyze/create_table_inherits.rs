@@ -8,7 +8,7 @@ use super::{
     BoundRelation, CatalogLookup, ColumnConstraint, ConstraintAttributes, CreateTableElement,
     CreateTableStatement, ParseError, PartitionColumnOverride, RawTypeName, TableConstraint,
     TablePersistence, lower_partition_clause, validate_partitioned_check_constraints,
-    validate_partitioned_index_backed_constraints,
+    validate_partitioned_index_backed_constraints, validate_partitioned_not_null_constraints,
 };
 
 #[derive(Debug, Clone)]
@@ -50,6 +50,10 @@ pub fn lower_create_table_with_catalog(
             &stmt.table_name,
             lowered.partition_spec.as_ref(),
             &lowered.check_actions,
+        )?;
+        validate_partitioned_not_null_constraints(
+            lowered.partition_spec.as_ref(),
+            &lowered.not_null_actions,
         )?;
         validate_partitioned_index_backed_constraints(
             &stmt.table_name,
@@ -128,6 +132,10 @@ pub fn lower_create_table_with_catalog(
         &stmt.table_name,
         lowered.partition_spec.as_ref(),
         &lowered.check_actions,
+    )?;
+    validate_partitioned_not_null_constraints(
+        lowered.partition_spec.as_ref(),
+        &lowered.not_null_actions,
     )?;
     validate_partitioned_index_backed_constraints(
         &stmt.table_name,
@@ -469,6 +477,20 @@ fn merge_inherited_columns(
         merge_partition_column_override(&mut merged[index], override_)?;
     }
 
+    for constraint in stmt.constraints() {
+        match constraint {
+            TableConstraint::NotNull { column, .. } => {
+                mark_local_table_not_null(&mut merged, &column_lookup, column)?;
+            }
+            TableConstraint::PrimaryKey { columns, .. } => {
+                for column in columns {
+                    mark_local_table_not_null(&mut merged, &column_lookup, column)?;
+                }
+            }
+            _ => {}
+        }
+    }
+
     if let Some(conflict) = merged
         .iter()
         .find(|column| column.conflicting_parent_generated)
@@ -500,6 +522,26 @@ fn merge_inherited_columns(
     }
 
     Ok(merged)
+}
+
+fn mark_local_table_not_null(
+    merged: &mut [MergedColumnSpec],
+    column_lookup: &BTreeMap<String, usize>,
+    column_name: &str,
+) -> Result<(), ParseError> {
+    let Some(index) = column_lookup
+        .get(&column_name.to_ascii_lowercase())
+        .copied()
+    else {
+        return Err(ParseError::UnknownColumn(column_name.to_string()));
+    };
+    let column = &mut merged[index];
+    if column.not_null_is_local || column.column.nullable() {
+        return Ok(());
+    }
+    column.not_null_is_local = true;
+    replace_not_null_constraint(&mut column.column, ConstraintAttributes::default());
+    Ok(())
 }
 
 fn duplicate_column_error(name: &str) -> ParseError {

@@ -2642,7 +2642,7 @@ pub struct AlterTableAlterConstraintStatement {
     pub table_name: String,
     pub constraint_name: String,
     pub not_valid: bool,
-    pub no_inherit: bool,
+    pub inheritability: Option<bool>,
     pub deferrable: Option<bool>,
     pub initially_deferred: Option<bool>,
     pub enforced: Option<bool>,

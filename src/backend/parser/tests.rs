@@ -3617,7 +3617,7 @@ fn parse_alter_table_constraint_statements() {
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
             not_valid: false,
-            no_inherit: false,
+            inheritability: None,
             deferrable: Some(true),
             initially_deferred: Some(true),
             enforced: None,
@@ -3636,7 +3636,7 @@ fn parse_alter_table_constraint_statements() {
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
             not_valid: false,
-            no_inherit: false,
+            inheritability: None,
             deferrable: Some(false),
             initially_deferred: None,
             enforced: Some(false),
@@ -3654,7 +3654,24 @@ fn parse_alter_table_constraint_statements() {
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
             not_valid: true,
-            no_inherit: true,
+            inheritability: Some(false),
+            deferrable: None,
+            initially_deferred: None,
+            enforced: None,
+        })
+    );
+
+    let stmt =
+        parse_statement("alter table items alter constraint items_id_check inherit").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterConstraint(AlterTableAlterConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            constraint_name: "items_id_check".into(),
+            not_valid: false,
+            inheritability: Some(true),
             deferrable: None,
             initially_deferred: None,
             enforced: None,

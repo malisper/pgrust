@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 use super::collation::{default_collation_oid_for_type, strip_explicit_collation};
 use super::{
     BoundRelation, CatalogLookup, CheckConstraintAction, CreateTableStatement,
-    IndexBackedConstraintAction, ParseError, PartitionStrategy, RawPartitionBoundSpec,
-    RawPartitionRangeDatum, RawPartitionSpec, SqlExpr, SqlType, SqlTypeKind, TablePersistence,
-    bind_expr_with_outer_and_ctes, bind_scalar_expr_in_scope, expr_contains_set_returning,
-    infer_sql_expr_type, scope_for_relation, sql_type_name,
+    IndexBackedConstraintAction, NotNullConstraintAction, ParseError, PartitionStrategy,
+    RawPartitionBoundSpec, RawPartitionRangeDatum, RawPartitionSpec, SqlExpr, SqlType, SqlTypeKind,
+    TablePersistence, bind_expr_with_outer_and_ctes, bind_scalar_expr_in_scope,
+    expr_contains_set_returning, infer_sql_expr_type, scope_for_relation, sql_type_name,
 };
 use crate::backend::executor::{Value, cast_value};
 use crate::backend::parser::parse_expr;
@@ -287,6 +287,24 @@ pub(crate) fn validate_partitioned_check_constraints(
             message: format!(
                 "cannot add NO INHERIT constraint to partitioned table \"{relation_name}\""
             ),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_partitioned_not_null_constraints(
+    partition_spec: Option<&LoweredPartitionSpec>,
+    not_null_actions: &[NotNullConstraintAction],
+) -> Result<(), ParseError> {
+    if partition_spec.is_none() {
+        return Ok(());
+    }
+    if not_null_actions.iter().any(|action| action.no_inherit) {
+        return Err(ParseError::DetailedError {
+            message: "not-null constraints on partitioned tables cannot be NO INHERIT".into(),
             detail: None,
             hint: None,
             sqlstate: "42P16",
