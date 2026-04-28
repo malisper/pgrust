@@ -23661,6 +23661,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::xml_pi_expr => build_xml_pi_expr(pair),
         Rule::xml_root_expr => build_xml_root_expr(pair),
         Rule::xml_serialize_expr => build_xml_serialize_expr(pair),
+        Rule::xml_exists_expr => build_xml_exists_expr(pair),
         Rule::typed_string_literal => {
             let mut inner = pair.into_inner();
             let first = inner.next().ok_or(ParseError::UnexpectedEof)?;
@@ -24874,6 +24875,25 @@ fn build_xml_serialize_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError>
     })))
 }
 
+fn build_xml_exists_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut path = None;
+    let mut document = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr => path = Some(build_expr(part)?),
+            Rule::xml_passing_clause => document = Some(build_xml_passing_clause(part)?),
+            _ => {}
+        }
+    }
+    Ok(simple_func_call(
+        "xmlexists",
+        vec![
+            SqlFunctionArg::positional(path.ok_or(ParseError::UnexpectedEof)?),
+            SqlFunctionArg::positional(document.ok_or(ParseError::UnexpectedEof)?),
+        ],
+    ))
+}
+
 fn build_case_when(pair: Pair<'_, Rule>) -> Result<SqlCaseWhen, ParseError> {
     let mut expr = None;
     let mut result = None;
@@ -25759,6 +25779,18 @@ mod tests {
                 other => panic!("expected XMLTABLE from item, got {other:?}"),
             },
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_xml_exists_expr() {
+        let expr = parse_expr("xmlexists('/menu/beers' PASSING BY REF data BY REF)").unwrap();
+        match expr {
+            SqlExpr::FuncCall { name, args, .. } => {
+                assert_eq!(name, "xmlexists");
+                assert_eq!(args.args().len(), 2);
+            }
+            other => panic!("expected xmlexists function call, got {other:?}"),
         }
     }
 

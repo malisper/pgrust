@@ -494,6 +494,8 @@ pub enum BuiltinScalarFunction {
     XmlIsWellFormed,
     XmlIsWellFormedDocument,
     XmlIsWellFormedContent,
+    XPath,
+    XPathExists,
     ToJson,
     ToJsonb,
     SqlJsonConstructor,
