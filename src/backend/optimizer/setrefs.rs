@@ -1779,6 +1779,12 @@ fn inline_exec_params(expr: Expr, params: &[ExecParamSource], consumed: &mut Vec
     }
 }
 
+fn can_bind_as_nest_param(rebased_expr: &Expr, fixed_expr: &Expr) -> bool {
+    fixed_expr != rebased_expr
+        && expr_sql_type(fixed_expr) == expr_sql_type(rebased_expr)
+        && !expr_contains_local_semantic_var(fixed_expr)
+}
+
 fn decrement_outer_expr_levels(expr: Expr) -> Expr {
     match expr {
         Expr::Var(mut var) if var.varlevelsup > 0 => {
@@ -4861,7 +4867,7 @@ fn set_nested_loop_join_references(
                 );
                 let fixed_expr =
                     fix_upper_expr_for_input(ctx.root, rebased_expr.clone(), &left, &left_tlist);
-                if fixed_expr != rebased_expr && !expr_contains_local_semantic_var(&fixed_expr) {
+                if can_bind_as_nest_param(&rebased_expr, &fixed_expr) {
                     consumed_parent_params.extend(param_consumed_parent_params);
                     params.push(ExecParamSource {
                         paramid: param.paramid,
@@ -4902,7 +4908,7 @@ fn set_nested_loop_join_references(
             &left_for_late_params,
             &left_tlist,
         );
-        if fixed_expr != param.expr && !expr_contains_local_semantic_var(&fixed_expr) {
+        if can_bind_as_nest_param(&param.expr, &fixed_expr) {
             nest_params.push(ExecParamSource {
                 paramid: param.paramid,
                 expr: lower_expr(

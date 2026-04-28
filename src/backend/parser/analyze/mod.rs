@@ -3156,6 +3156,8 @@ pub(crate) struct SlotScopeColumn {
     pub hidden: bool,
 }
 
+const NAMED_SLOT_VARNO: usize = 0;
+
 pub(crate) fn bind_scalar_expr_in_named_slot_scope(
     expr: &SqlExpr,
     relation_scopes: &[(String, Vec<SlotScopeColumn>)],
@@ -3193,7 +3195,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
             source_columns: Vec::new(),
         });
         output_exprs.push(Expr::Var(Var {
-            varno: 1,
+            varno: NAMED_SLOT_VARNO,
             varattno: user_attrno(column.slot),
             varlevelsup: 0,
             vartype: column.sql_type,
@@ -3222,7 +3224,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
                 source_columns: Vec::new(),
             });
             output_exprs.push(Expr::Var(Var {
-                varno: 1,
+                varno: NAMED_SLOT_VARNO,
                 varattno: user_attrno(column.slot),
                 varlevelsup: 0,
                 vartype: column.sql_type,

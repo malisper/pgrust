@@ -4,7 +4,7 @@ use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::{ArrayValue, RecordValue};
 use crate::include::nodes::primnodes::{
-    BoolExprType, Expr, OpExprKind, ParamKind, Var, is_special_varno, user_attrno,
+    BoolExprType, Expr, OpExprKind, ParamKind, Var, user_attrno,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -77,7 +77,7 @@ fn plan_is_proven_empty(plan: &Plan) -> bool {
 
 fn expr_has_local_tuple_var(expr: &Expr) -> bool {
     match expr {
-        Expr::Var(var) => var.varlevelsup == 0 && !is_special_varno(var.varno),
+        Expr::Var(var) => var.varlevelsup == 0,
         Expr::Op(op) => op.args.iter().any(expr_has_local_tuple_var),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_has_local_tuple_var),
         Expr::Func(func) => func.args.iter().any(expr_has_local_tuple_var),

@@ -60,6 +60,38 @@ query_repl.rs still has the existing unreachable-pattern warning during check.
 ---
 
 Goal:
+Fix CI failures from cargo-test-run__1_2__73490903903.log on the join-regression branch.
+
+Key decisions:
+Only expand single-record SQL SRF rows when the function declares a record/composite result.
+Sort expanded array equality scan keys after dedupe so residual index-only scans emit deterministic btree order.
+Use a pseudo varno for PL/pgSQL named-slot scopes so correlated subquery params cannot collide with real range-table indexes during setrefs.
+Treat executor tuple Vars as row-dependent in EXISTS runtime-empty analysis so correlated EXISTS subplans are not folded to false.
+
+Files touched:
+src/backend/executor/exec_expr/subquery.rs
+src/backend/executor/nodes.rs
+src/backend/executor/sqlfunc.rs
+src/backend/optimizer/setrefs.rs
+src/backend/parser/analyze/mod.rs
+
+Tests run:
+scripts/cargo_isolated.sh test --lib --quiet sql_set_returning_function_accepts_values_body -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet index_only_scan_applies_residual_filter -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet plpgsql_assignment_query_expr_from_clause_uses_sql_scope -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet enum_pg_enum_cleanup_query_keeps_select_star_width -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet planned_rangefuncs_lateral_full_join_has_no_root_ext_params -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet planned_correlated_cte_subquery_rebases_hidden_cte_boundary_params -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet planner_uses_runtime_index_key_for_correlated_limit_subplan -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet planner_uses_runtime_scalar_array_index_for_or_join_clause -- --nocapture
+scripts/cargo_isolated.sh check
+
+Remaining:
+No local failures in the attached CI repro set.
+
+---
+
+Goal:
 Fix cargo-test CI failures from the targeted relcache/fmgr PR.
 
 Key decisions:

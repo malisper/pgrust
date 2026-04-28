@@ -7,6 +7,7 @@ use crate::backend::access::heap::heapam::{
     heap_scan_page_next_tuple, heap_scan_prepare_next_page,
 };
 use crate::backend::access::index::indexam;
+use crate::backend::access::nbtree::nbtcompare::compare_bt_values;
 use crate::backend::access::nbtree::nbtree::decode_key_payload;
 use crate::backend::commands::explain::format_explain_lines_with_costs;
 use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
@@ -868,6 +869,7 @@ fn expand_array_equality_scan_keys(
         }
         values.push(value);
     }
+    values.sort_by(compare_bt_values);
 
     values
         .into_iter()
