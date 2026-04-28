@@ -13204,6 +13204,28 @@ fn comment_on_function_uses_pg_proc_description_rows() {
 }
 
 #[test]
+fn comment_on_function_missing_signature_uses_canonical_type_names() {
+    let base = temp_dir("comment_on_function_missing_sig");
+    let db = Database::open(&base, 16).unwrap();
+
+    match db.execute(
+        1,
+        "comment on function missing_bpchar_func(bpchar, integer) is 'missing'",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "function missing_bpchar_func(character, integer) does not exist"
+            );
+            assert_eq!(sqlstate, "42883");
+        }
+        other => panic!("expected missing function error, got {other:?}"),
+    }
+}
+
+#[test]
 fn comment_on_operator_uses_pg_operator_description_rows() {
     let base = temp_dir("comment_on_operator");
     let db = Database::open(&base, 16).unwrap();
@@ -25903,6 +25925,219 @@ fn reciprocal_bpchar_after_triggers_keep_one_visible_row() {
 }
 
 #[test]
+fn plpgsql_select_into_record_preserves_field_types() {
+    let base = temp_dir("plpgsql_record_field_types");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table plpgsql_hub(name char(14), comment text, nslots integer)",
+    )
+    .unwrap();
+    db.execute(1, "insert into plpgsql_hub values ('base.hub1', 'hub', 16)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_hub_over_limit(hname char(14), slotno integer)
+         returns boolean language plpgsql as $$
+         declare
+           hubrec record;
+         begin
+           select into hubrec * from plpgsql_hub where name = hname;
+           return slotno > hubrec.nslots;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_hub_over_limit('base.hub1', 17)"),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn plpgsql_labeled_record_reference_uses_outer_slot_when_shadowed() {
+    let base = temp_dir("plpgsql_labeled_record_shadow");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table plpgsql_label_pslot(slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table plpgsql_label_pline(slotname char(20), comment text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into plpgsql_label_pslot values ('PS.base.a1', 'PL.one')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into plpgsql_label_pline values ('PL.one', 'line')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_label_shadow_lookup() returns text language plpgsql as $$
+         <<outer>>
+         declare
+           rec record;
+         begin
+           select into rec * from plpgsql_label_pslot where slotname = 'PS.base.a1';
+           declare
+             rec record;
+           begin
+             select into rec * from plpgsql_label_pline
+               where slotname = \"outer\".rec.backlink;
+             return trim(\"outer\".rec.backlink) || ':' || rec.comment;
+           end;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_label_shadow_lookup()"),
+        vec![vec![Value::Text("PL.one:line".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_assignment_query_expr_from_clause_uses_sql_scope() {
+    let base = temp_dir("plpgsql_assignment_query_expr_from");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table plpgsql_assignment_hub(name char(14), comment text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table plpgsql_assignment_hslot(slotname char(20), hubname char(14), slotno integer)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into plpgsql_assignment_hub values ('base.hub1', 'hub')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into plpgsql_assignment_hslot values ('HS.base.hub1.1', 'base.hub1', 1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_assignment_hslot_view(sname char(20))
+         returns text language plpgsql as $$
+         declare
+           retval text;
+         begin
+           retval := comment from plpgsql_assignment_hub h, plpgsql_assignment_hslot hs
+             where hs.slotname = sname and h.name = hs.hubname;
+           retval := retval || ' slot ';
+           retval := retval || slotno::text from plpgsql_assignment_hslot
+             where slotname = sname;
+           return retval;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select plpgsql_assignment_hslot_view('HS.base.hub1.1')"
+        ),
+        vec![vec![Value::Text("hub slot 1".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_after_trigger_update_keeps_new_row_and_reciprocal_update() {
+    let base = temp_dir("plpgsql_trigger_backlink_update");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table plpgsql_pslot(slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table plpgsql_wslot(slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(1, "insert into plpgsql_pslot values ('PS.base.a1', '')")
+        .unwrap();
+    db.execute(1, "insert into plpgsql_wslot values ('WS.001.1a', '')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_set_wslot(myname char(20), blname char(20))
+         returns integer language plpgsql as $$
+         declare
+           rec record;
+         begin
+           select into rec * from plpgsql_wslot where slotname = myname;
+           if rec.backlink != blname then
+             update plpgsql_wslot set backlink = blname where slotname = myname;
+           end if;
+           return 0;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_pslot_backlink_a() returns trigger language plpgsql as $$
+         declare
+           dummy integer;
+         begin
+           if new.backlink != '' then
+             dummy := plpgsql_set_wslot(new.backlink, new.slotname);
+           end if;
+           return new;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger plpgsql_pslot_backlink_a
+         after update on plpgsql_pslot
+         for each row execute function plpgsql_pslot_backlink_a()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "update plpgsql_pslot set backlink = 'WS.001.1a' where slotname = 'PS.base.a1'",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select trim(p.backlink), trim(w.backlink)
+             from plpgsql_pslot p, plpgsql_wslot w
+             where p.slotname = 'PS.base.a1' and w.slotname = 'WS.001.1a'",
+        ),
+        vec![vec![
+            Value::Text("WS.001.1a".into()),
+            Value::Text("PS.base.a1".into())
+        ]]
+    );
+}
+
+#[test]
 fn bpchar_before_update_trigger_does_not_treat_unchanged_key_as_renamed() {
     let base = temp_dir("bpchar_before_update_same_key_not_renamed");
     let db = Database::open(&base, 16).unwrap();
@@ -35229,6 +35464,295 @@ fn plpgsql_write_inside_explicit_transaction_select_allocates_xid() {
 }
 
 #[test]
+fn plpgsql_write_inside_streaming_select_allocates_and_commits_xid() {
+    let base = temp_dir("plpgsql_write_inside_streaming_select");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table stream_found_items (id int4, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into stream_found_items values (1, 'old'), (2, 'old')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function stream_found_fn() returns bool language plpgsql as $$
+             begin
+               delete from stream_found_items where id = 1;
+               if not found then return false; end if;
+               update stream_found_items set note = 'new' where id = 2;
+               if not found then return false; end if;
+               perform * from stream_found_items where note = 'new';
+               if not found then return false; end if;
+               return true;
+             end $$",
+        )
+        .unwrap();
+    let before = db.txns.read().next_xid();
+    let stmt = crate::backend::parser::parse_statement("select stream_found_fn()").unwrap();
+    let Statement::Select(select_stmt) = stmt else {
+        panic!("expected select statement");
+    };
+
+    let mut guard = session.execute_streaming(&db, &select_stmt).unwrap();
+    let slot = crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx)
+        .unwrap()
+        .expect("streaming row");
+    assert_eq!(slot.values().unwrap(), &[Value::Bool(true)]);
+    assert!(
+        crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx)
+            .unwrap()
+            .is_none()
+    );
+    session
+        .finish_streaming_select_guard(&db, &mut guard, true)
+        .unwrap();
+    drop(guard);
+
+    assert_eq!(db.txns.read().next_xid(), before + 1);
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, note from stream_found_items order by id"
+        ),
+        vec![vec![Value::Int32(2), Value::Text("new".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_return_next_accepts_composite_expression_for_setof_rowtype() {
+    let base = temp_dir("plpgsql_return_next_setof_rowtype");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table return_next_items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into return_next_items values (1, 'one'), (2, 'two')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function return_next_record_items() returns setof return_next_items language plpgsql as $$
+         declare rec record;
+         begin
+           for rec in select * from return_next_items order by id loop
+             return next rec;
+           end loop;
+           return;
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function return_next_row_items() returns setof return_next_items language plpgsql as $$
+         declare row return_next_items%rowtype;
+         begin
+           for row in select * from return_next_items order by id loop
+             return next row;
+           end loop;
+           return;
+         end $$",
+    )
+    .unwrap();
+
+    let expected = vec![
+        vec![Value::Int32(1), Value::Text("one".into())],
+        vec![Value::Int32(2), Value::Text("two".into())],
+    ];
+    assert_eq!(
+        query_rows(&db, 1, "select * from return_next_record_items()"),
+        expected
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select * from return_next_row_items()"),
+        expected
+    );
+}
+
+#[test]
+fn plpgsql_record_returning_function_from_accepts_column_definition_list() {
+    let base = temp_dir("plpgsql_record_function_from_coldefs");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function record_set_func(seed int4) returns setof record language plpgsql as $$
+         declare retval record;
+         begin
+           if seed > 100 then
+             retval := row(5, 10, 15);
+             return next retval;
+             return next retval;
+           else
+             retval := row(50, 5::numeric, 'xxx'::text);
+             return next retval;
+           end if;
+           return;
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function record_one_func(seed int4) returns record language plpgsql as $$
+         declare retval record;
+         begin
+           if seed > 100 then
+             retval := row(5, 10, 15);
+           else
+             retval := row(50, 5::numeric, 'xxx'::text);
+           end if;
+           return retval;
+         end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select * from record_set_func(1500) as (a int4, b int4, c int4)"
+        ),
+        vec![
+            vec![Value::Int32(5), Value::Int32(10), Value::Int32(15)],
+            vec![Value::Int32(5), Value::Int32(10), Value::Int32(15)],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select * from record_one_func(5) as (a int4, b numeric, c text)"
+        ),
+        vec![vec![
+            Value::Int32(50),
+            Value::Numeric(crate::include::nodes::datum::NumericValue::from_i64(5)),
+            Value::Text("xxx".into()),
+        ]]
+    );
+}
+
+#[test]
+fn plpgsql_anycompatible_range_calls_coerce_anchor_arguments() {
+    let base = temp_dir("plpgsql_anycompatible_range_calls");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create type float8range as range (subtype = float8, subtype_diff = float8mi)",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "create function anycompat_range_array(x anycompatiblerange, y anycompatible, z anycompatible)
+         returns anycompatiblearray language plpgsql as $$
+         begin
+           return array[lower(x), upper(x), y, z];
+         end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select anycompat_range_array(int4range(42, 49), 11, 2::smallint)"
+        ),
+        vec![vec![Value::Array(vec![
+            Value::Int32(42),
+            Value::Int32(49),
+            Value::Int32(11),
+            Value::Int32(2),
+        ])]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select anycompat_range_array(float8range(4.5, 7.8), 7.8, 11::real)"
+        ),
+        vec![vec![Value::Array(vec![
+            Value::Float64(4.5),
+            Value::Float64(7.8),
+            Value::Float64(7.8),
+            Value::Float64(11.0),
+        ])]]
+    );
+}
+
+#[test]
+fn plpgsql_polymorphic_out_arguments_compile_concrete_types() {
+    let base = temp_dir("plpgsql_polymorphic_out_args");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function poly_out(a anyelement, b anyarray,
+                                  c anycompatible, d anycompatible,
+                                  out x anyarray, out y anycompatiblearray)
+         language plpgsql as $$
+         begin
+           x := a || b;
+           y := array[c, d];
+         end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select x, y from poly_out(11, array[1, 2], 42, 34.5)"
+        ),
+        vec![vec![
+            Value::Array(vec![Value::Int32(11), Value::Int32(1), Value::Int32(2)]),
+            Value::Array(vec![
+                Value::Numeric(crate::include::nodes::datum::NumericValue::from_i64(42)),
+                Value::Numeric("34.5".into()),
+            ]),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_typeof(x), pg_typeof(y) from poly_out(11, array[1, 2], 42, 34.5)"
+        ),
+        vec![vec![
+            Value::Text("integer[]".into()),
+            Value::Text("numeric[]".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_typeof(x), pg_typeof(y) from poly_out(11, '{1,2}', point(1,2), '(3,4)')"
+        ),
+        vec![vec![
+            Value::Text("integer[]".into()),
+            Value::Text("point[]".into()),
+        ]]
+    );
+    match db.execute(1, "select x from poly_out(11, array[1, 2.2], 42, 34.5)") {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. })) => {
+            assert_eq!(
+                message,
+                "function poly_out(integer, numeric[], integer, numeric) does not exist"
+            );
+        }
+        other => panic!("expected undefined function error, got {other:?}"),
+    }
+}
+
+#[test]
 fn transaction_scoped_advisory_lock_does_not_allocate_xid() {
     let base = temp_dir("advisory_xact_lock_no_xid");
     let db = Database::open(&base, 64).unwrap();
@@ -37426,6 +37950,66 @@ fn plpgsql_runtime_errors_include_statement_context() {
             assert!(matches!(*source, ExecError::DivisionByZero(_)));
         }
         other => panic!("expected PL/pgSQL context, got {other:?}"),
+    }
+}
+
+#[test]
+fn plpgsql_context_formats_argument_list_without_spaces() {
+    let dir = temp_dir("plpgsql_context_arg_spacing");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function two_arg_context(a int4, b text) returns void language plpgsql as $$ begin raise exception 'boom'; end $$",
+    )
+    .unwrap();
+
+    match db.execute(1, "select two_arg_context(1, 'x')").unwrap_err() {
+        ExecError::WithContext { context, .. } => {
+            assert!(context.contains("PL/pgSQL function two_arg_context(integer,text)"));
+        }
+        other => panic!("expected PL/pgSQL context, got {other:?}"),
+    }
+}
+
+#[test]
+fn plpgsql_context_uses_declared_polymorphic_signature() {
+    let dir = temp_dir("plpgsql_context_polymorphic_sig");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function poly_context(x anyelement) returns anyelement language plpgsql as $$ begin return x + 1; end $$",
+    )
+    .unwrap();
+
+    match db
+        .execute(1, "select poly_context(point(3,4))")
+        .unwrap_err()
+    {
+        ExecError::WithContext { context, .. } => {
+            assert!(context.contains("PL/pgSQL function poly_context(anyelement)"));
+        }
+        other => panic!("expected PL/pgSQL context, got {other:?}"),
+    }
+}
+
+#[test]
+fn plpgsql_return_expr_with_out_parameter_is_compile_error() {
+    let dir = temp_dir("plpgsql_return_expr_out_param");
+    let db = Database::open(&dir, 64).unwrap();
+
+    match db.execute(
+        1,
+        "create function return_out_expr(in i int4, out j int4) returns int4 language plpgsql as $$ begin return i + 1; end $$",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. })) => {
+            assert_eq!(
+                message,
+                "RETURN cannot have a parameter in function with OUT parameters"
+            );
+        }
+        other => panic!("expected RETURN/OUT compile error, got {other:?}"),
     }
 }
 

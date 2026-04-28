@@ -493,7 +493,7 @@ impl Database {
         result
     }
 
-    fn finish_txn_with_async_notifications(
+    pub(crate) fn finish_txn_with_async_notifications(
         &self,
         client_id: ClientId,
         xid: TransactionId,
@@ -2628,6 +2628,7 @@ impl Database {
         };
         let privilege_planned_stmt = query_desc.planned_stmt.clone();
 
+        let transaction_snapshot = snapshot_override.clone();
         let (snapshot, command_id) = match (snapshot_override, txn_ctx) {
             (Some(snapshot), Some((_xid, cid))) => (snapshot, cid),
             (Some(snapshot), None) => {
@@ -2637,6 +2638,13 @@ impl Database {
             (None, Some((xid, cid))) => (self.txns.read().snapshot_for_command(xid, cid)?, cid),
             (None, None) => (self.txns.read().snapshot(INVALID_TRANSACTION_ID)?, 0),
         };
+        let transaction_state: SharedExecutorTransactionState =
+            std::sync::Arc::new(parking_lot::Mutex::new(ExecutorTransactionState {
+                xid: (snapshot.current_xid != INVALID_TRANSACTION_ID)
+                    .then_some(snapshot.current_xid),
+                cid: command_id,
+                transaction_snapshot,
+            }));
         let columns = query_desc.columns();
         let column_names = query_desc.column_names();
         let state = executor_start(query_desc.planned_stmt.plan_tree);
@@ -2662,7 +2670,7 @@ impl Database {
             stats: std::sync::Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
             snapshot,
-            transaction_state: None,
+            transaction_state: Some(transaction_state),
             client_id,
             current_database_name: self.current_database_name(),
             session_user_oid: self.auth_state(client_id).session_user_oid(),
@@ -2693,7 +2701,9 @@ impl Database {
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
-            deferred_foreign_keys: None,
+            deferred_foreign_keys: Some(
+                crate::backend::executor::DeferredForeignKeyTracker::default(),
+            ),
             trigger_depth: 0,
         };
         if select_stmt.locking_clause.is_some() {

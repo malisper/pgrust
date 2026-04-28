@@ -2104,7 +2104,9 @@ fn bind_function_from_item_with_ctes(
             )
         })
         .collect::<Vec<_>>();
-    let resolved = resolve_function_call(catalog, name, &actual_types, func_variadic).ok();
+    let resolved_result = resolve_function_call(catalog, name, &actual_types, func_variadic);
+    let resolved_error = resolved_result.as_ref().err().cloned();
+    let resolved = resolved_result.ok();
     let resolved_proc_oid = resolved.as_ref().map(|call| call.proc_oid).unwrap_or(0);
     let resolved_func_variadic = resolved
         .as_ref()
@@ -3157,7 +3159,7 @@ fn bind_function_from_item_with_ctes(
                 );
                 Ok((plan, scope, alias_single_function_output))
             } else {
-                Err(ParseError::UnknownTable(other.to_string()))
+                Err(resolved_error.unwrap_or_else(|| ParseError::UnknownTable(other.to_string())))
             }
         }
     }

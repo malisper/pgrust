@@ -2265,14 +2265,14 @@ impl Session {
         portal: &mut Portal,
         completed: bool,
         succeeded: bool,
-    ) {
+    ) -> Result<(), ExecError> {
         if !completed {
-            return;
+            return Ok(());
         }
         let crate::pgrust::portal::PortalExecution::Streaming(guard) = &mut portal.execution else {
-            return;
+            return Ok(());
         };
-        self.finish_streaming_select_guard(db, guard, succeeded);
+        self.finish_streaming_select_guard(db, guard, succeeded)
     }
 
     pub(crate) fn finish_streaming_select_guard(
@@ -2280,11 +2280,27 @@ impl Session {
         db: &Database,
         guard: &mut SelectGuard,
         succeeded: bool,
-    ) {
+    ) -> Result<(), ExecError> {
+        if self.active_txn.is_none() {
+            return self.finish_autocommit_streaming_select_guard(db, guard, succeeded);
+        }
+
         if let Some(xid) = guard.ctx.transaction_xid()
             && let Some(txn) = self.active_txn.as_mut()
         {
             txn.xid = Some(xid);
+            if txn.isolation_level.uses_transaction_snapshot()
+                && let Some(mut snapshot) = txn.transaction_snapshot.clone()
+            {
+                snapshot.current_xid = xid;
+                snapshot.current_cid = guard.base_command_id;
+                crate::backend::utils::time::snapmgr::set_transaction_snapshot_override(
+                    db,
+                    self.client_id,
+                    xid,
+                    snapshot,
+                );
+            }
         }
         self.merge_ctx_pending_async_notifications(&mut guard.ctx, succeeded);
         if succeeded {
@@ -2294,6 +2310,86 @@ impl Session {
             );
             self.process_catalog_command_end(db, guard.catalog_effect_start);
         }
+        Ok(())
+    }
+
+    fn finish_autocommit_streaming_select_guard(
+        &mut self,
+        db: &Database,
+        guard: &mut SelectGuard,
+        succeeded: bool,
+    ) -> Result<(), ExecError> {
+        let xid = guard.ctx.transaction_xid();
+        let next_command_id = guard.ctx.next_command_id;
+        let mut catalog_effects = mem::take(&mut guard.ctx.catalog_effects);
+        catalog_effects.extend(mem::take(&mut guard.ctx.pending_catalog_effects));
+        let temp_effects = mem::take(&mut guard.ctx.temp_effects);
+        let pending_table_locks = mem::take(&mut guard.ctx.pending_table_locks);
+        unlock_relations(&db.table_locks, self.client_id, &pending_table_locks);
+        let pending_async_notifications = if succeeded {
+            mem::take(&mut guard.ctx.pending_async_notifications)
+        } else {
+            guard.ctx.pending_async_notifications.clear();
+            Vec::new()
+        };
+
+        let Some(xid) = xid else {
+            debug_assert!(catalog_effects.is_empty());
+            debug_assert!(temp_effects.is_empty());
+            if succeeded {
+                db.async_notify_runtime
+                    .publish(self.client_id, &pending_async_notifications);
+            }
+            return Ok(());
+        };
+
+        if !succeeded {
+            let _ = db.finish_txn_with_async_notifications(
+                self.client_id,
+                xid,
+                Err(ExecError::DetailedError {
+                    message: "streaming SELECT failed".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                }),
+                &catalog_effects,
+                &temp_effects,
+                &[],
+                pending_async_notifications,
+            );
+            return Ok(());
+        }
+
+        let result = if let Some(deferred_foreign_keys) = guard.ctx.deferred_foreign_keys.as_ref() {
+            let search_path = self.configured_search_path();
+            let validation_catalog =
+                db.lazy_catalog_lookup(self.client_id, Some((xid, 1)), search_path.as_deref());
+            crate::pgrust::database::foreign_keys::validate_deferred_foreign_key_constraints(
+                db,
+                self.client_id,
+                &validation_catalog,
+                xid,
+                next_command_id.max(1),
+                self.interrupts(),
+                &guard.ctx.datetime_config,
+                deferred_foreign_keys,
+            )
+            .map(|_| StatementResult::AffectedRows(0))
+        } else {
+            Ok(StatementResult::AffectedRows(0))
+        };
+
+        db.finish_txn_with_async_notifications(
+            self.client_id,
+            xid,
+            result,
+            &catalog_effects,
+            &temp_effects,
+            &[],
+            pending_async_notifications,
+        )
+        .map(|_| ())
     }
 
     fn validate_constraints_for_active_txn(
@@ -5230,7 +5326,12 @@ impl Session {
                 .as_ref()
                 .map(|result| result.completed)
                 .unwrap_or(true);
-            self.merge_completed_streaming_portal(db, &mut portal, completed, fetch_result.is_ok());
+            self.merge_completed_streaming_portal(
+                db,
+                &mut portal,
+                completed,
+                fetch_result.is_ok(),
+            )?;
             fetch_result?
         };
         self.portals.put(portal);
