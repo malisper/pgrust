@@ -49918,6 +49918,30 @@ fn plpgsql_exception_block_handles_named_condition() {
 }
 
 #[test]
+fn plpgsql_exception_others_does_not_catch_assert_failure() {
+    let dir = temp_dir("plpgsql_exception_others_assert_failure");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function uncaught_assert() returns void language plpgsql as $$
+         begin
+           assert false, 'uncaught assert';
+         exception when others then
+           return;
+         end
+         $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select uncaught_assert()").unwrap_err();
+    let (message, sqlstate) = exec_error_detailed_message_sqlstate(&err)
+        .unwrap_or_else(|| panic!("expected assertion failure, got {err:?}"));
+    assert_eq!(message, "uncaught assert");
+    assert_eq!(sqlstate, "P0004");
+}
+
+#[test]
 fn plpgsql_query_for_loop_sets_found_false_when_empty() {
     let dir = temp_dir("plpgsql_query_loop_found_false");
     let db = Database::open(&dir, 64).unwrap();

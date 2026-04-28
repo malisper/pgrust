@@ -5775,7 +5775,7 @@ fn handler_matches(handler: &CompiledExceptionHandler, err: &ExecError) -> bool 
 
 fn exception_condition_matches(condition: &ExceptionCondition, err: &ExecError) -> bool {
     match condition {
-        ExceptionCondition::Others => !matches!(exec_error_sqlstate(err), "57014"),
+        ExceptionCondition::Others => !matches!(exec_error_sqlstate(err), "57014" | "P0004"),
         ExceptionCondition::SqlState(sqlstate) => exec_error_sqlstate(err) == sqlstate,
         ExceptionCondition::ConditionName(name) => exception_condition_name_sqlstate(name)
             .is_some_and(|sqlstate| sqlstate == exec_error_sqlstate(err)),
