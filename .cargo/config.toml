@@ -7,7 +7,10 @@ rustc-wrapper = "scripts/rustc_sccache_wrapper.sh"
 codegen-backend = true
 
 [profile.dev]
-codegen-backend = "cranelift"
+# Cranelift miscompiles generated catalog bootstrap rows on aarch64 macOS
+# (normal debug bins corrupt Vec<PgOperatorRow> metadata during startup).
+# Keep dev builds on LLVM until that backend bug is isolated upstream.
+codegen-backend = "llvm"
 
 [profile.test]
 # :HACK: rustc_codegen_cranelift still aborts this workspace's database
