@@ -14,6 +14,7 @@ use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_ne
 use crate::backend::access::index::buildkeys::materialize_heap_row_values;
 use crate::backend::commands::partition::{partition_ancestor_oids, partition_tree_entries};
 use crate::backend::parser::{CatalogLookup, SqlTypeKind};
+use crate::backend::utils::cache::system_views::build_pg_get_publication_tables_rows;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::utils::time::datetime::{
     current_timezone_name, days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
@@ -200,6 +201,7 @@ fn execute_native_set_returning_function(
             Value::Bool(false),
         ])]),
         "pg_tablespace_databases" => Some(eval_pg_tablespace_databases(&values)),
+        "pg_get_publication_tables" => Some(eval_pg_get_publication_tables(&values, ctx)?),
         _ => {
             if let Some(func) = builtin_scalar_function_for_proc_oid(row.oid) {
                 let value = eval_native_builtin_scalar_value_call(func, &values, false, ctx)?;
@@ -213,6 +215,92 @@ fn execute_native_set_returning_function(
         }
     };
     Ok(rows)
+}
+
+fn eval_pg_get_publication_tables(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let Some(catalog) = ctx.catalog.as_deref() else {
+        return Err(ExecError::DetailedError {
+            message: "pg_get_publication_tables requires executor catalog context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    };
+    let publication_names = publication_names_from_values(values)?;
+    let publications = catalog.publication_rows();
+    for name in &publication_names {
+        if !publications
+            .iter()
+            .any(|publication| publication.pubname == *name)
+        {
+            return Err(ExecError::DetailedError {
+                message: format!("publication \"{name}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            });
+        }
+    }
+    Ok(build_pg_get_publication_tables_rows(
+        publications,
+        catalog.publication_rel_rows(),
+        catalog.publication_namespace_rows(),
+        catalog.class_rows(),
+        catalog.attribute_rows(),
+        catalog.inheritance_rows(),
+        &publication_names,
+    )
+    .into_iter()
+    .map(TupleSlot::virtual_row)
+    .collect())
+}
+
+fn publication_names_from_values(values: &[Value]) -> Result<Vec<String>, ExecError> {
+    if values.len() == 1 {
+        return publication_names_from_single_value(&values[0]);
+    }
+    values
+        .iter()
+        .filter(|value| !matches!(value, Value::Null))
+        .map(publication_name_from_value)
+        .collect()
+}
+
+fn publication_names_from_single_value(value: &Value) -> Result<Vec<String>, ExecError> {
+    match value {
+        Value::Null => Ok(Vec::new()),
+        Value::Array(values) => publication_names_from_array_values(values),
+        Value::PgArray(array) => publication_names_from_array_values(&array.elements),
+        other => {
+            if let Some(array) = normalize_array_value(other) {
+                publication_names_from_array_values(&array.elements)
+            } else {
+                Ok(vec![publication_name_from_value(other)?])
+            }
+        }
+    }
+}
+
+fn publication_names_from_array_values(values: &[Value]) -> Result<Vec<String>, ExecError> {
+    values
+        .iter()
+        .filter(|value| !matches!(value, Value::Null))
+        .map(publication_name_from_value)
+        .collect()
+}
+
+fn publication_name_from_value(value: &Value) -> Result<String, ExecError> {
+    value
+        .as_text()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "pg_get_publication_tables",
+            left: value.clone(),
+            right: Value::Text(String::new().into()),
+        })
 }
 
 fn srf_data_dir_path(ctx: &ExecutorContext) -> Result<std::path::PathBuf, ExecError> {

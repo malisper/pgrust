@@ -73,6 +73,7 @@ fn parse_create_publication_mixed_targets_and_options() {
         Statement::CreatePublication(stmt) => {
             assert_eq!(stmt.publication_name, "pub");
             assert!(!stmt.target.for_all_tables);
+            assert!(!stmt.target.for_all_sequences);
             assert_eq!(stmt.target.objects.len(), 2);
             assert!(matches!(
                 &stmt.target.objects[0],
@@ -97,6 +98,104 @@ fn parse_create_publication_mixed_targets_and_options() {
             );
         }
         other => panic!("expected create publication, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_create_publication_all_sequences_targets() {
+    let stmt = parse_statement("create publication pub for all sequences, all tables").unwrap();
+    match stmt {
+        Statement::CreatePublication(stmt) => {
+            assert_eq!(stmt.publication_name, "pub");
+            assert!(stmt.target.for_all_sequences);
+            assert!(stmt.target.for_all_tables);
+            assert!(stmt.target.objects.is_empty());
+        }
+        other => panic!("expected create publication, got {other:?}"),
+    }
+
+    let err =
+        parse_statement("create publication pub for all sequences, all tables, all sequences")
+            .unwrap_err();
+    assert!(matches!(
+        err.unpositioned(),
+        ParseError::DetailedError { message, detail, .. }
+            if message == "invalid publication object list"
+                && detail.as_deref() == Some("ALL SEQUENCES can be specified only once.")
+    ));
+}
+
+#[test]
+fn parse_create_publication_for_all_tables_except() {
+    let stmt = parse_statement(
+        "create publication pub for all tables except (table pub_test.widgets, table only widgets)",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CreatePublication(stmt) => {
+            assert!(stmt.target.for_all_tables);
+            assert!(!stmt.target.for_all_sequences);
+            assert!(stmt.target.objects.is_empty());
+            assert_eq!(stmt.target.except_tables.len(), 2);
+            assert_eq!(
+                stmt.target.except_tables[0].relation_name,
+                "pub_test.widgets"
+            );
+            assert!(!stmt.target.except_tables[0].only);
+            assert_eq!(stmt.target.except_tables[1].relation_name, "widgets");
+            assert!(stmt.target.except_tables[1].only);
+        }
+        other => panic!("expected create publication, got {other:?}"),
+    }
+
+    let err =
+        parse_statement("create publication pub for all tables except (widgets)").unwrap_err();
+    assert!(matches!(
+        err.unpositioned(),
+        ParseError::DetailedError { message, detail, .. }
+            if message == "invalid publication object list"
+                && detail.as_deref() == Some(
+                    "One of TABLE or TABLES IN SCHEMA must be specified before a standalone table or schema name."
+                )
+    ));
+}
+
+#[test]
+fn parse_alter_publication_set_all_sequences() {
+    let stmt = parse_statement("alter publication pub set all sequences").unwrap();
+    match stmt {
+        Statement::AlterPublication(stmt) => {
+            assert_eq!(stmt.publication_name, "pub");
+            assert!(matches!(
+                stmt.action,
+                AlterPublicationAction::SetObjects(target)
+                    if target.for_all_sequences
+                        && !target.for_all_tables
+                        && target.objects.is_empty()
+            ));
+        }
+        other => panic!("expected alter publication, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_alter_publication_set_all_tables_except() {
+    let stmt =
+        parse_statement("alter publication pub set all tables except (table widgets)").unwrap();
+    match stmt {
+        Statement::AlterPublication(stmt) => {
+            assert_eq!(stmt.publication_name, "pub");
+            assert!(matches!(
+                stmt.action,
+                AlterPublicationAction::SetObjects(target)
+                    if target.for_all_tables
+                        && !target.for_all_sequences
+                        && target.objects.is_empty()
+                        && target.except_tables.len() == 1
+                        && target.except_tables[0].relation_name == "widgets"
+            ));
+        }
+        other => panic!("expected alter publication, got {other:?}"),
     }
 }
 
@@ -255,6 +354,7 @@ fn parse_publication_describe_queries() {
         "SELECT pubname AS \"Name\", \
          pg_catalog.pg_get_userbyid(pubowner) AS \"Owner\", \
          puballtables AS \"All tables\", \
+         puballsequences AS \"All sequences\", \
          pubinsert AS \"Inserts\", \
          pubupdate AS \"Updates\", \
          pubdelete AS \"Deletes\", \
@@ -269,7 +369,7 @@ fn parse_publication_describe_queries() {
     parse_statement(
         "SELECT oid, pubname, \
          pg_catalog.pg_get_userbyid(pubowner) AS owner, \
-         puballtables, pubinsert, pubupdate, pubdelete, pubtruncate, \
+         puballtables, puballsequences, pubinsert, pubupdate, pubdelete, pubtruncate, \
          (CASE pubgencols WHEN 'n' THEN 'none' WHEN 's' THEN 'stored' END) AS \"Generated columns\", \
          pubviaroot \
          FROM pg_catalog.pg_publication \
@@ -3387,9 +3487,18 @@ fn parse_alter_table_constraint_statements() {
             if_exists: false,
             only: false,
             table_name: "pets".into(),
-            index_name: "pets_pk".into(),
+            identity: crate::include::nodes::parsenodes::ReplicaIdentityKind::Index(
+                "pets_pk".into()
+            ),
         })
     );
+    assert!(matches!(
+        parse_statement("alter table pets replica identity full").unwrap(),
+        Statement::AlterTableReplicaIdentity(AlterTableReplicaIdentityStatement {
+            identity: crate::include::nodes::parsenodes::ReplicaIdentityKind::Full,
+            ..
+        })
+    ));
 
     let stmt =
         parse_statement("alter table items add constraint items_key unique using index items_idx")

@@ -3263,28 +3263,23 @@ impl CatalogStore {
             publication_rel_rows_for_publication_mvcc(self, ctx, publication_oid)?;
         let old_publication_namespaces =
             publication_namespace_rows_for_publication_mvcc(self, ctx, publication_oid)?;
-        let old_rel_row_oids = old_publication_rels
-            .iter()
-            .map(|row| row.oid)
-            .collect::<BTreeSet<_>>();
-        let old_namespace_row_oids = old_publication_namespaces
-            .iter()
-            .map(|row| row.oid)
-            .collect::<BTreeSet<_>>();
-        let old_depends = depend_rows_referencing_object_mvcc(
-            self,
-            ctx,
-            PG_PUBLICATION_RELATION_OID,
-            publication_oid,
-        )?
-        .into_iter()
-        .filter(|row| {
-            (row.classid == PG_PUBLICATION_REL_RELATION_OID
-                && old_rel_row_oids.contains(&row.objid))
-                || (row.classid == PG_PUBLICATION_NAMESPACE_RELATION_OID
-                    && old_namespace_row_oids.contains(&row.objid))
-        })
-        .collect::<Vec<_>>();
+        let mut old_depends = Vec::new();
+        for row in &old_publication_rels {
+            old_depends.extend(depend_rows_for_object_mvcc(
+                self,
+                ctx,
+                PG_PUBLICATION_REL_RELATION_OID,
+                row.oid,
+            )?);
+        }
+        for row in &old_publication_namespaces {
+            old_depends.extend(depend_rows_for_object_mvcc(
+                self,
+                ctx,
+                PG_PUBLICATION_NAMESPACE_RELATION_OID,
+                row.oid,
+            )?);
+        }
 
         let delete_rows = PhysicalCatalogRows {
             publication_rels: old_publication_rels,
@@ -6204,33 +6199,54 @@ impl CatalogStore {
         Ok(effect)
     }
 
-    pub fn set_replica_identity_index_mvcc(
+    pub fn set_replica_identity_mvcc(
         &mut self,
         relation_oid: u32,
-        index_oid: u32,
+        identity: char,
+        index_oid: Option<u32>,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let old_indexes = index_rows_for_relation_mvcc(self, ctx, relation_oid)?;
-        let target = old_indexes
-            .iter()
-            .find(|row| row.indexrelid == index_oid)
-            .ok_or_else(|| CatalogError::UnknownTable(index_oid.to_string()))?;
-        if !target.indisunique {
+        let old_class = class_row_by_oid_mvcc(self, ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if !matches!(identity, 'd' | 'f' | 'n' | 'i') {
+            return Err(CatalogError::Corrupt("invalid replica identity kind"));
+        }
+        if identity == 'i' && index_oid.is_none() {
             return Err(CatalogError::Corrupt(
-                "replica identity index must be unique",
+                "replica identity index requires an index oid",
             ));
         }
+        if identity != 'i' && index_oid.is_some() {
+            return Err(CatalogError::Corrupt(
+                "replica identity index oid supplied for non-index identity",
+            ));
+        }
+        let old_indexes = index_rows_for_relation_mvcc(self, ctx, relation_oid)?;
+        if let Some(index_oid) = index_oid {
+            let target = old_indexes
+                .iter()
+                .find(|row| row.indexrelid == index_oid)
+                .ok_or_else(|| CatalogError::UnknownTable(index_oid.to_string()))?;
+            if !target.indisunique {
+                return Err(CatalogError::Corrupt(
+                    "replica identity index must be unique",
+                ));
+            }
+        }
+        let mut new_class = old_class.clone();
+        new_class.relreplident = identity;
         let mut new_indexes = old_indexes.clone();
         for row in &mut new_indexes {
-            row.indisreplident = row.indexrelid == index_oid;
+            row.indisreplident = Some(row.indexrelid) == index_oid;
         }
 
         let control = self.control_state()?;
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
-        let kinds = vec![BootstrapCatalogKind::PgIndex];
+        let kinds = vec![BootstrapCatalogKind::PgClass, BootstrapCatalogKind::PgIndex];
         delete_catalog_rows_subset_mvcc(
             ctx,
             &PhysicalCatalogRows {
+                classes: vec![old_class],
                 indexes: old_indexes,
                 ..PhysicalCatalogRows::default()
             },
@@ -6240,6 +6256,7 @@ impl CatalogStore {
         insert_catalog_rows_subset_mvcc(
             ctx,
             &PhysicalCatalogRows {
+                classes: vec![new_class],
                 indexes: new_indexes,
                 ..PhysicalCatalogRows::default()
             },
@@ -6251,7 +6268,9 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_oid(&mut effect.relation_oids, relation_oid);
-        effect_record_oid(&mut effect.relation_oids, index_oid);
+        if let Some(index_oid) = index_oid {
+            effect_record_oid(&mut effect.relation_oids, index_oid);
+        }
         Ok(effect)
     }
 

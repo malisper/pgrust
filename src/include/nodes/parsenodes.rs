@@ -2500,7 +2500,15 @@ pub struct AlterTableReplicaIdentityStatement {
     pub if_exists: bool,
     pub only: bool,
     pub table_name: String,
-    pub index_name: String,
+    pub identity: ReplicaIdentityKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplicaIdentityKind {
+    Default,
+    Full,
+    Nothing,
+    Index(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3037,6 +3045,8 @@ pub enum PublicationObjectSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PublicationTargetSpec {
     pub for_all_tables: bool,
+    pub for_all_sequences: bool,
+    pub except_tables: Vec<PublicationTableSpec>,
     pub objects: Vec<PublicationObjectSpec>,
 }
 

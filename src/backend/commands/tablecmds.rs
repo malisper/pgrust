@@ -16,6 +16,7 @@ use crate::backend::access::table::toast_helper::toast_tuple_values_for_write;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::catalog::column_desc;
+use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
 use crate::backend::optimizer::{finalize_expr_subqueries, planner};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
@@ -71,9 +72,9 @@ use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
     ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID, BOX_TYPE_OID, BPCHAR_TYPE_OID,
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID, HASH_AM_OID,
-    PG_CATALOG_NAMESPACE_OID, PgAmRow, PgOpclassRow, SPGIST_AM_OID, TEXT_TYPE_OID,
-    VARCHAR_TYPE_OID, bootstrap_pg_am_rows, builtin_range_name_for_sql_type,
-    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    PG_CATALOG_NAMESPACE_OID, PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow, PgPublicationRelRow,
+    PgPublicationRow, SPGIST_AM_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_am_rows,
+    builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
@@ -965,6 +966,306 @@ pub(crate) enum WriteUpdatedRowResult {
     AlreadyModified,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicationDmlAction {
+    Update,
+    Delete,
+}
+
+impl PublicationDmlAction {
+    fn publishes(self, publication: &PgPublicationRow) -> bool {
+        match self {
+            Self::Update => publication.pubupdate,
+            Self::Delete => publication.pubdelete,
+        }
+    }
+
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Update => "update",
+            Self::Delete => "delete from",
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Update => "updates",
+            Self::Delete => "deletes",
+        }
+    }
+
+    fn gerund(self) -> &'static str {
+        match self {
+            Self::Update => "updating",
+            Self::Delete => "deleting from",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplicaIdentityColumns {
+    None,
+    Full,
+    Columns,
+}
+
+fn publication_replica_identity_error(
+    relation_name: &str,
+    action: PublicationDmlAction,
+    detail: Option<&'static str>,
+) -> ExecError {
+    match detail {
+        Some(detail) => ExecError::DetailedError {
+            message: format!("cannot {} table \"{relation_name}\"", action.verb()),
+            detail: Some(detail.into()),
+            hint: None,
+            sqlstate: "55000",
+        },
+        None => ExecError::DetailedError {
+            message: format!(
+                "cannot {} table \"{relation_name}\" because it does not have a replica identity and publishes {}",
+                action.verb(),
+                action.noun()
+            ),
+            detail: None,
+            hint: Some(format!(
+                "To enable {} the table, set REPLICA IDENTITY using ALTER TABLE.",
+                action.gerund()
+            )),
+            sqlstate: "55000",
+        },
+    }
+}
+
+fn relation_and_publication_parent_oids(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> Vec<u32> {
+    let mut oids = vec![relation_oid];
+    let mut pending = vec![relation_oid];
+    while let Some(oid) = pending.pop() {
+        for parent in catalog.inheritance_parents(oid) {
+            if !oids.contains(&parent.inhparent) {
+                oids.push(parent.inhparent);
+                pending.push(parent.inhparent);
+            }
+        }
+    }
+    oids
+}
+
+fn active_publication_memberships(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    namespace_oid: u32,
+    action: PublicationDmlAction,
+) -> Vec<(PgPublicationRow, Option<PgPublicationRelRow>)> {
+    let relation_oids = relation_and_publication_parent_oids(catalog, relation_oid);
+    let publication_rows = catalog.publication_rows();
+    let publication_rel_rows = catalog.publication_rel_rows();
+    let publication_namespace_rows = catalog.publication_namespace_rows();
+    let mut memberships = Vec::new();
+
+    for publication in publication_rows {
+        if !action.publishes(&publication) {
+            continue;
+        }
+        let rel_rows = publication_rel_rows
+            .iter()
+            .filter(|row| row.prpubid == publication.oid && relation_oids.contains(&row.prrelid))
+            .collect::<Vec<_>>();
+        let excluded = rel_rows.iter().any(|row| row.prexcept);
+        if let Some(row) = rel_rows.into_iter().find(|row| !row.prexcept) {
+            memberships.push((publication, Some(row.clone())));
+            continue;
+        }
+        if publication.puballtables && !excluded {
+            memberships.push((publication, None));
+            continue;
+        }
+        if publication_namespace_rows
+            .iter()
+            .any(|row| row.pnpubid == publication.oid && row.pnnspid == namespace_oid)
+        {
+            memberships.push((publication, None));
+        }
+    }
+
+    memberships
+}
+
+fn replica_identity_columns(
+    relation_oid: u32,
+    desc: &RelationDesc,
+    indexes: &[BoundIndexRelation],
+    catalog: &dyn CatalogLookup,
+) -> (ReplicaIdentityColumns, Vec<i16>) {
+    match catalog
+        .class_row_by_oid(relation_oid)
+        .map(|row| row.relreplident)
+        .unwrap_or('d')
+    {
+        'f' => (
+            ReplicaIdentityColumns::Full,
+            desc.columns
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, column)| {
+                    (!column.dropped)
+                        .then(|| i16::try_from(idx + 1).ok())
+                        .flatten()
+                })
+                .collect(),
+        ),
+        'i' => indexes
+            .iter()
+            .find(|index| index.index_meta.indisreplident)
+            .map(|index| {
+                (
+                    ReplicaIdentityColumns::Columns,
+                    index.index_meta.indkey.clone(),
+                )
+            })
+            .unwrap_or((ReplicaIdentityColumns::None, Vec::new())),
+        'n' => (ReplicaIdentityColumns::None, Vec::new()),
+        _ => indexes
+            .iter()
+            .find(|index| index.index_meta.indisprimary)
+            .map(|index| {
+                (
+                    ReplicaIdentityColumns::Columns,
+                    index.index_meta.indkey.clone(),
+                )
+            })
+            .unwrap_or((ReplicaIdentityColumns::None, Vec::new())),
+    }
+}
+
+fn relation_column_attnum(desc: &RelationDesc, name: &str) -> Option<i16> {
+    let column_name = name.rsplit('.').next().unwrap_or(name);
+    desc.columns
+        .iter()
+        .enumerate()
+        .find(|(_, column)| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+        .and_then(|(idx, _)| i16::try_from(idx + 1).ok())
+}
+
+fn publication_filter_attnums(qual: &str, desc: &RelationDesc) -> Result<Vec<i16>, ExecError> {
+    let expr = parse_expr(qual).map_err(ExecError::Parse)?;
+    let mut column_names = BTreeSet::new();
+    collect_sql_expr_column_names(&expr, &mut column_names);
+    Ok(column_names
+        .into_iter()
+        .filter_map(|name| relation_column_attnum(desc, &name))
+        .collect())
+}
+
+fn publication_generated_identity_is_published(
+    publication: &PgPublicationRow,
+    membership: Option<&PgPublicationRelRow>,
+    attnum: i16,
+    desc: &RelationDesc,
+) -> bool {
+    let Some(column) = attnum
+        .checked_sub(1)
+        .and_then(|idx| usize::try_from(idx).ok())
+        .and_then(|idx| desc.columns.get(idx))
+    else {
+        return true;
+    };
+    let Some(generated) = column.generated else {
+        return true;
+    };
+    if membership
+        .and_then(|row| row.prattrs.as_ref())
+        .is_some_and(|attrs| attrs.contains(&attnum))
+    {
+        return true;
+    }
+    publication.pubgencols == PUBLISH_GENCOLS_STORED
+        && matches!(
+            generated,
+            crate::include::nodes::parsenodes::ColumnGeneratedKind::Stored
+        )
+}
+
+fn enforce_publication_replica_identity(
+    relation_name: &str,
+    relation_oid: u32,
+    namespace_oid: u32,
+    desc: &RelationDesc,
+    indexes: &[BoundIndexRelation],
+    catalog: &dyn CatalogLookup,
+    action: PublicationDmlAction,
+    require_identity: bool,
+) -> Result<(), ExecError> {
+    let memberships = active_publication_memberships(catalog, relation_oid, namespace_oid, action);
+    if memberships.is_empty() {
+        return Ok(());
+    }
+
+    let (identity_kind, identity_attrs) =
+        replica_identity_columns(relation_oid, desc, indexes, catalog);
+    for (publication, membership) in &memberships {
+        if let Some(attrs) = membership.as_ref().and_then(|row| row.prattrs.as_ref()) {
+            if identity_kind == ReplicaIdentityColumns::Full
+                || identity_attrs.iter().any(|attnum| !attrs.contains(attnum))
+            {
+                return Err(publication_replica_identity_error(
+                    relation_name,
+                    action,
+                    Some(
+                        "Column list used by the publication does not cover the replica identity.",
+                    ),
+                ));
+            }
+        }
+        if let Some(qual) = membership.as_ref().and_then(|row| row.prqual.as_deref()) {
+            let filter_attrs = publication_filter_attnums(qual, desc)?;
+            if filter_attrs
+                .iter()
+                .any(|attnum| !identity_attrs.contains(attnum))
+            {
+                return Err(publication_replica_identity_error(
+                    relation_name,
+                    action,
+                    Some(
+                        "Column used in the publication WHERE expression is not part of the replica identity.",
+                    ),
+                ));
+            }
+        }
+        if identity_attrs.iter().any(|attnum| {
+            !publication_generated_identity_is_published(
+                publication,
+                membership.as_ref(),
+                *attnum,
+                desc,
+            )
+        }) {
+            return Err(publication_replica_identity_error(
+                relation_name,
+                action,
+                Some("Replica identity must not contain unpublished generated columns."),
+            ));
+        }
+    }
+
+    if require_identity && identity_kind == ReplicaIdentityColumns::None {
+        return Err(publication_replica_identity_error(
+            relation_name,
+            action,
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+fn predicate_is_const_false(predicate: Option<&Expr>) -> bool {
+    matches!(predicate, Some(Expr::Const(Value::Bool(false))))
+}
+
 fn serialization_failure_due_to_concurrent_update() -> ExecError {
     ExecError::DetailedError {
         message: "could not serialize access due to concurrent update".into(),
@@ -1548,7 +1849,7 @@ pub(crate) fn rollback_inserted_row(
 pub(crate) fn write_updated_row(
     relation_name: &str,
     rel: crate::backend::storage::smgr::RelFileLocator,
-    _relation_oid: u32,
+    relation_oid: u32,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
     desc: &RelationDesc,
@@ -1570,6 +1871,22 @@ pub(crate) fn write_updated_row(
 ) -> Result<WriteUpdatedRowResult, ExecError> {
     let mut current_values = current_values.to_vec();
     materialize_generated_columns(desc, &mut current_values, ctx)?;
+    if let Some(catalog) = ctx.catalog.as_deref() {
+        let namespace_oid = catalog
+            .class_row_by_oid(relation_oid)
+            .map(|row| row.relnamespace)
+            .unwrap_or(0);
+        enforce_publication_replica_identity(
+            relation_name,
+            relation_oid,
+            namespace_oid,
+            desc,
+            indexes,
+            catalog,
+            PublicationDmlAction::Update,
+            true,
+        )?;
+    }
     let old_tuple = if toast.is_some() {
         Some(heap_fetch(&*ctx.pool, ctx.client_id, rel, current_tid)?)
     } else {
@@ -7034,6 +7351,20 @@ pub fn execute_update_with_waiter(
             let mut transition_capture = triggers
                 .as_ref()
                 .map(|triggers| triggers.new_transition_capture());
+            let namespace_oid = catalog
+                .class_row_by_oid(target.relation_oid)
+                .map(|row| row.relnamespace)
+                .unwrap_or(0);
+            enforce_publication_replica_identity(
+                &target.relation_name,
+                target.relation_oid,
+                namespace_oid,
+                &target.desc,
+                &target.indexes,
+                catalog,
+                PublicationDmlAction::Update,
+                !predicate_is_const_false(target.predicate.as_ref()),
+            )?;
 
             let desc = Rc::new(target.desc.clone());
             let attr_descs: Rc<[_]> = desc.attribute_descs().into();
@@ -7380,6 +7711,24 @@ fn execute_update_from_joined_input(
     for trigger in triggers.iter().flatten() {
         trigger.before_statement(ctx)?;
     }
+    if let Some(catalog) = ctx.catalog.as_deref() {
+        for target in &stmt.targets {
+            let namespace_oid = catalog
+                .class_row_by_oid(target.relation_oid)
+                .map(|row| row.relnamespace)
+                .unwrap_or(0);
+            enforce_publication_replica_identity(
+                &target.relation_name,
+                target.relation_oid,
+                namespace_oid,
+                &target.desc,
+                &target.indexes,
+                catalog,
+                PublicationDmlAction::Update,
+                true,
+            )?;
+        }
+    }
     let mut transition_captures = triggers
         .iter()
         .map(|trigger| {
@@ -7613,6 +7962,21 @@ pub fn execute_delete_with_waiter(
             let mut transition_capture = triggers
                 .as_ref()
                 .map(|triggers| triggers.new_transition_capture());
+            let namespace_oid = catalog
+                .class_row_by_oid(target.relation_oid)
+                .map(|row| row.relnamespace)
+                .unwrap_or(0);
+            let indexes = catalog.index_relations_for_heap(target.relation_oid);
+            enforce_publication_replica_identity(
+                &target.relation_name,
+                target.relation_oid,
+                namespace_oid,
+                &target.desc,
+                &indexes,
+                catalog,
+                PublicationDmlAction::Delete,
+                !predicate_is_const_false(target.predicate.as_ref()),
+            )?;
 
             let desc = Rc::new(target.desc.clone());
             let attr_descs: Rc<[_]> = desc.attribute_descs().into();
@@ -7645,6 +8009,23 @@ pub fn execute_delete_with_waiter(
                 let mut current_tid = *tid;
                 let mut current_values = values.clone();
                 loop {
+                    if let Some(catalog) = ctx.catalog.as_deref() {
+                        let namespace_oid = catalog
+                            .class_row_by_oid(target.relation_oid)
+                            .map(|row| row.relnamespace)
+                            .unwrap_or(0);
+                        let indexes = catalog.index_relations_for_heap(target.relation_oid);
+                        enforce_publication_replica_identity(
+                            &target.relation_name,
+                            target.relation_oid,
+                            namespace_oid,
+                            &target.desc,
+                            &indexes,
+                            catalog,
+                            PublicationDmlAction::Delete,
+                            true,
+                        )?;
+                    }
                     if let Some(triggers) = &triggers {
                         if !triggers.before_row_delete(&current_values, ctx)? {
                             break;
@@ -7945,6 +8326,22 @@ pub(crate) fn apply_base_update_row(
     loop {
         ctx.check_for_interrupts()?;
         materialize_generated_columns(&target.desc, &mut current_values, ctx)?;
+        if let Some(catalog) = ctx.catalog.as_deref() {
+            let namespace_oid = catalog
+                .class_row_by_oid(target.relation_oid)
+                .map(|row| row.relnamespace)
+                .unwrap_or(0);
+            enforce_publication_replica_identity(
+                &target.relation_name,
+                target.relation_oid,
+                namespace_oid,
+                &target.desc,
+                &target.indexes,
+                catalog,
+                PublicationDmlAction::Update,
+                true,
+            )?;
+        }
         let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, current_tid)?;
         crate::backend::executor::enforce_row_security_write_checks(
             &target.relation_name,
@@ -8151,6 +8548,23 @@ pub(crate) fn apply_base_delete_row(
     let mut current_values = old_values;
     loop {
         ctx.check_for_interrupts()?;
+        if let Some(catalog) = ctx.catalog.as_deref() {
+            let namespace_oid = catalog
+                .class_row_by_oid(target.relation_oid)
+                .map(|row| row.relnamespace)
+                .unwrap_or(0);
+            let indexes = catalog.index_relations_for_heap(target.relation_oid);
+            enforce_publication_replica_identity(
+                &target.relation_name,
+                target.relation_oid,
+                namespace_oid,
+                &target.desc,
+                &indexes,
+                catalog,
+                PublicationDmlAction::Delete,
+                true,
+            )?;
+        }
         let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_delete(
             &target.relation_name,
             &target.referenced_by_foreign_keys,

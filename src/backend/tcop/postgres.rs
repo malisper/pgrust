@@ -11238,6 +11238,7 @@ ORDER BY 1, 2;";
         let sql = "SELECT pubname AS \"Name\", \
              pg_catalog.pg_get_userbyid(pubowner) AS \"Owner\", \
              puballtables AS \"All tables\", \
+             puballsequences AS \"All sequences\", \
              pubinsert AS \"Inserts\", \
              pubupdate AS \"Updates\", \
              pubdelete AS \"Deletes\", \
@@ -11258,6 +11259,7 @@ ORDER BY 1, 2;";
             vec![vec![
                 Value::Text("pub".into()),
                 Value::Text("postgres".into()),
+                Value::Bool(false),
                 Value::Bool(false),
                 Value::Bool(true),
                 Value::Bool(true),
@@ -11332,7 +11334,7 @@ ORDER BY 1, 2;";
 
         let sql = "SELECT oid, pubname, \
              pg_catalog.pg_get_userbyid(pubowner) AS owner, \
-             puballtables, pubinsert, pubupdate, pubdelete, pubtruncate, \
+             puballtables, puballsequences, pubinsert, pubupdate, pubdelete, pubtruncate, \
              (CASE pubgencols WHEN 'n' THEN 'none' WHEN 's' THEN 'stored' END) AS \"Generated columns\", \
              pubviaroot \
              FROM pg_catalog.pg_publication \
@@ -11346,8 +11348,9 @@ ORDER BY 1, 2;";
         assert_eq!(rows[0][1], Value::Text("pub".into()));
         assert_eq!(rows[0][2], Value::Text("postgres".into()));
         assert_eq!(rows[0][3], Value::Bool(false));
-        assert_eq!(rows[0][8], Value::Text("none".into()));
-        assert_eq!(rows[0][9], Value::Bool(false));
+        assert_eq!(rows[0][4], Value::Bool(false));
+        assert_eq!(rows[0][9], Value::Text("none".into()));
+        assert_eq!(rows[0][10], Value::Bool(false));
     }
 
     #[test]
