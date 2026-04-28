@@ -4466,6 +4466,7 @@ fn set_merge_join_references(
     merge_clauses: Vec<RestrictInfo>,
     outer_merge_keys: Vec<Expr>,
     inner_merge_keys: Vec<Expr>,
+    merge_key_descending: Vec<bool>,
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Plan {
     let left_tlist = build_path_tlist(ctx.root, &left);
@@ -4545,6 +4546,7 @@ fn set_merge_join_references(
         merge_clauses: lowered_merge_clauses,
         outer_merge_keys,
         inner_merge_keys,
+        merge_key_descending,
         join_qual,
         qual,
     }
@@ -5360,6 +5362,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             restrict_clauses,
             ..
         } => set_merge_join_references(
@@ -5371,6 +5374,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             restrict_clauses,
         ),
         Path::Projection {

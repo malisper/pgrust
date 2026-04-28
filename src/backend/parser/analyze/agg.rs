@@ -40,7 +40,8 @@ pub(super) fn aggregate_call_matches_catalog(
     within_group: Option<&[OrderByItem]>,
 ) -> bool {
     if within_group.is_some() {
-        return resolve_builtin_hypothetical_aggregate(name).is_some();
+        return resolve_builtin_hypothetical_aggregate(name).is_some()
+            || resolve_builtin_ordered_set_aggregate(name).is_some();
     }
     if let Some(func) = resolve_builtin_aggregate(name) {
         return builtin_aggregate_accepts_call(func, args);

@@ -1907,6 +1907,218 @@ fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
 }
 
 #[test]
+fn set_operation_null_literal_coerces_to_peer_column_type() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    db.execute(1, "create table setop_nulls (a int4)").unwrap();
+    db.execute(1, "insert into setop_nulls values (7)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a from setop_nulls union all select null order by a nulls last"
+        ),
+        vec![vec![Value::Int32(7)], vec![Value::Null]]
+    );
+}
+
+#[test]
+fn explain_declare_cursor_does_not_create_cursor() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "explain (costs off) declare c scroll cursor for select 1",
+    );
+    assert!(!rows.is_empty());
+    assert!(session.execute(&db, "fetch next from c").is_err());
+}
+
+#[test]
+fn scroll_cursor_backward_stops_at_beginning_boundary() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "declare c scroll cursor for select * from (values (1), (2), (3)) v(x)",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch forward 2 from c"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch backward 1 from c"),
+        vec![vec![Value::Int32(1)]]
+    );
+    assert!(session_query_rows(&mut session, &db, "fetch backward 1 from c").is_empty());
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn cluster_table_using_btree_index_rewrites_heap_order() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    db.execute(1, "create table cluster_items (id int4)")
+        .unwrap();
+    db.execute(1, "insert into cluster_items values (3), (1), (2)")
+        .unwrap();
+    db.execute(1, "create index cluster_items_id_idx on cluster_items(id)")
+        .unwrap();
+    db.execute(1, "cluster cluster_items using cluster_items_id_idx")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id from cluster_items"),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)]
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indisclustered from pg_index where indexrelid = 'cluster_items_id_idx'::regclass"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn cluster_temp_table_uses_named_index_order() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+    session
+        .execute(
+            &db,
+            "create temp table cluster_temp_items (id int4, k int4)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into cluster_temp_items values (1, 3), (2, 1), (3, 2), (4, 1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index cluster_temp_items_k_idx on cluster_temp_items(k)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "cluster cluster_temp_items using cluster_temp_items_k_idx",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id from cluster_temp_items order by ctid"
+        ),
+        vec![
+            vec![Value::Int32(2)],
+            vec![Value::Int32(4)],
+            vec![Value::Int32(3)],
+            vec![Value::Int32(1)]
+        ]
+    );
+}
+
+#[test]
+fn cluster_temp_table_resolves_later_named_index() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+    session
+        .execute(
+            &db,
+            "create temp table cluster_temp_multi (id int4, k int4, j int4)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into cluster_temp_multi values (1, 1, 4), (2, 2, 3), (3, 3, 2), (4, 4, 1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index cluster_temp_multi_k_idx on cluster_temp_multi(k)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index cluster_temp_multi_j_idx on cluster_temp_multi(j)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "cluster cluster_temp_multi using cluster_temp_multi_j_idx",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id from cluster_temp_multi order by ctid"
+        ),
+        vec![
+            vec![Value::Int32(4)],
+            vec![Value::Int32(3)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(1)]
+        ]
+    );
+}
+
+#[test]
+fn planner_join_gucs_and_using_binding_affect_explain_shape() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    db.execute(1, "create table join_a (id int4, payload int4)")
+        .unwrap();
+    db.execute(1, "create table join_b (id int4, payload int4)")
+        .unwrap();
+    db.execute(1, "insert into join_a values (1, 10), (2, 20)")
+        .unwrap();
+    db.execute(1, "insert into join_b values (1, 100), (2, 200)")
+        .unwrap();
+    let mut session = Session::new(1);
+    session.execute(&db, "set enable_nestloop = off").unwrap();
+    session.execute(&db, "set enable_hashjoin = off").unwrap();
+
+    let lines = session_query_rows(
+        &mut session,
+        &db,
+        "explain (costs off) select count(*) from join_a a inner join join_b b using (id) group by id order by id",
+    )
+    .into_iter()
+    .filter_map(|mut row| match row.pop() {
+        Some(Value::Text(line)) => Some(line),
+        _ => None,
+    })
+    .collect::<Vec<_>>();
+    assert!(
+        lines.iter().any(|line| line.contains("Merge Join")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| !line.contains("COALESCE")),
+        "{lines:?}"
+    );
+}
+
+#[test]
 fn stats_import_restores_and_clears_relation_stats() {
     let db = Database::open_ephemeral(64).expect("open ephemeral database");
     db.execute(1, "create schema stats_import").unwrap();

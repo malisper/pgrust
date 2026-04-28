@@ -53,15 +53,16 @@ use crate::include::catalog::{
     builtin_range_rows, builtin_type_row_by_name, builtin_type_row_by_oid, builtin_type_rows,
     is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
     proc_oid_for_builtin_aggregate_function, proc_oid_for_builtin_hypothetical_aggregate_function,
-    range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
-    synthetic_range_proc_rows_by_name,
+    proc_oid_for_builtin_ordered_set_aggregate_function, range_type_ref_for_sql_type,
+    relkind_is_analyzable, synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::pathnodes::{PlannerConfig, PlannerIndexExprCacheEntry};
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, HypotheticalAggFunc, JsonTableFunction,
-    OrderByEntry, QueryColumn, RelationDesc, SetReturningCall, SortGroupClause, TargetEntry,
-    ToastRelationRef, Var, expr_contains_set_returning, expr_sql_type_hint, user_attrno,
+    OrderByEntry, OrderedSetAggFunc, QueryColumn, RelationDesc, SetReturningCall, SortGroupClause,
+    TargetEntry, ToastRelationRef, Var, expr_contains_set_returning, expr_sql_type_hint,
+    user_attrno,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -501,6 +502,13 @@ struct ResolvedHypotheticalAggregateCall {
     builtin_impl: HypotheticalAggFunc,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedOrderedSetAggregateCall {
+    proc_oid: u32,
+    result_type: SqlType,
+    builtin_impl: OrderedSetAggFunc,
+}
+
 fn resolve_builtin_aggregate_call(
     catalog: &dyn CatalogLookup,
     func: AggFunc,
@@ -675,6 +683,19 @@ fn resolve_hypothetical_aggregate_call(name: &str) -> Option<ResolvedHypothetica
     })
 }
 
+fn resolve_ordered_set_aggregate_call(
+    name: &str,
+    arg_types: &[SqlType],
+) -> Option<ResolvedOrderedSetAggregateCall> {
+    let builtin_impl = resolve_builtin_ordered_set_aggregate(name)?;
+    let proc_oid = proc_oid_for_builtin_ordered_set_aggregate_function(builtin_impl)?;
+    Some(ResolvedOrderedSetAggregateCall {
+        proc_oid,
+        result_type: ordered_set_aggregate_sql_type(builtin_impl, arg_types),
+        builtin_impl,
+    })
+}
+
 fn hypothetical_aggregate_sql_type(func: HypotheticalAggFunc) -> SqlType {
     match func {
         HypotheticalAggFunc::Rank | HypotheticalAggFunc::DenseRank => {
@@ -683,6 +704,15 @@ fn hypothetical_aggregate_sql_type(func: HypotheticalAggFunc) -> SqlType {
         HypotheticalAggFunc::PercentRank | HypotheticalAggFunc::CumeDist => {
             SqlType::new(SqlTypeKind::Float8)
         }
+    }
+}
+
+fn ordered_set_aggregate_sql_type(func: OrderedSetAggFunc, arg_types: &[SqlType]) -> SqlType {
+    match func {
+        OrderedSetAggFunc::PercentileDisc => arg_types
+            .first()
+            .copied()
+            .unwrap_or_else(|| SqlType::new(SqlTypeKind::Text)),
     }
 }
 
@@ -701,6 +731,27 @@ fn not_ordered_set_aggregate_error(name: &str) -> ParseError {
         detail: None,
         hint: None,
         sqlstate: "42809",
+    }
+}
+
+fn ordered_set_direct_arg_count_mismatch_error(
+    name: &str,
+    direct_arg_types: &[SqlType],
+    aggregate_arg_types: &[SqlType],
+) -> ParseError {
+    let signature = direct_arg_types
+        .iter()
+        .chain(aggregate_arg_types.iter())
+        .map(|ty| sql_type_name(*ty))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ParseError::DetailedError {
+        message: format!("function {name}({signature}) does not exist"),
+        detail: None,
+        hint: Some(format!(
+            "To use the ordered-set aggregate {name}, provide one direct percentile argument and one ordering column.",
+        )),
+        sqlstate: "42883",
     }
 }
 
@@ -814,6 +865,84 @@ fn coerce_hypothetical_aggregate_inputs(
     }
 
     Ok((coerced_direct_args, coerced_args, coerced_order_by))
+}
+
+fn coerce_ordered_set_aggregate_inputs(
+    name: &str,
+    direct_args: &[SqlFunctionArg],
+    direct_arg_types: &[SqlType],
+    bound_direct_args: Vec<Expr>,
+    aggregate_args: &[SqlFunctionArg],
+    aggregate_arg_types: &[SqlType],
+    bound_args: Vec<Expr>,
+    order_by: &[OrderByItem],
+    bound_order_exprs: Vec<Expr>,
+    catalog: &dyn CatalogLookup,
+) -> Result<(Vec<Expr>, Vec<Expr>, Vec<OrderByEntry>), ParseError> {
+    let Some(OrderedSetAggFunc::PercentileDisc) = resolve_builtin_ordered_set_aggregate(name)
+    else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "supported ordered-set aggregate",
+            actual: name.to_string(),
+        });
+    };
+    if direct_args.len() != 1 || aggregate_args.len() != 1 || order_by.len() != 1 {
+        return Err(ordered_set_direct_arg_count_mismatch_error(
+            name,
+            direct_arg_types,
+            aggregate_arg_types,
+        ));
+    }
+
+    let target_direct_type = SqlType::new(SqlTypeKind::Float8);
+    let direct_type = coerce_unknown_string_literal_type(
+        &direct_args[0].value,
+        direct_arg_types
+            .first()
+            .copied()
+            .unwrap_or(target_direct_type),
+        target_direct_type,
+    );
+    let direct_expr = bound_direct_args
+        .into_iter()
+        .next()
+        .expect("direct arg length checked above");
+
+    let target_arg_type = aggregate_arg_types
+        .first()
+        .copied()
+        .unwrap_or_else(|| SqlType::new(SqlTypeKind::Text));
+    let arg_type = coerce_unknown_string_literal_type(
+        &aggregate_args[0].value,
+        target_arg_type,
+        SqlType::new(SqlTypeKind::Text),
+    );
+    let arg_expr = bound_args
+        .into_iter()
+        .next()
+        .expect("aggregate arg length checked above");
+    let order_expr = bound_order_exprs
+        .into_iter()
+        .next()
+        .expect("order arg length checked above");
+
+    let coerced_arg = coerce_bound_expr(arg_expr, target_arg_type, arg_type);
+    let order_by_entry = build_bound_order_by_entry(
+        &order_by[0],
+        coerce_bound_expr(order_expr, target_arg_type, arg_type),
+        0,
+        catalog,
+    )?;
+
+    Ok((
+        vec![coerce_bound_expr(
+            direct_expr,
+            direct_type,
+            target_direct_type,
+        )],
+        vec![coerced_arg],
+        vec![order_by_entry],
+    ))
 }
 fn validate_distinct_aggregate_order_by(
     arg_values: &[SqlExpr],
@@ -5155,13 +5284,18 @@ fn bind_select_query_with_outer(
                             let hypothetical =
                                 resolve_builtin_hypothetical_aggregate(&agg.name).is_some()
                                     && !agg.direct_args.is_empty();
+                            let ordered_set =
+                                resolve_builtin_ordered_set_aggregate(&agg.name).is_some()
+                                    && !agg.direct_args.is_empty();
                             if aggregate_args_are_named(agg.args.args()) {
                                 return Err(ParseError::UnexpectedToken {
                                     expected: "aggregate arguments without names",
                                     actual: agg.name.clone(),
                                 });
                             }
-                            if hypothetical && aggregate_args_are_named(&agg.direct_args) {
+                            if (hypothetical || ordered_set)
+                                && aggregate_args_are_named(&agg.direct_args)
+                            {
                                 return Err(ParseError::UnexpectedToken {
                                     expected: "aggregate arguments without names",
                                     actual: agg.name.clone(),
@@ -5173,7 +5307,7 @@ fn bind_select_query_with_outer(
                                 .iter()
                                 .map(|arg| arg.value.clone())
                                 .collect();
-                            if !hypothetical {
+                            if !hypothetical && !ordered_set {
                                 validate_distinct_aggregate_order_by(
                                     &arg_values,
                                     &agg.order_by,
@@ -5181,6 +5315,7 @@ fn bind_select_query_with_outer(
                                 )?;
                             }
                             if !hypothetical
+                                && !ordered_set
                                 && let Some(func) = resolve_builtin_aggregate(&agg.name)
                             {
                                 validate_aggregate_arity(func, &arg_values)?;
@@ -5198,7 +5333,7 @@ fn bind_select_query_with_outer(
                                     )
                                 })
                                 .collect::<Vec<_>>();
-                            let resolved = if hypothetical {
+                            let resolved = if hypothetical || ordered_set {
                                 None
                             } else {
                                 Some(
@@ -5236,7 +5371,7 @@ fn bind_select_query_with_outer(
                                     ));
                                 }
                             }
-                            let bound_direct_args = if hypothetical {
+                            let bound_direct_args = if hypothetical || ordered_set {
                                 agg.direct_args
                                     .iter()
                                     .map(|arg| {
@@ -5336,6 +5471,33 @@ fn bind_select_query_with_outer(
                                         bound_order_exprs,
                                         catalog,
                                     )?
+                                } else if ordered_set {
+                                    let direct_arg_types = agg
+                                        .direct_args
+                                        .iter()
+                                        .map(|arg| {
+                                            infer_sql_expr_type_with_ctes(
+                                                &arg.value,
+                                                &scope,
+                                                catalog,
+                                                outer_scopes,
+                                                grouped_outer.as_ref(),
+                                                &visible_ctes,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    coerce_ordered_set_aggregate_inputs(
+                                        &agg.name,
+                                        &agg.direct_args,
+                                        &direct_arg_types,
+                                        bound_direct_args,
+                                        agg.args.args(),
+                                        &arg_types,
+                                        bound_args,
+                                        &agg.order_by,
+                                        bound_order_exprs,
+                                        catalog,
+                                    )?
                                 } else {
                                     let bound_order_by = bound_order_exprs
                                         .into_iter()
@@ -5372,6 +5534,14 @@ fn bind_select_query_with_outer(
                                             actual: agg.name.clone(),
                                         },
                                     )?;
+                                (resolved.proc_oid, false, resolved.result_type)
+                            } else if ordered_set {
+                                let resolved =
+                                    resolve_ordered_set_aggregate_call(&agg.name, &arg_types)
+                                        .ok_or_else(|| ParseError::UnexpectedToken {
+                                            expected: "supported aggregate",
+                                            actual: agg.name.clone(),
+                                        })?;
                                 (resolved.proc_oid, false, resolved.result_type)
                             } else {
                                 let resolved = resolved
@@ -5416,6 +5586,9 @@ fn bind_select_query_with_outer(
                         let hypothetical = resolve_builtin_hypothetical_aggregate(&agg.name)
                             .is_some()
                             && !agg.direct_args.is_empty();
+                        let ordered_set = resolve_builtin_ordered_set_aggregate(&agg.name)
+                            .is_some()
+                            && !agg.direct_args.is_empty();
                         let arg_values: Vec<SqlExpr> = agg
                             .args
                             .args()
@@ -5437,6 +5610,13 @@ fn bind_select_query_with_outer(
                             .collect::<Vec<_>>();
                         let result_type = if hypothetical {
                             resolve_hypothetical_aggregate_call(&agg.name)
+                                .map(|resolved| resolved.result_type)
+                                .ok_or_else(|| ParseError::UnexpectedToken {
+                                    expected: "supported aggregate",
+                                    actual: agg.name.clone(),
+                                })?
+                        } else if ordered_set {
+                            resolve_ordered_set_aggregate_call(&agg.name, &arg_types)
                                 .map(|resolved| resolved.result_type)
                                 .ok_or_else(|| ParseError::UnexpectedToken {
                                     expected: "supported aggregate",
@@ -5892,8 +6072,11 @@ fn bind_set_operation_query_with_outer(
             else {
                 continue;
             };
-            column_types[input_index] =
-                coerce_unknown_string_literal_type(raw_expr, column_types[input_index], peer_type);
+            column_types[input_index] = coerce_unknown_set_operation_literal_type(
+                raw_expr,
+                column_types[input_index],
+                peer_type,
+            );
         }
 
         let mut common = column_types[0];

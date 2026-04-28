@@ -281,6 +281,7 @@ pub enum Plan {
         merge_clauses: Vec<Expr>,
         outer_merge_keys: Vec<Expr>,
         inner_merge_keys: Vec<Expr>,
+        merge_key_descending: Vec<bool>,
         join_qual: Vec<Expr>,
         qual: Vec<Expr>,
     },

@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use super::super::expand_join_rte_vars;
 use crate::RelFileLocator;
 use crate::backend::executor::{
     Value, cast_value, compare_order_values, network_btree_upper_bound, network_prefix,
@@ -874,6 +875,7 @@ pub(super) fn optimize_path_with_config(
                     restrict_clauses,
                     pathtarget,
                     output_columns,
+                    config,
                 )
             }
             Path::HashJoin {
@@ -918,6 +920,7 @@ pub(super) fn optimize_path_with_config(
                 merge_clauses,
                 outer_merge_keys,
                 inner_merge_keys,
+                merge_key_descending,
                 restrict_clauses,
                 ..
             } => {
@@ -938,6 +941,7 @@ pub(super) fn optimize_path_with_config(
                     merge_clauses,
                     outer_merge_keys,
                     inner_merge_keys,
+                    merge_key_descending,
                     join_clauses,
                     restrict_clauses,
                 )
@@ -2227,10 +2231,14 @@ fn choose_join_plan(
     restrict_clauses: Vec<RestrictInfo>,
     pathtarget: PathTarget,
     output_columns: Vec<QueryColumn>,
+    config: PlannerConfig,
 ) -> Path {
     let left_relids = path_relids(&left);
     let right_relids = path_relids(&right);
-    select_best_join_path(build_join_paths(
+    select_best_join_path(build_join_paths_internal(
+        Some(config),
+        None,
+        None,
         left,
         right,
         &left_relids,
@@ -2253,6 +2261,7 @@ pub(super) fn build_join_paths(
     output_columns: Vec<QueryColumn>,
 ) -> Vec<Path> {
     build_join_paths_internal(
+        None,
         None,
         None,
         left,
@@ -2279,6 +2288,7 @@ pub(super) fn build_join_paths_with_root(
     output_columns: Vec<QueryColumn>,
 ) -> Vec<Path> {
     build_join_paths_internal(
+        Some(root.config),
         Some(root),
         Some(catalog),
         left,
@@ -2293,6 +2303,7 @@ pub(super) fn build_join_paths_with_root(
 }
 
 fn build_join_paths_internal(
+    config_override: Option<PlannerConfig>,
     root: Option<&PlannerInfo>,
     catalog: Option<&dyn CatalogLookup>,
     left: Path,
@@ -2315,18 +2326,28 @@ fn build_join_paths_internal(
     let allow_swapped_orientation = matches!(kind, JoinType::Inner)
         && (!right_uses_immediate_outer || !lateral_orientation_locked)
         || allow_base_cross_swap;
+    let config = config_override
+        .or_else(|| root.map(|root| root.config))
+        .unwrap_or_default();
 
     let mut paths = Vec::new();
+    let mut disabled_paths = Vec::new();
     if allow_default_orientation {
-        paths.push(estimate_nested_loop_join_internal(
-            root,
-            left.clone(),
-            right.clone(),
-            kind,
-            restrict_clauses.clone(),
-            pathtarget.clone(),
-            output_columns.clone(),
-        ));
+        push_join_path(
+            &mut paths,
+            &mut disabled_paths,
+            config.enable_nestloop,
+            estimate_nested_loop_join_internal(
+                root,
+                left.clone(),
+                right.clone(),
+                kind,
+                restrict_clauses.clone(),
+                pathtarget.clone(),
+                output_columns.clone(),
+                config.enable_material,
+            ),
+        );
         if let Some((inner, remaining_restrict_clauses)) = parameterized_inner_index_path(
             root,
             catalog,
@@ -2335,28 +2356,40 @@ fn build_join_paths_internal(
             right_relids,
             &restrict_clauses,
         ) {
-            paths.push(estimate_nested_loop_join_internal(
-                root,
-                left.clone(),
-                inner,
-                kind,
-                remaining_restrict_clauses,
-                pathtarget.clone(),
-                output_columns.clone(),
-            ));
+            push_join_path(
+                &mut paths,
+                &mut disabled_paths,
+                config.enable_nestloop,
+                estimate_nested_loop_join_internal(
+                    root,
+                    left.clone(),
+                    inner,
+                    kind,
+                    remaining_restrict_clauses,
+                    pathtarget.clone(),
+                    output_columns.clone(),
+                    config.enable_material,
+                ),
+            );
         }
     }
 
     if allow_swapped_orientation {
-        paths.push(estimate_nested_loop_join_internal(
-            root,
-            right.clone(),
-            left.clone(),
-            kind,
-            restrict_clauses.clone(),
-            pathtarget.clone(),
-            output_columns.clone(),
-        ));
+        push_join_path(
+            &mut paths,
+            &mut disabled_paths,
+            config.enable_nestloop,
+            estimate_nested_loop_join_internal(
+                root,
+                right.clone(),
+                left.clone(),
+                kind,
+                restrict_clauses.clone(),
+                pathtarget.clone(),
+                output_columns.clone(),
+                config.enable_material,
+            ),
+        );
         if let Some((inner, remaining_restrict_clauses)) = parameterized_inner_index_path(
             root,
             catalog,
@@ -2365,15 +2398,21 @@ fn build_join_paths_internal(
             left_relids,
             &restrict_clauses,
         ) {
-            paths.push(estimate_nested_loop_join_internal(
-                root,
-                right.clone(),
-                inner,
-                kind,
-                remaining_restrict_clauses,
-                pathtarget.clone(),
-                output_columns.clone(),
-            ));
+            push_join_path(
+                &mut paths,
+                &mut disabled_paths,
+                config.enable_nestloop,
+                estimate_nested_loop_join_internal(
+                    root,
+                    right.clone(),
+                    inner,
+                    kind,
+                    remaining_restrict_clauses,
+                    pathtarget.clone(),
+                    output_columns.clone(),
+                    config.enable_material,
+                ),
+            );
         }
     }
 
@@ -2382,19 +2421,24 @@ fn build_join_paths_internal(
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, left_relids, right_relids)
     {
-        paths.push(estimate_hash_join_internal(
-            root,
-            left.clone(),
-            right.clone(),
-            kind,
-            pathtarget.clone(),
-            output_columns.clone(),
-            hash_join.hash_clauses,
-            hash_join.outer_hash_keys,
-            hash_join.inner_hash_keys,
-            hash_join.join_clauses,
-            restrict_clauses.clone(),
-        ));
+        push_join_path(
+            &mut paths,
+            &mut disabled_paths,
+            config.enable_hashjoin,
+            estimate_hash_join_internal(
+                root,
+                left.clone(),
+                right.clone(),
+                kind,
+                pathtarget.clone(),
+                output_columns.clone(),
+                hash_join.hash_clauses,
+                hash_join.outer_hash_keys,
+                hash_join.inner_hash_keys,
+                hash_join.join_clauses,
+                restrict_clauses.clone(),
+            ),
+        );
     }
 
     if !lateral_orientation_locked
@@ -2402,19 +2446,25 @@ fn build_join_paths_internal(
         && let Some(merge_join) =
             extract_merge_join_clauses(&restrict_clauses, left_relids, right_relids)
     {
-        paths.push(estimate_merge_join_internal(
-            root,
-            left.clone(),
-            right.clone(),
-            kind,
-            pathtarget.clone(),
-            output_columns.clone(),
-            merge_join.merge_clauses,
-            merge_join.outer_merge_keys,
-            merge_join.inner_merge_keys,
-            merge_join.join_clauses,
-            restrict_clauses.clone(),
-        ));
+        push_join_path(
+            &mut paths,
+            &mut disabled_paths,
+            config.enable_mergejoin,
+            estimate_merge_join_internal(
+                root,
+                left.clone(),
+                right.clone(),
+                kind,
+                pathtarget.clone(),
+                output_columns.clone(),
+                merge_join.merge_clauses,
+                merge_join.outer_merge_keys,
+                merge_join.inner_merge_keys,
+                None,
+                merge_join.join_clauses,
+                restrict_clauses.clone(),
+            ),
+        );
     }
 
     if !lateral_orientation_locked
@@ -2422,19 +2472,24 @@ fn build_join_paths_internal(
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, right_relids, left_relids)
     {
-        paths.push(estimate_hash_join_internal(
-            root,
-            right.clone(),
-            left.clone(),
-            kind,
-            pathtarget.clone(),
-            output_columns.clone(),
-            hash_join.hash_clauses,
-            hash_join.outer_hash_keys,
-            hash_join.inner_hash_keys,
-            hash_join.join_clauses,
-            restrict_clauses.clone(),
-        ));
+        push_join_path(
+            &mut paths,
+            &mut disabled_paths,
+            config.enable_hashjoin,
+            estimate_hash_join_internal(
+                root,
+                right.clone(),
+                left.clone(),
+                kind,
+                pathtarget.clone(),
+                output_columns.clone(),
+                hash_join.hash_clauses,
+                hash_join.outer_hash_keys,
+                hash_join.inner_hash_keys,
+                hash_join.join_clauses,
+                restrict_clauses.clone(),
+            ),
+        );
     }
 
     if !lateral_orientation_locked
@@ -2442,22 +2497,45 @@ fn build_join_paths_internal(
         && let Some(merge_join) =
             extract_merge_join_clauses(&restrict_clauses, right_relids, left_relids)
     {
-        paths.push(estimate_merge_join_internal(
-            root,
-            right,
-            left,
-            kind,
-            pathtarget,
-            output_columns,
-            merge_join.merge_clauses,
-            merge_join.outer_merge_keys,
-            merge_join.inner_merge_keys,
-            merge_join.join_clauses,
-            restrict_clauses,
-        ));
+        push_join_path(
+            &mut paths,
+            &mut disabled_paths,
+            config.enable_mergejoin,
+            estimate_merge_join_internal(
+                root,
+                right,
+                left,
+                kind,
+                pathtarget,
+                output_columns,
+                merge_join.merge_clauses,
+                merge_join.outer_merge_keys,
+                merge_join.inner_merge_keys,
+                None,
+                merge_join.join_clauses,
+                restrict_clauses,
+            ),
+        );
     }
 
-    paths
+    if paths.is_empty() {
+        disabled_paths
+    } else {
+        paths
+    }
+}
+
+fn push_join_path(
+    paths: &mut Vec<Path>,
+    disabled_paths: &mut Vec<Path>,
+    enabled: bool,
+    path: Path,
+) {
+    if enabled {
+        paths.push(path);
+    } else {
+        disabled_paths.push(path);
+    }
 }
 
 fn parameterized_inner_index_path(
@@ -3343,6 +3421,7 @@ fn estimate_nested_loop_join_internal(
     restrict_clauses: Vec<RestrictInfo>,
     pathtarget: PathTarget,
     output_columns: Vec<QueryColumn>,
+    enable_material: bool,
 ) -> Path {
     let left_info = left.plan_info();
     let right_info = right.plan_info();
@@ -3351,7 +3430,7 @@ fn estimate_nested_loop_join_internal(
     let join_sel = selectivity_for_restrict_clauses(&restrict_clauses, left_rows);
     let rows = estimate_join_rows(left_rows, right_rows, kind, join_sel);
     let (inner_first_scan, inner_rescan) =
-        nested_loop_inner_scan_costs(kind, &left, &right, right_info);
+        nested_loop_inner_scan_costs(kind, &left, &right, right_info, enable_material);
     let join_tuples = left_rows * right_rows;
     let join_cpu = join_tuple_cpu_cost(join_tuples, &restrict_clauses);
     let output_cpu = output_tuple_cpu_cost(rows);
@@ -3396,6 +3475,7 @@ fn estimate_nested_loop_join(
         restrict_clauses,
         pathtarget,
         output_columns,
+        true,
     )
 }
 
@@ -3416,6 +3496,7 @@ fn estimate_nested_loop_join_with_root(
         restrict_clauses,
         pathtarget,
         output_columns,
+        root.config.enable_material,
     )
 }
 
@@ -3424,6 +3505,7 @@ fn nested_loop_inner_scan_costs(
     left: &Path,
     right: &Path,
     right_info: PlanEstimate,
+    enable_material: bool,
 ) -> (f64, f64) {
     if matches!(kind, JoinType::Cross)
         && path_is_values_relation(left)
@@ -3442,10 +3524,15 @@ fn nested_loop_inner_scan_costs(
         return (scan_cost, scan_cost);
     }
 
-    (
-        materialized_inner_first_scan_cost(right_info),
-        materialized_inner_rescan_cost(right_info),
-    )
+    if enable_material {
+        (
+            materialized_inner_first_scan_cost(right_info),
+            materialized_inner_rescan_cost(right_info),
+        )
+    } else {
+        let scan_cost = right_info.total_cost.as_f64();
+        (scan_cost, scan_cost)
+    }
 }
 
 fn materialized_inner_first_scan_cost(info: PlanEstimate) -> f64 {
@@ -3594,6 +3681,7 @@ fn estimate_merge_join(
     merge_clauses: Vec<RestrictInfo>,
     outer_merge_keys: Vec<Expr>,
     inner_merge_keys: Vec<Expr>,
+    merge_key_descending: Vec<bool>,
     join_clauses: Vec<RestrictInfo>,
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Path {
@@ -3607,6 +3695,7 @@ fn estimate_merge_join(
         merge_clauses,
         outer_merge_keys,
         inner_merge_keys,
+        Some(merge_key_descending),
         join_clauses,
         restrict_clauses,
     )
@@ -3622,6 +3711,7 @@ fn estimate_merge_join_internal(
     merge_clauses: Vec<RestrictInfo>,
     outer_merge_keys: Vec<Expr>,
     inner_merge_keys: Vec<Expr>,
+    merge_key_descending: Option<Vec<bool>>,
     join_clauses: Vec<RestrictInfo>,
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Path {
@@ -3634,8 +3724,11 @@ fn estimate_merge_join_internal(
         "merge join does not support cross joins"
     );
 
-    let outer_pathkeys = merge_pathkeys(&outer_merge_keys, &merge_clauses);
-    let inner_pathkeys = merge_pathkeys(&inner_merge_keys, &merge_clauses);
+    let merge_key_descending = merge_key_descending.unwrap_or_else(|| {
+        preferred_merge_key_directions(_root, &outer_merge_keys, &inner_merge_keys)
+    });
+    let outer_pathkeys = merge_pathkeys(&outer_merge_keys, &merge_clauses, &merge_key_descending);
+    let inner_pathkeys = merge_pathkeys(&inner_merge_keys, &merge_clauses, &merge_key_descending);
     let left = ensure_path_sorted_for_merge(left, &outer_pathkeys);
     let right = ensure_path_sorted_for_merge(right, &inner_pathkeys);
     let left_info = left.plan_info();
@@ -3683,21 +3776,70 @@ fn estimate_merge_join_internal(
         merge_clauses,
         outer_merge_keys,
         inner_merge_keys,
+        merge_key_descending,
         restrict_clauses,
     }
 }
 
-fn merge_pathkeys(keys: &[Expr], clauses: &[RestrictInfo]) -> Vec<PathKey> {
+fn merge_pathkeys(keys: &[Expr], clauses: &[RestrictInfo], descending: &[bool]) -> Vec<PathKey> {
     keys.iter()
         .zip(clauses.iter())
-        .map(|(expr, restrict)| PathKey {
+        .enumerate()
+        .map(|(index, (expr, restrict))| PathKey {
             expr: expr.clone(),
             ressortgroupref: 0,
-            descending: false,
-            nulls_first: Some(false),
+            descending: descending.get(index).copied().unwrap_or(false),
+            nulls_first: None,
             collation_oid: merge_clause_collation(restrict),
         })
         .collect()
+}
+
+fn preferred_merge_key_directions(
+    root: Option<&PlannerInfo>,
+    outer_keys: &[Expr],
+    inner_keys: &[Expr],
+) -> Vec<bool> {
+    outer_keys
+        .iter()
+        .zip(inner_keys.iter())
+        .map(|(outer_key, inner_key)| {
+            root.and_then(|root| {
+                preferred_query_pathkey_direction(root, outer_key)
+                    .or_else(|| preferred_query_pathkey_direction(root, inner_key))
+            })
+            .unwrap_or(false)
+        })
+        .collect()
+}
+
+fn preferred_query_pathkey_direction(root: &PlannerInfo, expr: &Expr) -> Option<bool> {
+    let expr = expand_join_rte_vars(root, expr.clone());
+    root.query_pathkeys.iter().find_map(|key| {
+        let key_expr = expand_join_rte_vars(root, key.expr.clone());
+        if key_expr == expr || root_inner_join_equates_exprs(root, &key_expr, &expr) {
+            Some(key.descending)
+        } else {
+            None
+        }
+    })
+}
+
+fn root_inner_join_equates_exprs(root: &PlannerInfo, left: &Expr, right: &Expr) -> bool {
+    root.inner_join_clauses.iter().any(|restrict| {
+        let Expr::Op(op) = &restrict.clause else {
+            return false;
+        };
+        if !matches!(op.op, OpExprKind::Eq) {
+            return false;
+        }
+        let [op_left, op_right] = op.args.as_slice() else {
+            return false;
+        };
+        let op_left = expand_join_rte_vars(root, op_left.clone());
+        let op_right = expand_join_rte_vars(root, op_right.clone());
+        (op_left == *left && op_right == *right) || (op_left == *right && op_right == *left)
+    })
 }
 
 fn merge_clause_collation(restrict: &RestrictInfo) -> Option<u32> {

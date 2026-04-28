@@ -338,7 +338,7 @@ impl Database {
         client_id: ClientId,
         relation_oid: u32,
         rel: crate::backend::storage::smgr::RelFileLocator,
-    ) -> Result<(), ExecError> {
+    ) -> Result<crate::backend::storage::smgr::RelFileLocator, ExecError> {
         let temp_backend_id = self.temp_backend_id(client_id);
         let mut namespaces = self.temp_relations.write();
         let namespace = namespaces.get_mut(&temp_backend_id).ok_or_else(|| {
@@ -351,11 +351,12 @@ impl Database {
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string()))
             })?;
+        let old_rel = entry.entry.rel;
         entry.entry.rel = rel;
         namespace.generation = namespace.generation.saturating_add(1);
         drop(namespaces);
         self.invalidate_backend_cache_state(client_id);
-        Ok(())
+        Ok(old_rel)
     }
 
     pub(super) fn replace_temp_entry_index_readiness(

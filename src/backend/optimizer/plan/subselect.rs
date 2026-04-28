@@ -1402,6 +1402,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             join_qual,
             qual,
         } => Plan::MergeJoin {
@@ -1421,6 +1422,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
+            merge_key_descending,
             join_qual: join_qual
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
@@ -1861,6 +1863,7 @@ pub(super) fn finalize_plan_subqueries(
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             join_qual,
             qual,
         } => Plan::MergeJoin {
@@ -1880,6 +1883,7 @@ pub(super) fn finalize_plan_subqueries(
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                 .collect(),
+            merge_key_descending,
             join_qual: join_qual
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))

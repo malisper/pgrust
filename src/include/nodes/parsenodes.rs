@@ -312,6 +312,7 @@ mod tests {
 pub enum Statement {
     Do(DoStatement),
     Explain(ExplainStatement),
+    Cluster(ClusterStatement),
     Show(ShowStatement),
     Select(SelectStatement),
     Values(ValuesStatement),
@@ -533,6 +534,12 @@ pub enum Statement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadStatement {
     pub filename: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterStatement {
+    pub table_name: String,
+    pub index_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

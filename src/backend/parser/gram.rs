@@ -15433,6 +15433,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::do_stmt => Ok(Statement::Do(build_do(inner)?)),
         Rule::call_stmt => Ok(Statement::Call(build_call_statement(inner.as_str())?)),
         Rule::explain_stmt => Ok(Statement::Explain(build_explain(inner)?)),
+        Rule::cluster_stmt => Ok(Statement::Cluster(build_cluster(inner)?)),
         Rule::table_stmt => Ok(Statement::Select(build_table_select(inner)?)),
         Rule::select_into_stmt => Ok(Statement::CreateTableAs(build_select_into(inner)?)),
         Rule::select_stmt => Ok(Statement::Select(build_select(inner)?)),
@@ -16022,6 +16023,21 @@ fn build_declare_cursor(pair: Pair<'_, Rule>) -> Result<DeclareCursorStatement, 
         scroll,
         hold,
         query: query.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_cluster(pair: Pair<'_, Rule>) -> Result<ClusterStatement, ParseError> {
+    let names = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier)
+        .collect::<Vec<_>>();
+    let [table_name, index_name] = names.as_slice() else {
+        return Err(ParseError::UnexpectedEof);
+    };
+    Ok(ClusterStatement {
+        table_name: table_name.clone(),
+        index_name: index_name.clone(),
     })
 }
 
@@ -17000,6 +17016,9 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                 }
             }
             Rule::select_stmt => statement = Some(Statement::Select(build_select(part)?)),
+            Rule::declare_cursor_stmt => {
+                statement = Some(Statement::DeclareCursor(build_declare_cursor(part)?));
+            }
             Rule::insert_stmt => statement = Some(Statement::Insert(build_insert(part)?)),
             Rule::merge_stmt => statement = Some(Statement::Merge(build_merge(part)?)),
             Rule::update_stmt => statement = Some(Statement::Update(build_update(part)?)),
@@ -17643,14 +17662,47 @@ fn build_offset_clause(pair: Pair<'_, Rule>) -> Result<usize, ParseError> {
 }
 
 fn build_usize_clause(pair: Pair<'_, Rule>, expected: &'static str) -> Result<usize, ParseError> {
-    let integer = pair
+    let expr = pair
         .into_inner()
-        .find(|part| part.as_rule() == Rule::integer)
+        .find(|part| matches!(part.as_rule(), Rule::integer_const_expr | Rule::integer))
         .ok_or(ParseError::UnexpectedEof)?;
-    parse_usize_literal(integer.as_str()).map_err(|_| ParseError::UnexpectedToken {
+    parse_usize_const_expr(expr.as_str()).map_err(|_| ParseError::UnexpectedToken {
         expected,
-        actual: integer.as_str().into(),
+        actual: expr.as_str().into(),
     })
+}
+
+fn parse_usize_const_expr(text: &str) -> Result<usize, ()> {
+    let mut spaced = String::with_capacity(text.len() + 8);
+    for ch in text.chars() {
+        if ch == '+' || ch == '-' {
+            spaced.push(' ');
+            spaced.push(ch);
+            spaced.push(' ');
+        } else {
+            spaced.push(ch);
+        }
+    }
+    let mut parts = spaced.split_whitespace();
+    let first = parts.next().ok_or(())?;
+    let mut value = normalize_numeric_literal_text(first)
+        .parse::<i128>()
+        .map_err(|_| ())?;
+    while let Some(op) = parts.next() {
+        let rhs = parts.next().ok_or(())?;
+        let rhs = normalize_numeric_literal_text(rhs)
+            .parse::<i128>()
+            .map_err(|_| ())?;
+        match op {
+            "+" => value = value.checked_add(rhs).ok_or(())?,
+            "-" => value = value.checked_sub(rhs).ok_or(())?,
+            _ => return Err(()),
+        }
+    }
+    if parts.next().is_some() || value < 0 {
+        return Err(());
+    }
+    usize::try_from(value).map_err(|_| ())
 }
 
 fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {

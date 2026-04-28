@@ -645,6 +645,10 @@ fn execute_statement_with_source(
                 actual: "REFRESH MATERIALIZED VIEW".into(),
             }))
         }
+        Statement::Cluster(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CLUSTER handled by database/session layer",
+            actual: "CLUSTER".into(),
+        })),
         Statement::DropMaterializedView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP MATERIALIZED VIEW handled by database/session layer",
             actual: "DROP MATERIALIZED VIEW".into(),
@@ -1001,6 +1005,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::CreateRule(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE RULE".into(),
+        })),
+        Statement::Cluster(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CLUSTER".into(),
         })),
         Statement::Vacuum(stmt) => execute_vacuum(stmt, catalog, ctx),
         Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {

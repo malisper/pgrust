@@ -4234,11 +4234,11 @@ fn bind_join_constraint_with_ctes(
             None,
         )),
         JoinConstraint::Using(columns) => {
-            bind_join_using_projection(columns, left_scope, right_scope)
+            bind_join_using_projection(kind, columns, left_scope, right_scope)
         }
         JoinConstraint::Natural => {
             let columns = natural_join_columns(left_scope, right_scope);
-            bind_join_using_projection(&columns, left_scope, right_scope)
+            bind_join_using_projection(kind, &columns, left_scope, right_scope)
         }
     }
 }
@@ -4284,6 +4284,7 @@ fn join_using_source_columns(left: &ScopeColumn, right: &ScopeColumn) -> Vec<(u3
 }
 
 fn bind_join_using_projection(
+    kind: &JoinKind,
     columns: &[String],
     left_scope: &BoundScope,
     right_scope: &BoundScope,
@@ -4329,7 +4330,11 @@ fn bind_join_using_projection(
         let left_ty = left_scope.desc.columns[*left_index].sql_type;
         let left_expr = left_scope.output_exprs[*left_index].clone();
         let right_expr = right_scope.output_exprs[*right_index].clone();
-        alias_exprs.push(Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)));
+        alias_exprs.push(match kind {
+            JoinKind::Full => Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)),
+            JoinKind::Right => right_expr,
+            _ => left_expr,
+        });
         output_columns.push(QueryColumn {
             name: name.clone(),
             sql_type: left_ty,

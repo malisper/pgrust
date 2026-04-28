@@ -193,6 +193,21 @@ impl Database {
                         namespace.generation = namespace.generation.saturating_add(1);
                     }
                 }
+                TempMutationEffect::ReplaceRel {
+                    relation_oid,
+                    old_rel,
+                    ..
+                } => {
+                    if let Some(namespace) = namespaces.get_mut(&temp_backend_id)
+                        && let Some(entry) = namespace
+                            .tables
+                            .values_mut()
+                            .find(|entry| entry.entry.relation_oid == *relation_oid)
+                    {
+                        entry.entry.rel = *old_rel;
+                        namespace.generation = namespace.generation.saturating_add(1);
+                    }
+                }
             }
         }
         drop(namespaces);

@@ -384,6 +384,19 @@ impl HypotheticalAggFunc {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderedSetAggFunc {
+    PercentileDisc,
+}
+
+impl OrderedSetAggFunc {
+    pub fn name(&self) -> &'static str {
+        match self {
+            OrderedSetAggFunc::PercentileDisc => "percentile_disc",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinWindowFunction {
     RowNumber,
     Rank,
