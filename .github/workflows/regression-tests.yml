@@ -313,6 +313,10 @@ jobs:
           RUN_SHA: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REPO_FULL_NAME: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          # Keep this aligned with the rerun policy in regression-tests-rerun.yml
+          # (run_attempt < 2). Bump both together if the policy ever changes.
+          MAX_ATTEMPTS: "2"
         working-directory: pgrust
         run: scripts/github/notify_slack_regression.sh
 
