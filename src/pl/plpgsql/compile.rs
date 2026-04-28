@@ -961,6 +961,7 @@ pub(crate) fn compile_function_from_proc(
 
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
     let (sqlstate_slot, sqlerrm_slot) = env.define_exception_slots();
+    env.push_label_scope(&row.proname);
 
     let return_contract = function_return_contract(row, catalog, &output_slots)?;
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
@@ -1028,6 +1029,7 @@ pub(crate) fn compile_trigger_function_from_proc(
     let bindings = seed_trigger_env(&mut env, relation_desc);
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
     let (sqlstate_slot, sqlerrm_slot) = env.define_exception_slots();
+    env.push_label_scope(&row.proname);
     let return_contract = FunctionReturnContract::Trigger { bindings };
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
@@ -4320,7 +4322,11 @@ fn normalize_plpgsql_window_frame_bound(
 
 fn normalize_labeled_column_name(name: &str, env: &CompileEnv) -> Option<SqlExpr> {
     let (label_and_var, field) = name.rsplit_once('.')?;
-    let (label, qualifier) = label_and_var.rsplit_once('.')?;
+    let Some((label, qualifier)) = label_and_var.rsplit_once('.') else {
+        return env
+            .get_labeled_var(label_and_var, field)
+            .map(|scope_var| SqlExpr::Column(scope_var.alias.clone()));
+    };
     if let Some(scope_var) = env.get_labeled_var(label, qualifier)
         && matches!(
             scope_var.var.ty.kind,
@@ -4349,6 +4355,12 @@ fn normalize_labeled_field_select(
     field: &str,
     env: &CompileEnv,
 ) -> Option<SqlExpr> {
+    if let SqlExpr::Column(label) = expr
+        && let Some(scope_var) = env.get_labeled_var(label, field)
+    {
+        return Some(SqlExpr::Column(scope_var.alias.clone()));
+    }
+
     if let SqlExpr::Column(label) = expr
         && let Some((qualifier, nested_field)) = field.rsplit_once('.')
     {
@@ -4952,6 +4964,20 @@ mod tests {
                 expr: Box::new(SqlExpr::Column(plpgsql_label_alias(0, slot, "item"))),
                 field: "note".into(),
             }
+        );
+    }
+
+    #[test]
+    fn normalizes_labeled_scalar_variable_reference() {
+        let mut env = CompileEnv::default();
+        let slot = env.define_var("param1", SqlType::new(SqlTypeKind::Int4));
+        env.push_label_scope("pl_qual_names");
+        env.define_var("param1", SqlType::new(SqlTypeKind::Int4));
+
+        let parsed = parse_expr("pl_qual_names.param1").unwrap();
+        assert_eq!(
+            normalize_plpgsql_expr(parsed, &env),
+            SqlExpr::Column(plpgsql_label_alias(0, slot, "param1")),
         );
     }
 

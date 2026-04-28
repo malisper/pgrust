@@ -35744,6 +35744,38 @@ fn plpgsql_labeled_record_reference_uses_outer_slot_when_shadowed() {
 }
 
 #[test]
+fn plpgsql_labeled_scalar_references_include_function_parameters() {
+    let base = temp_dir("plpgsql_labeled_scalar_refs");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_labeled_scalar_lookup(param1 int) returns text language plpgsql as $$
+         <<outerblock>>
+         declare
+           param1 int := 1;
+         begin
+           <<innerblock>>
+           declare
+             param1 int := 2;
+           begin
+             return param1::text
+                    || ',' || plpgsql_labeled_scalar_lookup.param1::text
+                    || ',' || outerblock.param1::text
+                    || ',' || innerblock.param1::text;
+           end;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_labeled_scalar_lookup(42)"),
+        vec![vec![Value::Text("2,42,1,2".into())]]
+    );
+}
+
+#[test]
 fn plpgsql_assignment_query_expr_from_clause_uses_sql_scope() {
     let base = temp_dir("plpgsql_assignment_query_expr_from");
     let db = Database::open(&base, 16).unwrap();
