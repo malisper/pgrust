@@ -181,6 +181,7 @@ fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
 }
 
 fn build_cursor_decl(pair: Pair<'_, Rule>) -> Result<CursorDecl, ParseError> {
+    let raw = pair.as_str().to_string();
     let mut name = None;
     let mut query = None;
     for part in pair.into_inner() {
@@ -192,8 +193,69 @@ fn build_cursor_decl(pair: Pair<'_, Rule>) -> Result<CursorDecl, ParseError> {
     }
     Ok(CursorDecl {
         name: name.ok_or(ParseError::UnexpectedEof)?,
+        scrollable: cursor_decl_scrollable(&raw),
+        param_names: cursor_decl_param_names(&raw)?,
         query: query.ok_or(ParseError::UnexpectedEof)?,
     })
+}
+
+fn cursor_decl_scrollable(raw: &str) -> bool {
+    let Some(cursor_idx) = find_next_top_level_keyword(raw, &["cursor"]) else {
+        return true;
+    };
+    !raw[..cursor_idx].to_ascii_lowercase().contains("no scroll")
+}
+
+fn cursor_decl_param_names(raw: &str) -> Result<Vec<String>, ParseError> {
+    let Some(cursor_idx) = find_next_top_level_keyword(raw, &["cursor"]) else {
+        return Ok(Vec::new());
+    };
+    let after_cursor_start = cursor_idx + "cursor".len();
+    let Some(for_idx) = find_next_top_level_keyword(&raw[after_cursor_start..], &["for"]) else {
+        return Ok(Vec::new());
+    };
+    let after_cursor = raw[after_cursor_start..after_cursor_start + for_idx].trim();
+    if !after_cursor.starts_with('(') {
+        return Ok(Vec::new());
+    }
+    let Some(close_idx) = matching_paren_index(after_cursor) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "cursor parameter list",
+            actual: raw.to_string(),
+        });
+    };
+    let params = &after_cursor[1..close_idx];
+    split_top_level_csv(params)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|param| param.split_whitespace().next().map(str::to_string))
+        .map(|name| {
+            parse_expr(&name).and_then(|expr| match expr {
+                SqlExpr::Column(name) => Ok(name),
+                _ => Err(ParseError::UnexpectedToken {
+                    expected: "cursor parameter name",
+                    actual: name,
+                }),
+            })
+        })
+        .collect()
+}
+
+fn matching_paren_index(input: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn strip_trailing_keyword<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
@@ -814,9 +876,10 @@ fn build_dynamic_execute_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> 
         .map(|part| part.as_str().trim().to_string())
         .filter(|text| !text.is_empty())
         .ok_or(ParseError::UnexpectedEof)?;
-    let (sql_expr, into_targets, using_exprs) = split_dynamic_execute_stmt(&raw)?;
+    let (sql_expr, strict, into_targets, using_exprs) = split_dynamic_execute_stmt(&raw)?;
     Ok(Stmt::DynamicExecute {
         sql_expr,
+        strict,
         into_targets,
         using_exprs,
         line,
@@ -904,6 +967,7 @@ fn build_fetch_cursor_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     let cursor_sql = text[..into_idx].trim();
     let targets_sql = text[into_idx + "into".len()..].trim();
     let name = fetch_cursor_name(cursor_sql)?;
+    let backward = fetch_cursor_moves_backward(cursor_sql);
     let targets = split_top_level_csv(targets_sql)
         .ok_or_else(|| ParseError::UnexpectedToken {
             expected: "FETCH cursor INTO target [, ...]",
@@ -912,7 +976,11 @@ fn build_fetch_cursor_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         .iter()
         .map(|target| parse_dynamic_execute_into_target(target))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Stmt::FetchCursor { name, targets })
+    Ok(Stmt::FetchCursor {
+        name,
+        backward,
+        targets,
+    })
 }
 
 fn build_close_cursor_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
@@ -958,6 +1026,14 @@ fn fetch_cursor_name(text: &str) -> Result<String, ParseError> {
         actual: text.to_string(),
     })?;
     cursor_name_from_text(name)
+}
+
+fn fetch_cursor_moves_backward(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    lowered
+        .split_whitespace()
+        .any(|word| matches!(word, "prior" | "last" | "backward"))
+        || lowered.contains("relative -")
 }
 
 fn build_ident(pair: Pair<'_, Rule>) -> String {
@@ -1013,39 +1089,48 @@ fn split_execute_query_source(source: &str) -> Result<(String, Vec<String>), Par
 
 fn split_dynamic_execute_stmt(
     source: &str,
-) -> Result<(String, Vec<AssignTarget>, Vec<String>), ParseError> {
-    let using_index = find_next_top_level_keyword(source, &["using"]);
-    let (before_using, using_exprs) = match using_index {
-        Some(index) => {
-            let using_sql = source[index + "using".len()..].trim();
-            if using_sql.is_empty() {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "EXECUTE <query> USING expr [, ...]",
-                    actual: source.to_string(),
-                });
-            }
-            let exprs =
-                split_top_level_csv(using_sql).ok_or_else(|| ParseError::UnexpectedToken {
-                    expected: "EXECUTE <query> USING expr [, ...]",
-                    actual: source.to_string(),
-                })?;
-            (source[..index].trim_end(), exprs)
-        }
-        None => (source.trim_end(), Vec::new()),
-    };
+) -> Result<(String, bool, Vec<AssignTarget>, Vec<String>), ParseError> {
+    let first_clause = find_next_top_level_keyword(source, &["into", "using"]);
+    let sql_expr = first_clause
+        .map(|index| source[..index].trim())
+        .unwrap_or_else(|| source.trim());
+    if sql_expr.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "EXECUTE <query>",
+            actual: source.to_string(),
+        });
+    }
 
-    let into_index = find_next_top_level_keyword(before_using, &["into"]);
-    let (sql_expr, into_targets) = match into_index {
-        Some(index) => {
-            let sql_expr = before_using[..index].trim();
-            let targets_sql = before_using[index + "into".len()..].trim();
-            if sql_expr.is_empty() || targets_sql.is_empty() {
+    let mut strict = false;
+    let mut into_targets = Vec::new();
+    let mut using_exprs = Vec::new();
+    let mut rest = first_clause
+        .map(|index| source[index..].trim_start())
+        .unwrap_or("");
+    while !rest.is_empty() {
+        if keyword_at(rest, 0, "into") {
+            if !into_targets.is_empty() {
                 return Err(ParseError::UnexpectedToken {
                     expected: "EXECUTE <query> INTO target [, ...]",
                     actual: source.to_string(),
                 });
             }
-            let targets = split_top_level_csv(targets_sql)
+            rest = rest["into".len()..].trim_start();
+            let next_clause = find_next_top_level_keyword(rest, &["into", "using"]);
+            let mut targets_sql = next_clause
+                .map(|index| rest[..index].trim())
+                .unwrap_or_else(|| rest.trim());
+            if keyword_at(targets_sql, 0, "strict") {
+                strict = true;
+                targets_sql = targets_sql["strict".len()..].trim_start();
+            }
+            if targets_sql.is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "EXECUTE <query> INTO target [, ...]",
+                    actual: source.to_string(),
+                });
+            }
+            into_targets = split_top_level_csv(targets_sql)
                 .ok_or_else(|| ParseError::UnexpectedToken {
                     expected: "EXECUTE <query> INTO target [, ...]",
                     actual: source.to_string(),
@@ -1053,18 +1138,44 @@ fn split_dynamic_execute_stmt(
                 .iter()
                 .map(|target| parse_dynamic_execute_into_target(target))
                 .collect::<Result<Vec<_>, _>>()?;
-            (sql_expr, targets)
+            rest = next_clause
+                .map(|index| rest[index..].trim_start())
+                .unwrap_or("");
+        } else if keyword_at(rest, 0, "using") {
+            if !using_exprs.is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "EXECUTE <query> USING expr [, ...]",
+                    actual: source.to_string(),
+                });
+            }
+            rest = rest["using".len()..].trim_start();
+            let next_clause = find_next_top_level_keyword(rest, &["into", "using"]);
+            let using_sql = next_clause
+                .map(|index| rest[..index].trim())
+                .unwrap_or_else(|| rest.trim());
+            if using_sql.is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "EXECUTE <query> USING expr [, ...]",
+                    actual: source.to_string(),
+                });
+            }
+            using_exprs =
+                split_top_level_csv(using_sql).ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "EXECUTE <query> USING expr [, ...]",
+                    actual: source.to_string(),
+                })?;
+            rest = next_clause
+                .map(|index| rest[index..].trim_start())
+                .unwrap_or("");
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "EXECUTE <query> INTO target [, ...] USING expr [, ...]",
+                actual: source.to_string(),
+            });
         }
-        None => (before_using.trim(), Vec::new()),
-    };
-
-    if sql_expr.is_empty() {
-        return Err(ParseError::UnexpectedToken {
-            expected: "EXECUTE <query>",
-            actual: source.to_string(),
-        });
     }
-    Ok((sql_expr.to_string(), into_targets, using_exprs))
+
+    Ok((sql_expr.to_string(), strict, into_targets, using_exprs))
 }
 
 fn parse_dynamic_execute_into_target(target: &str) -> Result<AssignTarget, ParseError> {
@@ -1756,6 +1867,7 @@ mod tests {
             begin
                 assert x > 0, 'x must be positive';
                 execute format('select %s', '1') into y using x;
+                execute 'select * from foo where f1 = $1' using 1 into strict rec;
             end
             ",
         )
@@ -1764,6 +1876,7 @@ mod tests {
         assert!(matches!(unline(&block.statements[0]), Stmt::Assert { .. }));
         let Stmt::DynamicExecute {
             sql_expr,
+            strict,
             into_targets,
             using_exprs,
             ..
@@ -1772,8 +1885,22 @@ mod tests {
             panic!("expected dynamic EXECUTE statement");
         };
         assert_eq!(sql_expr, "format('select %s', '1')");
+        assert!(!strict);
         assert_eq!(into_targets, &vec![AssignTarget::Name("y".into())]);
         assert_eq!(using_exprs, &vec!["x".to_string()]);
+        let Stmt::DynamicExecute {
+            sql_expr,
+            strict,
+            into_targets,
+            using_exprs,
+        } = unline(&block.statements[2])
+        else {
+            panic!("expected dynamic EXECUTE statement");
+        };
+        assert_eq!(sql_expr, "'select * from foo where f1 = $1'");
+        assert!(*strict);
+        assert_eq!(into_targets, &vec![AssignTarget::Name("rec".into())]);
+        assert_eq!(using_exprs, &vec!["1".to_string()]);
     }
 
     #[test]

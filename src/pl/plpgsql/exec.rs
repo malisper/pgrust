@@ -46,7 +46,7 @@ use super::cache::{PlpgsqlFunctionCacheKey, RelationShape, TransitionTableShape}
 use super::compile::{
     CompiledBlock, CompiledExceptionHandler, CompiledExpr, CompiledForQuerySource,
     CompiledForQueryTarget, CompiledFunction, CompiledSelectIntoTarget, CompiledStmt,
-    FunctionReturnContract, QueryCompareOp, TriggerReturnedRow,
+    CompiledStrictParam, FunctionReturnContract, QueryCompareOp, TriggerReturnedRow,
     compile_event_trigger_function_from_proc, compile_function_from_proc,
     compile_trigger_function_from_proc,
 };
@@ -187,6 +187,7 @@ struct FunctionCursor {
     columns: Vec<QueryColumn>,
     rows: Vec<Vec<Value>>,
     pos: usize,
+    scrollable: bool,
 }
 
 #[derive(Debug)]
@@ -1663,6 +1664,7 @@ fn exec_do_stmt(
         }
         CompiledStmt::DynamicExecute {
             sql_expr,
+            strict: _,
             into_targets,
             using_exprs,
             ..
@@ -2155,12 +2157,14 @@ fn exec_function_stmt(
         }
         CompiledStmt::DynamicExecute {
             sql_expr,
+            strict,
             into_targets,
             using_exprs,
             ..
         } => {
             exec_function_dynamic_execute(
                 sql_expr,
+                *strict,
                 into_targets,
                 using_exprs,
                 compiled,
@@ -2186,12 +2190,21 @@ fn exec_function_stmt(
             exec_function_get_diagnostics(*stacked, items, state)?;
             Ok(FunctionControl::Continue)
         }
-        CompiledStmt::OpenCursor { slot, name, plan } => {
-            exec_function_open_cursor(*slot, name, plan, compiled, state, ctx)?;
+        CompiledStmt::OpenCursor {
+            slot,
+            name,
+            plan,
+            scrollable,
+        } => {
+            exec_function_open_cursor(*slot, name, plan, *scrollable, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
-        CompiledStmt::FetchCursor { slot, targets } => {
-            exec_function_fetch_cursor(*slot, targets, compiled, state, ctx)?;
+        CompiledStmt::FetchCursor {
+            slot,
+            backward,
+            targets,
+        } => {
+            exec_function_fetch_cursor(*slot, *backward, targets, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::CloseCursor { slot } => {
@@ -2207,8 +2220,9 @@ fn exec_function_stmt(
             plan,
             targets,
             strict,
+            strict_params,
         } => {
-            exec_function_select_into(plan, targets, *strict, compiled, state, ctx)?;
+            exec_function_select_into(plan, targets, *strict, strict_params, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::ExecInsertInto { stmt, targets } => {
@@ -2440,16 +2454,22 @@ fn exec_function_select_into(
     plan: &crate::include::nodes::plannodes::PlannedStmt,
     targets: &[CompiledSelectIntoTarget],
     strict: bool,
+    strict_params: &[CompiledStrictParam],
     compiled: &CompiledFunction,
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let result = execute_function_query_result(plan, compiled, state, ctx)?;
+    let strict_detail =
+        strict_param_detail_if_enabled(strict_params, compiled, state, ctx).map(|detail| detail);
     assign_query_rows_into_targets(
         &result.rows,
         &result.columns,
         targets,
         strict,
+        strict_detail.as_deref(),
+        false,
+        true,
         compiled,
         state,
         ctx,
@@ -2461,6 +2481,9 @@ fn assign_query_rows_into_targets(
     columns: &[QueryColumn],
     targets: &[CompiledSelectIntoTarget],
     strict: bool,
+    strict_detail: Option<&str>,
+    strict_multi_row: bool,
+    multi_row_hint: bool,
     compiled: &CompiledFunction,
     state: &mut FunctionState,
     ctx: &ExecutorContext,
@@ -2469,7 +2492,7 @@ fn assign_query_rows_into_targets(
         if strict {
             return Err(function_runtime_error(
                 "query returned no rows",
-                None,
+                strict_detail.map(str::to_string),
                 "P0002",
             ));
         }
@@ -2480,25 +2503,25 @@ fn assign_query_rows_into_targets(
         return Ok(());
     };
     if rows.len() > 1 {
-        let check_level = if strict {
+        let check_level = if strict || strict_multi_row {
             Some(ExtraCheckLevel::Error)
         } else {
             plpgsql_extra_check_level(&ctx.gucs, "too_many_rows")
         };
+        let hint = multi_row_hint
+            .then(|| "Make sure the query returns a single row, or use LIMIT 1.".into());
         match check_level {
             Some(ExtraCheckLevel::Error) => {
                 return Err(function_runtime_error_with_hint(
                     "query returned more than one row",
-                    None,
-                    Some("Make sure the query returns a single row, or use LIMIT 1.".into()),
+                    strict_detail.map(str::to_string),
+                    hint,
                     "P0003",
                 ));
             }
-            Some(ExtraCheckLevel::Warning) => queue_plpgsql_warning(
-                "query returned more than one row",
-                None,
-                Some("Make sure the query returns a single row, or use LIMIT 1.".into()),
-            ),
+            Some(ExtraCheckLevel::Warning) => {
+                queue_plpgsql_warning("query returned more than one row", None, hint)
+            }
             None => {}
         }
     }
@@ -2555,6 +2578,67 @@ fn assign_query_rows_into_targets(
 
     state.values[compiled.found_slot] = Value::Bool(true);
     Ok(())
+}
+
+fn strict_param_detail_if_enabled(
+    params: &[CompiledStrictParam],
+    compiled: &CompiledFunction,
+    state: &FunctionState,
+    ctx: &ExecutorContext,
+) -> Option<String> {
+    if !plpgsql_print_strict_params_enabled(compiled, ctx) || params.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "parameters: {}",
+        params
+            .iter()
+            .map(|param| format!(
+                "{} = {}",
+                param.name,
+                format_strict_param_value(state.values.get(param.slot).unwrap_or(&Value::Null))
+            ))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+fn dynamic_strict_param_detail_if_enabled(
+    strict: bool,
+    using_exprs: &[CompiledExpr],
+    compiled: &CompiledFunction,
+    state: &FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<String>, ExecError> {
+    if !strict || !plpgsql_print_strict_params_enabled(compiled, ctx) || using_exprs.is_empty() {
+        return Ok(None);
+    }
+    let values = using_exprs
+        .iter()
+        .map(|expr| eval_function_expr(expr, &state.values, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(format!(
+        "parameters: {}",
+        values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| format!("${} = {}", index + 1, format_strict_param_value(value)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
+}
+
+fn plpgsql_print_strict_params_enabled(compiled: &CompiledFunction, ctx: &ExecutorContext) -> bool {
+    compiled.print_strict_params.unwrap_or_else(|| {
+        ctx.gucs
+            .get("plpgsql.print_strict_params")
+            .is_some_and(|value| value.eq_ignore_ascii_case("on"))
+    })
+}
+
+fn format_strict_param_value(value: &Value) -> String {
+    let rendered = render_raise_value(value).replace('\'', "''");
+    format!("'{rendered}'")
 }
 
 fn exec_function_for_query(
@@ -2774,7 +2858,9 @@ fn exec_function_insert_into(
         ));
     };
     advance_plpgsql_command_id(ctx);
-    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state, ctx)
+    assign_query_rows_into_targets(
+        &rows, &columns, targets, false, None, true, true, compiled, state, ctx,
+    )
 }
 
 fn exec_function_update(
@@ -2828,7 +2914,9 @@ fn exec_function_update_into(
         ));
     };
     advance_plpgsql_command_id(ctx);
-    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state, ctx)
+    assign_query_rows_into_targets(
+        &rows, &columns, targets, false, None, true, true, compiled, state, ctx,
+    )
 }
 
 fn exec_function_delete(
@@ -2880,7 +2968,9 @@ fn exec_function_delete_into(
         ));
     };
     advance_plpgsql_command_id(ctx);
-    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state, ctx)
+    assign_query_rows_into_targets(
+        &rows, &columns, targets, false, None, true, true, compiled, state, ctx,
+    )
 }
 
 fn exec_function_create_table_as(
@@ -3327,12 +3417,15 @@ fn execute_dynamic_for_query(
 
 fn exec_function_dynamic_execute(
     sql_expr: &CompiledExpr,
+    strict: bool,
     into_targets: &[CompiledSelectIntoTarget],
     using_exprs: &[CompiledExpr],
     compiled: &CompiledFunction,
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
+    let dynamic_strict_detail =
+        dynamic_strict_param_detail_if_enabled(strict, using_exprs, compiled, state, ctx)?;
     let result = execute_dynamic_statement(sql_expr, using_exprs, compiled, state, ctx)?;
     if !into_targets.is_empty() {
         let StatementResult::Query { columns, rows, .. } = result else {
@@ -3346,6 +3439,9 @@ fn exec_function_dynamic_execute(
             &rows,
             &columns,
             into_targets,
+            strict,
+            dynamic_strict_detail.as_deref(),
+            false,
             false,
             compiled,
             state,
@@ -3629,6 +3725,7 @@ fn exec_function_open_cursor(
     slot: usize,
     name: &str,
     plan: &crate::include::nodes::plannodes::PlannedStmt,
+    scrollable: bool,
     compiled: &CompiledFunction,
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
@@ -3642,6 +3739,7 @@ fn exec_function_open_cursor(
             columns: result.columns,
             rows: result.rows,
             pos: 0,
+            scrollable,
         },
     );
     Ok(())
@@ -3649,6 +3747,7 @@ fn exec_function_open_cursor(
 
 fn exec_function_fetch_cursor(
     slot: usize,
+    backward: bool,
     targets: &[CompiledSelectIntoTarget],
     compiled: &CompiledFunction,
     state: &mut FunctionState,
@@ -3663,13 +3762,23 @@ fn exec_function_fetch_cursor(
                 "34000",
             )
         })?;
+        if backward && !cursor.scrollable {
+            return Err(function_runtime_error_with_hint(
+                "cursor can only scan forward",
+                None,
+                Some("Declare it with SCROLL option to enable backward scan.".into()),
+                "55000",
+            ));
+        }
         let row = cursor.rows.get(cursor.pos).cloned();
         if row.is_some() {
             cursor.pos += 1;
         }
         (row.into_iter().collect::<Vec<_>>(), cursor.columns.clone())
     };
-    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state, ctx)
+    assign_query_rows_into_targets(
+        &rows, &columns, targets, false, None, false, true, compiled, state, ctx,
+    )
 }
 
 fn exec_function_close_cursor(slot: usize, state: &mut FunctionState) -> Result<(), ExecError> {

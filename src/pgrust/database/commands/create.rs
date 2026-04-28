@@ -45,7 +45,7 @@ use crate::pgrust::database::{
     default_sequence_name_base, format_nextval_default_oid, initial_sequence_state,
     resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
 };
-use crate::pl::plpgsql::validate_create_function_body;
+use crate::pl::plpgsql::validate_create_function_body_with_options;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CreatedOwnedSequence {
@@ -3227,6 +3227,21 @@ impl Database {
         create_stmt: &CreateFunctionStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        self.execute_create_function_stmt_with_search_path_and_gucs(
+            client_id,
+            create_stmt,
+            configured_search_path,
+            None,
+        )
+    }
+
+    pub(crate) fn execute_create_function_stmt_with_search_path_and_gucs(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateFunctionStatement,
+        configured_search_path: Option<&[String]>,
+        gucs: Option<&std::collections::HashMap<String, String>>,
+    ) -> Result<StatementResult, ExecError> {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
@@ -3236,6 +3251,7 @@ impl Database {
             xid,
             0,
             configured_search_path,
+            gucs,
             &mut catalog_effects,
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
@@ -3250,6 +3266,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        gucs: Option<&std::collections::HashMap<String, String>>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         self.execute_create_function_stmt_in_transaction_with_kind(
@@ -3258,6 +3275,7 @@ impl Database {
             xid,
             cid,
             configured_search_path,
+            gucs,
             catalog_effects,
             'f',
             "function",
@@ -3334,6 +3352,7 @@ impl Database {
             xid,
             cid,
             configured_search_path,
+            None,
             catalog_effects,
             'p',
             "procedure",
@@ -3347,6 +3366,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        gucs: Option<&std::collections::HashMap<String, String>>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         proc_kind: char,
         object_kind: &'static str,
@@ -3644,8 +3664,16 @@ impl Database {
             }
         }
         if language_row.oid == PG_LANGUAGE_PLPGSQL_OID {
-            validate_create_function_body(&create_stmt.body, !output_args.is_empty())
-                .map_err(ExecError::Parse)?;
+            let validation_notices = validate_create_function_body_with_options(
+                &create_stmt.body,
+                !output_args.is_empty(),
+                proargnames.as_deref().unwrap_or(&[]),
+                gucs,
+            )
+            .map_err(ExecError::Parse)?;
+            for notice in validation_notices {
+                push_backend_notice(notice.severity, notice.sqlstate, notice.message, None, None);
+            }
         }
         let existing_proc = catalog
             .proc_rows_by_name(&function_name)

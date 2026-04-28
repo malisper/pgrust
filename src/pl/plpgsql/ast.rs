@@ -20,6 +20,8 @@ pub struct VarDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CursorDecl {
     pub name: String,
+    pub scrollable: bool,
+    pub param_names: Vec<String>,
     pub query: String,
 }
 
@@ -175,6 +177,7 @@ pub enum Stmt {
     },
     DynamicExecute {
         sql_expr: String,
+        strict: bool,
         into_targets: Vec<AssignTarget>,
         using_exprs: Vec<String>,
         line: usize,
@@ -189,6 +192,7 @@ pub enum Stmt {
     },
     FetchCursor {
         name: String,
+        backward: bool,
         targets: Vec<AssignTarget>,
     },
     CloseCursor {

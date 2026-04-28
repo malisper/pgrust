@@ -4987,10 +4987,11 @@ impl Session {
                 } else {
                     self.validate_create_function_config(create_stmt)?;
                     let search_path = self.configured_search_path();
-                    db.execute_create_function_stmt_with_search_path(
+                    db.execute_create_function_stmt_with_search_path_and_gucs(
                         self.client_id,
                         create_stmt,
                         search_path.as_deref(),
+                        Some(&self.gucs),
                     )
                 }
             }
@@ -12076,6 +12077,7 @@ impl Session {
                         xid,
                         cid,
                         search_path.as_deref(),
+                        Some(&self.gucs),
                         &mut txn.catalog_effects,
                     )
                 }

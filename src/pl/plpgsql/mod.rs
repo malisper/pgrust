@@ -26,14 +26,32 @@ pub(crate) use exec::{
 };
 pub use gram::parse_block;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlpgsqlValidationNotice {
+    pub severity: &'static str,
+    pub sqlstate: &'static str,
+    pub message: String,
+}
+
 pub(crate) fn validate_create_function_body(
     body: &str,
     has_output_args: bool,
 ) -> Result<(), ParseError> {
-    if !has_output_args {
-        return Ok(());
-    }
+    validate_create_function_body_with_options(body, has_output_args, &[], None).map(|_| ())
+}
+
+pub(crate) fn validate_create_function_body_with_options(
+    body: &str,
+    has_output_args: bool,
+    arg_names: &[String],
+    gucs: Option<&HashMap<String, String>>,
+) -> Result<Vec<PlpgsqlValidationNotice>, ParseError> {
     let block = parse_block(body)?;
+    if !has_output_args {
+        let mut notices = Vec::new();
+        validate_shadowed_variables(&block, arg_names, gucs, &mut notices)?;
+        return Ok(notices);
+    }
     if block_contains_return_expr(&block) {
         return Err(ParseError::DetailedError {
             message: "RETURN cannot have a parameter in function with OUT parameters".into(),
@@ -42,7 +60,9 @@ pub(crate) fn validate_create_function_body(
             sqlstate: "42804",
         });
     }
-    Ok(())
+    let mut notices = Vec::new();
+    validate_shadowed_variables(&block, arg_names, gucs, &mut notices)?;
+    Ok(notices)
 }
 
 fn block_contains_return_expr(block: &Block) -> bool {
@@ -75,6 +95,155 @@ fn stmt_contains_return_expr(stmt: &Stmt) -> bool {
         | Stmt::ForEach { body, .. } => body.iter().any(stmt_contains_return_expr),
         _ => false,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValidationCheckLevel {
+    Warning,
+    Error,
+}
+
+fn validate_shadowed_variables(
+    block: &Block,
+    arg_names: &[String],
+    gucs: Option<&HashMap<String, String>>,
+    notices: &mut Vec<PlpgsqlValidationNotice>,
+) -> Result<(), ParseError> {
+    let Some(level) = validation_extra_check_level(gucs, "shadowed_variables") else {
+        return Ok(());
+    };
+    let mut scopes = vec![
+        arg_names
+            .iter()
+            .filter(|name| !name.is_empty())
+            .map(|name| name.to_ascii_lowercase())
+            .collect::<std::collections::HashSet<_>>(),
+    ];
+    validate_shadowed_variables_in_block(block, level, &mut scopes, notices)
+}
+
+fn validate_shadowed_variables_in_block(
+    block: &Block,
+    level: ValidationCheckLevel,
+    scopes: &mut Vec<std::collections::HashSet<String>>,
+    notices: &mut Vec<PlpgsqlValidationNotice>,
+) -> Result<(), ParseError> {
+    scopes.push(std::collections::HashSet::new());
+    for decl in &block.declarations {
+        match decl {
+            Decl::Var(decl) => validate_decl_name_shadow(&decl.name, level, scopes, notices)?,
+            Decl::Alias(decl) => validate_decl_name_shadow(&decl.name, level, scopes, notices)?,
+            Decl::Cursor(decl) => {
+                validate_decl_name_shadow(&decl.name, level, scopes, notices)?;
+                for param_name in &decl.param_names {
+                    validate_decl_name_shadow(param_name, level, scopes, notices)?;
+                }
+            }
+        }
+    }
+    for stmt in &block.statements {
+        validate_shadowed_variables_in_stmt(stmt, level, scopes, notices)?;
+    }
+    for handler in &block.exception_handlers {
+        for stmt in &handler.statements {
+            validate_shadowed_variables_in_stmt(stmt, level, scopes, notices)?;
+        }
+    }
+    scopes.pop();
+    Ok(())
+}
+
+fn validate_shadowed_variables_in_stmt(
+    stmt: &Stmt,
+    level: ValidationCheckLevel,
+    scopes: &mut Vec<std::collections::HashSet<String>>,
+    notices: &mut Vec<PlpgsqlValidationNotice>,
+) -> Result<(), ParseError> {
+    match stmt {
+        Stmt::WithLine { stmt, .. } => {
+            validate_shadowed_variables_in_stmt(stmt, level, scopes, notices)
+        }
+        Stmt::Block(block) => validate_shadowed_variables_in_block(block, level, scopes, notices),
+        Stmt::If {
+            branches,
+            else_branch,
+        } => {
+            for (_, body) in branches {
+                for stmt in body {
+                    validate_shadowed_variables_in_stmt(stmt, level, scopes, notices)?;
+                }
+            }
+            for stmt in else_branch {
+                validate_shadowed_variables_in_stmt(stmt, level, scopes, notices)?;
+            }
+            Ok(())
+        }
+        Stmt::While { body, .. }
+        | Stmt::Loop { body }
+        | Stmt::ForInt { body, .. }
+        | Stmt::ForQuery { body, .. }
+        | Stmt::ForEach { body, .. } => {
+            for stmt in body {
+                validate_shadowed_variables_in_stmt(stmt, level, scopes, notices)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_decl_name_shadow(
+    name: &str,
+    level: ValidationCheckLevel,
+    scopes: &mut [std::collections::HashSet<String>],
+    notices: &mut Vec<PlpgsqlValidationNotice>,
+) -> Result<(), ParseError> {
+    let normalized = name.to_ascii_lowercase();
+    if scopes.iter().rev().any(|scope| scope.contains(&normalized)) {
+        let message = format!("variable \"{name}\" shadows a previously defined variable");
+        match level {
+            ValidationCheckLevel::Warning => notices.push(PlpgsqlValidationNotice {
+                severity: "WARNING",
+                sqlstate: "01000",
+                message,
+            }),
+            ValidationCheckLevel::Error => {
+                return Err(ParseError::DetailedError {
+                    message,
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42712",
+                });
+            }
+        }
+    }
+    if let Some(scope) = scopes.last_mut() {
+        scope.insert(normalized);
+    }
+    Ok(())
+}
+
+fn validation_extra_check_level(
+    gucs: Option<&HashMap<String, String>>,
+    check: &str,
+) -> Option<ValidationCheckLevel> {
+    let gucs = gucs?;
+    if validation_extra_check_enabled(gucs.get("plpgsql.extra_errors"), check) {
+        Some(ValidationCheckLevel::Error)
+    } else if validation_extra_check_enabled(gucs.get("plpgsql.extra_warnings"), check) {
+        Some(ValidationCheckLevel::Warning)
+    } else {
+        None
+    }
+}
+
+fn validation_extra_check_enabled(value: Option<&String>, check: &str) -> bool {
+    value.is_some_and(|value| {
+        value.eq_ignore_ascii_case("all")
+            || value
+                .split(',')
+                .any(|item| item.trim().eq_ignore_ascii_case(check))
+    })
 }
 
 pub fn execute_do(stmt: &DoStatement) -> Result<StatementResult, ExecError> {

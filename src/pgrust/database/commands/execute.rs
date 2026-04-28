@@ -1417,10 +1417,11 @@ impl Database {
                 }))
             }
             Statement::CreateFunction(ref create_stmt) => self
-                .execute_create_function_stmt_with_search_path(
+                .execute_create_function_stmt_with_search_path_and_gucs(
                     client_id,
                     create_stmt,
                     configured_search_path,
+                    Some(gucs),
                 ),
             Statement::CreateProcedure(ref create_stmt) => self
                 .execute_create_procedure_stmt_with_search_path(

@@ -42,6 +42,7 @@ pub(crate) struct CompiledBlock {
 pub struct CompiledFunction {
     pub(crate) name: String,
     pub(crate) proconfig: Option<Vec<String>>,
+    pub(crate) print_strict_params: Option<bool>,
     pub(crate) parameter_slots: Vec<CompiledFunctionSlot>,
     pub(crate) context_arg_type_names: Vec<String>,
     pub(crate) output_slots: Vec<CompiledOutputSlot>,
@@ -117,6 +118,18 @@ pub(crate) enum QueryCompareOp {
 pub(crate) struct CompiledSelectIntoTarget {
     pub(crate) slot: usize,
     pub(crate) ty: SqlType,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledStrictParam {
+    pub(crate) name: String,
+    pub(crate) slot: usize,
+}
+
+#[derive(Debug, Clone)]
+struct DeclaredCursor {
+    query: String,
+    scrollable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -279,6 +292,7 @@ pub(crate) enum CompiledStmt {
     },
     DynamicExecute {
         sql_expr: CompiledExpr,
+        strict: bool,
         into_targets: Vec<CompiledSelectIntoTarget>,
         using_exprs: Vec<CompiledExpr>,
         line: usize,
@@ -296,9 +310,11 @@ pub(crate) enum CompiledStmt {
         slot: usize,
         name: String,
         plan: PlannedStmt,
+        scrollable: bool,
     },
     FetchCursor {
         slot: usize,
+        backward: bool,
         targets: Vec<CompiledSelectIntoTarget>,
     },
     CloseCursor {
@@ -311,6 +327,7 @@ pub(crate) enum CompiledStmt {
         plan: PlannedStmt,
         targets: Vec<CompiledSelectIntoTarget>,
         strict: bool,
+        strict_params: Vec<CompiledStrictParam>,
     },
     ExecInsertInto {
         stmt: BoundInsertStatement,
@@ -373,7 +390,7 @@ struct CompileEnv {
     relation_scopes: Vec<RelationScopeVar>,
     labeled_scopes: Vec<LabeledScope>,
     local_ctes: Vec<BoundCte>,
-    declared_cursors: HashMap<String, String>,
+    declared_cursors: HashMap<String, DeclaredCursor>,
     parameter_slots: Vec<ScopeVar>,
     positional_parameter_names: Vec<String>,
     next_slot: usize,
@@ -598,15 +615,18 @@ impl CompileEnv {
             .collect()
     }
 
-    fn define_cursor(&mut self, name: &str, query: &str) {
-        self.declared_cursors
-            .insert(name.to_ascii_lowercase(), query.to_string());
+    fn define_cursor(&mut self, name: &str, query: &str, scrollable: bool) {
+        self.declared_cursors.insert(
+            name.to_ascii_lowercase(),
+            DeclaredCursor {
+                query: query.to_string(),
+                scrollable,
+            },
+        );
     }
 
-    fn declared_cursor_query(&self, name: &str) -> Option<&str> {
-        self.declared_cursors
-            .get(&name.to_ascii_lowercase())
-            .map(String::as_str)
+    fn declared_cursor(&self, name: &str) -> Option<&DeclaredCursor> {
+        self.declared_cursors.get(&name.to_ascii_lowercase())
     }
 
     fn visible_sql_columns(&self) -> Vec<(String, SqlType)> {
@@ -670,6 +690,7 @@ pub(crate) fn compile_do_function(
     Ok(CompiledFunction {
         name: "inline_code_block".into(),
         proconfig: None,
+        print_strict_params: None,
         parameter_slots: Vec::new(),
         context_arg_type_names: Vec::new(),
         output_slots: Vec::new(),
@@ -696,6 +717,7 @@ pub(crate) fn compile_function_from_proc(
         });
     }
     let block = parse_block(&row.prosrc)?;
+    let print_strict_params = print_strict_params_directive(&row.prosrc);
     let mut env = CompileEnv::default();
     let mut parameter_slots = Vec::new();
     let mut output_slots = Vec::new();
@@ -798,6 +820,7 @@ pub(crate) fn compile_function_from_proc(
     Ok(CompiledFunction {
         name: row.proname.clone(),
         proconfig: row.proconfig.clone(),
+        print_strict_params,
         parameter_slots,
         context_arg_type_names,
         output_slots,
@@ -811,6 +834,20 @@ pub(crate) fn compile_function_from_proc(
     })
 }
 
+fn print_strict_params_directive(source: &str) -> Option<bool> {
+    source.lines().find_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix("#print_strict_params")?.trim();
+        if rest.eq_ignore_ascii_case("on") {
+            Some(true)
+        } else if rest.eq_ignore_ascii_case("off") {
+            Some(false)
+        } else {
+            None
+        }
+    })
+}
+
 pub(crate) fn compile_trigger_function_from_proc(
     row: &PgProcRow,
     relation_desc: &RelationDesc,
@@ -818,6 +855,7 @@ pub(crate) fn compile_trigger_function_from_proc(
     catalog: &dyn CatalogLookup,
 ) -> Result<CompiledFunction, ParseError> {
     let block = parse_block(&row.prosrc)?;
+    let print_strict_params = print_strict_params_directive(&row.prosrc);
     let mut env = CompileEnv::default();
     let mut trigger_transition_ctes = Vec::new();
     env.local_ctes = transition_tables
@@ -844,6 +882,7 @@ pub(crate) fn compile_trigger_function_from_proc(
     Ok(CompiledFunction {
         name: row.proname.clone(),
         proconfig: row.proconfig.clone(),
+        print_strict_params,
         parameter_slots: Vec::new(),
         context_arg_type_names: Vec::new(),
         output_slots: Vec::new(),
@@ -1070,7 +1109,7 @@ fn compile_cursor_decl(
     let ty = SqlType::new(SqlTypeKind::Text)
         .with_identity(crate::include::catalog::REFCURSOR_TYPE_OID, 0);
     let slot = env.define_var(&decl.name, ty);
-    env.define_cursor(&decl.name, &decl.query);
+    env.define_cursor(&decl.name, &decl.query, decl.scrollable);
     Ok(CompiledVar {
         slot,
         ty,
@@ -1283,12 +1322,19 @@ fn compile_stmt(
         Stmt::Perform { sql, line } => compile_perform_stmt(sql, *line, catalog, env)?,
         Stmt::DynamicExecute {
             sql_expr,
+            strict,
             into_targets,
             using_exprs,
             line,
-        } => {
-            compile_dynamic_execute_stmt(sql_expr, into_targets, using_exprs, *line, catalog, env)?
-        }
+        } => compile_dynamic_execute_stmt(
+            sql_expr,
+            *strict,
+            into_targets,
+            using_exprs,
+            *line,
+            catalog,
+            env,
+        )?,
         Stmt::GetDiagnostics { stacked, items } => {
             let items = items
                 .iter()
@@ -1305,7 +1351,11 @@ fn compile_stmt(
         Stmt::OpenCursor { name, sql } => {
             compile_open_cursor_stmt(name, sql.as_deref(), catalog, env)?
         }
-        Stmt::FetchCursor { name, targets } => {
+        Stmt::FetchCursor {
+            name,
+            backward,
+            targets,
+        } => {
             let (slot, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
             let targets = targets
                 .iter()
@@ -1314,7 +1364,11 @@ fn compile_stmt(
                         .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            CompiledStmt::FetchCursor { slot, targets }
+            CompiledStmt::FetchCursor {
+                slot,
+                backward: *backward,
+                targets,
+            }
         }
         Stmt::CloseCursor { name } => {
             let (slot, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
@@ -1541,6 +1595,19 @@ fn compile_return_stmt(
             hint: None,
             sqlstate: "42804",
         }),
+        (
+            FunctionReturnContract::Scalar {
+                ty,
+                output_slot: None,
+                setof: false,
+            },
+            Some(_),
+        ) if ty.kind == SqlTypeKind::Void => Err(ParseError::DetailedError {
+            message: "RETURN cannot have a parameter in function returning void".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        }),
         (FunctionReturnContract::Scalar { setof: false, .. }, Some(expr)) => {
             Ok(CompiledStmt::Return {
                 expr: Some(compile_expr_text(expr, catalog, env)?),
@@ -1714,21 +1781,38 @@ fn compile_perform_stmt(
 
 fn compile_dynamic_execute_stmt(
     sql_expr: &str,
+    strict: bool,
     into_targets: &[AssignTarget],
     using_exprs: &[String],
     line: usize,
     catalog: &dyn CatalogLookup,
-    env: &CompileEnv,
+    env: &mut CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
-    let targets = into_targets
+    let mut targets = into_targets
         .iter()
         .map(|target| {
             resolve_assign_target(target, env)
                 .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if let [target] = targets.as_mut_slice()
+        && target.ty.kind == SqlTypeKind::Record
+        && let Some(result_columns) =
+            dynamic_sql_literal_result_columns(sql_expr, using_exprs, catalog, env)
+    {
+        let descriptor = assign_anonymous_record_descriptor(
+            result_columns
+                .iter()
+                .map(|column| (column.name.clone(), column.sql_type))
+                .collect(),
+        );
+        let ty = descriptor.sql_type();
+        env.update_slot_type(target.slot, ty);
+        target.ty = ty;
+    }
     Ok(CompiledStmt::DynamicExecute {
         sql_expr: compile_expr_text(sql_expr, catalog, env)?,
+        strict,
         into_targets: targets,
         using_exprs: using_exprs
             .iter()
@@ -1745,15 +1829,30 @@ fn compile_open_cursor_stmt(
     env: &mut CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
     let (slot, _) = resolve_assign_target(&AssignTarget::Name(name.to_string()), env)?;
-    let query_sql = match sql {
-        Some(sql) => sql,
-        None => env
-            .declared_cursor_query(name)
-            .ok_or_else(|| ParseError::UnexpectedToken {
+    let declared_cursor = if sql.is_none() {
+        Some(
+            env.declared_cursor(name)
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "declared cursor query or OPEN cursor FOR query",
+                    actual: name.to_string(),
+                })?,
+        )
+    } else {
+        None
+    };
+    let query_sql = match (sql, declared_cursor) {
+        (Some(sql), _) => sql,
+        (None, Some(cursor)) => cursor.query.as_str(),
+        (None, None) => {
+            return Err(ParseError::UnexpectedToken {
                 expected: "declared cursor query or OPEN cursor FOR query",
                 actual: name.to_string(),
-            })?,
+            });
+        }
     };
+    let scrollable = declared_cursor
+        .map(|cursor| cursor.scrollable)
+        .unwrap_or(true);
     let rewritten_sql = rewrite_plpgsql_sql_text(query_sql, env)?;
     let stmt = parse_statement(&rewritten_sql)?;
     let plan = match stmt {
@@ -1770,6 +1869,7 @@ fn compile_open_cursor_stmt(
         slot,
         name: name.to_string(),
         plan,
+        scrollable,
     })
 }
 
@@ -2511,7 +2611,57 @@ fn compile_select_into_stmt(
         plan: planned,
         targets,
         strict,
+        strict_params: strict_params_for_sql(select_sql, env),
     })
+}
+
+fn strict_params_for_sql(sql: &str, env: &CompileEnv) -> Vec<CompiledStrictParam> {
+    let mut params = env
+        .vars
+        .iter()
+        .filter(|(name, _)| {
+            !name.starts_with('$')
+                && !is_plpgsql_label_alias(name)
+                && identifier_position(sql, name).is_some()
+        })
+        .map(|(name, var)| {
+            (
+                identifier_position(sql, name).unwrap_or(usize::MAX),
+                CompiledStrictParam {
+                    name: name.clone(),
+                    slot: var.slot,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    params.sort_by_key(|(position, _)| *position);
+    params.into_iter().map(|(_, param)| param).collect()
+}
+
+fn identifier_position(sql: &str, ident: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let ident_len = ident.len();
+    let mut offset = 0usize;
+    while offset + ident_len <= bytes.len() {
+        let rest = &sql[offset..];
+        let Some(found) = rest.to_ascii_lowercase().find(&ident.to_ascii_lowercase()) else {
+            break;
+        };
+        let start = offset + found;
+        let end = start + ident_len;
+        let before_ok =
+            start == 0 || !is_sql_ident_char(sql.as_bytes()[start.saturating_sub(1)] as char);
+        let after_ok = end == sql.len() || !is_sql_ident_char(sql.as_bytes()[end] as char);
+        if before_ok && after_ok {
+            return Some(start);
+        }
+        offset = end;
+    }
+    None
+}
+
+fn is_sql_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn compile_for_query_stmt(
@@ -2717,6 +2867,150 @@ fn compile_dml_into_targets(
         target.ty = ty;
     }
     Ok(targets)
+}
+
+fn dynamic_sql_literal_result_columns(
+    sql_expr: &str,
+    using_exprs: &[String],
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Option<Vec<QueryColumn>> {
+    let sql = dynamic_sql_literal(sql_expr)?;
+    let sql = dynamic_shape_sql(&sql, using_exprs);
+    let outer_scope = outer_scope_for_sql(env);
+    let stmt = parse_statement(&sql).ok()?;
+    match stmt {
+        Statement::Select(stmt) => pg_plan_query_with_outer_scopes_and_ctes(
+            &stmt,
+            catalog,
+            std::slice::from_ref(&outer_scope),
+            &env.local_ctes,
+        )
+        .ok()
+        .map(|plan| plan.columns()),
+        Statement::Values(stmt) => pg_plan_values_query_with_outer_scopes_and_ctes(
+            &stmt,
+            catalog,
+            std::slice::from_ref(&outer_scope),
+            &env.local_ctes,
+        )
+        .ok()
+        .map(|plan| plan.columns()),
+        Statement::Insert(stmt) => {
+            bind_insert_with_outer_scopes(&stmt, catalog, std::slice::from_ref(&outer_scope))
+                .ok()
+                .map(|bound| {
+                    bound
+                        .returning
+                        .iter()
+                        .map(target_entry_query_column)
+                        .collect()
+                })
+        }
+        Statement::Update(stmt) => {
+            bind_update_with_outer_scopes(&stmt, catalog, std::slice::from_ref(&outer_scope))
+                .ok()
+                .map(|bound| {
+                    bound
+                        .returning
+                        .iter()
+                        .map(target_entry_query_column)
+                        .collect()
+                })
+        }
+        Statement::Delete(stmt) => {
+            bind_delete_with_outer_scopes(&stmt, catalog, std::slice::from_ref(&outer_scope))
+                .ok()
+                .map(|bound| {
+                    bound
+                        .returning
+                        .iter()
+                        .map(target_entry_query_column)
+                        .collect()
+                })
+        }
+        _ => None,
+    }
+}
+
+fn dynamic_sql_literal(sql_expr: &str) -> Option<String> {
+    let expr = parse_expr(sql_expr).ok()?;
+    match expr {
+        SqlExpr::Const(value) => value.as_text().map(str::to_string),
+        _ => None,
+    }
+}
+
+fn dynamic_shape_sql(sql: &str, using_exprs: &[String]) -> String {
+    if using_exprs.is_empty() {
+        return sql.trim().trim_end_matches(';').trim_end().to_string();
+    }
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut idx = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_single {
+            out.push(ch);
+            if ch == '\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    out.push('\'');
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            out.push(ch);
+            if ch == '"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    out.push('"');
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if ch == '\'' {
+            in_single = true;
+            out.push(ch);
+            idx += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_double = true;
+            out.push(ch);
+            idx += 1;
+            continue;
+        }
+        if ch == '$' {
+            let start = idx + 1;
+            let mut end = start;
+            while end < bytes.len() && (bytes[end] as char).is_ascii_digit() {
+                end += 1;
+            }
+            if end > start
+                && let Ok(param_index) = sql[start..end].parse::<usize>()
+                && let Some(expr) = using_exprs.get(param_index - 1)
+            {
+                out.push('(');
+                out.push_str(expr);
+                out.push(')');
+                idx = end;
+                continue;
+            }
+        }
+        out.push(ch);
+        idx += 1;
+    }
+    out.trim().trim_end_matches(';').trim_end().to_string()
 }
 
 fn target_entry_query_column(target: &TargetEntry) -> QueryColumn {
