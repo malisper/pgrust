@@ -9231,7 +9231,9 @@ fn raw_select_contains_writable_cte(select_stmt: &crate::backend::parser::Select
 
 fn raw_cte_body_is_writable(body: &crate::backend::parser::CteBody) -> bool {
     match body {
-        crate::backend::parser::CteBody::Insert(_) => true,
+        crate::backend::parser::CteBody::Insert(_) | crate::backend::parser::CteBody::Update(_) => {
+            true
+        }
         crate::backend::parser::CteBody::Select(select_stmt) => {
             raw_select_contains_writable_cte(select_stmt)
         }
@@ -9255,6 +9257,9 @@ fn raw_cte_body_contains_pg_notify(body: &crate::backend::parser::CteBody) -> bo
         }
         crate::backend::parser::CteBody::Insert(insert_stmt) => {
             raw_insert_statement_contains_pg_notify(insert_stmt)
+        }
+        crate::backend::parser::CteBody::Update(update_stmt) => {
+            raw_update_statement_contains_pg_notify(update_stmt)
         }
         crate::backend::parser::CteBody::RecursiveUnion {
             anchor, recursive, ..
@@ -9298,6 +9303,28 @@ fn raw_insert_statement_contains_pg_notify(
                 }
         })
         || insert_stmt
+            .returning
+            .iter()
+            .any(|item| raw_expr_contains_pg_notify(&item.expr))
+}
+
+fn raw_update_statement_contains_pg_notify(
+    update_stmt: &crate::backend::parser::UpdateStatement,
+) -> bool {
+    update_stmt.with.iter().any(raw_cte_contains_pg_notify)
+        || update_stmt
+            .from
+            .as_ref()
+            .is_some_and(raw_from_item_contains_pg_notify)
+        || update_stmt
+            .assignments
+            .iter()
+            .any(|assignment| raw_expr_contains_pg_notify(&assignment.expr))
+        || update_stmt
+            .where_clause
+            .as_ref()
+            .is_some_and(raw_expr_contains_pg_notify)
+        || update_stmt
             .returning
             .iter()
             .any(|item| raw_expr_contains_pg_notify(&item.expr))

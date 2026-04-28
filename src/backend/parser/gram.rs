@@ -17856,6 +17856,7 @@ fn build_cte_body(pair: Pair<'_, Rule>) -> Result<CteBody, ParseError> {
         }
         Rule::values_stmt => Ok(CteBody::Values(build_values_statement(pair)?)),
         Rule::insert_stmt => Ok(CteBody::Insert(Box::new(build_insert(pair)?))),
+        Rule::update_stmt => Ok(CteBody::Update(Box::new(build_update(pair)?))),
         Rule::recursive_union_cte_body => {
             let all = contains_union_all(pair.as_str());
             let mut inner = pair.into_inner();

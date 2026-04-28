@@ -401,3 +401,19 @@ Positioned DML bucket:
 - Remaining positioned-DML gaps: EXPLAIN renders a lowered seq-scan ctid filter
   instead of PostgreSQL's `Tid Scan ... TID Cond: CURRENT OF ...`, and a cursor
   row updated before a later positioned DELETE still points at the old ctid.
+
+Writable UPDATE CTE bucket:
+- CTE bodies now parse and carry `UPDATE` statements, and the SELECT writable
+  CTE path materializes `UPDATE ... RETURNING` rows before binding the outer
+  query.
+- UPDATE CTEs reuse the existing RLS/trigger/rule update executor path, so
+  failing WITH CHECK policies report the PostgreSQL-style RLS error instead of
+  an unsupported SELECT-form error.
+- Added focused parser and session coverage for
+  `WITH upd AS (UPDATE ... RETURNING) SELECT ...`.
+- `scripts/cargo_isolated.sh test --lib --quiet writable_update_cte` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `693/774` matched, `81` mismatches, `1350` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.

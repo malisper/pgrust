@@ -620,6 +620,9 @@ fn collect_direct_relation_oids_from_cte_body(
         crate::backend::parser::CteBody::Insert(insert) => {
             collect_direct_relation_oids_from_insert(insert, catalog, visible_ctes, rels);
         }
+        crate::backend::parser::CteBody::Update(update) => {
+            collect_direct_relation_oids_from_update(update, catalog, visible_ctes, rels);
+        }
         crate::backend::parser::CteBody::RecursiveUnion {
             anchor, recursive, ..
         } => {
@@ -677,6 +680,35 @@ fn collect_direct_relation_oids_from_insert(
         }
     }
     for item in &insert.returning {
+        collect_direct_relation_oids_from_sql_expr(&item.expr, catalog, visible_ctes, rels);
+    }
+    visible_ctes.truncate(cte_base);
+}
+
+fn collect_direct_relation_oids_from_update(
+    update: &crate::backend::parser::UpdateStatement,
+    catalog: &dyn CatalogLookup,
+    visible_ctes: &mut Vec<String>,
+    rels: &mut BTreeSet<u32>,
+) {
+    let cte_base = visible_ctes.len();
+    for cte in &update.with {
+        collect_direct_relation_oids_from_cte_body(&cte.body, catalog, visible_ctes, rels);
+        visible_ctes.push(cte.name.to_ascii_lowercase());
+    }
+    if let Some(entry) = catalog.lookup_any_relation(&update.table_name) {
+        rels.insert(entry.relation_oid);
+    }
+    if let Some(from) = &update.from {
+        collect_direct_relation_oids_from_from_item(from, catalog, visible_ctes, rels);
+    }
+    for assignment in &update.assignments {
+        collect_direct_relation_oids_from_sql_expr(&assignment.expr, catalog, visible_ctes, rels);
+    }
+    if let Some(where_clause) = &update.where_clause {
+        collect_direct_relation_oids_from_sql_expr(where_clause, catalog, visible_ctes, rels);
+    }
+    for item in &update.returning {
         collect_direct_relation_oids_from_sql_expr(&item.expr, catalog, visible_ctes, rels);
     }
     visible_ctes.truncate(cte_base);

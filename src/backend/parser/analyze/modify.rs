@@ -4050,20 +4050,31 @@ pub(crate) fn bind_update_with_outer_scopes(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
 ) -> Result<BoundUpdateStatement, ParseError> {
+    bind_update_with_outer_scopes_and_ctes(stmt, catalog, outer_scopes, &[])
+}
+
+pub(crate) fn bind_update_with_outer_scopes_and_ctes(
+    stmt: &UpdateStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    outer_ctes: &[BoundCte],
+) -> Result<BoundUpdateStatement, ParseError> {
     let local_ctes = bind_ctes(
         stmt.with_recursive,
         &stmt.with,
         catalog,
         outer_scopes,
         None,
-        &[],
+        outer_ctes,
         &[],
     )?;
+    let mut visible_ctes = local_ctes.clone();
+    visible_ctes.extend_from_slice(outer_ctes);
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
     if stmt.from.is_some() {
-        return bind_update_from(stmt, catalog, outer_scopes, &local_ctes, &entry);
+        return bind_update_from(stmt, catalog, outer_scopes, &visible_ctes, &entry);
     }
-    bind_simple_update(stmt, catalog, outer_scopes, &local_ctes, &entry)
+    bind_simple_update(stmt, catalog, outer_scopes, &visible_ctes, &entry)
 }
 
 fn bind_simple_update(

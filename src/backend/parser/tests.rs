@@ -7688,6 +7688,27 @@ fn parse_insert_with_writable_insert_cte() {
 }
 
 #[test]
+fn parse_select_with_writable_update_cte() {
+    let stmt = parse_statement(
+        "with moved as (update src set id = id + 1 returning id) select id from moved",
+    )
+    .unwrap();
+    match stmt {
+        Statement::Select(select) => {
+            assert_eq!(select.with.len(), 1);
+            match &select.with[0].body {
+                CteBody::Update(update) => {
+                    assert_eq!(update.table_name, "src");
+                    assert_eq!(update.returning.len(), 1);
+                }
+                other => panic!("expected writable update CTE, got {other:?}"),
+            }
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_select_with_writable_insert_cte_returning_tableoid_and_star() {
     let stmt = parse_statement(
         "with ins (a, b, c) as \
