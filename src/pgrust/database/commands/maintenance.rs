@@ -1,4 +1,7 @@
 use super::super::*;
+use super::alter_table_work_queue::{
+    build_alter_table_work_queue, has_inheritance_children, relation_name_for_alter_error,
+};
 use super::constraint::{find_constraint_row, validate_check_rows, validate_not_null_rows};
 use super::create::{
     aggregate_signature_arg_oids, format_aggregate_signature, resolve_aggregate_proc_rows,
@@ -851,29 +854,17 @@ fn collect_add_column_targets(
     base_column: &crate::backend::executor::ColumnDesc,
     only: bool,
 ) -> Result<Vec<AddColumnTarget>, ExecError> {
-    let target_relation_oids = if only {
-        vec![relation.relation_oid]
-    } else {
-        catalog.find_all_inheritors(relation.relation_oid)
-    };
-    let target_relation_oids = target_relation_oids.into_iter().collect::<BTreeSet<_>>();
-    let mut targets = Vec::with_capacity(target_relation_oids.len());
+    if only && has_inheritance_children(catalog, relation.relation_oid) {
+        return Err(ExecError::Parse(ParseError::InvalidTableDefinition(
+            "column must be added to child tables too".into(),
+        )));
+    }
 
-    for relation_oid in &target_relation_oids {
-        let target_relation = if *relation_oid == relation.relation_oid {
-            relation.clone()
-        } else {
-            catalog
-                .lookup_relation_by_oid(*relation_oid)
-                .or_else(|| {
-                    catalog
-                        .class_row_by_oid(*relation_oid)
-                        .and_then(|row| catalog.lookup_any_relation(&row.relname))
-                })
-                .ok_or_else(|| {
-                    ExecError::Parse(ParseError::UnknownTable(relation_oid.to_string()))
-                })?
-        };
+    let work_queue = build_alter_table_work_queue(catalog, relation, only)?;
+    let mut targets = Vec::with_capacity(work_queue.len());
+
+    for item in work_queue {
+        let target_relation = item.relation;
         if target_relation.desc.columns.iter().any(|existing| {
             !existing.dropped && existing.name.eq_ignore_ascii_case(&base_column.name)
         }) {
@@ -882,24 +873,16 @@ fn collect_add_column_targets(
                 actual: format!("column already exists: {}", base_column.name),
             }));
         }
-        let direct_parent_count = if *relation_oid == relation.relation_oid {
-            0
-        } else {
-            catalog
-                .inheritance_parents(*relation_oid)
-                .into_iter()
-                .filter(|parent| target_relation_oids.contains(&parent.inhparent))
-                .count()
-        };
+        let direct_parent_count = item.expected_parents;
         let mut column = base_column.clone();
         if direct_parent_count > 0 {
-            column.attinhcount = direct_parent_count as i16;
+            column.attinhcount = direct_parent_count;
             column.attislocal = false;
             if direct_parent_count > 1 {
                 push_notice(format!(
                     "merging definition of column \"{}\" for child \"{}\"",
                     column.name,
-                    relation_name_for_add_column_notice(catalog, target_relation.relation_oid)
+                    relation_name_for_alter_error(catalog, target_relation.relation_oid)
                 ));
             }
         }
@@ -1878,12 +1861,19 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        self.table_locks.lock_table_interruptible(
-            relation.rel,
-            TableLockMode::AccessExclusive,
+        let lock_queue = build_alter_table_work_queue(&catalog, &relation, alter_stmt.only)?;
+        let lock_requests = lock_queue
+            .iter()
+            .map(|item| (item.relation.rel, TableLockMode::AccessExclusive))
+            .collect::<Vec<_>>();
+        crate::backend::storage::lmgr::lock_table_requests_interruptible(
+            &self.table_locks,
             client_id,
+            &lock_requests,
             interrupts.as_ref(),
         )?;
+        let locked_rels =
+            crate::pgrust::database::foreign_keys::table_lock_relations(&lock_requests);
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
@@ -1908,7 +1898,9 @@ impl Database {
             &sequence_effects,
         );
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        for rel in locked_rels {
+            self.table_locks.unlock_table(rel, client_id);
+        }
         result
     }
 

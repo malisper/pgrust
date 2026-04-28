@@ -1,4 +1,5 @@
 use super::super::*;
+use super::alter_table_work_queue::{build_alter_table_work_queue, has_inheritance_children};
 use super::typed_table::reject_typed_table_ddl;
 use crate::backend::parser::{BoundRelation, CatalogLookup};
 use crate::backend::utils::misc::notices::push_notice;
@@ -31,32 +32,40 @@ fn collect_rename_column_targets(
     new_column_name: &str,
     only: bool,
 ) -> Result<Vec<BoundRelation>, ExecError> {
-    let relation_oids = if only {
-        vec![relation.relation_oid]
-    } else {
-        catalog.find_all_inheritors(relation.relation_oid)
-    };
-    let mut relation_oids = relation_oids
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if !only {
-        relation_oids
-            .sort_by_key(|relation_oid| (*relation_oid == relation.relation_oid, *relation_oid));
+    if only && has_inheritance_children(catalog, relation.relation_oid) {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "inherited column \"{column_name}\" must be renamed in child tables too"
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
     }
-    let mut targets = Vec::with_capacity(relation_oids.len());
 
-    for relation_oid in relation_oids {
-        let target = if relation_oid == relation.relation_oid {
-            relation.clone()
-        } else {
-            catalog
-                .lookup_relation_by_oid(relation_oid)
-                .ok_or_else(|| {
-                    ExecError::Parse(ParseError::UnknownTable(relation_oid.to_string()))
-                })?
+    let work_queue = build_alter_table_work_queue(catalog, relation, only)?;
+    let mut targets = Vec::with_capacity(work_queue.len());
+
+    for item in work_queue {
+        let target = item.relation;
+        let Some(column) = target
+            .desc
+            .columns
+            .iter()
+            .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+        else {
+            return Err(ExecError::Parse(ParseError::UnknownColumn(
+                column_name.to_string(),
+            )));
         };
+        if column.attinhcount > item.expected_parents {
+            return Err(ExecError::DetailedError {
+                message: format!("cannot rename inherited column \"{column_name}\""),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
         let relation_name = relation_name_for_error(catalog, &target);
         validate_alter_table_rename_column(
             &target.desc,
@@ -442,12 +451,19 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        self.table_locks.lock_table_interruptible(
-            relation.rel,
-            TableLockMode::AccessExclusive,
+        let lock_queue = build_alter_table_work_queue(&catalog, &relation, rename_stmt.only)?;
+        let lock_requests = lock_queue
+            .iter()
+            .map(|item| (item.relation.rel, TableLockMode::AccessExclusive))
+            .collect::<Vec<_>>();
+        crate::backend::storage::lmgr::lock_table_requests_interruptible(
+            &self.table_locks,
             client_id,
+            &lock_requests,
             interrupts.as_ref(),
         )?;
+        let locked_rels =
+            crate::pgrust::database::foreign_keys::table_lock_relations(&lock_requests);
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
@@ -461,7 +477,9 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        for rel in locked_rels {
+            self.table_locks.unlock_table(rel, client_id);
+        }
         result
     }
 

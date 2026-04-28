@@ -6555,6 +6555,48 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn update_relation_column_inheritance_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        attinhcount: i16,
+        attislocal: bool,
+        not_null_constraint_inhcount: Option<i16>,
+        not_null_constraint_is_local: Option<bool>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let column_index = relation_column_index_visible(&entry.desc, column_name)?;
+                let column = &mut entry.desc.columns[column_index];
+                column.attinhcount = attinhcount;
+                column.attislocal = attislocal;
+                if let Some(inhcount) = not_null_constraint_inhcount {
+                    column.not_null_constraint_inhcount = inhcount;
+                }
+                if let Some(is_local) = not_null_constraint_is_local {
+                    column.not_null_constraint_is_local = is_local;
+                }
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgAttribute,
+                        BootstrapCatalogKind::PgConstraint,
+                        BootstrapCatalogKind::PgDepend,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
     pub fn alter_table_set_column_default_mvcc(
         &mut self,
         relation_oid: u32,

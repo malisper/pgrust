@@ -17029,6 +17029,176 @@ fn alter_table_add_column_merges_temp_multi_parent_child_metadata() {
 }
 
 #[test]
+fn alter_table_add_column_only_parent_with_inheritance_children_errors() {
+    let base = temp_dir("alter_table_add_column_only_inherited_parent");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table add_parent (a int)").unwrap();
+    db.execute(1, "create table add_child () inherits (add_parent)")
+        .unwrap();
+
+    match db.execute(1, "alter table only add_parent add column b int") {
+        Err(ExecError::Parse(ParseError::InvalidTableDefinition(message))) => {
+            assert_eq!(message, "column must be added to child tables too");
+        }
+        other => panic!("expected ONLY ADD COLUMN inheritance error, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_rename_column_inheritance_recurses() {
+    let base = temp_dir("alter_table_rename_column_inherits");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table rename_parent (a int)").unwrap();
+    db.execute(
+        1,
+        "create table rename_child (b int) inherits (rename_parent)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table rename_grandchild (c int) inherits (rename_child)",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table rename_child rename column a to d") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "cannot rename inherited column \"a\"");
+        }
+        other => panic!("expected inherited rename rejection, got {other:?}"),
+    }
+    match db.execute(1, "alter table only rename_parent rename column a to d") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "inherited column \"a\" must be renamed in child tables too"
+            );
+        }
+        other => panic!("expected ONLY rename inheritance rejection, got {other:?}"),
+    }
+
+    db.execute(1, "alter table rename_parent rename column a to d")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, a.attname, a.attinhcount, a.attislocal
+             from pg_attribute a
+             join pg_class c on c.oid = a.attrelid
+             where c.relname in ('rename_parent', 'rename_child', 'rename_grandchild')
+               and a.attname = 'd'
+             order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("rename_child".into()),
+                Value::Text("d".into()),
+                Value::Int16(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("rename_grandchild".into()),
+                Value::Text("d".into()),
+                Value::Int16(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("rename_parent".into()),
+                Value::Text("d".into()),
+                Value::Int16(0),
+                Value::Bool(true),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn alter_table_drop_column_inheritance_metadata() {
+    let base = temp_dir("alter_table_drop_column_inherits");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table drop_parent (f1 int, f2 int)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table drop_child (f1 int not null) inherits (drop_parent)",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table drop_child drop column f1") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "cannot drop inherited column \"f1\"");
+        }
+        other => panic!("expected inherited drop rejection, got {other:?}"),
+    }
+
+    db.execute(1, "alter table drop_parent drop column f1")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a.attinhcount, a.attislocal, a.attnotnull
+             from pg_attribute a
+             join pg_class c on c.oid = a.attrelid
+             where c.relname = 'drop_child' and a.attname = 'f1'",
+        ),
+        vec![vec![Value::Int16(0), Value::Bool(true), Value::Bool(true)]]
+    );
+
+    db.execute(1, "alter table drop_child drop column f1")
+        .unwrap();
+    match db.execute(1, "select f1 from drop_child") {
+        Err(ExecError::Parse(ParseError::UnknownColumn(column))) => {
+            assert_eq!(column, "f1");
+        }
+        other => panic!("expected dropped child column to be absent, got {other:?}"),
+    }
+
+    db.execute(1, "create table drop_parent2 (f1 int, f2 int)")
+        .unwrap();
+    db.execute(1, "create table drop_child2 () inherits (drop_parent2)")
+        .unwrap();
+    db.execute(1, "alter table drop_parent2 drop column f1")
+        .unwrap();
+    match db.execute(1, "select f1 from drop_child2") {
+        Err(ExecError::Parse(ParseError::UnknownColumn(column))) => {
+            assert_eq!(column, "f1");
+        }
+        other => panic!("expected inherited-only child column to be dropped, got {other:?}"),
+    }
+
+    db.execute(1, "create table drop_p1 (id int, name text)")
+        .unwrap();
+    db.execute(1, "create table drop_p2 (id2 int, name text)")
+        .unwrap();
+    db.execute(1, "create table drop_c1 () inherits (drop_p1, drop_p2)")
+        .unwrap();
+    db.execute(1, "create table drop_gc1 () inherits (drop_c1)")
+        .unwrap();
+    db.execute(1, "alter table only drop_p1 drop column name")
+        .unwrap();
+    db.execute(1, "alter table drop_p2 drop column name")
+        .unwrap();
+    match db.execute(1, "alter table drop_gc1 drop column name") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "cannot drop inherited column \"name\"");
+        }
+        other => panic!("expected grandchild inherited drop rejection, got {other:?}"),
+    }
+    db.execute(1, "alter table drop_c1 drop column name")
+        .unwrap();
+    match db.execute(1, "alter table drop_gc1 drop column name") {
+        Err(ExecError::Parse(ParseError::UnknownColumn(column))) => {
+            assert_eq!(column, "name");
+        }
+        other => panic!("expected grandchild column to be dropped with parent, got {other:?}"),
+    }
+}
+
+#[test]
 fn alter_table_add_column_propagates_temp_not_null_constraints() {
     let base = temp_dir("alter_table_add_column_temp_not_null");
     let db = Database::open(&base, 16).unwrap();
@@ -26545,6 +26715,76 @@ fn alter_table_rename_constraint_updates_catalog_and_enforcement() {
         }) if relation == "items" && constraint == "items_id_guard" => {}
         other => panic!("expected renamed CHECK constraint violation, got {other:?}"),
     }
+}
+
+#[test]
+fn alter_table_rename_check_constraint_inheritance_recurses() {
+    let base = temp_dir("alter_table_rename_constraint_inherits");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table constraint_parent (a int constraint con1 check (a > 0))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table constraint_child () inherits (constraint_parent)",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "alter table constraint_child rename constraint con1 to con2",
+    ) {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "cannot rename inherited constraint \"con1\"");
+        }
+        other => panic!("expected inherited constraint rename rejection, got {other:?}"),
+    }
+    match db.execute(
+        1,
+        "alter table only constraint_parent rename constraint con1 to con2",
+    ) {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "inherited constraint \"con1\" must be renamed in child tables too"
+            );
+        }
+        other => panic!("expected ONLY constraint rename rejection, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "alter table constraint_parent rename constraint con1 to con2",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, con.conname, con.coninhcount, con.conislocal
+             from pg_constraint con
+             join pg_class c on c.oid = con.conrelid
+             where c.relname in ('constraint_parent', 'constraint_child')
+             order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("constraint_child".into()),
+                Value::Text("con2".into()),
+                Value::Int16(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("constraint_parent".into()),
+                Value::Text("con2".into()),
+                Value::Int16(0),
+                Value::Bool(true),
+            ],
+        ]
+    );
 }
 
 #[test]
