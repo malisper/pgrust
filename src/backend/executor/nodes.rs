@@ -1847,6 +1847,7 @@ impl PlanNode for IndexOnlyScanState {
                 return Ok(Some(&mut self.slot));
             }
 
+            self.stats.heap_fetches = self.stats.heap_fetches.saturating_add(1);
             let visible = heap_fetch_visible_with_txns(
                 &ctx.pool,
                 ctx.client_id,
@@ -1966,6 +1967,9 @@ impl PlanNode for IndexOnlyScanState {
                 "{prefix}Rows Removed by Filter: {}",
                 self.stats.rows_removed_by_filter
             ));
+        }
+        if analyze {
+            lines.push(format!("{prefix}Heap Fetches: {}", self.stats.heap_fetches));
         }
         if analyze && self.stats.index_searches > 0 {
             lines.push(format!(
@@ -2148,6 +2152,9 @@ impl PlanNode for IndexScanState {
                     return Ok(Some(&mut self.slot));
                 }
             }
+            if self.index_only {
+                self.stats.heap_fetches = self.stats.heap_fetches.saturating_add(1);
+            }
             let visible = heap_fetch_visible_with_txns(
                 &ctx.pool,
                 ctx.client_id,
@@ -2267,6 +2274,9 @@ impl PlanNode for IndexScanState {
                 self.stats.rows_removed_by_filter
             ));
         }
+        if analyze && self.index_only {
+            lines.push(format!("{prefix}Heap Fetches: {}", self.stats.heap_fetches));
+        }
         if analyze && self.stats.index_searches > 0 {
             lines.push(format!(
                 "{prefix}Index Searches: {}",
@@ -2376,8 +2386,10 @@ fn render_index_scan_key(
             ),
             None => render_explain_literal(value),
         },
-        IndexScanKeyArgument::Runtime(expr) => runtime_renderer
-            .map(|render| render(expr))
+        IndexScanKeyArgument::Runtime(expr) => key
+            .runtime_label
+            .clone()
+            .or_else(|| runtime_renderer.map(|render| render(expr)))
             .unwrap_or_else(|| render_explain_expr(expr, &[])),
     };
     if key.strategy == 3
@@ -5386,6 +5398,16 @@ fn memoize_rows_memory(rows: &[MaterializedRow]) -> usize {
         .sum()
 }
 
+fn memoize_key_memory(key: &MemoizeCacheKey) -> usize {
+    48 + key.0.iter().map(memoize_value_memory).sum::<usize>()
+}
+
+fn memoize_entry_memory(key: &MemoizeCacheKey, rows: &[MaterializedRow]) -> usize {
+    // Account for the hash table entry, tuple array, and per-entry memory
+    // context overhead that PostgreSQL charges outside the raw key/row bytes.
+    8192 + memoize_key_memory(key) + memoize_rows_memory(rows)
+}
+
 fn parse_memory_kb(raw: &str) -> Option<usize> {
     let trimmed = raw.trim().trim_matches('\'').trim();
     let mut parts = trimmed.split_whitespace();
@@ -5432,7 +5454,7 @@ fn memoize_evict_if_needed(state: &mut MemoizeState, ctx: &ExecutorContext) {
             state.memoize_stats.memory_usage_bytes = state
                 .memoize_stats
                 .memory_usage_bytes
-                .saturating_sub(memoize_rows_memory(&rows));
+                .saturating_sub(memoize_entry_memory(&key, &rows));
             state.memoize_stats.evictions += 1;
         }
     }
@@ -5473,14 +5495,14 @@ fn memoize_prepare_scan(
             break;
         }
     }
-    let row_memory = memoize_rows_memory(&rows);
-    if row_memory > memoize_memory_limit_bytes(ctx) {
+    let entry_memory = memoize_entry_memory(&key, &rows);
+    if entry_memory > memoize_memory_limit_bytes(ctx) {
         state.memoize_stats.overflows += 1;
     }
     state.memoize_stats.memory_usage_bytes = state
         .memoize_stats
         .memory_usage_bytes
-        .saturating_add(row_memory);
+        .saturating_add(entry_memory);
     state.cache.insert(key.clone(), rows.clone());
     state.lru.push_back(key);
     memoize_evict_if_needed(state, ctx);
@@ -5555,13 +5577,16 @@ impl PlanNode for MemoizeState {
         lines: &mut Vec<String>,
     ) {
         let prefix = explain_detail_prefix(indent);
-        if !self.cache_keys.is_empty() {
-            let keys = self
-                .cache_keys
-                .iter()
-                .map(|expr| render_explain_expr(expr, &self.column_names))
-                .collect::<Vec<_>>()
-                .join(", ");
+        if !self.cache_keys.is_empty() || !self.cache_key_labels.is_empty() {
+            let keys = if !self.cache_key_labels.is_empty() {
+                self.cache_key_labels.join(", ")
+            } else {
+                self.cache_keys
+                    .iter()
+                    .map(|expr| render_explain_expr(expr, &self.column_names))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
             lines.push(format!("{prefix}Cache Key: {keys}"));
         }
         lines.push(format!(

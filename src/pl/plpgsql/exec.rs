@@ -3072,6 +3072,7 @@ fn planner_config_from_executor_gucs(gucs: &HashMap<String, String>) -> PlannerC
         enable_indexscan: bool_executor_guc(gucs, "enable_indexscan", true),
         enable_indexonlyscan: bool_executor_guc(gucs, "enable_indexonlyscan", true),
         enable_bitmapscan: bool_executor_guc(gucs, "enable_bitmapscan", true),
+        enable_nestloop: bool_executor_guc(gucs, "enable_nestloop", true),
         enable_hashjoin: bool_executor_guc(gucs, "enable_hashjoin", true),
         enable_mergejoin: bool_executor_guc(gucs, "enable_mergejoin", true),
         enable_memoize: bool_executor_guc(gucs, "enable_memoize", true),

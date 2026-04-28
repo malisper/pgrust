@@ -743,15 +743,20 @@ fn push_nonverbose_plan_details(
         }
         Plan::Memoize {
             cache_keys,
+            cache_key_labels,
             binary_mode,
             ..
         } => {
-            if !cache_keys.is_empty() {
-                let rendered = cache_keys
-                    .iter()
-                    .map(|expr| render_verbose_expr(expr, &[], ctx))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+            if !cache_keys.is_empty() || !cache_key_labels.is_empty() {
+                let rendered = if !cache_key_labels.is_empty() {
+                    cache_key_labels.join(", ")
+                } else {
+                    cache_keys
+                        .iter()
+                        .map(|expr| render_verbose_expr(expr, &[], ctx))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
                 lines.push(format!("{prefix}Cache Key: {rendered}"));
             }
             lines.push(format!(

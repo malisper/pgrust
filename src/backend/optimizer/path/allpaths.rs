@@ -3648,6 +3648,26 @@ fn translate_restrict_clauses_to_child(
 
 fn best_path(paths: Vec<Path>) -> Option<Path> {
     paths.into_iter().min_by(|left, right| {
+        if bestpath::preferred_parameterized_index_nested_loop(left)
+            && !bestpath::preferred_parameterized_index_nested_loop(right)
+        {
+            return Ordering::Less;
+        }
+        if bestpath::preferred_parameterized_index_nested_loop(right)
+            && !bestpath::preferred_parameterized_index_nested_loop(left)
+        {
+            return Ordering::Greater;
+        }
+        if bestpath::preferred_parameterized_nested_loop(left)
+            && !bestpath::preferred_parameterized_nested_loop(right)
+        {
+            return Ordering::Less;
+        }
+        if bestpath::preferred_parameterized_nested_loop(right)
+            && !bestpath::preferred_parameterized_nested_loop(left)
+        {
+            return Ordering::Greater;
+        }
         left.plan_info()
             .total_cost
             .as_f64()

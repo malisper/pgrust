@@ -1227,6 +1227,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             plan_info,
             input,
             cache_keys,
+            cache_key_labels,
             key_paramids,
             dependent_paramids,
             binary_mode,
@@ -1239,6 +1240,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
+            cache_key_labels,
             key_paramids,
             dependent_paramids,
             binary_mode,
@@ -1374,6 +1376,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .map(|param| crate::include::nodes::plannodes::ExecParamSource {
                     paramid: param.paramid,
                     expr: rebase_expr_subplan_ids(param.expr, base),
+                    label: param.label,
                 })
                 .collect(),
             join_qual: join_qual
@@ -1748,6 +1751,7 @@ pub(super) fn finalize_plan_subqueries(
             plan_info,
             input,
             cache_keys,
+            cache_key_labels,
             key_paramids,
             dependent_paramids,
             binary_mode,
@@ -1760,6 +1764,7 @@ pub(super) fn finalize_plan_subqueries(
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                 .collect(),
+            cache_key_labels,
             key_paramids,
             dependent_paramids,
             binary_mode,
@@ -1855,6 +1860,7 @@ pub(super) fn finalize_plan_subqueries(
                 .map(|param| crate::include::nodes::plannodes::ExecParamSource {
                     paramid: param.paramid,
                     expr: finalize_expr_subqueries(param.expr, catalog, subplans),
+                    label: param.label,
                 })
                 .collect(),
             join_qual: join_qual

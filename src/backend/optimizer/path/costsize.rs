@@ -34,7 +34,7 @@ use crate::include::nodes::datum::{
     ArrayValue, IntervalValue, NumericValue, RecordValue, Value as DatumValue,
 };
 use crate::include::nodes::pathnodes::{
-    Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, RestrictInfo,
+    Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, PlannerSubroot, RestrictInfo,
 };
 use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument, PlanEstimate};
 use crate::include::nodes::primnodes::SetReturningCall;
@@ -44,7 +44,7 @@ use crate::include::nodes::primnodes::{
     Var, attrno_index, set_returning_call_exprs, user_attrno,
 };
 
-use super::super::pathnodes::{expr_sql_type, slot_output_target};
+use super::super::pathnodes::{expr_sql_type, rte_slot_varno, slot_output_target};
 use super::super::{
     AccessCandidate, CPU_INDEX_TUPLE_COST, CPU_OPERATOR_COST, CPU_TUPLE_COST, DEFAULT_BOOL_SEL,
     DEFAULT_EQ_SEL, DEFAULT_INEQ_SEL, DEFAULT_NUM_PAGES, DEFAULT_NUM_ROWS, ExtendedStatistic,
@@ -2045,6 +2045,8 @@ pub(super) fn estimate_index_candidate(
     let index_scan_rows = clamp_rows(stats.reltuples * scan_sel);
     let index_rows = clamp_rows(stats.reltuples * used_sel);
     let unordered_probe = order_items.is_none();
+    let broad_unordered_btree_range =
+        unordered_btree_range_probe_needs_heap_penalty(&spec, stats, scan_sel);
     let (startup_cost, mut base_cost) = if is_gist_like_am(spec.index.index_meta.am_oid) {
         estimate_gist_scan_cost(
             index_pages,
@@ -2062,6 +2064,12 @@ pub(super) fn estimate_index_candidate(
     };
     if spec.row_prefix && unordered_probe {
         base_cost += stats.relpages * RANDOM_PAGE_COST + stats.reltuples * CPU_TUPLE_COST;
+    }
+    if broad_unordered_btree_range {
+        // :HACK: Until heap/index correlation costing is closer to PostgreSQL,
+        // broad unordered btree range probes look too cheap and displace the
+        // seq-scan outer side in memoize regression plans.
+        base_cost += stats.relpages * RANDOM_PAGE_COST + index_scan_rows * RANDOM_PAGE_COST;
     }
     if spec.index.index_meta.am_oid == BTREE_AM_OID {
         let order_columns = if spec.removes_order {
@@ -2189,6 +2197,93 @@ pub(super) fn estimate_index_candidate(
     }
 
     AccessCandidate { total_cost, plan }
+}
+
+fn unordered_btree_range_probe_needs_heap_penalty(
+    spec: &IndexPathSpec,
+    stats: &RelationStats,
+    scan_sel: f64,
+) -> bool {
+    spec.index.index_meta.am_oid == BTREE_AM_OID
+        && !spec.removes_order
+        && scan_sel.max(btree_range_key_histogram_selectivity(spec, stats).unwrap_or(0.0)) >= 0.01
+        && btree_ordering_equality_prefix(&spec.keys) == 0
+        && spec
+            .keys
+            .iter()
+            .any(|key| key.attribute_number > 0 && key.strategy != 3)
+}
+
+fn btree_range_key_histogram_selectivity(
+    spec: &IndexPathSpec,
+    stats: &RelationStats,
+) -> Option<f64> {
+    spec.keys
+        .iter()
+        .filter(|key| key.attribute_number > 0 && key.strategy != 3)
+        .filter_map(|key| {
+            let IndexScanKeyArgument::Const(value) = &key.argument else {
+                return None;
+            };
+            let index_pos = usize::try_from(key.attribute_number.saturating_sub(1)).ok()?;
+            let heap_attno = *spec.index.index_meta.indkey.get(index_pos)?;
+            if heap_attno <= 0 {
+                return None;
+            }
+            let row = stats.stats_by_attnum.get(&heap_attno)?;
+            let wanted = match key.strategy {
+                1 | 2 => Ordering::Less,
+                4 | 5 => Ordering::Greater,
+                _ => return None,
+            };
+            let selectivity = ineq_selectivity_for_stats_row(row, value, wanted, false).max(
+                unique_integer_range_selectivity(row, value, key.strategy, stats.reltuples)
+                    .unwrap_or(0.0),
+            );
+            let selectivity = if matches!(key.strategy, 2 | 4) {
+                selectivity.max(eq_selectivity_for_stats_row(row, value, stats.reltuples))
+            } else {
+                selectivity
+            };
+            Some(selectivity)
+        })
+        .reduce(f64::max)
+}
+
+fn unique_integer_range_selectivity(
+    row: &PgStatisticRow,
+    value: &Value,
+    strategy: u16,
+    reltuples: f64,
+) -> Option<f64> {
+    if reltuples <= 0.0 {
+        return None;
+    }
+    let ndistinct = effective_ndistinct(row, reltuples)?;
+    if ndistinct < reltuples * 0.5 {
+        return None;
+    }
+    let value = match value {
+        Value::Int16(value) => f64::from(*value),
+        Value::Int32(value) => f64::from(*value),
+        Value::Int64(value) => *value as f64,
+        _ => return None,
+    };
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    let eq_width = (1.0 / ndistinct.max(1.0)).clamp(0.0, 1.0);
+    let lt = (value / reltuples).clamp(0.0, 1.0);
+    let le = (lt + eq_width).clamp(0.0, 1.0);
+    let gt = (1.0 - le).clamp(0.0, 1.0);
+    let ge = (1.0 - lt).clamp(0.0, 1.0);
+    Some(match strategy {
+        1 => lt,
+        2 => le,
+        4 => ge,
+        5 => gt,
+        _ => return None,
+    })
 }
 
 fn btree_index_natural_pathkeys(
@@ -2350,6 +2445,7 @@ fn build_join_paths_internal(
             left_relids,
             right_relids,
             &restrict_clauses,
+            &pathtarget,
         ) {
             paths.push(estimate_nested_loop_join_internal(
                 root,
@@ -2380,6 +2476,7 @@ fn build_join_paths_internal(
             right_relids,
             left_relids,
             &restrict_clauses,
+            &pathtarget,
         ) {
             paths.push(estimate_nested_loop_join_internal(
                 root,
@@ -2487,6 +2584,7 @@ fn parameterized_inner_index_path(
     outer_relids: &[usize],
     inner_relids: &[usize],
     restrict_clauses: &[RestrictInfo],
+    required_pathtarget: &PathTarget,
 ) -> Option<(Path, Vec<RestrictInfo>)> {
     let root = root?;
     let catalog = catalog?;
@@ -2513,7 +2611,60 @@ fn parameterized_inner_index_path(
             pathkeys,
             outer_relids,
             restrict_clauses,
+            required_pathtarget,
         );
+    }
+    if let Path::Append {
+        plan_info,
+        pathtarget,
+        relids,
+        source_id,
+        desc,
+        child_roots,
+        children,
+    } = inner
+    {
+        let mut parameterized_children = Vec::with_capacity(children.len());
+        let mut remaining: Option<Vec<RestrictInfo>> = None;
+        for (index, child) in children.iter().enumerate() {
+            let child_root = child_roots
+                .get(index)
+                .and_then(Option::as_ref)
+                .map(PlannerSubroot::as_ref)
+                .unwrap_or(root);
+            let (child_path, child_remaining) = parameterized_inner_index_path(
+                Some(child_root),
+                Some(catalog),
+                child,
+                outer_relids,
+                inner_relids,
+                restrict_clauses,
+                required_pathtarget,
+            )?;
+            if !path_contains_runtime_index_arg(&child_path) {
+                return None;
+            }
+            if let Some(existing) = &remaining {
+                if existing != &child_remaining {
+                    return None;
+                }
+            } else {
+                remaining = Some(child_remaining);
+            }
+            parameterized_children.push(child_path);
+        }
+        return Some((
+            Path::Append {
+                plan_info: *plan_info,
+                pathtarget: pathtarget.clone(),
+                relids: relids.clone(),
+                source_id: *source_id,
+                desc: desc.clone(),
+                child_roots: child_roots.clone(),
+                children: parameterized_children,
+            },
+            remaining.unwrap_or_default(),
+        ));
     }
     match inner {
         Path::Filter {
@@ -2529,6 +2680,7 @@ fn parameterized_inner_index_path(
                 outer_relids,
                 inner_relids,
                 restrict_clauses,
+                required_pathtarget,
             )?;
             return Some((
                 Path::Filter {
@@ -2554,6 +2706,7 @@ fn parameterized_inner_index_path(
                 outer_relids,
                 inner_relids,
                 restrict_clauses,
+                required_pathtarget,
             )?;
             return Some((
                 Path::Projection {
@@ -2580,6 +2733,7 @@ fn parameterized_inner_index_path(
                 outer_relids,
                 inner_relids,
                 restrict_clauses,
+                required_pathtarget,
             )?;
             return Some((
                 Path::Limit {
@@ -2605,6 +2759,7 @@ fn parameterized_inner_index_path(
                 outer_relids,
                 inner_relids,
                 restrict_clauses,
+                required_pathtarget,
             )?;
             return Some((
                 Path::LockRows {
@@ -2627,43 +2782,119 @@ fn parameterized_inner_index_path(
         .filter(|(index, _)| !parameterized_indexes.contains(index))
         .map(|(_, restrict)| restrict.clone())
         .collect::<Vec<_>>();
-    let Path::SeqScan {
-        source_id,
-        rel,
-        relation_name,
-        relation_oid,
-        relkind,
-        relispopulated,
-        toast,
-        desc,
-        ..
-    } = inner
-    else {
-        return Some((wrap_parameterized_filter(inner.clone(), filter), remaining));
-    };
-
-    let mut best: Option<AccessCandidate> = None;
-    if *relkind == 'r' && root.config.enable_indexscan && !relation_uses_virtual_scan(*relation_oid)
-    {
-        let stats = relation_stats(catalog, *relation_oid, desc);
-        for index in catalog
-            .index_relations_for_heap(*relation_oid)
-            .iter()
-            .filter(|index| {
-                index.index_meta.indisvalid
-                    && index.index_meta.indisready
-                    && !index.index_meta.indisexclusion
-                    && !index.index_meta.indkey.is_empty()
+    let plan = match inner {
+        Path::SeqScan {
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            ..
+        } => (*relkind == 'r')
+            .then(|| {
+                parameterized_base_index_path(
+                    root,
+                    catalog,
+                    *source_id,
+                    *rel,
+                    relation_name,
+                    *relation_oid,
+                    *toast,
+                    desc,
+                    &filter,
+                    required_pathtarget,
+                )
             })
-        {
-            let Some(spec) = build_index_path_spec(
-                Some(&filter),
+            .flatten()
+            .unwrap_or_else(|| {
+                wrap_parameterized_filter(
+                    Path::SeqScan {
+                        plan_info: inner.plan_info(),
+                        pathtarget: inner.semantic_output_target(),
+                        source_id: *source_id,
+                        rel: *rel,
+                        relation_name: relation_name.clone(),
+                        relation_oid: *relation_oid,
+                        relkind: *relkind,
+                        relispopulated: *relispopulated,
+                        toast: *toast,
+                        desc: desc.clone(),
+                        disabled: false,
+                    },
+                    filter,
+                )
+            }),
+        Path::IndexOnlyScan {
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            toast,
+            desc,
+            ..
+        }
+        | Path::IndexScan {
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            toast,
+            desc,
+            ..
+        } => parameterized_base_index_path(
+            root,
+            catalog,
+            *source_id,
+            *rel,
+            relation_name,
+            *relation_oid,
+            *toast,
+            desc,
+            &filter,
+            required_pathtarget,
+        )
+        .unwrap_or_else(|| wrap_parameterized_filter(inner.clone(), filter)),
+        _ => wrap_parameterized_filter(inner.clone(), filter),
+    };
+    Some((plan, remaining))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parameterized_base_index_path(
+    root: &PlannerInfo,
+    catalog: &dyn CatalogLookup,
+    source_id: usize,
+    rel: RelFileLocator,
+    relation_name: &str,
+    relation_oid: u32,
+    toast: Option<ToastRelationRef>,
+    desc: &RelationDesc,
+    filter: &Expr,
+    pathtarget: &PathTarget,
+) -> Option<Path> {
+    if !root.config.enable_indexscan || relation_uses_virtual_scan(relation_oid) {
+        return None;
+    }
+    let stats = relation_stats(catalog, relation_oid, desc);
+    catalog
+        .index_relations_for_heap(relation_oid)
+        .iter()
+        .filter(|index| {
+            index.index_meta.indisvalid
+                && index.index_meta.indisready
+                && !index.index_meta.indisexclusion
+                && !index.index_meta.indkey.is_empty()
+        })
+        .filter_map(|index| {
+            let spec = build_index_path_spec(
+                Some(filter),
                 None,
                 index,
                 root.config.retain_partial_index_filters,
-            ) else {
-                continue;
-            };
+            )?;
             if !spec.keys.iter().any(|key| {
                 matches!(key.argument, IndexScanKeyArgument::Runtime(_))
                     || key
@@ -2671,52 +2902,210 @@ fn parameterized_inner_index_path(
                         .as_ref()
                         .is_some_and(expr_contains_runtime_input)
             }) {
-                continue;
+                return None;
             }
+            let (mut required_attrs, has_target_attrs) =
+                root_index_only_attrs_for_parameterized_path(root, source_id, filter);
+            if required_attrs.is_empty()
+                || (!has_target_attrs
+                    && !filter_only_parameterized_index_only_allowed(index, &spec, desc))
+            {
+                required_attrs =
+                    index_only_attrs_for_parameterized_path(source_id, pathtarget, filter);
+            }
+            let target_index_only = index_supports_index_only_attrs(index, &required_attrs);
             let candidate = estimate_index_candidate(
-                *source_id,
-                *rel,
-                relation_name.clone(),
-                *relation_oid,
-                *toast,
+                source_id,
+                rel,
+                relation_name.to_string(),
+                relation_oid,
+                toast,
                 desc.clone(),
                 &stats,
                 spec,
                 None,
                 None,
-                false,
+                target_index_only,
                 root.config,
                 catalog,
             );
-            if path_contains_runtime_index_arg(&candidate.plan)
-                && best
-                    .as_ref()
-                    .is_none_or(|current| candidate.total_cost < current.total_cost)
-            {
-                best = Some(candidate);
-            }
+            path_contains_runtime_index_arg(&candidate.plan).then_some(candidate)
+        })
+        .min_by(|left, right| {
+            left.total_cost
+                .partial_cmp(&right.total_cost)
+                .unwrap_or(Ordering::Equal)
+        })
+        .map(|candidate| candidate.plan)
+}
+
+fn visible_user_attr_indexes_for_index_only(desc: &RelationDesc) -> Vec<usize> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| (!column.dropped).then_some(index))
+        .collect()
+}
+
+fn index_only_attrs_for_parameterized_path(
+    source_id: usize,
+    pathtarget: &PathTarget,
+    filter: &Expr,
+) -> Vec<usize> {
+    let mut attrs = BTreeSet::new();
+    for expr in &pathtarget.exprs {
+        collect_expr_attrs_for_source(expr, source_id, &mut attrs);
+    }
+    collect_expr_attrs_for_source(filter, source_id, &mut attrs);
+    attrs.into_iter().collect()
+}
+
+fn root_index_only_attrs_for_parameterized_path(
+    root: &PlannerInfo,
+    source_id: usize,
+    filter: &Expr,
+) -> (Vec<usize>, bool) {
+    let mut attrs = BTreeSet::new();
+    let mut target_attrs = BTreeSet::new();
+    for target in [
+        &root.scanjoin_target,
+        &root.final_target,
+        &root.sort_input_target,
+        &root.group_input_target,
+    ] {
+        for expr in &target.exprs {
+            collect_expr_attrs_for_source(expr, source_id, &mut target_attrs);
         }
     }
+    let has_target_attrs = !target_attrs.is_empty();
+    attrs.extend(target_attrs);
+    collect_expr_attrs_for_source(filter, source_id, &mut attrs);
+    (attrs.into_iter().collect(), has_target_attrs)
+}
 
-    let plan = best.map(|candidate| candidate.plan).unwrap_or_else(|| {
-        wrap_parameterized_filter(
-            Path::SeqScan {
-                plan_info: inner.plan_info(),
-                pathtarget: inner.semantic_output_target(),
-                source_id: *source_id,
-                rel: *rel,
-                relation_name: relation_name.clone(),
-                relation_oid: *relation_oid,
-                relkind: *relkind,
-                relispopulated: *relispopulated,
-                toast: *toast,
-                desc: desc.clone(),
-                disabled: false,
-            },
-            filter,
-        )
-    });
-    Some((plan, remaining))
+fn filter_only_parameterized_index_only_allowed(
+    index: &BoundIndexRelation,
+    spec: &IndexPathSpec,
+    desc: &RelationDesc,
+) -> bool {
+    desc.columns.len() == 1
+        || index.index_meta.indisunique
+        || spec.keys.iter().all(|key| key.strategy == 3)
+}
+
+fn collect_expr_attrs_for_source(expr: &Expr, source_id: usize, attrs: &mut BTreeSet<usize>) {
+    match expr {
+        Expr::Var(var) => {
+            if var.varlevelsup == 0
+                && (var.varno == source_id
+                    || rte_slot_varno(var.varno) == Some(source_id)
+                    || rte_slot_varno(source_id) == Some(var.varno))
+                && let Some(index) = attrno_index(var.varattno)
+            {
+                attrs.insert(index);
+            }
+        }
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .for_each(|arg| collect_expr_attrs_for_source(arg, source_id, attrs)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .for_each(|arg| collect_expr_attrs_for_source(arg, source_id, attrs)),
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .for_each(|arg| collect_expr_attrs_for_source(arg, source_id, attrs)),
+        Expr::ScalarArrayOp(saop) => {
+            collect_expr_attrs_for_source(&saop.left, source_id, attrs);
+            collect_expr_attrs_for_source(&saop.right, source_id, attrs);
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => {
+            collect_expr_attrs_for_source(inner, source_id, attrs)
+        }
+        Expr::Coalesce(left, right)
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            collect_expr_attrs_for_source(left, source_id, attrs);
+            collect_expr_attrs_for_source(right, source_id, attrs);
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .for_each(|element| collect_expr_attrs_for_source(element, source_id, attrs)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .for_each(|(_, expr)| collect_expr_attrs_for_source(expr, source_id, attrs)),
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_expr_attrs_for_source(arg, source_id, attrs);
+            }
+            for arm in &case_expr.args {
+                collect_expr_attrs_for_source(&arm.expr, source_id, attrs);
+                collect_expr_attrs_for_source(&arm.result, source_id, attrs);
+            }
+            collect_expr_attrs_for_source(&case_expr.defresult, source_id, attrs);
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_expr_attrs_for_source(expr, source_id, attrs);
+            collect_expr_attrs_for_source(pattern, source_id, attrs);
+            if let Some(escape) = escape.as_deref() {
+                collect_expr_attrs_for_source(escape, source_id, attrs);
+            }
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_expr_attrs_for_source(array, source_id, attrs);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_expr_attrs_for_source(lower, source_id, attrs);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_expr_attrs_for_source(upper, source_id, attrs);
+                }
+            }
+        }
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .for_each(|arg| collect_expr_attrs_for_source(arg, source_id, attrs)),
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .for_each(|arg| collect_expr_attrs_for_source(arg, source_id, attrs)),
+        Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Aggref(_)
+        | Expr::WindowFunc(_)
+        | Expr::SetReturning(_)
+        | Expr::SubLink(_)
+        | Expr::SubPlan(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => {}
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2732,6 +3121,7 @@ fn parameterized_subquery_inner_path(
     pathkeys: &[PathKey],
     outer_relids: &[usize],
     restrict_clauses: &[RestrictInfo],
+    _required_pathtarget: &PathTarget,
 ) -> Option<(Path, Vec<RestrictInfo>)> {
     let visible_targets = query
         .target_list
@@ -2767,6 +3157,7 @@ fn parameterized_subquery_inner_path(
     if rewritten_restricts.is_empty() {
         return None;
     }
+    let child_required_pathtarget = input.semantic_output_target();
     let (input, _) = parameterized_inner_index_path(
         Some(root),
         Some(catalog),
@@ -2774,6 +3165,7 @@ fn parameterized_subquery_inner_path(
         outer_relids,
         &child_relids,
         &rewritten_restricts,
+        &child_required_pathtarget,
     )?;
     let input_info = input.plan_info();
     let width = output_columns

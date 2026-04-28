@@ -86,6 +86,26 @@ fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostSelector) ->
         return candidate_left_relids > current_left_relids;
     }
     if matches!(cost, CostSelector::Total) {
+        if preferred_partitionwise_join_append(candidate)
+            && !preferred_partitionwise_join_append(current)
+        {
+            return true;
+        }
+        if preferred_partitionwise_join_append(current)
+            && !preferred_partitionwise_join_append(candidate)
+        {
+            return false;
+        }
+        if preferred_parameterized_append_inner_nested_loop(candidate)
+            && !preferred_parameterized_append_inner_nested_loop(current)
+        {
+            return true;
+        }
+        if preferred_parameterized_append_inner_nested_loop(current)
+            && !preferred_parameterized_append_inner_nested_loop(candidate)
+        {
+            return false;
+        }
         if preferred_parameterized_index_nested_loop(candidate)
             && !preferred_parameterized_index_nested_loop(current)
         {
@@ -116,6 +136,50 @@ fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostSelector) ->
     let cmp = compare_path_costs(candidate, current, cost);
     cmp == Ordering::Less
         || (cmp == Ordering::Equal && better_pathkeys(&candidate.pathkeys(), &current.pathkeys()))
+}
+
+fn preferred_partitionwise_join_append(path: &Path) -> bool {
+    match path {
+        Path::Append { children, .. } if children.len() > 1 => {
+            children.iter().all(path_is_join_child)
+        }
+        _ => false,
+    }
+}
+
+fn path_is_join_child(path: &Path) -> bool {
+    match path {
+        Path::NestedLoopJoin { .. } | Path::HashJoin { .. } | Path::MergeJoin { .. } => true,
+        Path::Projection { input, .. } | Path::Filter { input, .. } => path_is_join_child(input),
+        _ => false,
+    }
+}
+
+fn preferred_parameterized_append_inner_nested_loop(path: &Path) -> bool {
+    match path {
+        Path::NestedLoopJoin {
+            left,
+            right,
+            kind: JoinType::Inner,
+            ..
+        } => {
+            !path_is_append_like(left)
+                && path_is_append_like(right)
+                && path_has_runtime_index_scan(right)
+        }
+        _ => false,
+    }
+}
+
+fn path_is_append_like(path: &Path) -> bool {
+    match path {
+        Path::Append { .. } | Path::MergeAppend { .. } => true,
+        Path::Projection { input, .. }
+        | Path::Filter { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::Limit { input, .. } => path_is_append_like(input),
+        _ => false,
+    }
 }
 
 pub(super) fn non_nested_join_nearly_as_cheap(preferred: &Path, other: &Path) -> bool {
@@ -230,6 +294,9 @@ fn path_has_runtime_index_scan(path: &Path) -> bool {
         | Path::CteScan {
             cte_plan: input, ..
         } => path_has_runtime_index_scan(input),
+        Path::Append { children, .. } | Path::MergeAppend { children, .. } => {
+            children.iter().any(path_has_runtime_index_scan)
+        }
         _ => false,
     }
 }

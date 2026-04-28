@@ -20,7 +20,7 @@ use crate::include::nodes::primnodes::{
     WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index, is_executor_special_varno,
     is_system_attr, set_returning_call_exprs, user_attrno,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
 struct IndexedTlistEntry {
@@ -1544,6 +1544,7 @@ fn exec_param_for_outer_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr {
     ctx.next_param_id += 1;
     ctx.ext_params.push(ExecParamSource {
         paramid,
+        label: label_for_expr(ctx, &parent_expr),
         expr: parent_expr,
     });
     Expr::Param(Param {
@@ -1676,6 +1677,126 @@ fn inline_exec_params(expr: Expr, params: &[ExecParamSource], consumed: &mut Vec
             Box::new(inline_exec_params(*right, params, consumed)),
         ),
         other => other,
+    }
+}
+
+fn label_for_runtime_expr(ctx: &SetRefsContext<'_>, expr: &Expr) -> Option<String> {
+    label_for_expr(ctx, &decrement_outer_expr_levels(expr.clone()))
+}
+
+fn label_for_expr(ctx: &SetRefsContext<'_>, expr: &Expr) -> Option<String> {
+    let root = ctx.root?;
+    Some(render_param_label_expr(root, expr, ctx))
+}
+
+fn render_param_label_expr(root: &PlannerInfo, expr: &Expr, ctx: &SetRefsContext<'_>) -> String {
+    match expr {
+        Expr::Var(var) if var.varlevelsup > 0 => {
+            let mut var = var.clone();
+            var.varlevelsup -= 1;
+            render_param_label_expr(root, &Expr::Var(var), ctx)
+        }
+        Expr::Var(var) if var.varlevelsup == 0 => root
+            .parse
+            .rtable
+            .get(var.varno.saturating_sub(1))
+            .and_then(|rte| {
+                attrno_index(var.varattno).and_then(|index| {
+                    if let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind
+                        && let Some(alias_expr) = joinaliasvars.get(index)
+                    {
+                        return Some(render_param_label_expr(root, alias_expr, ctx));
+                    }
+                    rte.desc.columns.get(index).map(|column| {
+                        if let Some(alias) = rte.alias.as_deref() {
+                            format!("{alias}.{}", column.name)
+                        } else {
+                            column.name.clone()
+                        }
+                    })
+                })
+            })
+            .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Param(param) if matches!(param.paramkind, ParamKind::Exec) => ctx
+            .ext_params
+            .iter()
+            .rev()
+            .find(|source| source.paramid == param.paramid)
+            .map(|source| {
+                source
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| render_param_label_expr(root, &source.expr, ctx))
+            })
+            .unwrap_or_else(|| format!("${}", param.paramid)),
+        Expr::Cast(inner, ty) => {
+            let inner = render_param_label_expr(root, inner, ctx);
+            format!("({inner})::{}", param_label_type_name(*ty))
+        }
+        Expr::Collate { expr: inner, .. } => render_param_label_expr(root, inner, ctx),
+        Expr::Op(op) => {
+            let op_text = match op.op {
+                crate::include::nodes::primnodes::OpExprKind::Add => "+",
+                crate::include::nodes::primnodes::OpExprKind::Sub => "-",
+                crate::include::nodes::primnodes::OpExprKind::Mul => "*",
+                crate::include::nodes::primnodes::OpExprKind::Div => "/",
+                crate::include::nodes::primnodes::OpExprKind::Mod => "%",
+                crate::include::nodes::primnodes::OpExprKind::Eq => "=",
+                crate::include::nodes::primnodes::OpExprKind::NotEq => "<>",
+                crate::include::nodes::primnodes::OpExprKind::Lt => "<",
+                crate::include::nodes::primnodes::OpExprKind::LtEq => "<=",
+                crate::include::nodes::primnodes::OpExprKind::Gt => ">",
+                crate::include::nodes::primnodes::OpExprKind::GtEq => ">=",
+                _ => {
+                    return crate::backend::executor::render_explain_expr(expr, &[]);
+                }
+            };
+            match op.args.as_slice() {
+                [left, right] => format!(
+                    "({} {op_text} {})",
+                    render_param_label_expr(root, left, ctx),
+                    render_param_label_expr(root, right, ctx)
+                ),
+                [inner] => format!("({op_text}{})", render_param_label_expr(root, inner, ctx)),
+                _ => crate::backend::executor::render_explain_expr(expr, &[]),
+            }
+        }
+        Expr::Const(value) => {
+            let rendered =
+                crate::backend::executor::render_explain_expr(&Expr::Const(value.clone()), &[]);
+            rendered
+                .strip_prefix('(')
+                .and_then(|value| value.strip_suffix(')'))
+                .unwrap_or(&rendered)
+                .to_string()
+        }
+        _ => crate::backend::executor::render_explain_expr(expr, &[]),
+    }
+}
+
+fn param_label_type_name(ty: crate::backend::parser::SqlType) -> String {
+    use crate::backend::parser::SqlTypeKind;
+    let element = if ty.is_array { ty.element_type() } else { ty };
+    let rendered = match element.kind {
+        SqlTypeKind::Bool => "boolean".into(),
+        SqlTypeKind::Int2 => "smallint".into(),
+        SqlTypeKind::Int4 => "integer".into(),
+        SqlTypeKind::Int8 => "bigint".into(),
+        SqlTypeKind::Float4 => "real".into(),
+        SqlTypeKind::Float8 => "double precision".into(),
+        SqlTypeKind::Numeric => element
+            .numeric_precision_scale()
+            .map(|(precision, scale)| format!("numeric({precision},{scale})"))
+            .unwrap_or_else(|| "numeric".into()),
+        SqlTypeKind::Text => "text".into(),
+        SqlTypeKind::Varchar => "character varying".into(),
+        SqlTypeKind::Char => "character".into(),
+        _ => format!("{:?}", element.kind).to_ascii_lowercase(),
+    };
+    if ty.is_array {
+        format!("{rendered}[]")
+    } else {
+        rendered
     }
 }
 
@@ -2609,6 +2730,13 @@ fn lower_index_scan_key(
     key: IndexScanKey,
     mode: LowerMode<'_>,
 ) -> IndexScanKey {
+    let runtime_label = match &key.argument {
+        IndexScanKeyArgument::Runtime(expr) => key
+            .runtime_label
+            .clone()
+            .or_else(|| label_for_runtime_expr(ctx, expr)),
+        IndexScanKeyArgument::Const(_) => key.runtime_label.clone(),
+    };
     let argument = match key.argument {
         IndexScanKeyArgument::Const(value) => IndexScanKeyArgument::Const(value),
         IndexScanKeyArgument::Runtime(expr) => {
@@ -2620,6 +2748,7 @@ fn lower_index_scan_key(
         strategy: key.strategy,
         argument,
         display_expr: key.display_expr,
+        runtime_label,
     }
 }
 
@@ -2967,17 +3096,48 @@ fn collect_plan_exec_paramids(plan: &Plan, out: &mut BTreeSet<usize>) {
                 .for_each(|child| collect_plan_exec_paramids(child, out));
         }
         Plan::Unique { input, .. }
-        | Plan::Filter { input, .. }
-        | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
-        | Plan::Projection { input, .. }
-        | Plan::SubqueryScan { input, .. }
         | Plan::CteScan {
             cte_plan: input, ..
+        } => collect_plan_exec_paramids(input, out),
+        Plan::OrderBy { input, items, .. } => {
+            collect_plan_exec_paramids(input, out);
+            items
+                .iter()
+                .for_each(|item| collect_expr_exec_paramids(&item.expr, out));
         }
-        | Plan::ProjectSet { input, .. } => collect_plan_exec_paramids(input, out),
+        Plan::SubqueryScan { input, filter, .. } => {
+            collect_plan_exec_paramids(input, out);
+            if let Some(filter) = filter {
+                collect_expr_exec_paramids(filter, out);
+            }
+        }
+        Plan::Filter {
+            input, predicate, ..
+        } => {
+            collect_plan_exec_paramids(input, out);
+            collect_expr_exec_paramids(predicate, out);
+        }
+        Plan::Projection { input, targets, .. } => {
+            collect_plan_exec_paramids(input, out);
+            targets
+                .iter()
+                .for_each(|target| collect_expr_exec_paramids(&target.expr, out));
+        }
+        Plan::ProjectSet { input, targets, .. } => {
+            collect_plan_exec_paramids(input, out);
+            targets.iter().for_each(|target| {
+                use crate::include::nodes::primnodes::ProjectSetTarget;
+                match target {
+                    ProjectSetTarget::Scalar(entry) => collect_expr_exec_paramids(&entry.expr, out),
+                    ProjectSetTarget::Set { call, .. } => set_returning_call_exprs(call)
+                        .into_iter()
+                        .for_each(|expr| collect_expr_exec_paramids(expr, out)),
+                }
+            });
+        }
         Plan::IndexOnlyScan {
             keys,
             order_by_keys,
@@ -4659,6 +4819,7 @@ fn set_nested_loop_join_references(
                     && !expr_contains_local_semantic_var(&fixed_expr)
                 {
                     consumed_parent_params.extend(param_consumed_parent_params);
+                    let label = label_for_expr(ctx, &rebased_expr).or(param.label.clone());
                     params.push(ExecParamSource {
                         paramid: param.paramid,
                         expr: lower_expr(
@@ -4669,11 +4830,13 @@ fn set_nested_loop_join_references(
                                 tlist: &left_tlist,
                             },
                         ),
+                        label,
                     });
                 } else {
                     propagated_params.push(ExecParamSource {
                         paramid: param.paramid,
                         expr: rebased_expr,
+                        label: param.label,
                     });
                 }
             }
@@ -4698,7 +4861,7 @@ fn set_nested_loop_join_references(
 
 fn maybe_wrap_memoize(
     root: Option<&PlannerInfo>,
-    right_plan: Plan,
+    mut right_plan: Plan,
     nest_params: &[ExecParamSource],
     _outer_rows: f64,
 ) -> Plan {
@@ -4730,11 +4893,30 @@ fn maybe_wrap_memoize(
                 .map(|source| source.expr.clone())
         })
         .collect::<Vec<_>>();
+    let param_labels = nest_params
+        .iter()
+        .filter_map(|source| source.label.clone().map(|label| (source.paramid, label)))
+        .collect::<BTreeMap<_, _>>();
+    annotate_runtime_index_labels(&mut right_plan, &param_labels);
+    let cache_key_labels = key_paramids
+        .iter()
+        .filter_map(|paramid| {
+            nest_params
+                .iter()
+                .find(|source| source.paramid == *paramid)
+                .map(|source| {
+                    runtime_label_for_single_param(&right_plan, *paramid, &param_labels)
+                        .or_else(|| source.label.clone())
+                        .unwrap_or_else(|| format!("${}", source.paramid))
+                })
+        })
+        .collect::<Vec<_>>();
     let binary_mode = memoize_uses_binary_mode(&right_plan);
     Plan::Memoize {
         plan_info: right_plan.plan_info(),
         input: Box::new(right_plan),
         cache_keys,
+        cache_key_labels,
         key_paramids,
         dependent_paramids: dependent_paramids.into_iter().collect(),
         binary_mode,
@@ -4743,15 +4925,238 @@ fn maybe_wrap_memoize(
     }
 }
 
+fn annotate_runtime_index_labels(plan: &mut Plan, param_labels: &BTreeMap<usize, String>) {
+    match plan {
+        Plan::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        }
+        | Plan::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        } => {
+            annotate_runtime_index_key_labels(keys, param_labels);
+            annotate_runtime_index_key_labels(order_by_keys, param_labels);
+        }
+        Plan::BitmapIndexScan { keys, .. } => {
+            annotate_runtime_index_key_labels(keys, param_labels);
+        }
+        Plan::BitmapOr { children, .. }
+        | Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => {
+            children
+                .iter_mut()
+                .for_each(|child| annotate_runtime_index_labels(child, param_labels));
+        }
+        Plan::BitmapHeapScan { bitmapqual, .. } => {
+            annotate_runtime_index_labels(bitmapqual, param_labels);
+        }
+        Plan::Hash { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        }
+        | Plan::Unique { input, .. } => annotate_runtime_index_labels(input, param_labels),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            annotate_runtime_index_labels(left, param_labels);
+            annotate_runtime_index_labels(right, param_labels);
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            annotate_runtime_index_labels(anchor, param_labels);
+            annotate_runtime_index_labels(recursive, param_labels);
+        }
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::Values { .. }
+        | Plan::WorkTableScan { .. } => {}
+    }
+}
+
+fn runtime_label_for_single_param(
+    plan: &Plan,
+    paramid: usize,
+    param_labels: &BTreeMap<usize, String>,
+) -> Option<String> {
+    match plan {
+        Plan::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        }
+        | Plan::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        } => keys
+            .iter()
+            .chain(order_by_keys.iter())
+            .find_map(|key| runtime_key_label_for_single_param(key, paramid, param_labels)),
+        Plan::BitmapIndexScan { keys, .. } => keys
+            .iter()
+            .find_map(|key| runtime_key_label_for_single_param(key, paramid, param_labels)),
+        Plan::BitmapOr { children, .. }
+        | Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => children
+            .iter()
+            .find_map(|child| runtime_label_for_single_param(child, paramid, param_labels)),
+        Plan::BitmapHeapScan { bitmapqual, .. } => {
+            runtime_label_for_single_param(bitmapqual, paramid, param_labels)
+        }
+        Plan::Hash { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        }
+        | Plan::Unique { input, .. } => {
+            runtime_label_for_single_param(input, paramid, param_labels)
+        }
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            runtime_label_for_single_param(left, paramid, param_labels)
+                .or_else(|| runtime_label_for_single_param(right, paramid, param_labels))
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => runtime_label_for_single_param(anchor, paramid, param_labels)
+            .or_else(|| runtime_label_for_single_param(recursive, paramid, param_labels)),
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::Values { .. }
+        | Plan::WorkTableScan { .. } => None,
+    }
+}
+
+fn runtime_key_label_for_single_param(
+    key: &IndexScanKey,
+    paramid: usize,
+    param_labels: &BTreeMap<usize, String>,
+) -> Option<String> {
+    let IndexScanKeyArgument::Runtime(expr) = &key.argument else {
+        return None;
+    };
+    let mut paramids = BTreeSet::new();
+    collect_expr_exec_paramids(expr, &mut paramids);
+    (paramids.len() == 1 && paramids.contains(&paramid))
+        .then(|| render_runtime_param_label(expr, param_labels))
+        .flatten()
+}
+
+fn annotate_runtime_index_key_labels(
+    keys: &mut [IndexScanKey],
+    param_labels: &BTreeMap<usize, String>,
+) {
+    for key in keys {
+        if let IndexScanKeyArgument::Runtime(expr) = &key.argument
+            && let Some(label) = render_runtime_param_label(expr, param_labels)
+        {
+            key.runtime_label = Some(label);
+        }
+    }
+}
+
+fn render_runtime_param_label(
+    expr: &Expr,
+    param_labels: &BTreeMap<usize, String>,
+) -> Option<String> {
+    match expr {
+        Expr::Param(param) if matches!(param.paramkind, ParamKind::Exec) => {
+            param_labels.get(&param.paramid).cloned()
+        }
+        Expr::Cast(inner, ty) => render_runtime_param_label(inner, param_labels)
+            .map(|inner| format!("({inner})::{}", param_label_type_name(*ty))),
+        Expr::Collate { expr: inner, .. } => render_runtime_param_label(inner, param_labels),
+        Expr::Op(op) => {
+            let has_param_label = op
+                .args
+                .iter()
+                .any(|arg| render_runtime_param_label(arg, param_labels).is_some());
+            if !has_param_label {
+                return None;
+            }
+            let op_text = match op.op {
+                crate::include::nodes::primnodes::OpExprKind::Add => "+",
+                crate::include::nodes::primnodes::OpExprKind::Sub => "-",
+                crate::include::nodes::primnodes::OpExprKind::Mul => "*",
+                crate::include::nodes::primnodes::OpExprKind::Div => "/",
+                crate::include::nodes::primnodes::OpExprKind::Mod => "%",
+                crate::include::nodes::primnodes::OpExprKind::Eq => "=",
+                crate::include::nodes::primnodes::OpExprKind::NotEq => "<>",
+                crate::include::nodes::primnodes::OpExprKind::Lt => "<",
+                crate::include::nodes::primnodes::OpExprKind::LtEq => "<=",
+                crate::include::nodes::primnodes::OpExprKind::Gt => ">",
+                crate::include::nodes::primnodes::OpExprKind::GtEq => ">=",
+                _ => return None,
+            };
+            match op.args.as_slice() {
+                [left, right] => Some(format!(
+                    "({} {op_text} {})",
+                    render_runtime_param_label_operand(left, param_labels),
+                    render_runtime_param_label_operand(right, param_labels)
+                )),
+                [inner] => Some(format!(
+                    "({op_text}{})",
+                    render_runtime_param_label_operand(inner, param_labels)
+                )),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn render_runtime_param_label_operand(
+    expr: &Expr,
+    param_labels: &BTreeMap<usize, String>,
+) -> String {
+    render_runtime_param_label(expr, param_labels).unwrap_or_else(|| {
+        let rendered = crate::backend::executor::render_explain_expr(expr, &[]);
+        rendered
+            .strip_prefix('(')
+            .and_then(|value| value.strip_suffix(')'))
+            .unwrap_or(&rendered)
+            .to_string()
+    })
+}
+
 fn memoize_uses_binary_mode(plan: &Plan) -> bool {
     match plan {
         Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => {
             keys.iter().any(|key| key.strategy != 3)
         }
+        Plan::Projection { .. } | Plan::Limit { .. } => true,
         Plan::Filter { input, .. }
-        | Plan::Projection { input, .. }
         | Plan::SubqueryScan { input, .. }
-        | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. } => memoize_uses_binary_mode(input),
         Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
             children.iter().any(memoize_uses_binary_mode)

@@ -26,14 +26,20 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
         (Value::Int64(a), Value::Int32(b)) => a.cmp(&i64::from(*b)),
         (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
         (Value::Xid8(a), Value::Xid8(b)) => a.cmp(b),
-        (Value::Int16(a), Value::Float64(b)) => f64::from(*a).total_cmp(b),
-        (Value::Int32(a), Value::Float64(b)) => f64::from(*a).total_cmp(b),
-        (Value::Int64(a), Value::Float64(b)) => (*a as f64).total_cmp(b),
-        (Value::Float64(a), Value::Int16(b)) => a.total_cmp(&f64::from(*b)),
-        (Value::Float64(a), Value::Int32(b)) => a.total_cmp(&f64::from(*b)),
-        (Value::Float64(a), Value::Int64(b)) => a.total_cmp(&(*b as f64)),
-        (Value::Text(a), Value::Text(b)) => a.cmp(b),
-        (Value::TextRef(_, _), Value::TextRef(_, _)) => Ordering::Equal,
+        (Value::Int16(a), Value::Float64(b)) => pg_float_cmp(f64::from(*a), *b),
+        (Value::Int32(a), Value::Float64(b)) => pg_float_cmp(f64::from(*a), *b),
+        (Value::Int64(a), Value::Float64(b)) => pg_float_cmp(*a as f64, *b),
+        (Value::Float64(a), Value::Int16(b)) => pg_float_cmp(*a, f64::from(*b)),
+        (Value::Float64(a), Value::Int32(b)) => pg_float_cmp(*a, f64::from(*b)),
+        (Value::Float64(a), Value::Int64(b)) => pg_float_cmp(*a, *b as f64),
+        (Value::Text(_) | Value::TextRef(_, _), Value::Text(_) | Value::TextRef(_, _)) => left
+            .as_text()
+            .expect("text-family btree value should expose text")
+            .cmp(
+                right
+                    .as_text()
+                    .expect("text-family btree value should expose text"),
+            ),
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
         (Value::Bytea(a), Value::Bytea(b)) => a.cmp(b),
         (Value::Uuid(a), Value::Uuid(b)) => a.cmp(b),
@@ -57,8 +63,17 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
                 .unwrap()
                 .cmp(&numeric_key_value(b).unwrap())
         }
-        (Value::Float64(a), Value::Float64(b)) => a.total_cmp(b),
+        (Value::Float64(a), Value::Float64(b)) => pg_float_cmp(*a, *b),
         _ => Ordering::Equal,
+    }
+}
+
+fn pg_float_cmp(left: f64, right: f64) -> Ordering {
+    match (left.is_nan(), right.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
     }
 }
 
