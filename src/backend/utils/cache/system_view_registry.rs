@@ -21,6 +21,13 @@ pub enum SyntheticSystemViewKind {
     PgUserMappings,
     PgRoles,
     PgStatActivity,
+    PgStatDatabase,
+    PgStatCheckpointer,
+    PgStatWal,
+    PgStatSlru,
+    PgStatArchiver,
+    PgStatBgwriter,
+    PgStatRecoveryPrefetch,
     PgStatAllTables,
     PgStatUserTables,
     PgStatioUserTables,
@@ -133,6 +140,17 @@ const PG_SETTINGS_ALIASES: &[&str] = &["pg_settings", "pg_catalog.pg_settings"];
 const PG_USER_MAPPINGS_ALIASES: &[&str] = &["pg_user_mappings", "pg_catalog.pg_user_mappings"];
 const PG_ROLES_ALIASES: &[&str] = &["pg_roles", "pg_catalog.pg_roles"];
 const PG_STAT_ACTIVITY_ALIASES: &[&str] = &["pg_stat_activity", "pg_catalog.pg_stat_activity"];
+const PG_STAT_DATABASE_ALIASES: &[&str] = &["pg_stat_database", "pg_catalog.pg_stat_database"];
+const PG_STAT_CHECKPOINTER_ALIASES: &[&str] =
+    &["pg_stat_checkpointer", "pg_catalog.pg_stat_checkpointer"];
+const PG_STAT_WAL_ALIASES: &[&str] = &["pg_stat_wal", "pg_catalog.pg_stat_wal"];
+const PG_STAT_SLRU_ALIASES: &[&str] = &["pg_stat_slru", "pg_catalog.pg_stat_slru"];
+const PG_STAT_ARCHIVER_ALIASES: &[&str] = &["pg_stat_archiver", "pg_catalog.pg_stat_archiver"];
+const PG_STAT_BGWRITER_ALIASES: &[&str] = &["pg_stat_bgwriter", "pg_catalog.pg_stat_bgwriter"];
+const PG_STAT_RECOVERY_PREFETCH_ALIASES: &[&str] = &[
+    "pg_stat_recovery_prefetch",
+    "pg_catalog.pg_stat_recovery_prefetch",
+];
 const PG_STAT_ALL_TABLES_ALIASES: &[&str] =
     &["pg_stat_all_tables", "pg_catalog.pg_stat_all_tables"];
 const PG_STAT_USER_TABLES_ALIASES: &[&str] =
@@ -516,6 +534,112 @@ const PG_SETTINGS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("setting"),
 ];
 
+const PG_STAT_DATABASE_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("datid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::text("datname"),
+    SyntheticSystemViewColumn::new("numbackends", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("xact_commit", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("xact_rollback", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("blks_read", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("blks_hit", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("tup_returned", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("tup_fetched", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("tup_inserted", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("tup_updated", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("tup_deleted", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("conflicts", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("temp_files", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("temp_bytes", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("deadlocks", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("checksum_failures", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new(
+        "checksum_last_failure",
+        SqlType::new(SqlTypeKind::TimestampTz),
+    ),
+    SyntheticSystemViewColumn::new("blk_read_time", SqlType::new(SqlTypeKind::Float8)),
+    SyntheticSystemViewColumn::new("blk_write_time", SqlType::new(SqlTypeKind::Float8)),
+    SyntheticSystemViewColumn::new("session_time", SqlType::new(SqlTypeKind::Float8)),
+    SyntheticSystemViewColumn::new("active_time", SqlType::new(SqlTypeKind::Float8)),
+    SyntheticSystemViewColumn::new(
+        "idle_in_transaction_time",
+        SqlType::new(SqlTypeKind::Float8),
+    ),
+    SyntheticSystemViewColumn::new("sessions", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("sessions_abandoned", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("sessions_fatal", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("sessions_killed", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new(
+        "parallel_workers_to_launch",
+        SqlType::new(SqlTypeKind::Int8),
+    ),
+    SyntheticSystemViewColumn::new("parallel_workers_launched", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("stats_reset", SqlType::new(SqlTypeKind::TimestampTz)),
+];
+
+const PG_STAT_CHECKPOINTER_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("num_timed", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("num_requested", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("num_done", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("restartpoints_timed", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("restartpoints_req", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("restartpoints_done", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("write_time", SqlType::new(SqlTypeKind::Float8)),
+    SyntheticSystemViewColumn::new("sync_time", SqlType::new(SqlTypeKind::Float8)),
+    SyntheticSystemViewColumn::new("buffers_written", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("slru_written", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("stats_reset", SqlType::new(SqlTypeKind::TimestampTz)),
+];
+
+const PG_STAT_WAL_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("wal_records", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("wal_fpi", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("wal_bytes", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("wal_buffers_full", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("stats_reset", SqlType::new(SqlTypeKind::TimestampTz)),
+];
+
+const PG_STAT_SLRU_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("name"),
+    SyntheticSystemViewColumn::new("blks_zeroed", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("blks_hit", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("blks_read", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("blks_written", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("blks_exists", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("flushes", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("truncates", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("stats_reset", SqlType::new(SqlTypeKind::TimestampTz)),
+];
+
+const PG_STAT_ARCHIVER_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("archived_count", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::text("last_archived_wal"),
+    SyntheticSystemViewColumn::new("last_archived_time", SqlType::new(SqlTypeKind::TimestampTz)),
+    SyntheticSystemViewColumn::new("failed_count", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::text("last_failed_wal"),
+    SyntheticSystemViewColumn::new("last_failed_time", SqlType::new(SqlTypeKind::TimestampTz)),
+    SyntheticSystemViewColumn::new("stats_reset", SqlType::new(SqlTypeKind::TimestampTz)),
+];
+
+const PG_STAT_BGWRITER_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("buffers_clean", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("maxwritten_clean", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("buffers_alloc", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("stats_reset", SqlType::new(SqlTypeKind::TimestampTz)),
+];
+
+const PG_STAT_RECOVERY_PREFETCH_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("stats_reset", SqlType::new(SqlTypeKind::TimestampTz)),
+    SyntheticSystemViewColumn::new("prefetch", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("hit", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("skip_init", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("skip_new", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("skip_fpw", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("skip_rep", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("wal_distance", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("block_distance", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("io_depth", SqlType::new(SqlTypeKind::Int4)),
+];
+
 const PG_LOCKS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("locktype"),
     SyntheticSystemViewColumn::new("database", SqlType::new(SqlTypeKind::Oid)),
@@ -803,7 +927,7 @@ const INFORMATION_SCHEMA_FOREIGN_TABLE_OPTIONS_COLUMNS: &[SyntheticSystemViewCol
     SyntheticSystemViewColumn::text("option_value"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 41] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 48] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgEnum,
         canonical_name: "pg_catalog.pg_enum",
@@ -928,6 +1052,55 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 41] = [
         canonical_name: "pg_catalog.pg_stat_activity",
         aliases: PG_STAT_ACTIVITY_ALIASES,
         columns: PG_STAT_ACTIVITY_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgStatDatabase,
+        canonical_name: "pg_catalog.pg_stat_database",
+        aliases: PG_STAT_DATABASE_ALIASES,
+        columns: PG_STAT_DATABASE_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgStatCheckpointer,
+        canonical_name: "pg_catalog.pg_stat_checkpointer",
+        aliases: PG_STAT_CHECKPOINTER_ALIASES,
+        columns: PG_STAT_CHECKPOINTER_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgStatWal,
+        canonical_name: "pg_catalog.pg_stat_wal",
+        aliases: PG_STAT_WAL_ALIASES,
+        columns: PG_STAT_WAL_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgStatSlru,
+        canonical_name: "pg_catalog.pg_stat_slru",
+        aliases: PG_STAT_SLRU_ALIASES,
+        columns: PG_STAT_SLRU_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgStatArchiver,
+        canonical_name: "pg_catalog.pg_stat_archiver",
+        aliases: PG_STAT_ARCHIVER_ALIASES,
+        columns: PG_STAT_ARCHIVER_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgStatBgwriter,
+        canonical_name: "pg_catalog.pg_stat_bgwriter",
+        aliases: PG_STAT_BGWRITER_ALIASES,
+        columns: PG_STAT_BGWRITER_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgStatRecoveryPrefetch,
+        canonical_name: "pg_catalog.pg_stat_recovery_prefetch",
+        aliases: PG_STAT_RECOVERY_PREFETCH_ALIASES,
+        columns: PG_STAT_RECOVERY_PREFETCH_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

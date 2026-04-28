@@ -5240,6 +5240,20 @@ impl Database {
             xid,
             cid,
         )?;
+        {
+            let stats_state = self.session_stats_state(client_id);
+            let mut stats = stats_state.write();
+            for _ in 0..inserted {
+                stats.note_relation_insert_with_persistence(
+                    relation_oid,
+                    match create_stmt.persistence {
+                        TablePersistence::Temporary => 't',
+                        TablePersistence::Permanent | TablePersistence::Unlogged => 'p',
+                    },
+                );
+            }
+            stats.note_io_extend("client backend", "relation", "bulkwrite", 8192);
+        }
         Ok(StatementResult::AffectedRows(inserted))
     }
 
