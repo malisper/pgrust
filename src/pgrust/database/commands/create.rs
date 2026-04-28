@@ -3664,9 +3664,14 @@ impl Database {
             }
         }
         if language_row.oid == PG_LANGUAGE_PLPGSQL_OID {
+            let has_plpgsql_output_args = proargmodes
+                .as_deref()
+                .is_some_and(|modes| modes.iter().any(|mode| matches!(*mode, b'o' | b'b' | b't')));
             let validation_notices = validate_create_function_body_with_options(
                 &create_stmt.body,
-                !output_args.is_empty(),
+                has_plpgsql_output_args,
+                prorettype == VOID_TYPE_OID,
+                proretset,
                 proargnames.as_deref().unwrap_or(&[]),
                 gucs,
             )

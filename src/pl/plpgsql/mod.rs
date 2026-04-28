@@ -7,7 +7,7 @@ mod gram;
 use std::collections::HashMap;
 
 use crate::backend::executor::{ExecError, ExecutorContext, StatementResult};
-use crate::backend::parser::{Catalog, CatalogLookup, DoStatement, ParseError};
+use crate::backend::parser::{Catalog, CatalogLookup, DoStatement, ParseError, parse_statement};
 
 pub use ast::*;
 pub use cache::PlpgsqlFunctionCache;
@@ -37,31 +37,23 @@ pub(crate) fn validate_create_function_body(
     body: &str,
     has_output_args: bool,
 ) -> Result<(), ParseError> {
-    validate_create_function_body_with_options(body, has_output_args, &[], None).map(|_| ())
+    validate_create_function_body_with_options(body, has_output_args, false, false, &[], None)
+        .map(|_| ())
 }
 
 pub(crate) fn validate_create_function_body_with_options(
     body: &str,
     has_output_args: bool,
+    returns_void: bool,
+    returns_set: bool,
     arg_names: &[String],
     gucs: Option<&HashMap<String, String>>,
 ) -> Result<Vec<PlpgsqlValidationNotice>, ParseError> {
     let block = parse_block(body)?;
     validate_declared_cursor_arguments(&block)?;
     validate_raise_placeholders(&block)?;
-    if !has_output_args {
-        let mut notices = Vec::new();
-        validate_shadowed_variables(&block, arg_names, gucs, &mut notices)?;
-        return Ok(notices);
-    }
-    if block_contains_return_expr(&block) {
-        return Err(ParseError::DetailedError {
-            message: "RETURN cannot have a parameter in function with OUT parameters".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "42804",
-        });
-    }
+    validate_return_statements(&block, has_output_args, returns_void, returns_set)?;
+    validate_static_sql(&block)?;
     let mut notices = Vec::new();
     validate_shadowed_variables(&block, arg_names, gucs, &mut notices)?;
     Ok(notices)
@@ -325,36 +317,283 @@ fn cursor_arg_error(message: String) -> ParseError {
     }
 }
 
-fn block_contains_return_expr(block: &Block) -> bool {
-    block.statements.iter().any(stmt_contains_return_expr)
-        || block
-            .exception_handlers
-            .iter()
-            .any(|handler| handler.statements.iter().any(stmt_contains_return_expr))
+fn validate_return_statements(
+    block: &Block,
+    has_output_args: bool,
+    returns_void: bool,
+    returns_set: bool,
+) -> Result<(), ParseError> {
+    for stmt in &block.statements {
+        validate_return_stmt_in_stmt(stmt, has_output_args, returns_void, returns_set)?;
+    }
+    for handler in &block.exception_handlers {
+        for stmt in &handler.statements {
+            validate_return_stmt_in_stmt(stmt, has_output_args, returns_void, returns_set)?;
+        }
+    }
+    Ok(())
 }
 
-fn stmt_contains_return_expr(stmt: &Stmt) -> bool {
+fn validate_return_stmt_in_stmt(
+    stmt: &Stmt,
+    has_output_args: bool,
+    returns_void: bool,
+    returns_set: bool,
+) -> Result<(), ParseError> {
     match stmt {
-        Stmt::WithLine { stmt, .. } => stmt_contains_return_expr(stmt),
-        Stmt::Return { expr: Some(_) } => true,
-        Stmt::Continue => false,
-        Stmt::Block(block) => block_contains_return_expr(block),
+        Stmt::WithLine { stmt, .. } => {
+            validate_return_stmt_in_stmt(stmt, has_output_args, returns_void, returns_set)
+        }
+        Stmt::Return { expr: Some(_) } if has_output_args => Err(ParseError::DetailedError {
+            message: "RETURN cannot have a parameter in function with OUT parameters".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        }),
+        Stmt::Return { expr: Some(_) } if returns_void => Err(ParseError::DetailedError {
+            message: "RETURN cannot have a parameter in function returning void".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        }),
+        Stmt::Return { expr: None } if !has_output_args && !returns_void && !returns_set => {
+            Err(ParseError::DetailedError {
+                message: "missing expression at or near \";\"".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            })
+        }
+        Stmt::Block(block) => {
+            validate_return_statements(block, has_output_args, returns_void, returns_set)
+        }
+        Stmt::Continue => Ok(()),
         Stmt::If {
             branches,
             else_branch,
         } => {
-            branches
-                .iter()
-                .any(|(_, body)| body.iter().any(stmt_contains_return_expr))
-                || else_branch.iter().any(stmt_contains_return_expr)
+            for (_, body) in branches {
+                for stmt in body {
+                    validate_return_stmt_in_stmt(stmt, has_output_args, returns_void, returns_set)?;
+                }
+            }
+            for stmt in else_branch {
+                validate_return_stmt_in_stmt(stmt, has_output_args, returns_void, returns_set)?;
+            }
+            Ok(())
         }
         Stmt::While { body, .. }
         | Stmt::Loop { body }
         | Stmt::ForInt { body, .. }
         | Stmt::ForQuery { body, .. }
-        | Stmt::ForEach { body, .. } => body.iter().any(stmt_contains_return_expr),
+        | Stmt::ForEach { body, .. } => {
+            for stmt in body {
+                validate_return_stmt_in_stmt(stmt, has_output_args, returns_void, returns_set)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_static_sql(block: &Block) -> Result<(), ParseError> {
+    for decl in &block.declarations {
+        if let Decl::Cursor(cursor) = decl {
+            validate_static_select_sql(&cursor.query)?;
+        }
+    }
+    for stmt in &block.statements {
+        validate_static_sql_in_stmt(stmt)?;
+    }
+    for handler in &block.exception_handlers {
+        for stmt in &handler.statements {
+            validate_static_sql_in_stmt(stmt)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_static_sql_in_stmt(stmt: &Stmt) -> Result<(), ParseError> {
+    match stmt {
+        Stmt::WithLine { stmt, .. } => validate_static_sql_in_stmt(stmt),
+        Stmt::Block(block) => validate_static_sql(block),
+        Stmt::If {
+            branches,
+            else_branch,
+        } => {
+            for (_, body) in branches {
+                for stmt in body {
+                    validate_static_sql_in_stmt(stmt)?;
+                }
+            }
+            for stmt in else_branch {
+                validate_static_sql_in_stmt(stmt)?;
+            }
+            Ok(())
+        }
+        Stmt::While { body, .. }
+        | Stmt::Loop { body }
+        | Stmt::ForInt { body, .. }
+        | Stmt::ForEach { body, .. } => {
+            for stmt in body {
+                validate_static_sql_in_stmt(stmt)?;
+            }
+            Ok(())
+        }
+        Stmt::ForQuery { source, body, .. } => {
+            if let ForQuerySource::Static(sql) = source {
+                validate_static_select_sql(sql)?;
+            }
+            for stmt in body {
+                validate_static_sql_in_stmt(stmt)?;
+            }
+            Ok(())
+        }
+        Stmt::ReturnQuery { source } => {
+            if let ForQuerySource::Static(sql) = source {
+                validate_static_select_sql(sql)?;
+            }
+            Ok(())
+        }
+        Stmt::OpenCursor {
+            source: OpenCursorSource::Static(sql),
+            ..
+        } => validate_static_select_sql(sql),
+        Stmt::Perform { sql, .. } => validate_static_sql_text(&format!("select {sql}")),
+        Stmt::ExecSql { sql } if should_validate_exec_sql(sql) => validate_static_sql_text(sql),
+        _ => Ok(()),
+    }
+}
+
+fn validate_static_select_sql(sql: &str) -> Result<(), ParseError> {
+    validate_static_sql_text(sql)
+}
+
+fn should_validate_exec_sql(sql: &str) -> bool {
+    let lowered = sql.to_ascii_lowercase();
+    let words = lowered.split_whitespace().collect::<Vec<_>>();
+    !sql.contains('$') && !words.iter().any(|word| *word == "into")
+}
+
+fn validate_static_sql_text(sql: &str) -> Result<(), ParseError> {
+    if let Some(token) = malformed_select_alias_token(sql) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "statement",
+            actual: format!("syntax error at or near \"{token}\""),
+        });
+    }
+    if should_defer_static_sql_validation(sql) {
+        return Ok(());
+    }
+    match parse_statement(sql) {
+        Ok(_) => Ok(()),
+        Err(err) if is_static_sql_syntax_error(err.unpositioned()) => {
+            Err(err.unpositioned().clone())
+        }
+        Err(_) => Ok(()),
+    }
+}
+
+fn is_static_sql_syntax_error(err: &ParseError) -> bool {
+    match err {
+        ParseError::UnexpectedToken { actual, .. } => {
+            actual.starts_with("syntax error at or near ")
+        }
+        ParseError::UnexpectedEof => true,
         _ => false,
     }
+}
+
+fn should_defer_static_sql_validation(sql: &str) -> bool {
+    let Some(first_word) = sql.split_whitespace().next() else {
+        return true;
+    };
+    if sql.contains(":=") || sql.contains('[') {
+        return true;
+    }
+    matches!(
+        first_word.to_ascii_lowercase().as_str(),
+        "alter"
+            | "call"
+            | "close"
+            | "comment"
+            | "create"
+            | "delete"
+            | "drop"
+            | "execute"
+            | "fetch"
+            | "insert"
+            | "move"
+            | "open"
+            | "reset"
+            | "select"
+            | "set"
+            | "truncate"
+            | "update"
+            | "values"
+            | "with"
+    )
+}
+
+fn malformed_select_alias_token(sql: &str) -> Option<String> {
+    let trimmed = sql.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("select ") {
+        return None;
+    }
+    let after_select = trimmed.get("select".len()..).unwrap_or_default();
+    let after_select_lower = lower.get("select".len()..).unwrap_or_default();
+    let select_list = after_select_lower
+        .find(" from ")
+        .and_then(|index| after_select.get(..index))
+        .unwrap_or(after_select);
+    for item in select_list.split(',') {
+        let words = item.split_whitespace().take(3).collect::<Vec<_>>();
+        if words.len() < 3 {
+            continue;
+        }
+        if words.iter().all(|word| is_bare_identifier(word))
+            && !words[1..].iter().any(|word| is_select_expr_keyword(word))
+        {
+            return Some(words[2].trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+fn is_bare_identifier(word: &str) -> bool {
+    let mut chars = word.chars();
+    matches!(chars.next(), Some(ch) if ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_select_expr_keyword(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "and"
+            | "as"
+            | "between"
+            | "case"
+            | "collate"
+            | "else"
+            | "end"
+            | "from"
+            | "full"
+            | "cross"
+            | "inner"
+            | "join"
+            | "in"
+            | "is"
+            | "left"
+            | "like"
+            | "not"
+            | "null"
+            | "on"
+            | "or"
+            | "right"
+            | "then"
+            | "when"
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

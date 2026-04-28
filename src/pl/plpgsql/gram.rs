@@ -2217,6 +2217,38 @@ mod tests {
     }
 
     #[test]
+    fn parse_multiple_exception_handlers() {
+        let block = parse_block(
+            "
+            begin
+                begin
+                    null;
+                exception
+                    when substring_error then
+                        raise notice 'wrong';
+                    when division_by_zero then
+                        raise notice 'right';
+                end;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::Block(nested) = unline(&block.statements[0]) else {
+            panic!("expected nested block statement");
+        };
+        assert_eq!(nested.exception_handlers.len(), 2);
+        assert_eq!(
+            nested.exception_handlers[0].conditions,
+            vec![ExceptionCondition::ConditionName("substring_error".into())]
+        );
+        assert_eq!(
+            nested.exception_handlers[1].conditions,
+            vec![ExceptionCondition::ConditionName("division_by_zero".into())]
+        );
+    }
+
+    #[test]
     fn parse_assert_and_dynamic_execute() {
         let block = parse_block(
             "

@@ -73,6 +73,7 @@ stmt_keyword_start = _{
     | kw_for
     | kw_loop
     | kw_exit
+    | kw_when
     | kw_perform
     | kw_raise
     | kw_assert

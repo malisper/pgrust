@@ -36,6 +36,8 @@ pub(crate) struct CompiledBlock {
     pub(crate) local_slots: Vec<CompiledVar>,
     pub(crate) statements: Vec<CompiledStmt>,
     pub(crate) exception_handlers: Vec<CompiledExceptionHandler>,
+    pub(crate) exception_sqlstate_slot: Option<usize>,
+    pub(crate) exception_sqlerrm_slot: Option<usize>,
     pub(crate) total_slots: usize,
 }
 
@@ -427,6 +429,8 @@ struct CompileEnv {
     declared_cursors: HashMap<String, DeclaredCursor>,
     parameter_slots: Vec<ScopeVar>,
     positional_parameter_names: Vec<String>,
+    exception_sqlstate: Option<ScopeVar>,
+    exception_sqlerrm: Option<ScopeVar>,
     next_slot: usize,
 }
 
@@ -436,11 +440,53 @@ impl CompileEnv {
     }
 
     fn define_var(&mut self, name: &str, ty: SqlType) -> usize {
-        let slot = self.next_slot;
-        self.next_slot += 1;
+        let slot = self.allocate_slot();
         self.vars
             .insert(name.to_ascii_lowercase(), ScopeVar { slot, ty });
         slot
+    }
+
+    fn allocate_slot(&mut self) -> usize {
+        let slot = self.next_slot;
+        self.next_slot += 1;
+        slot
+    }
+
+    fn define_exception_slots(&mut self) -> (usize, usize) {
+        let text_ty = SqlType::new(SqlTypeKind::Text);
+        let sqlstate_slot = self.allocate_slot();
+        let sqlerrm_slot = self.allocate_slot();
+        self.exception_sqlstate = Some(ScopeVar {
+            slot: sqlstate_slot,
+            ty: text_ty,
+        });
+        self.exception_sqlerrm = Some(ScopeVar {
+            slot: sqlerrm_slot,
+            ty: text_ty,
+        });
+        (sqlstate_slot, sqlerrm_slot)
+    }
+
+    fn with_exception_vars<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, ParseError>,
+    ) -> Result<T, ParseError> {
+        let saved_sqlstate = self.vars.insert(
+            "sqlstate".into(),
+            self.exception_sqlstate
+                .clone()
+                .ok_or(ParseError::UnexpectedEof)?,
+        );
+        let saved_sqlerrm = self.vars.insert(
+            "sqlerrm".into(),
+            self.exception_sqlerrm
+                .clone()
+                .ok_or(ParseError::UnexpectedEof)?,
+        );
+        let result = f(self);
+        restore_optional_var(&mut self.vars, "sqlstate", saved_sqlstate);
+        restore_optional_var(&mut self.vars, "sqlerrm", saved_sqlerrm);
+        result
     }
 
     fn define_parameter_var(&mut self, name: &str, ty: SqlType) -> usize {
@@ -703,14 +749,24 @@ impl CompileEnv {
     }
 }
 
+fn restore_optional_var(vars: &mut HashMap<String, ScopeVar>, name: &str, saved: Option<ScopeVar>) {
+    match saved {
+        Some(var) => {
+            vars.insert(name.into(), var);
+        }
+        None => {
+            vars.remove(name);
+        }
+    }
+}
+
 pub(crate) fn compile_do_block(
     block: &Block,
     catalog: &dyn CatalogLookup,
 ) -> Result<CompiledBlock, ParseError> {
     let mut env = CompileEnv::default();
     let _ = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
-    let _ = env.define_var("sqlstate", SqlType::new(SqlTypeKind::Text));
-    let _ = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
+    let _ = env.define_exception_slots();
     compile_block(block, catalog, &mut env, None)
 }
 
@@ -720,8 +776,7 @@ pub(crate) fn compile_do_function(
 ) -> Result<CompiledFunction, ParseError> {
     let mut env = CompileEnv::default();
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
-    let sqlstate_slot = env.define_var("sqlstate", SqlType::new(SqlTypeKind::Text));
-    let sqlerrm_slot = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
+    let (sqlstate_slot, sqlerrm_slot) = env.define_exception_slots();
     let return_contract = FunctionReturnContract::Scalar {
         ty: SqlType::new(SqlTypeKind::Void),
         setof: false,
@@ -849,8 +904,7 @@ pub(crate) fn compile_function_from_proc(
     }
 
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
-    let sqlstate_slot = env.define_var("sqlstate", SqlType::new(SqlTypeKind::Text));
-    let sqlerrm_slot = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
+    let (sqlstate_slot, sqlerrm_slot) = env.define_exception_slots();
 
     let return_contract = function_return_contract(row, catalog, &output_slots)?;
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
@@ -916,8 +970,7 @@ pub(crate) fn compile_trigger_function_from_proc(
         .collect();
     let bindings = seed_trigger_env(&mut env, relation_desc);
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
-    let sqlstate_slot = env.define_var("sqlstate", SqlType::new(SqlTypeKind::Text));
-    let sqlerrm_slot = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
+    let (sqlstate_slot, sqlerrm_slot) = env.define_exception_slots();
     let return_contract = FunctionReturnContract::Trigger { bindings };
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
@@ -1103,14 +1156,12 @@ fn compile_block(
         .exception_handlers
         .iter()
         .map(|handler| {
+            let statements = env.with_exception_vars(|handler_env| {
+                compile_stmt_list(&handler.statements, catalog, handler_env, return_contract)
+            })?;
             Ok(CompiledExceptionHandler {
                 conditions: handler.conditions.clone(),
-                statements: compile_stmt_list(
-                    &handler.statements,
-                    catalog,
-                    &mut env,
-                    return_contract,
-                )?,
+                statements,
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
@@ -1119,6 +1170,8 @@ fn compile_block(
         local_slots,
         statements,
         exception_handlers,
+        exception_sqlstate_slot: env.exception_sqlstate.as_ref().map(|var| var.slot),
+        exception_sqlerrm_slot: env.exception_sqlerrm.as_ref().map(|var| var.slot),
         total_slots: outer.next_slot,
     })
 }

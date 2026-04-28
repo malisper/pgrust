@@ -586,6 +586,7 @@ pub fn execute_user_defined_trigger_function(
     };
     state.values[compiled.found_slot] = Value::Bool(false);
     state.values[compiled.sqlstate_slot] = Value::Text(String::new().into());
+    state.values[compiled.sqlerrm_slot] = Value::Text(String::new().into());
     seed_trigger_state(bindings, call, &mut state);
     let saved_pinned_cte_tables = ctx.pinned_cte_tables.clone();
     let saved_cte_tables = ctx.cte_tables.clone();
@@ -1331,6 +1332,7 @@ fn execute_compiled_function(
     };
     state.values[compiled.found_slot] = Value::Bool(false);
     state.values[compiled.sqlstate_slot] = Value::Text(String::new().into());
+    state.values[compiled.sqlerrm_slot] = Value::Text(String::new().into());
     for (slot_def, arg_value) in compiled.parameter_slots.iter().zip(arg_values.iter()) {
         state.values[slot_def.slot] = cast_value(arg_value.clone(), slot_def.ty)?;
     }
@@ -1477,17 +1479,25 @@ fn exec_do_block(
 }
 
 fn exec_do_exception_handlers(
-    handlers: &[CompiledExceptionHandler],
+    block: &CompiledBlock,
     err: &ExecError,
     values: &mut [Value],
     gucs: &HashMap<String, String>,
 ) -> Result<Option<()>, ExecError> {
-    let Some(handler) = handlers
+    let Some(handler) = block
+        .exception_handlers
         .iter()
         .find(|handler| handler_matches(handler, err))
     else {
         return Ok(None);
     };
+    let current = exception_data_from_error(err);
+    if let Some(slot) = block.exception_sqlstate_slot {
+        values[slot] = Value::Text(current.sqlstate.into());
+    }
+    if let Some(slot) = block.exception_sqlerrm_slot {
+        values[slot] = Value::Text(current.message.into());
+    }
     for stmt in &handler.statements {
         if matches!(exec_do_stmt(stmt, values, gucs)?, DoControl::LoopContinue) {
             return Ok(Some(()));

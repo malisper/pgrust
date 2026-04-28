@@ -48875,6 +48875,89 @@ fn plpgsql_raise_placeholder_mismatch_fails_at_create_time() {
 }
 
 #[test]
+fn plpgsql_static_sql_syntax_is_validated_at_create_time() {
+    let dir = temp_dir("plpgsql_static_sql_validation");
+    let db = Database::open(&dir, 64).unwrap();
+
+    let err = db
+        .execute(
+            1,
+            "create function bad_static_sql() returns int4 language plpgsql as $$ begin Johnny Yuma; return 1; end $$",
+        )
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("Johnny"), "{err:?}");
+
+    let err = db
+        .execute(
+            1,
+            "create function bad_static_loop_sql() returns int4 language plpgsql as $$ declare r record; begin for r in select I fought the law, the law won loop return 1; end loop; return 2; end $$",
+        )
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("the"), "{err:?}");
+}
+
+#[test]
+fn plpgsql_return_shape_is_validated_at_create_time() {
+    let dir = temp_dir("plpgsql_return_shape_validation");
+    let db = Database::open(&dir, 64).unwrap();
+
+    let missing = db
+        .execute(
+            1,
+            "create function missing_return_expr() returns int4 language plpgsql as $$ begin return; end $$",
+        )
+        .unwrap_err();
+    assert!(
+        format!("{missing:?}").contains("missing expression"),
+        "{missing:?}"
+    );
+
+    let void_expr = db
+        .execute(
+            1,
+            "create function void_return_expr() returns void language plpgsql as $$ begin return 5; end $$",
+        )
+        .unwrap_err();
+    assert!(
+        format!("{void_expr:?}")
+            .contains("RETURN cannot have a parameter in function returning void"),
+        "{void_expr:?}"
+    );
+
+    db.execute(
+        1,
+        "create function void_return_ok() returns void language plpgsql as $$ begin perform 2 + 2; end $$",
+    )
+    .unwrap();
+}
+
+#[test]
+fn plpgsql_sqlstate_sqlerrm_are_visible_only_in_exception_handlers() {
+    let dir = temp_dir("plpgsql_exception_var_scope");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function sqlstate_outside_handler() returns void language plpgsql as $$ begin raise notice '%', sqlstate; end $$",
+    )
+    .unwrap();
+    let err = db
+        .execute(1, "select sqlstate_outside_handler()")
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("sqlstate"), "{err:?}");
+
+    db.execute(
+        1,
+        "create function sqlstate_inside_handler() returns text language plpgsql as $$ begin raise exception 'boom'; exception when others then return sqlstate || ':' || sqlerrm; end $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select sqlstate_inside_handler()"),
+        vec![vec![Value::Text("P0001:boom".into())]]
+    );
+}
+
+#[test]
 fn plpgsql_return_query_execute_supports_using() {
     let dir = temp_dir("plpgsql_return_query_execute_using");
     let db = Database::open(&dir, 64).unwrap();
