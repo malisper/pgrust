@@ -2231,8 +2231,18 @@ fn exec_function_stmt(
             name,
             source,
             scrollable,
+            constant,
         } => {
-            exec_function_open_cursor(*slot, name, source, *scrollable, compiled, state, ctx)?;
+            exec_function_open_cursor(
+                *slot,
+                name,
+                source,
+                *scrollable,
+                *constant,
+                compiled,
+                state,
+                ctx,
+            )?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::FetchCursor {
@@ -3880,13 +3890,23 @@ fn exec_function_open_cursor(
     name: &str,
     source: &CompiledCursorOpenSource,
     scrollable: bool,
+    constant: bool,
     compiled: &CompiledFunction,
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
+    if constant && !refcursor_slot_has_name(slot, state) {
+        return Err(function_runtime_error(
+            &format!("variable \"{name}\" is declared CONSTANT"),
+            None,
+            "22005",
+        ));
+    }
     let portal_name = cursor_name_for_slot(slot, name, state);
     let result = execute_cursor_open_source(source, compiled, state, ctx)?;
-    state.values[slot] = Value::Text(portal_name.clone().into());
+    if !constant {
+        state.values[slot] = Value::Text(portal_name.clone().into());
+    }
     state.cursors.insert(
         portal_name,
         FunctionCursor {
@@ -3897,6 +3917,12 @@ fn exec_function_open_cursor(
         },
     );
     Ok(())
+}
+
+fn refcursor_slot_has_name(slot: usize, state: &FunctionState) -> bool {
+    state.values[slot]
+        .as_text()
+        .is_some_and(|name| !name.is_empty())
 }
 
 fn execute_cursor_query_result(

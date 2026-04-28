@@ -14,6 +14,7 @@ pub struct VarDecl {
     pub type_name: String,
     pub ty: SqlType,
     pub default_expr: Option<String>,
+    pub constant: bool,
     pub strict: bool,
 }
 

@@ -364,6 +364,7 @@ pub(crate) enum CompiledStmt {
         name: String,
         source: CompiledCursorOpenSource,
         scrollable: bool,
+        constant: bool,
     },
     FetchCursor {
         slot: usize,
@@ -419,6 +420,7 @@ pub(crate) enum CompiledStmt {
 struct ScopeVar {
     slot: usize,
     ty: SqlType,
+    constant: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -461,9 +463,13 @@ impl CompileEnv {
     }
 
     fn define_var(&mut self, name: &str, ty: SqlType) -> usize {
+        self.define_var_with_options(name, ty, false)
+    }
+
+    fn define_var_with_options(&mut self, name: &str, ty: SqlType, constant: bool) -> usize {
         let slot = self.allocate_slot();
         self.vars
-            .insert(name.to_ascii_lowercase(), ScopeVar { slot, ty });
+            .insert(name.to_ascii_lowercase(), ScopeVar { slot, ty, constant });
         slot
     }
 
@@ -480,10 +486,12 @@ impl CompileEnv {
         self.exception_sqlstate = Some(ScopeVar {
             slot: sqlstate_slot,
             ty: text_ty,
+            constant: false,
         });
         self.exception_sqlerrm = Some(ScopeVar {
             slot: sqlerrm_slot,
             ty: text_ty,
+            constant: false,
         });
         (sqlstate_slot, sqlerrm_slot)
     }
@@ -512,17 +520,33 @@ impl CompileEnv {
 
     fn define_parameter_var(&mut self, name: &str, ty: SqlType) -> usize {
         let slot = self.define_var(name, ty);
-        self.parameter_slots.push(ScopeVar { slot, ty });
+        self.parameter_slots.push(ScopeVar {
+            slot,
+            ty,
+            constant: false,
+        });
         let positional_name = positional_parameter_var_name(self.parameter_slots.len());
-        self.vars
-            .insert(positional_name.clone(), ScopeVar { slot, ty });
+        self.vars.insert(
+            positional_name.clone(),
+            ScopeVar {
+                slot,
+                ty,
+                constant: false,
+            },
+        );
         self.positional_parameter_names.push(positional_name);
         slot
     }
 
     fn define_alias(&mut self, name: &str, slot: usize, ty: SqlType) {
-        self.vars
-            .insert(name.to_ascii_lowercase(), ScopeVar { slot, ty });
+        self.vars.insert(
+            name.to_ascii_lowercase(),
+            ScopeVar {
+                slot,
+                ty,
+                constant: false,
+            },
+        );
     }
 
     fn update_slot_type(&mut self, slot: usize, ty: SqlType) {
@@ -1203,7 +1227,7 @@ fn compile_var_decl(
     env: &mut CompileEnv,
 ) -> Result<CompiledVar, ParseError> {
     let ty = resolve_decl_type(&decl.type_name, catalog)?;
-    let slot = env.define_var(&decl.name, ty);
+    let slot = env.define_var_with_options(&decl.name, ty, decl.constant);
     let default_expr = decl
         .default_expr
         .as_deref()
@@ -2129,13 +2153,18 @@ fn compile_open_cursor_stmt(
     catalog: &dyn CatalogLookup,
     env: &mut CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
-    let (slot, _) = resolve_assign_target(&AssignTarget::Name(name.to_string()), env)?;
+    let var = env
+        .get_var(name)
+        .ok_or_else(|| ParseError::UnknownColumn(name.to_string()))?;
+    let slot = var.slot;
+    let constant = var.constant;
     let (source, scrollable, _) = compile_cursor_open_source(name, source, catalog, env)?;
     Ok(CompiledStmt::OpenCursor {
         slot,
         name: name.to_string(),
         source,
         scrollable,
+        constant,
     })
 }
 
@@ -4726,7 +4755,19 @@ fn resolve_assign_target(
             }),
         AssignTarget::Name(name) => env
             .get_var(name)
-            .map(|var| (var.slot, var.ty))
+            .map(|var| {
+                if var.constant {
+                    Err(ParseError::DetailedError {
+                        message: format!("variable \"{name}\" is declared CONSTANT"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "22005",
+                    })
+                } else {
+                    Ok((var.slot, var.ty))
+                }
+            })
+            .transpose()?
             .ok_or_else(|| ParseError::UnknownColumn(name.clone())),
         AssignTarget::Field { relation, field } => env
             .get_relation_field(relation, field)

@@ -48044,6 +48044,62 @@ fn plpgsql_refcursor_open_fetch_close_work() {
 }
 
 #[test]
+fn plpgsql_constant_refcursor_requires_portal_name() {
+    let dir = temp_dir("plpgsql_constant_refcursor");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table pl_constant_cursor_items (id int4)")
+        .unwrap();
+    db.execute(1, "insert into pl_constant_cursor_items values (1)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function constant_refcursor_without_name() returns refcursor language plpgsql as $$
+            declare
+                rc constant refcursor;
+            begin
+                open rc for select id from pl_constant_cursor_items;
+                return rc;
+            end
+        $$",
+    )
+    .unwrap();
+    let err = db
+        .execute(1, "select constant_refcursor_without_name()")
+        .expect_err("constant refcursor without name should fail");
+    let root = match &err {
+        ExecError::WithContext { source, .. } => source.as_ref(),
+        other => other,
+    };
+    match root {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => {
+            assert_eq!(message, "variable \"rc\" is declared CONSTANT");
+            assert_eq!(*sqlstate, "22005");
+        }
+        other => panic!("expected constant refcursor error, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create function constant_refcursor_with_name() returns refcursor language plpgsql as $$
+            declare
+                rc constant refcursor := 'my_cursor_name';
+            begin
+                open rc for select id from pl_constant_cursor_items;
+                return rc;
+            end
+        $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select constant_refcursor_with_name()"),
+        vec![vec![Value::Text("my_cursor_name".into())]]
+    );
+}
+
+#[test]
 fn drop_function_ignores_argument_names_and_out_only_modes() {
     let dir = temp_dir("drop_function_mode_signature");
     let db = Database::open(&dir, 64).unwrap();

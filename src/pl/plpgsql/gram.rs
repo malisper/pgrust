@@ -147,12 +147,17 @@ fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
     let mut name = None;
     let mut ty = None;
     let mut default_expr = None;
+    let mut constant = false;
     let mut strict = false;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::ident => name = Some(build_ident(part)),
             Rule::type_name_text => {
                 let mut type_name = part.as_str().trim();
+                if let Some(suffix) = strip_leading_keyword(type_name, "constant") {
+                    type_name = suffix.trim_start();
+                    constant = true;
+                }
                 if let Some(prefix) = strip_trailing_keyword(type_name, "strict") {
                     type_name = prefix.trim_end();
                     strict = true;
@@ -176,6 +181,7 @@ fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
             .ok_or(ParseError::UnexpectedEof)?,
         ty: ty.map(|(_, ty)| ty).ok_or(ParseError::UnexpectedEof)?,
         default_expr,
+        constant,
         strict,
     })
 }
@@ -348,6 +354,24 @@ fn strip_trailing_keyword<'a>(input: &'a str, keyword: &str) -> Option<&'a str> 
         return None;
     }
     Some(&trimmed[..start])
+}
+
+fn strip_leading_keyword<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    let trimmed = input.trim_start();
+    if trimmed.len() < keyword.len() {
+        return None;
+    }
+    if !trimmed[..keyword.len()].eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    if trimmed[keyword.len()..]
+        .chars()
+        .next()
+        .is_some_and(is_identifier_char)
+    {
+        return None;
+    }
+    Some(&trimmed[keyword.len()..])
 }
 
 fn decl_type_hint(type_name: &str) -> Result<SqlType, ParseError> {
@@ -1948,6 +1972,28 @@ mod tests {
             panic!("expected variable declaration");
         };
         assert_eq!(row_decl.type_name, "System%ROWTYPE");
+    }
+
+    #[test]
+    fn parse_constant_var_declaration() {
+        let block = parse_block(
+            "
+            declare
+                rc constant refcursor := 'my_cursor_name';
+            begin
+                null;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Decl::Var(decl) = &block.declarations[0] else {
+            panic!("expected variable declaration");
+        };
+        assert_eq!(decl.name, "rc");
+        assert!(decl.constant);
+        assert_eq!(decl.type_name, "refcursor");
+        assert_eq!(decl.default_expr.as_deref(), Some("'my_cursor_name'"));
     }
 
     #[test]
