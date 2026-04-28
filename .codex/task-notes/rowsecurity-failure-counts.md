@@ -146,3 +146,12 @@ COPY FROM RLS bucket:
 - `scripts/cargo_isolated.sh check` passed.
 - Latest rowsecurity regression result: `656/774` matched, `118` mismatches,
   `2068` diff lines. New diff copied to `/tmp/diffs/rowsecurity.diff`.
+
+COPY TO privilege-order bucket:
+- COPY TO relation sources now check SELECT privileges before running the
+  generated SELECT, so plain permission errors win over RLS errors for users
+  without table access.
+- Focused COPY TO and relation privilege tests passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result: `658/774` matched, `116` mismatches,
+  `2053` diff lines. New diff copied to `/tmp/diffs/rowsecurity.diff`.

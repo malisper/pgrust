@@ -12506,7 +12506,7 @@ impl Session {
                         sqlstate: "55000",
                     });
                 }
-                self.ensure_copy_to_relation_source(db, name)?;
+                self.ensure_copy_to_relation_source(db, name, columns.as_deref())?;
                 let select_list = columns
                     .as_ref()
                     .map(|columns| columns.join(", "))
@@ -13392,7 +13392,7 @@ impl Session {
                 table_name,
                 columns,
             } => {
-                self.ensure_copy_to_relation_source(db, table_name)?;
+                self.ensure_copy_to_relation_source(db, table_name, columns.as_deref())?;
                 relation_copy_to_query_sql(table_name, columns.as_deref())
             }
             CopyToSource::Query { statement, sql } => {
@@ -13459,11 +13459,38 @@ impl Session {
         &self,
         db: &Database,
         table_name: &str,
+        columns: Option<&[String]>,
     ) -> Result<(), ExecError> {
         let catalog = self.catalog_lookup(db);
         let Some(relation) = catalog.lookup_any_relation(table_name) else {
             return Ok(());
         };
+        let snapshot = db
+            .txns
+            .read()
+            .snapshot_for_command(INVALID_TRANSACTION_ID, 0)?;
+        let ctx = self.executor_context_for_catalog(db, snapshot, 0, &catalog, None, None);
+        let selected_columns = if let Some(columns) = columns {
+            columns
+                .iter()
+                .map(|name| {
+                    relation
+                        .desc
+                        .columns
+                        .iter()
+                        .position(|column| !column.dropped && column.name == *name)
+                        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(name.clone())))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            relation.desc.visible_column_indexes()
+        };
+        check_relation_column_privileges(
+            &ctx,
+            relation.relation_oid,
+            'r',
+            selected_columns.iter().copied(),
+        )?;
         if matches!(relation.relkind, 'r' | 'm') && relation.relispopulated {
             return Ok(());
         }
