@@ -2590,6 +2590,28 @@ fn parse_create_statistics_without_explicit_name() {
 }
 
 #[test]
+fn parse_create_statistics_function_call_targets() {
+    let stmt = parse_statement(
+        "create statistics s on date_trunc('day', d), public.upper(b), (a + b) from items",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateStatistics(CreateStatisticsStatement {
+            if_not_exists: false,
+            statistics_name: Some("s".into()),
+            kinds: vec![],
+            targets: vec![
+                "date_trunc('day', d)".into(),
+                "public.upper(b)".into(),
+                "(a + b)".into(),
+            ],
+            from_clause: "items".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_statistics_ddl_statements() {
     assert!(matches!(
         parse_statement("alter statistics if exists public.tst rename to public.tst2").unwrap(),
@@ -6467,6 +6489,21 @@ fn parse_drop_function_statement_with_signature() {
 }
 
 #[test]
+fn parse_drop_function_statement_without_signature() {
+    let stmt = parse_statement("drop function if exists public.p2text cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropFunction(DropFunctionStatement {
+            if_exists: true,
+            schema_name: Some("public".into()),
+            function_name: "p2text".into(),
+            arg_types: vec![],
+            cascade: true,
+        })
+    );
+}
+
+#[test]
 fn parse_call_statement_with_named_and_positional_args() {
     let stmt = parse_statement("call public.ptest5(10, b => 'Hello')").unwrap();
     assert_eq!(
@@ -8938,6 +8975,48 @@ fn build_plan_in_list_common_type_includes_left_operand() {
                 if *ty == SqlType::new(SqlTypeKind::Numeric))
                 && matches!(saop.right.as_ref(), Expr::ArrayLiteral { array_type, .. }
                     if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Numeric)))
+    ));
+}
+
+#[test]
+fn build_plan_binds_stats_ext_any_and_function_predicates() {
+    let plan = build_plan(
+        &parse_select(
+            "select (id * 2) < any (array[2, 102]), upper(name) > '1', \
+             (id * 2) < any (array[2, 102]) and upper(name) > '1' from people",
+        )
+        .unwrap(),
+        &catalog(),
+    )
+    .unwrap();
+    let Plan::Projection { targets, .. } = plan else {
+        panic!("expected projection plan");
+    };
+
+    assert_eq!(targets.len(), 3);
+    assert!(matches!(
+        &targets[0].expr,
+        Expr::ScalarArrayOp(saop)
+            if saop.op == SubqueryComparisonOp::Lt
+                && saop.use_or
+                && matches!(saop.right.as_ref(), Expr::ArrayLiteral { array_type, .. }
+                    if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
+    ));
+    assert!(matches!(
+        &targets[1].expr,
+        Expr::Op(op)
+            if op.op == crate::include::nodes::primnodes::OpExprKind::Gt
+                && matches!(op.args.as_slice(), [Expr::Func(func), _]
+                    if func.implementation
+                        == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                            crate::include::nodes::primnodes::BuiltinScalarFunction::Upper
+                        ))
+    ));
+    assert!(matches!(
+        &targets[2].expr,
+        Expr::Bool(bool_expr)
+            if bool_expr.boolop == crate::include::nodes::primnodes::BoolExprType::And
+                && bool_expr.args.len() == 2
     ));
 }
 

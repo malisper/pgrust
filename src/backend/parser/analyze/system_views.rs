@@ -210,6 +210,8 @@ pub(super) fn bind_builtin_system_view(
         }
         SyntheticSystemViewKind::PgRules => catalog.pg_rules_rows(),
         SyntheticSystemViewKind::PgStats => catalog.pg_stats_rows(),
+        SyntheticSystemViewKind::PgStatsExt => catalog.pg_stats_ext_rows(),
+        SyntheticSystemViewKind::PgStatsExtExprs => catalog.pg_stats_ext_exprs_rows(),
         SyntheticSystemViewKind::PgSettings => catalog.pg_settings_rows(),
         SyntheticSystemViewKind::PgUserMappings => catalog.pg_user_mappings_rows(),
         SyntheticSystemViewKind::PgRoles => catalog

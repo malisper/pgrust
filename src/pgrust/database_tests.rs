@@ -11380,6 +11380,22 @@ fn gist_leaf_tuple_count(db: &Database, client_id: u32, rel: crate::RelFileLocat
     count
 }
 
+fn btree_leaf_tuple_count(db: &Database, client_id: u32, rel: crate::RelFileLocator) -> usize {
+    let nblocks = relation_fork_nblocks(db, rel, crate::backend::storage::smgr::ForkNumber::Main);
+    let mut count = 0usize;
+    for block in 0..nblocks {
+        let page = read_buffered_relation_block(db, client_id, rel, block);
+        let opaque = crate::include::access::nbtree::bt_page_get_opaque(&page).unwrap();
+        if opaque.is_leaf() && opaque.btpo_flags & crate::include::access::nbtree::BTP_DELETED == 0
+        {
+            count += crate::include::access::nbtree::bt_page_data_items(&page)
+                .unwrap()
+                .len();
+        }
+    }
+    count
+}
+
 fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_name: &str) {
     let relfilenode = relfilenode_for(db, client_id, index_name);
     let lines = explain_lines(db, client_id, sql);
@@ -20332,6 +20348,39 @@ fn create_table_like_copies_statistics_only_when_requested() {
 }
 
 #[test]
+fn pg_stats_ext_views_exist_and_bind_columns() {
+    let base = temp_dir("pg_stats_ext_views_exist");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table stats_ext_view_t (a int4, b int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_ext_view_stat on a, b from stats_ext_view_t",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select statistics_name, dependencies from pg_stats_ext
+             where statistics_name = 'stats_ext_view_stat'",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select statistics_name, expr from pg_stats_ext_exprs
+             where statistics_name = 'stats_ext_view_stat'",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
 fn alter_table_add_without_overlaps_on_inherited_columns() {
     let base = temp_dir("without_overlaps_inherited_alter");
     let db = Database::open(&base, 16).unwrap();
@@ -27616,6 +27665,71 @@ fn indexed_truncate_reinitializes_indexes() {
 }
 
 #[test]
+fn btree_prunes_aborted_leaf_entries_when_page_is_full() {
+    let base = temp_dir("btree_prunes_aborted_leaf_entries");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4 not null, note text)")
+        .unwrap();
+    session
+        .execute(&db, "create index items_id_idx on items (id)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, &insert_items_sql(0..1800, "aborted"))
+        .unwrap();
+    session.execute(&db, "rollback").unwrap();
+
+    let index_rel = relation_locator_for(&db, 1, "items_id_idx");
+    let aborted_blocks = relation_fork_nblocks(
+        &db,
+        index_rel,
+        crate::backend::storage::smgr::ForkNumber::Main,
+    );
+    let aborted_tuples = btree_leaf_tuple_count(&db, 1, index_rel);
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items"),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert!(
+        aborted_tuples >= 1800,
+        "expected rollback to leave aborted index entries, got {aborted_tuples}"
+    );
+
+    session
+        .execute(&db, &insert_items_sql(0..1800, "live"))
+        .unwrap();
+
+    let live_blocks = relation_fork_nblocks(
+        &db,
+        index_rel,
+        crate::backend::storage::smgr::ForkNumber::Main,
+    );
+    let live_tuples = btree_leaf_tuple_count(&db, 1, index_rel);
+    assert!(
+        live_blocks <= aborted_blocks + 2,
+        "expected page-pressure pruning to avoid index growth, blocks {aborted_blocks} -> {live_blocks}"
+    );
+    assert!(
+        live_tuples < aborted_tuples + 1800,
+        "expected pruning to remove at least some aborted entries, tuples {aborted_tuples} -> {live_tuples}"
+    );
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from items where id = 42",
+        "items_id_idx",
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where id = 42"),
+        vec![vec![Value::Text("live42".into())]]
+    );
+}
+
+#[test]
 fn concurrent_indexed_inserts_and_lookups_remain_correct() {
     let base = temp_dir("concurrent_indexed_inserts_and_lookups");
     let db = Database::open(&base, 64).unwrap();
@@ -31834,6 +31948,27 @@ fn drop_function_uses_search_path_and_signature() {
     assert!(
         visible.proc_rows_by_name("add_one").is_empty(),
         "expected dropped function to be absent from pg_proc"
+    );
+}
+
+#[test]
+fn drop_function_without_signature_drops_unique_match() {
+    let base = temp_dir("drop_function_without_signature");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function tftest(x int4) returns int4 language sql as $$ select x $$",
+        )
+        .unwrap();
+    session.execute(&db, "drop function tftest").unwrap();
+
+    let visible = db.backend_catcache(1, None).unwrap();
+    assert!(
+        visible.proc_rows_by_name("tftest").is_empty(),
+        "expected bare DROP FUNCTION to drop the unique matching function"
     );
 }
 

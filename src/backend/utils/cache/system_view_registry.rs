@@ -13,6 +13,8 @@ pub enum SyntheticSystemViewKind {
     PgPublicationTables,
     PgRules,
     PgStats,
+    PgStatsExt,
+    PgStatsExtExprs,
     PgSettings,
     PgUserMappings,
     PgRoles,
@@ -119,6 +121,9 @@ const PG_PUBLICATION_TABLES_ALIASES: &[&str] =
     &["pg_publication_tables", "pg_catalog.pg_publication_tables"];
 const PG_RULES_ALIASES: &[&str] = &["pg_rules", "pg_catalog.pg_rules"];
 const PG_STATS_ALIASES: &[&str] = &["pg_stats", "pg_catalog.pg_stats"];
+const PG_STATS_EXT_ALIASES: &[&str] = &["pg_stats_ext", "pg_catalog.pg_stats_ext"];
+const PG_STATS_EXT_EXPRS_ALIASES: &[&str] =
+    &["pg_stats_ext_exprs", "pg_catalog.pg_stats_ext_exprs"];
 const PG_SETTINGS_ALIASES: &[&str] = &["pg_settings", "pg_catalog.pg_settings"];
 const PG_USER_MAPPINGS_ALIASES: &[&str] = &["pg_user_mappings", "pg_catalog.pg_user_mappings"];
 const PG_ROLES_ALIASES: &[&str] = &["pg_roles", "pg_catalog.pg_roles"];
@@ -336,6 +341,76 @@ const PG_STATS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::new(
         "range_bounds_histogram",
         SqlType::new(SqlTypeKind::AnyArray),
+    ),
+];
+
+const PG_STATS_EXT_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("schemaname"),
+    SyntheticSystemViewColumn::text("tablename"),
+    SyntheticSystemViewColumn::text("statistics_schemaname"),
+    SyntheticSystemViewColumn::text("statistics_name"),
+    SyntheticSystemViewColumn::text("statistics_owner"),
+    SyntheticSystemViewColumn::new(
+        "attnames",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Name)),
+    ),
+    SyntheticSystemViewColumn::new("exprs", SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
+    SyntheticSystemViewColumn::new(
+        "kinds",
+        SqlType::array_of(SqlType::new(SqlTypeKind::InternalChar)),
+    ),
+    SyntheticSystemViewColumn::new("inherited", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new(
+        "n_distinct",
+        SqlType::new(SqlTypeKind::Bytea)
+            .with_identity(crate::include::catalog::PG_NDISTINCT_TYPE_OID, 0),
+    ),
+    SyntheticSystemViewColumn::new(
+        "dependencies",
+        SqlType::new(SqlTypeKind::Bytea)
+            .with_identity(crate::include::catalog::PG_DEPENDENCIES_TYPE_OID, 0),
+    ),
+    SyntheticSystemViewColumn::new("most_common_vals", SqlType::new(SqlTypeKind::AnyArray)),
+    SyntheticSystemViewColumn::new(
+        "most_common_val_nulls",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Bool)),
+    ),
+    SyntheticSystemViewColumn::new(
+        "most_common_freqs",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Float8)),
+    ),
+    SyntheticSystemViewColumn::new(
+        "most_common_base_freqs",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Float8)),
+    ),
+];
+
+const PG_STATS_EXT_EXPRS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("schemaname"),
+    SyntheticSystemViewColumn::text("tablename"),
+    SyntheticSystemViewColumn::text("statistics_schemaname"),
+    SyntheticSystemViewColumn::text("statistics_name"),
+    SyntheticSystemViewColumn::text("statistics_owner"),
+    SyntheticSystemViewColumn::text("expr"),
+    SyntheticSystemViewColumn::new("inherited", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("null_frac", SqlType::new(SqlTypeKind::Float4)),
+    SyntheticSystemViewColumn::new("avg_width", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("n_distinct", SqlType::new(SqlTypeKind::Float4)),
+    SyntheticSystemViewColumn::new("most_common_vals", SqlType::new(SqlTypeKind::AnyArray)),
+    SyntheticSystemViewColumn::new(
+        "most_common_freqs",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Float4)),
+    ),
+    SyntheticSystemViewColumn::new("histogram_bounds", SqlType::new(SqlTypeKind::AnyArray)),
+    SyntheticSystemViewColumn::new("correlation", SqlType::new(SqlTypeKind::Float4)),
+    SyntheticSystemViewColumn::new("most_common_elems", SqlType::new(SqlTypeKind::AnyArray)),
+    SyntheticSystemViewColumn::new(
+        "most_common_elem_freqs",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Float4)),
+    ),
+    SyntheticSystemViewColumn::new(
+        "elem_count_histogram",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Float4)),
     ),
 ];
 
@@ -651,7 +726,7 @@ const INFORMATION_SCHEMA_FOREIGN_TABLE_OPTIONS_COLUMNS: &[SyntheticSystemViewCol
     SyntheticSystemViewColumn::text("option_value"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 36] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 38] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgEnum,
         canonical_name: "pg_catalog.pg_enum",
@@ -720,6 +795,20 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 36] = [
         canonical_name: "pg_catalog.pg_stats",
         aliases: PG_STATS_ALIASES,
         columns: PG_STATS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgStatsExt,
+        canonical_name: "pg_catalog.pg_stats_ext",
+        aliases: PG_STATS_EXT_ALIASES,
+        columns: PG_STATS_EXT_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgStatsExtExprs,
+        canonical_name: "pg_catalog.pg_stats_ext_exprs",
+        aliases: PG_STATS_EXT_EXPRS_ALIASES,
+        columns: PG_STATS_EXT_EXPRS_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

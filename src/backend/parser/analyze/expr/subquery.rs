@@ -48,30 +48,19 @@ fn quantified_array_literal_prefers_left_type(element: &SqlExpr) -> bool {
 
 fn infer_quantified_array_literal_type(
     elements: &[SqlExpr],
+    bound_elements: &[TypedExpr],
     left_type: SqlType,
     op: SubqueryComparisonOp,
-    scope: &BoundScope,
     catalog: &dyn CatalogLookup,
-    outer_scopes: &[BoundScope],
-    grouped_outer: Option<&GroupedOuterScope>,
-    ctes: &[BoundCte],
 ) -> Result<SqlType, ParseError> {
     let left_element_type = left_type.element_type();
     let comparison_op = comparison_operator_for_quantified_array(op);
     let mut common = Some(left_element_type);
-    for element in elements {
+    for (element, bound) in elements.iter().zip(bound_elements) {
         if matches!(element, SqlExpr::Const(Value::Null)) {
             continue;
         }
-        let raw_element_type = infer_sql_expr_type_with_ctes(
-            element,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )
-        .element_type();
+        let raw_element_type = bound.sql_type.element_type();
         let element_type =
             coerce_unknown_string_literal_type(element, raw_element_type, left_element_type);
         if let Some(comparison_op) = comparison_op {
@@ -107,41 +96,18 @@ fn infer_quantified_array_literal_type(
 }
 
 fn bind_array_literal_elements_as_type(
-    elements: &[SqlExpr],
+    bound_elements: Vec<TypedExpr>,
     target_array_type: SqlType,
-    scope: &BoundScope,
-    catalog: &dyn CatalogLookup,
-    outer_scopes: &[BoundScope],
-    grouped_outer: Option<&GroupedOuterScope>,
-    ctes: &[BoundCte],
-) -> Result<Expr, ParseError> {
+) -> Expr {
     let target_element_type = target_array_type.element_type();
-    let elements = elements
-        .iter()
-        .map(|element| {
-            let raw_type = infer_sql_expr_type_with_ctes(
-                element,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-            let bound = bind_expr_with_outer_and_ctes(
-                element,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?;
-            Ok(coerce_bound_expr(bound, raw_type, target_element_type))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Expr::ArrayLiteral {
+    let elements = bound_elements
+        .into_iter()
+        .map(|element| coerce_bound_expr(element.expr, element.sql_type, target_element_type))
+        .collect();
+    Expr::ArrayLiteral {
         elements,
         array_type: target_array_type,
-    })
+    }
 }
 
 fn bind_single_column_sublink(
@@ -459,88 +425,98 @@ pub(super) fn bind_quantified_array_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let raw_left_type =
-        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
-    let raw_array_type =
-        infer_sql_expr_type_with_ctes(array, scope, catalog, outer_scopes, grouped_outer, ctes);
-    let left_type =
-        coerce_unknown_string_literal_type(left, raw_left_type, raw_array_type.element_type());
-    let scalar_subquery_type = if let SqlExpr::ScalarSubquery(select) = array {
-        let child_visible_agg_scope = child_visible_aggregate_scope();
-        let query = bind_subquery_query(
-            select,
-            scope,
-            catalog,
-            outer_scopes,
-            child_visible_agg_scope.as_ref(),
-            ctes,
-        )?;
-        ensure_single_column_subquery(query.columns().len())?;
-        query.columns().first().map(|column| column.sql_type)
-    } else {
-        None
-    };
-    if let Some(array_type) = scalar_subquery_type.filter(|ty| ty.is_array) {
-        if let Some(comparison_op) = comparison_operator_for_quantified_array(op) {
-            return Err(ParseError::UndefinedOperator {
-                op: comparison_op,
-                left_type: sql_type_name(left_type),
-                right_type: sql_type_name(array_type),
-            });
-        }
-    }
-    let target_array_type = if matches!(op, SubqueryComparisonOp::Match)
-        && matches!(left_type.kind, SqlTypeKind::TsVector)
-        && matches!(
-            array,
-            SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
-        ) {
-        SqlType::array_of(SqlType::new(SqlTypeKind::TsQuery))
-    } else if let SqlExpr::ArrayLiteral(elements) = array {
-        infer_quantified_array_literal_type(
-            elements,
-            left_type,
-            op,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?
-    } else if raw_array_type.is_array {
-        coerce_unknown_string_literal_type(array, raw_array_type, raw_left_type)
-    } else {
-        SqlType::array_of(left_type.element_type())
-    };
-    let bound_array = if let SqlExpr::ArrayLiteral(elements) = array {
-        bind_array_literal_elements_as_type(
-            elements,
-            target_array_type,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?
-    } else {
-        let bound_array = bind_expr_with_outer_and_ctes(
-            array,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?;
-        coerce_bound_expr(bound_array, raw_array_type, target_array_type)
-    };
-    let bound_left =
-        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
-    let (bound_left, left_explicit_collation) = strip_explicit_collation(bound_left);
-    let comparison_left_type = if matches!(array, SqlExpr::ArrayLiteral(_)) {
-        target_array_type.element_type()
-    } else {
-        left_type
-    };
+    let bound_left = bind_typed_expr_with_outer_and_ctes(
+        left,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let raw_left_type = bound_left.sql_type;
+    let (target_array_type, bound_array, _left_type, comparison_left_type) =
+        if let SqlExpr::ArrayLiteral(elements) = array {
+            let bound_elements = elements
+                .iter()
+                .map(|element| {
+                    bind_typed_expr_with_outer_and_ctes(
+                        element,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                })
+                .collect::<Result<Vec<_>, ParseError>>()?;
+            let raw_array_element_type = elements
+                .iter()
+                .zip(bound_elements.iter())
+                .find_map(|(element, bound)| {
+                    (!matches!(element, SqlExpr::Const(Value::Null)))
+                        .then_some(bound.sql_type.element_type())
+                })
+                .unwrap_or(SqlType::new(SqlTypeKind::Text));
+            let left_type =
+                coerce_unknown_string_literal_type(left, raw_left_type, raw_array_element_type);
+            let target_array_type = infer_quantified_array_literal_type(
+                elements,
+                &bound_elements,
+                left_type,
+                op,
+                catalog,
+            )?;
+            let comparison_left_type = target_array_type.element_type();
+            let bound_array =
+                bind_array_literal_elements_as_type(bound_elements, target_array_type);
+            (
+                target_array_type,
+                bound_array,
+                left_type,
+                comparison_left_type,
+            )
+        } else {
+            let bound_array = bind_typed_expr_with_outer_and_ctes(
+                array,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            let raw_array_type = bound_array.sql_type;
+            let left_type = coerce_unknown_string_literal_type(
+                left,
+                raw_left_type,
+                raw_array_type.element_type(),
+            );
+            if matches!(array, SqlExpr::ScalarSubquery(_))
+                && raw_array_type.is_array
+                && let Some(comparison_op) = comparison_operator_for_quantified_array(op)
+            {
+                return Err(ParseError::UndefinedOperator {
+                    op: comparison_op,
+                    left_type: sql_type_name(left_type),
+                    right_type: sql_type_name(raw_array_type),
+                });
+            }
+            let target_array_type = if matches!(op, SubqueryComparisonOp::Match)
+                && matches!(left_type.kind, SqlTypeKind::TsVector)
+                && matches!(
+                    array,
+                    SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+                ) {
+                SqlType::array_of(SqlType::new(SqlTypeKind::TsQuery))
+            } else if raw_array_type.is_array {
+                coerce_unknown_string_literal_type(array, raw_array_type, raw_left_type)
+            } else {
+                SqlType::array_of(left_type.element_type())
+            };
+            let bound_array =
+                coerce_bound_expr(bound_array.expr, raw_array_type, target_array_type);
+            (target_array_type, bound_array, left_type, left_type)
+        };
+    let (bound_left, left_explicit_collation) = strip_explicit_collation(bound_left.expr);
     let left = coerce_bound_expr(bound_left, raw_left_type, comparison_left_type);
     let collation_oid = consumer_for_subquery_comparison_op(op)
         .map(|consumer| {

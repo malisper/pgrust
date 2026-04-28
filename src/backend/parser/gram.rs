@@ -3061,6 +3061,9 @@ fn validate_statistics_target_syntax(target: String) -> Result<String, ParseErro
     if simple_statistics_target(trimmed).is_some() {
         return Ok(trimmed.to_string());
     }
+    if unparenthesized_statistics_function_call(trimmed) {
+        return Ok(trimmed.to_string());
+    }
     if !(trimmed.starts_with('(') && trimmed.ends_with(')')) {
         let token = trimmed
             .split_ascii_whitespace()
@@ -3080,6 +3083,25 @@ fn validate_statistics_target_syntax(target: String) -> Result<String, ParseErro
         });
     }
     Ok(trimmed.to_string())
+}
+
+fn unparenthesized_statistics_function_call(target: &str) -> bool {
+    if target.starts_with('(') {
+        return false;
+    }
+    let Ok((parts, rest)) = parse_qualified_identifier_parts(target) else {
+        return false;
+    };
+    if parts.is_empty() {
+        return false;
+    }
+    let rest = rest.trim_start();
+    if !rest.starts_with('(') {
+        return false;
+    }
+    take_parenthesized_segment(rest)
+        .map(|(_, suffix)| suffix.trim().is_empty())
+        .unwrap_or(false)
 }
 
 fn simple_statistics_target(target: &str) -> Option<&str> {
@@ -8701,10 +8723,11 @@ fn build_drop_function_statement(sql: &str) -> Result<DropFunctionStatement, Par
     }
     let ((schema_name, function_name), rest_after_name) = parse_qualified_sql_name(rest)?;
     let rest_after_name = rest_after_name.trim_start();
-    if !rest_after_name.starts_with('(') {
-        return Err(syntax_error_at_statement_end(sql));
-    }
-    let (arg_sql, suffix) = take_parenthesized_segment(rest_after_name)?;
+    let (arg_sql, suffix) = if rest_after_name.starts_with('(') {
+        take_parenthesized_segment(rest_after_name)?
+    } else {
+        ("".into(), rest_after_name)
+    };
     let suffix = suffix.trim();
     let cascade = if suffix.is_empty() || keyword_at_start(suffix, "restrict") {
         false
