@@ -170,3 +170,19 @@ Auto-view DML RLS bucket:
 - Latest rowsecurity regression result with a 300s file timeout:
   `661/774` matched, `113` mismatches, `2033` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+Policy subquery privilege bucket:
+- Planned-statement privilege collection now walks query expression trees,
+  including RLS security quals and sublink subqueries, instead of collecting
+  only top-level range table permissions.
+- Policy expression subqueries are tagged with the effective RLS user, so
+  direct table RLS checks policy subqueries as the caller while normal views
+  check them as the view owner.
+- `EXPLAIN SELECT` now checks SELECT privileges before rendering the plan.
+- Added a focused test covering permission denial from an RLS policy subquery
+  for both SELECT and EXPLAIN.
+- Focused policy-subquery test, `row_security`, and
+  `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `672/774` matched, `102` mismatches, `1908` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.

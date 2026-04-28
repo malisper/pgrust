@@ -551,7 +551,7 @@ pub(crate) fn execute_explain(
     } else {
         None
     };
-    let (query_desc, merge_target_name) = match explain_target {
+    let (query_desc, merge_target_name, check_select_privileges) = match explain_target {
         EitherExplainTarget::Select(select) => (
             create_query_desc(
                 crate::backend::parser::pg_plan_query_with_config(
@@ -562,12 +562,14 @@ pub(crate) fn execute_explain(
                 None,
             ),
             None,
+            true,
         ),
         EitherExplainTarget::Merge(merge) => {
             let bound = crate::backend::parser::plan_merge(&merge, catalog)?;
             (
                 create_query_desc(bound.input_plan, None),
                 Some(bound.explain_target_name),
+                false,
             )
         }
         EitherExplainTarget::CreateTableAs(create_table_as) => (
@@ -595,8 +597,12 @@ pub(crate) fn execute_explain(
                 None,
             ),
             None,
+            true,
         ),
     };
+    if check_select_privileges {
+        check_planned_stmt_select_privileges(&query_desc.planned_stmt, ctx)?;
+    }
     let planning_elapsed = plan_start.elapsed();
     let planning_buffer_stats = ctx.pool.usage_stats();
     let mut lines = Vec::new();

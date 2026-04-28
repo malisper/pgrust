@@ -362,6 +362,7 @@ fn visibility_policy_clauses(
         desc,
         scope_rtindex,
         true,
+        effective_user_oid,
         catalog,
         active_policy_relations,
     )?
@@ -373,6 +374,7 @@ fn visibility_policy_clauses(
             relation_name,
             desc,
             scope_rtindex,
+            effective_user_oid,
             catalog,
             active_policy_relations,
         )?;
@@ -405,6 +407,7 @@ fn write_policy_checks(
         desc,
         1,
         force_using,
+        effective_user_oid,
         catalog,
         active_policy_relations,
     )?
@@ -424,6 +427,7 @@ fn write_policy_checks(
                 relation_name,
                 desc,
                 1,
+                effective_user_oid,
                 catalog,
                 active_policy_relations,
             )?
@@ -433,6 +437,7 @@ fn write_policy_checks(
                 relation_name,
                 desc,
                 1,
+                effective_user_oid,
                 catalog,
                 active_policy_relations,
             )?
@@ -489,6 +494,7 @@ fn combined_permissive_expr(
     desc: &RelationDesc,
     scope_rtindex: usize,
     force_using: bool,
+    effective_user_oid: u32,
     catalog: &dyn CatalogLookup,
     active_policy_relations: &mut Vec<u32>,
 ) -> Result<Option<Expr>, ParseError> {
@@ -500,6 +506,7 @@ fn combined_permissive_expr(
                 relation_name,
                 desc,
                 scope_rtindex,
+                effective_user_oid,
                 catalog,
                 active_policy_relations,
             )?
@@ -509,6 +516,7 @@ fn combined_permissive_expr(
                 relation_name,
                 desc,
                 scope_rtindex,
+                effective_user_oid,
                 catalog,
                 active_policy_relations,
             )?
@@ -526,6 +534,7 @@ fn bound_policy_expr(
     relation_name: &str,
     desc: &RelationDesc,
     scope_rtindex: usize,
+    effective_user_oid: u32,
     catalog: &dyn CatalogLookup,
     active_policy_relations: &mut Vec<u32>,
 ) -> Result<Expr, ParseError> {
@@ -536,7 +545,7 @@ fn bound_policy_expr(
     let scope = policy_scope(relation_name, desc, scope_rtindex, catalog)?;
     stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
         let expr = bind_expr_with_outer_and_ctes(&parsed, &scope, catalog, &[], None, &[])?;
-        rewrite_policy_expr(expr, catalog, active_policy_relations)
+        rewrite_policy_expr(expr, catalog, effective_user_oid, active_policy_relations)
     })
 }
 

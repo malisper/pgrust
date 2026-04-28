@@ -43416,6 +43416,57 @@ fn auto_view_dml_enforces_base_rls_before_view_check() {
 }
 
 #[test]
+fn rls_policy_subquery_privileges_are_checked_for_select_and_explain() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut app = Session::new(2);
+
+    owner
+        .execute(&db, "create role policy_owner nologin")
+        .unwrap();
+    owner
+        .execute(&db, "create role policy_app nologin")
+        .unwrap();
+    owner
+        .execute(&db, "set session authorization policy_owner")
+        .unwrap();
+    owner
+        .execute(&db, "create table visible_docs (a int4)")
+        .unwrap();
+    owner
+        .execute(&db, "create table hidden_docs (a int4)")
+        .unwrap();
+    owner
+        .execute(&db, "insert into visible_docs values (1), (2)")
+        .unwrap();
+    owner
+        .execute(&db, "insert into hidden_docs values (1)")
+        .unwrap();
+    owner
+        .execute(&db, "grant select on visible_docs to policy_app")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy visible_policy on visible_docs for select to policy_app
+             using (not exists (select 1 from hidden_docs h where h.a = visible_docs.a))",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "alter table visible_docs enable row level security")
+        .unwrap();
+
+    app.execute(&db, "set session authorization policy_app")
+        .unwrap();
+    let err = app.execute(&db, "select * from visible_docs").unwrap_err();
+    assert_sqlstate(err, "42501", "permission denied for table hidden_docs");
+    let err = app
+        .execute(&db, "explain (costs off) select * from visible_docs")
+        .unwrap_err();
+    assert_sqlstate(err, "42501", "permission denied for table hidden_docs");
+}
+
+#[test]
 fn on_conflict_do_update_enforces_rls_update_path_checks() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut owner = Session::new(1);
