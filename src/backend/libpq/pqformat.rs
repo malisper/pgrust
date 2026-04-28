@@ -79,6 +79,7 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::CheckViolation {
             relation,
             constraint,
+            ..
         } => format!(
             "new row for relation \"{relation}\" violates check constraint \"{constraint}\""
         ),

@@ -1,6 +1,7 @@
 use super::super::*;
 use super::alter_table_work_queue::{build_alter_table_work_queue, has_inheritance_children};
 use crate::backend::commands::tablecmds::collect_matching_rows_heap;
+use crate::backend::executor::value_io::format_failing_row_detail;
 use crate::backend::executor::{ExecutorContext, eval_expr};
 use crate::backend::parser::{
     BoundCheckConstraint, BoundExclusionConstraint, BoundForeignKeyConstraint,
@@ -373,13 +374,15 @@ pub(super) fn validate_check_rows(
     let rows =
         collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
     for (_, values) in rows {
-        let mut slot = TupleSlot::virtual_row(values);
+        let mut slot =
+            TupleSlot::virtual_row_with_metadata(values.clone(), None, Some(relation.relation_oid));
         match eval_expr(&check.expr, &mut slot, &mut ctx)? {
             Value::Null | Value::Bool(true) => {}
             Value::Bool(false) => {
                 return Err(ExecError::CheckViolation {
                     relation: relation_name.to_string(),
                     constraint: check.constraint_name.clone(),
+                    detail: Some(format_failing_row_detail(&values, &datetime_config)),
                 });
             }
             _ => {

@@ -8,7 +8,7 @@ use crate::include::nodes::parsenodes::{
     ColumnConstraint, ConstraintAttributes, CreateTableStatement, ForeignKeyAction,
     ForeignKeyMatchType, TableConstraint, TablePersistence,
 };
-use crate::include::nodes::primnodes::Expr;
+use crate::include::nodes::primnodes::{Expr, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO};
 
 use super::ParseError;
 
@@ -76,6 +76,7 @@ pub struct ForeignKeyConstraintAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BoundRelationConstraints {
+    pub relation_oid: Option<u32>,
     pub not_nulls: Vec<BoundNotNullConstraint>,
     pub checks: Vec<BoundCheckConstraint>,
     pub foreign_keys: Vec<BoundForeignKeyConstraint>,
@@ -949,6 +950,7 @@ pub fn bind_relation_constraints(
     }
 
     Ok(BoundRelationConstraints {
+        relation_oid: Some(relation_oid),
         not_nulls,
         checks,
         foreign_keys,
@@ -1722,7 +1724,7 @@ pub fn bind_index_predicate_expr(
     }
 
     let bound = super::bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &[])?;
-    reject_unsupported_check_expr(&bound)?;
+    reject_unsupported_index_predicate_expr(&bound)?;
     Ok(bound)
 }
 
@@ -1734,7 +1736,7 @@ fn bind_boolean_relation_predicate(
     expected: &'static str,
     actual: &'static str,
 ) -> Result<Expr, ParseError> {
-    let scope = super::scope_for_relation(relation_name, desc);
+    let scope = super::scope_for_base_relation_with_optional_name(relation_name, desc);
     let inferred = super::infer_sql_expr_type_with_ctes(expr, &scope, catalog, &[], None, &[]);
     if inferred != SqlType::new(SqlTypeKind::Bool) {
         return Err(ParseError::UnexpectedToken {
@@ -3471,6 +3473,17 @@ fn clip_to_char_boundary(value: &str, max_bytes: usize) -> &str {
 }
 
 fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
+    reject_unsupported_relation_predicate_expr(expr, false)
+}
+
+fn reject_unsupported_index_predicate_expr(expr: &Expr) -> Result<(), ParseError> {
+    reject_unsupported_relation_predicate_expr(expr, true)
+}
+
+fn reject_unsupported_relation_predicate_expr(
+    expr: &Expr,
+    allow_non_tableoid_system_columns: bool,
+) -> Result<(), ParseError> {
     match expr {
         Expr::Aggref(_) => Err(ParseError::FeatureNotSupported(
             "aggregate functions in CHECK constraints".into(),
@@ -3487,49 +3500,84 @@ fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
         Expr::Var(var) if var.varlevelsup > 0 => Err(ParseError::FeatureNotSupported(
             "outer references in CHECK constraints".into(),
         )),
+        Expr::Var(var)
+            if !allow_non_tableoid_system_columns
+                && var.varattno < 0
+                && var.varattno != TABLE_OID_ATTR_NO =>
+        {
+            let column_name = system_column_name(var.varattno).unwrap_or("unknown");
+            Err(ParseError::DetailedError {
+                message: format!(
+                    "system column \"{column_name}\" reference in check constraint is invalid"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            })
+        }
         Expr::Op(op) => {
             for arg in &op.args {
-                reject_unsupported_check_expr(arg)?;
+                reject_unsupported_relation_predicate_expr(arg, allow_non_tableoid_system_columns)?;
             }
             Ok(())
         }
         Expr::Bool(expr) => {
             for arg in &expr.args {
-                reject_unsupported_check_expr(arg)?;
+                reject_unsupported_relation_predicate_expr(arg, allow_non_tableoid_system_columns)?;
             }
             Ok(())
         }
         Expr::Case(case_expr) => {
             if let Some(arg) = &case_expr.arg {
-                reject_unsupported_check_expr(arg)?;
+                reject_unsupported_relation_predicate_expr(arg, allow_non_tableoid_system_columns)?;
             }
             for arm in &case_expr.args {
-                reject_unsupported_check_expr(&arm.expr)?;
-                reject_unsupported_check_expr(&arm.result)?;
+                reject_unsupported_relation_predicate_expr(
+                    &arm.expr,
+                    allow_non_tableoid_system_columns,
+                )?;
+                reject_unsupported_relation_predicate_expr(
+                    &arm.result,
+                    allow_non_tableoid_system_columns,
+                )?;
             }
-            reject_unsupported_check_expr(&case_expr.defresult)
+            reject_unsupported_relation_predicate_expr(
+                &case_expr.defresult,
+                allow_non_tableoid_system_columns,
+            )
         }
         Expr::CaseTest(_) => Ok(()),
         Expr::Func(func) => {
             for arg in &func.args {
-                reject_unsupported_check_expr(arg)?;
+                reject_unsupported_relation_predicate_expr(arg, allow_non_tableoid_system_columns)?;
             }
             Ok(())
         }
         Expr::SqlJsonQueryFunction(func) => {
             for child in func.child_exprs() {
-                reject_unsupported_check_expr(child)?;
+                reject_unsupported_relation_predicate_expr(
+                    child,
+                    allow_non_tableoid_system_columns,
+                )?;
             }
             Ok(())
         }
         Expr::ScalarArrayOp(expr) => {
-            reject_unsupported_check_expr(&expr.left)?;
-            reject_unsupported_check_expr(&expr.right)
+            reject_unsupported_relation_predicate_expr(
+                &expr.left,
+                allow_non_tableoid_system_columns,
+            )?;
+            reject_unsupported_relation_predicate_expr(
+                &expr.right,
+                allow_non_tableoid_system_columns,
+            )
         }
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => reject_unsupported_check_expr(inner),
+        | Expr::IsNotNull(inner) => {
+            reject_unsupported_relation_predicate_expr(inner, allow_non_tableoid_system_columns)
+        }
         Expr::Like {
             expr,
             pattern,
@@ -3542,47 +3590,67 @@ fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
             escape,
             ..
         } => {
-            reject_unsupported_check_expr(expr)?;
-            reject_unsupported_check_expr(pattern)?;
+            reject_unsupported_relation_predicate_expr(expr, allow_non_tableoid_system_columns)?;
+            reject_unsupported_relation_predicate_expr(pattern, allow_non_tableoid_system_columns)?;
             if let Some(escape) = escape {
-                reject_unsupported_check_expr(escape)?;
+                reject_unsupported_relation_predicate_expr(
+                    escape,
+                    allow_non_tableoid_system_columns,
+                )?;
             }
             Ok(())
         }
         Expr::IsDistinctFrom(left, right)
         | Expr::IsNotDistinctFrom(left, right)
         | Expr::Coalesce(left, right) => {
-            reject_unsupported_check_expr(left)?;
-            reject_unsupported_check_expr(right)
+            reject_unsupported_relation_predicate_expr(left, allow_non_tableoid_system_columns)?;
+            reject_unsupported_relation_predicate_expr(right, allow_non_tableoid_system_columns)
         }
         Expr::ArrayLiteral { elements, .. } => {
             for element in elements {
-                reject_unsupported_check_expr(element)?;
+                reject_unsupported_relation_predicate_expr(
+                    element,
+                    allow_non_tableoid_system_columns,
+                )?;
             }
             Ok(())
         }
         Expr::Row { fields, .. } => {
             for (_, field) in fields {
-                reject_unsupported_check_expr(field)?;
+                reject_unsupported_relation_predicate_expr(
+                    field,
+                    allow_non_tableoid_system_columns,
+                )?;
             }
             Ok(())
         }
-        Expr::FieldSelect { expr, .. } => reject_unsupported_check_expr(expr),
+        Expr::FieldSelect { expr, .. } => {
+            reject_unsupported_relation_predicate_expr(expr, allow_non_tableoid_system_columns)
+        }
         Expr::ArraySubscript { array, subscripts } => {
-            reject_unsupported_check_expr(array)?;
+            reject_unsupported_relation_predicate_expr(array, allow_non_tableoid_system_columns)?;
             for subscript in subscripts {
                 if let Some(lower) = &subscript.lower {
-                    reject_unsupported_check_expr(lower)?;
+                    reject_unsupported_relation_predicate_expr(
+                        lower,
+                        allow_non_tableoid_system_columns,
+                    )?;
                 }
                 if let Some(upper) = &subscript.upper {
-                    reject_unsupported_check_expr(upper)?;
+                    reject_unsupported_relation_predicate_expr(
+                        upper,
+                        allow_non_tableoid_system_columns,
+                    )?;
                 }
             }
             Ok(())
         }
         Expr::Xml(xml) => {
             for child in xml.child_exprs() {
-                reject_unsupported_check_expr(child)?;
+                reject_unsupported_relation_predicate_expr(
+                    child,
+                    allow_non_tableoid_system_columns,
+                )?;
             }
             Ok(())
         }
@@ -3600,5 +3668,13 @@ fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => Ok(()),
+    }
+}
+
+fn system_column_name(varattno: i32) -> Option<&'static str> {
+    match varattno {
+        TABLE_OID_ATTR_NO => Some("tableoid"),
+        SELF_ITEM_POINTER_ATTR_NO => Some("ctid"),
+        _ => None,
     }
 }

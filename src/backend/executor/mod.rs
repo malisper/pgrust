@@ -675,6 +675,7 @@ pub enum ExecError {
     CheckViolation {
         relation: String,
         constraint: String,
+        detail: Option<String>,
     },
     ForeignKeyViolation {
         constraint: String,

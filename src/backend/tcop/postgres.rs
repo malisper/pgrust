@@ -207,6 +207,7 @@ fn exec_error_detail(e: &ExecError) -> Option<&str> {
         ExecError::DetailedError { detail, .. } => detail.as_deref(),
         ExecError::UniqueViolation { detail, .. } => detail.as_deref(),
         ExecError::NotNullViolation { detail, .. } => detail.as_deref(),
+        ExecError::CheckViolation { detail, .. } => detail.as_deref(),
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { detail, .. }) => {
             detail.as_deref()
         }
@@ -420,6 +421,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             detail,
             ..
         }) => {
+            if let Some(system_column) = check_constraint_system_column_error_name(message) {
+                return find_case_insensitive_token_position(sql, system_column);
+            }
             if message.starts_with("invalid value for parameter \"") {
                 return None;
             }
@@ -603,6 +607,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::DetailedError {
             message, detail, ..
         } => {
+            if let Some(system_column) = check_constraint_system_column_error_name(message) {
+                return find_case_insensitive_token_position(sql, system_column);
+            }
             if is_jsonpath_sql_surface(sql)
                 && (message == "invalid input syntax for type jsonpath"
                     || is_jsonpath_parse_error(message))
@@ -727,6 +734,15 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         _ => return None,
     };
     find_error_value_position(sql, value)
+}
+
+fn check_constraint_system_column_error_name(message: &str) -> Option<&str> {
+    message
+        .strip_prefix("system column \"")
+        .and_then(|rest| rest.split_once('"'))
+        .and_then(|(name, rest)| {
+            (rest == " reference in check constraint is invalid").then_some(name)
+        })
 }
 
 fn create_table_error_position(sql: &str, message: &str) -> Option<usize> {

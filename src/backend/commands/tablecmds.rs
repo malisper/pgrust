@@ -3119,6 +3119,7 @@ fn relation_write_state_for_foreign_key(
             sqlstate: "XX000",
         })?;
     let constraints = BoundRelationConstraints {
+        relation_oid: Some(constraint.child_relation_oid),
         not_nulls: constraint
             .child_desc
             .columns
