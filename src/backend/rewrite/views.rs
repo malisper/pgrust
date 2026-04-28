@@ -475,6 +475,12 @@ fn render_target_entry(
         ),
         _ => render_expr(&target.expr, ctx),
     };
+    if xmlserialize_target_needs_outer_cast(target) {
+        rendered = format!(
+            "({rendered})::{}",
+            render_sql_type_with_catalog(target.sql_type, ctx.catalog)
+        );
+    }
     if target.name.eq_ignore_ascii_case("dat_at_local")
         && let Some(inner) = rendered
             .strip_prefix("timezone(")
@@ -489,7 +495,27 @@ fn render_target_entry(
     if rendered == quote_identifier_if_needed(target_name) || natural_output_matches {
         rendered
     } else {
-        format!("{rendered} AS {}", quote_identifier_if_needed(target_name))
+        format!(
+            "{rendered} AS {}",
+            quote_target_alias(target_name, &target.expr)
+        )
+    }
+}
+
+fn xmlserialize_target_needs_outer_cast(target: &TargetEntry) -> bool {
+    matches!(
+        &target.expr,
+        Expr::Xml(xml)
+            if matches!(xml.op, crate::include::nodes::primnodes::XmlExprOp::Serialize)
+                && !matches!(target.sql_type.kind, SqlTypeKind::Text)
+    )
+}
+
+fn quote_target_alias(name: &str, expr: &Expr) -> String {
+    if matches!(expr, Expr::Xml(_)) {
+        quote_identifier(name)
+    } else {
+        quote_identifier_if_needed(name)
     }
 }
 
@@ -505,6 +531,22 @@ fn render_from_node(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode, indent: u
         } => {
             let left_sql = render_from_node(ctx, left, indent + 3);
             let right_sql = render_from_node(ctx, right, indent + 3);
+            if *kind == JoinType::Cross && join_node_is_sql_table_function(ctx, right) {
+                let joined_body =
+                    format!("{left_sql},\n{}LATERAL {right_sql}", " ".repeat(indent + 3));
+                let needs_parentheses = indent != 3
+                    || ctx
+                        .query
+                        .rtable
+                        .get(rtindex.saturating_sub(1))
+                        .is_some_and(|rte| rte.alias.is_some());
+                let joined = if needs_parentheses {
+                    format!("({joined_body})")
+                } else {
+                    joined_body
+                };
+                return append_join_alias(ctx, *rtindex, joined);
+            }
             let using_cols = ctx
                 .query
                 .rtable
@@ -549,6 +591,23 @@ fn render_from_node(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode, indent: u
             append_join_alias(ctx, *rtindex, joined)
         }
     }
+}
+
+fn join_node_is_sql_table_function(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode) -> bool {
+    let JoinTreeNode::RangeTblRef(index) = node else {
+        return false;
+    };
+    ctx.query
+        .rtable
+        .get(index.saturating_sub(1))
+        .is_some_and(|rte| {
+            matches!(
+                &rte.kind,
+                RangeTblEntryKind::Function {
+                    call: SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)
+                }
+            )
+        })
 }
 
 fn render_rte(ctx: &ViewDeparseContext<'_>, index: usize) -> String {
@@ -896,7 +955,7 @@ fn render_sql_xml_table_call(table: &SqlXmlTable, ctx: &ViewDeparseContext<'_>) 
                 .namespaces
                 .iter()
                 .map(|namespace| {
-                    let uri = render_expr(&namespace.uri, ctx);
+                    let uri = render_sql_xmltable_text_expr(&namespace.uri, ctx);
                     match namespace.name.as_deref() {
                         Some(name) => format!("{uri} AS {}", quote_identifier_if_needed(name)),
                         None => format!("DEFAULT {uri}"),
@@ -907,9 +966,15 @@ fn render_sql_xml_table_call(table: &SqlXmlTable, ctx: &ViewDeparseContext<'_>) 
         );
         rendered.push_str("), ");
     }
-    rendered.push_str(&render_expr(&table.row_path, ctx));
+    rendered.push_str(&render_parenthesized_sql_xmltable_expr(
+        &table.row_path,
+        ctx,
+    ));
     rendered.push_str(" PASSING ");
-    rendered.push_str(&render_expr(&table.document, ctx));
+    rendered.push_str(&render_parenthesized_sql_xmltable_expr(
+        &table.document,
+        ctx,
+    ));
     rendered.push_str(" COLUMNS ");
     rendered.push_str(
         &table
@@ -928,13 +993,14 @@ fn render_sql_xml_table_call(table: &SqlXmlTable, ctx: &ViewDeparseContext<'_>) 
                             "{name} {}",
                             render_sql_json_table_type(column.sql_type, ctx.catalog)
                         );
-                        if let Some(path) = path {
-                            rendered.push_str(" PATH ");
-                            rendered.push_str(&render_expr(path, ctx));
-                        }
                         if let Some(default) = default {
                             rendered.push_str(" DEFAULT ");
-                            rendered.push_str(&render_expr(default, ctx));
+                            rendered
+                                .push_str(&render_parenthesized_sql_xmltable_expr(default, ctx));
+                        }
+                        if let Some(path) = path {
+                            rendered.push_str(" PATH ");
+                            rendered.push_str(&render_parenthesized_sql_xmltable_expr(path, ctx));
                         }
                         if *not_null {
                             rendered.push_str(" NOT NULL");
@@ -948,6 +1014,20 @@ fn render_sql_xml_table_call(table: &SqlXmlTable, ctx: &ViewDeparseContext<'_>) 
     );
     rendered.push(')');
     rendered
+}
+
+fn render_parenthesized_sql_xmltable_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
+    format!("({})", render_sql_xmltable_text_expr(expr, ctx))
+}
+
+fn render_sql_xmltable_text_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
+    match expr {
+        Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)) => {
+            format!("{}::text", render_expr(expr, ctx))
+        }
+        Expr::Cast(_, ty) if matches!(ty.kind, SqlTypeKind::Text) => render_expr(expr, ctx),
+        _ => render_expr(expr, ctx),
+    }
 }
 
 fn render_sql_json_table_call(table: &SqlJsonTable, ctx: &ViewDeparseContext<'_>) -> String {
@@ -1393,6 +1473,7 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
         Expr::SubLink(sublink) => render_sublink(sublink, ctx),
         Expr::ScalarArrayOp(saop) => render_scalar_array_op(saop, ctx),
         Expr::Func(func) => render_function(func, ctx),
+        Expr::Xml(xml) => render_xml_expr(xml, ctx),
         Expr::WindowFunc(window_func) => render_window_function(window_func, ctx),
         Expr::IsNull(inner) => format!("{} IS NULL", render_wrapped_expr(inner, ctx)),
         Expr::IsNotNull(inner) => {
@@ -1440,6 +1521,11 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
             }
         }
         Expr::FieldSelect { expr, field, .. } => {
+            if let Expr::Row { fields, .. } = expr.as_ref()
+                && let Some((_, value)) = fields.iter().find(|(name, _)| name == field)
+            {
+                return render_expr(value, ctx);
+            }
             format!(
                 "({}).{}",
                 render_expr(expr, ctx),
@@ -1615,6 +1701,126 @@ fn render_window_function(func: &WindowFuncExpr, ctx: &ViewDeparseContext<'_>) -
     format!("{call} OVER ({over})")
 }
 
+fn render_xml_expr(
+    xml: &crate::include::nodes::primnodes::XmlExpr,
+    ctx: &ViewDeparseContext<'_>,
+) -> String {
+    match xml.op {
+        crate::include::nodes::primnodes::XmlExprOp::Concat => format!(
+            "XMLCONCAT({})",
+            xml.args
+                .iter()
+                .map(|arg| render_expr(arg, ctx))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        crate::include::nodes::primnodes::XmlExprOp::Element => {
+            let mut parts = Vec::new();
+            if !xml.named_args.is_empty() {
+                let attrs = xml
+                    .named_args
+                    .iter()
+                    .zip(xml.arg_names.iter())
+                    .map(|(arg, name)| {
+                        format!(
+                            "{} AS {}",
+                            render_expr(arg, ctx),
+                            quote_identifier_if_needed(name)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                parts.push(format!("XMLATTRIBUTES({attrs})"));
+            }
+            parts.extend(xml.args.iter().map(|arg| render_expr(arg, ctx)));
+            format!(
+                "XMLELEMENT(NAME {}, {})",
+                quote_identifier_if_needed(xml.name.as_deref().unwrap_or_default()),
+                parts.join(", ")
+            )
+        }
+        crate::include::nodes::primnodes::XmlExprOp::Forest => format!(
+            "XMLFOREST({})",
+            xml.args
+                .iter()
+                .zip(xml.arg_names.iter())
+                .map(|(arg, name)| {
+                    format!(
+                        "{} AS {}",
+                        render_expr(arg, ctx),
+                        quote_identifier_if_needed(name)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        crate::include::nodes::primnodes::XmlExprOp::Parse => format!(
+            "XMLPARSE({} {} STRIP WHITESPACE)",
+            render_xml_option(xml.xml_option),
+            render_xml_text_arg(&xml.args[0], ctx)
+        ),
+        crate::include::nodes::primnodes::XmlExprOp::Pi => {
+            let mut rendered = format!(
+                "XMLPI(NAME {}",
+                quote_identifier_if_needed(xml.name.as_deref().unwrap_or_default())
+            );
+            if let Some(arg) = xml.args.first() {
+                rendered.push_str(", ");
+                rendered.push_str(&render_xml_text_arg(arg, ctx));
+            }
+            rendered.push(')');
+            rendered
+        }
+        crate::include::nodes::primnodes::XmlExprOp::Root => {
+            let version = match xml.root_version {
+                crate::backend::parser::XmlRootVersion::Value => xml
+                    .args
+                    .get(1)
+                    .map(|arg| format!("VERSION {}", render_expr(arg, ctx)))
+                    .unwrap_or_else(|| "VERSION NO VALUE".into()),
+                crate::backend::parser::XmlRootVersion::NoValue
+                | crate::backend::parser::XmlRootVersion::Omitted => "VERSION NO VALUE".into(),
+            };
+            let standalone = match xml.standalone {
+                Some(crate::backend::parser::XmlStandalone::Yes) => ", STANDALONE YES",
+                Some(crate::backend::parser::XmlStandalone::No) => ", STANDALONE NO",
+                Some(crate::backend::parser::XmlStandalone::NoValue) => ", STANDALONE NO VALUE",
+                None => "",
+            };
+            format!(
+                "XMLROOT({}, {version}{standalone})",
+                render_expr(&xml.args[0], ctx)
+            )
+        }
+        crate::include::nodes::primnodes::XmlExprOp::Serialize => {
+            let indent = if xml.indent == Some(true) {
+                " INDENT"
+            } else {
+                " NO INDENT"
+            };
+            format!(
+                "XMLSERIALIZE({} {} AS {}{indent})",
+                render_xml_option(xml.xml_option),
+                render_expr(&xml.args[0], ctx),
+                render_sql_type_with_catalog(
+                    xml.target_type.unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                    ctx.catalog,
+                )
+            )
+        }
+        crate::include::nodes::primnodes::XmlExprOp::IsDocument => {
+            format!("{} IS DOCUMENT", render_wrapped_expr(&xml.args[0], ctx))
+        }
+    }
+}
+
+fn render_xml_option(option: Option<crate::backend::parser::XmlOption>) -> &'static str {
+    match option {
+        Some(crate::backend::parser::XmlOption::Document) => "DOCUMENT",
+        Some(crate::backend::parser::XmlOption::Content) | None => "CONTENT",
+    }
+}
+
 fn render_window_clause(clause: &WindowClause, ctx: &ViewDeparseContext<'_>) -> String {
     let mut parts = Vec::new();
     if !clause.spec.partition_by.is_empty() {
@@ -1771,10 +1977,31 @@ fn render_function(func: &FuncExpr, ctx: &ViewDeparseContext<'_>) -> String {
         name,
         func.args
             .iter()
-            .map(|arg| render_expr(arg, ctx))
+            .map(|arg| {
+                if matches!(
+                    func.implementation,
+                    ScalarFunctionImpl::Builtin(
+                        BuiltinScalarFunction::XmlComment | BuiltinScalarFunction::XmlText
+                    )
+                ) {
+                    render_xml_text_arg(arg, ctx)
+                } else {
+                    render_expr(arg, ctx)
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+fn render_xml_text_arg(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
+    match expr {
+        Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)) => {
+            format!("{}::text", render_expr(expr, ctx))
+        }
+        Expr::Cast(_, ty) if matches!(ty.kind, SqlTypeKind::Text) => render_expr(expr, ctx),
+        _ => render_expr(expr, ctx),
+    }
 }
 
 fn render_timezone_function(func: &FuncExpr, ctx: &ViewDeparseContext<'_>) -> String {
@@ -1930,6 +2157,7 @@ fn render_literal(value: &Value) -> String {
             )
         }
         Value::Json(json) => format!("'{}'::json", json.replace('\'', "''")),
+        Value::Xml(xml) => format!("'{}'::xml", xml.replace('\'', "''")),
         Value::JsonPath(jsonpath) => format!("'{}'::jsonpath", jsonpath.replace('\'', "''")),
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes)
             .map(|text| format!("'{}'::jsonb", text.replace('\'', "''")))
@@ -1988,6 +2216,7 @@ fn render_sql_type_name(ty: SqlType, catalog: Option<&dyn CatalogLookup>) -> Str
         SqlTypeKind::Interval => "interval",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
+        SqlTypeKind::Xml => "xml",
         SqlTypeKind::Char => {
             return ty
                 .char_len()
@@ -2058,11 +2287,21 @@ fn var_name(var: &Var, ctx: &ViewDeparseContext<'_>) -> Option<String> {
     }
     let column = rte.desc.columns.get(column_index)?;
     if let RangeTblEntryKind::Function {
-        call: SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_),
+        call: call @ (SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)),
     } = &rte.kind
         && rte.alias.is_none()
     {
-        return Some(quote_json_table_column_name(&column.name));
+        let function_name = if matches!(call, SetReturningCall::SqlJsonTable(_)) {
+            "json_table"
+        } else {
+            "xmltable"
+        };
+        let column_name = quote_json_table_column_name(&column.name);
+        return if visible_source_count(scope.query) > 1 {
+            Some(format!("\"{function_name}\".{column_name}"))
+        } else {
+            Some(column_name)
+        };
     }
     let column_name = quote_identifier_if_needed(&column.name);
     if should_qualify_var(var, &scope) {
@@ -2267,6 +2506,8 @@ fn join_using_var_needs_cast(var: &Var, sql_type: SqlType, query: &Query) -> boo
 fn render_builtin_function_name(func: BuiltinScalarFunction) -> &'static str {
     match func {
         BuiltinScalarFunction::CurrentDatabase => "current_database",
+        BuiltinScalarFunction::XmlComment => "xmlcomment",
+        BuiltinScalarFunction::XmlText => "xmltext",
         BuiltinScalarFunction::PgGetUserById => "pg_get_userbyid",
         BuiltinScalarFunction::PgGetExpr => "pg_get_expr",
         BuiltinScalarFunction::PgGetViewDef => "pg_get_viewdef",
@@ -2310,8 +2551,12 @@ fn quote_identifier_if_needed(identifier: &str) -> String {
         })
         || identifier != identifier.to_ascii_lowercase();
     if needs_quotes {
-        format!("\"{}\"", identifier.replace('"', "\"\""))
+        quote_identifier(identifier)
     } else {
         identifier.to_string()
     }
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }

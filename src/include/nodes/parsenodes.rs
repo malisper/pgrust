@@ -1279,6 +1279,13 @@ pub enum XmlStandalone {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XmlRootVersion {
+    Omitted,
+    Value,
+    NoValue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawXmlExprOp {
     Concat,
     Element,
@@ -1301,6 +1308,7 @@ pub struct RawXmlExpr {
     pub indent: Option<bool>,
     pub target_type: Option<RawTypeName>,
     pub standalone: Option<XmlStandalone>,
+    pub root_version: XmlRootVersion,
 }
 
 impl RawXmlExpr {
@@ -2241,6 +2249,7 @@ pub enum TableAsObjectType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrepareStatement {
     pub name: String,
+    pub parameter_types: Vec<RawTypeName>,
     pub query: SelectStatement,
     pub query_sql: String,
 }
@@ -2248,6 +2257,7 @@ pub struct PrepareStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecuteStatement {
     pub name: String,
+    pub args: Vec<SqlExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4710,6 +4720,7 @@ pub enum SubqueryComparisonOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqlExpr {
     Column(String),
+    Parameter(usize),
     Default,
     Const(Value),
     IntegerLiteral(String),

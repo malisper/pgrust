@@ -3007,6 +3007,48 @@ pub(super) fn eval_convert_from_function(values: &[Value]) -> Result<Value, Exec
     Ok(Value::Text(CompactString::from_owned(decoded.into_owned())))
 }
 
+pub(super) fn eval_convert_to_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(encoding_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null) || matches!(encoding_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = text_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "convert_to",
+            left: text_value.clone(),
+            right: encoding_value.clone(),
+        })?;
+    let encoding_name = encoding_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "convert_to",
+            left: text_value.clone(),
+            right: encoding_value.clone(),
+        })?;
+    let normalized = normalize_encoding_label(encoding_name);
+    let encoding =
+        Encoding::for_label(normalized.as_bytes()).ok_or_else(|| ExecError::TypeMismatch {
+            op: "convert_to",
+            left: text_value.clone(),
+            right: encoding_value.clone(),
+        })?;
+    let (encoded, _, had_errors) = encoding.encode(text);
+    if had_errors {
+        return Err(ExecError::TypeMismatch {
+            op: "convert_to",
+            left: text_value.clone(),
+            right: encoding_value.clone(),
+        });
+    }
+    Ok(Value::Bytea(encoded.into_owned()))
+}
+
 fn decode_hex_text_bytes(raw: &str) -> Option<Vec<u8>> {
     let bytes = raw.strip_prefix("\\x")?;
     if bytes.len() % 2 != 0 {

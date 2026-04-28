@@ -434,6 +434,18 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return find_case_insensitive_token_position(sql, "any")
                     .or_else(|| find_case_insensitive_token_position(sql, "all"));
             }
+            if message.starts_with("argument of XMLCONCAT must be type xml") {
+                return find_xmlconcat_type_error_position(sql);
+            }
+            if message == "unnamed XML attribute value must be a column reference" {
+                return find_xmlattributes_unnamed_value_position(sql);
+            }
+            if let Some(name) = message
+                .strip_prefix("XML attribute name \"")
+                .and_then(|rest| rest.strip_suffix("\" appears more than once"))
+            {
+                return find_xmlattributes_duplicate_value_position(sql, name);
+            }
             if let Some(option) = message
                 .strip_prefix("unrecognized ANALYZE option \"")
                 .and_then(|rest| rest.strip_suffix('"'))
@@ -727,6 +739,14 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             raw_input, message, ..
         } => {
             if message == "unsupported XML feature" {
+                return None;
+            }
+            let lower = sql.trim_start().to_ascii_lowercase();
+            if lower.starts_with("execute ") {
+                return find_first_string_literal_position(sql)
+                    .or_else(|| find_error_value_position(sql, raw_input));
+            }
+            if raw_input.is_empty() {
                 return None;
             }
             raw_input.as_str()
@@ -1028,6 +1048,114 @@ fn find_function_argument_position(sql: &str, func: &str) -> Option<usize> {
         }
         return Some(idx + 1);
     }
+}
+
+fn find_xmlconcat_type_error_position(sql: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let func = lower.find("xmlconcat")?;
+    let open = sql[func..].find('(')? + func;
+    let bytes = sql.as_bytes();
+    let mut depth = 0usize;
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'(' => depth += 1,
+            b')' if depth == 0 => return Some(open + 2),
+            b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                let mut arg = index + 1;
+                while arg < bytes.len() && bytes[arg].is_ascii_whitespace() {
+                    arg += 1;
+                }
+                return (arg < bytes.len()).then_some(arg + 1);
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    Some(open + 2)
+}
+
+fn find_xmlattributes_unnamed_value_position(sql: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let open = lower.find("xmlattributes")?;
+    let paren = sql[open..].find('(')? + open;
+    let mut index = paren + 1;
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    (index < bytes.len()).then_some(index + 1)
+}
+
+fn find_xmlattributes_duplicate_value_position(sql: &str, name: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let attr_start = lower.find("xmlattributes")?;
+    let open = sql[attr_start..].find('(')? + attr_start;
+    let attr_end = find_xmlattributes_args_end(sql, open).unwrap_or(sql.len());
+    let segment = &sql[open + 1..attr_end];
+    let segment_lower = segment.to_ascii_lowercase();
+    let name_lower = name.to_ascii_lowercase();
+    let needles = [format!(" as {name_lower}"), format!(" as \"{name_lower}\"")];
+    let mut found = 0usize;
+    let mut scan_from = 0usize;
+    while scan_from < segment_lower.len() {
+        let next = needles
+            .iter()
+            .filter_map(|needle| {
+                segment_lower[scan_from..]
+                    .find(needle)
+                    .map(|offset| scan_from + offset)
+            })
+            .min()?;
+        found += 1;
+        if found == 2 {
+            let prefix = &segment[..next];
+            let value_start = prefix.rfind(',').map(|index| index + 1).unwrap_or_default();
+            let mut absolute = open + 1 + value_start;
+            let bytes = sql.as_bytes();
+            while absolute < bytes.len() && bytes[absolute].is_ascii_whitespace() {
+                absolute += 1;
+            }
+            return Some(absolute + 1);
+        }
+        scan_from = next + 1;
+    }
+    None
+}
+
+fn find_xmlattributes_args_end(sql: &str, open: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut depth = 0usize;
+    let mut index = open;
+    let mut in_string = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if byte == b'\'' {
+                if bytes.get(index + 1) == Some(&b'\'') {
+                    index += 2;
+                    continue;
+                }
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'\'' => in_string = true,
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 fn find_range_literal_position(sql: &str) -> Option<usize> {
@@ -7795,6 +7923,7 @@ fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> i
             RaiseLevel::Info => ("INFO", "00000"),
             RaiseLevel::Notice => ("NOTICE", "00000"),
             RaiseLevel::Warning => ("WARNING", "01000"),
+            RaiseLevel::Log => ("LOG", "00000"),
             RaiseLevel::Exception => continue,
         };
         send_notice_with_severity(stream, severity, sqlstate, &notice.message, None, None)?;
@@ -8168,6 +8297,7 @@ fn raw_window_frame_bound_contains_pg_notify(
 fn raw_expr_contains_pg_notify(expr: &crate::backend::parser::SqlExpr) -> bool {
     match expr {
         crate::backend::parser::SqlExpr::Column(_)
+        | crate::backend::parser::SqlExpr::Parameter(_)
         | crate::backend::parser::SqlExpr::Default
         | crate::backend::parser::SqlExpr::Const(_)
         | crate::backend::parser::SqlExpr::IntegerLiteral(_)
@@ -12676,6 +12806,20 @@ ORDER BY 1, 2;";
         };
 
         assert_eq!(exec_error_position(sql, &err), None);
+    }
+
+    #[test]
+    fn exec_error_position_points_at_execute_xml_argument() {
+        let sql = "EXECUTE foo ('bad');";
+        let err = ExecError::XmlInput {
+            raw_input: "<foo/>bad".into(),
+            message: "invalid XML document".into(),
+            detail: Some("line 1: Start tag expected, '<' not found".into()),
+            context: None,
+            sqlstate: "2200M",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), Some(14));
     }
 
     #[test]

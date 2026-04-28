@@ -178,7 +178,9 @@ pub(crate) fn format_record_text_with_options(
                             Value::TsQuery(v) => crate::backend::executor::render_tsquery_text(v),
                             Value::Json(v) => v.to_string(),
                             Value::JsonPath(v) => v.to_string(),
-                            Value::Xml(v) => v.to_string(),
+                            Value::Xml(v) => {
+                                crate::backend::executor::render_xml_output_text(v).to_string()
+                            }
                             Value::Null => String::new(),
                             _ => format!("{other:?}"),
                         })
@@ -334,7 +336,7 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
         Value::TextRef(_, _) => value.as_text().unwrap_or_default().to_string(),
         Value::Json(text) => text.to_string(),
         Value::JsonPath(text) => text.to_string(),
-        Value::Xml(text) => text.to_string(),
+        Value::Xml(text) => crate::backend::executor::render_xml_output_text(text).to_string(),
         Value::Bytea(bytes) => {
             let mut rendered = String::from("\\\\x");
             for byte in bytes {

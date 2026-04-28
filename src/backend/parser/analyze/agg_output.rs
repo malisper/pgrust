@@ -1269,9 +1269,24 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 ],
             ))
         }
-        SqlExpr::Xml(_) => Err(ParseError::FeatureNotSupported(
-            "xml expressions in grouped aggregate output are not implemented".into(),
-        )),
+        SqlExpr::Xml(xml) => bind_grouped_xml_expr(
+            xml,
+            clause.clone(),
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        ),
+        SqlExpr::Parameter(index) => Err(ParseError::DetailedError {
+            message: format!("there is no parameter ${index}"),
+            detail: None,
+            hint: None,
+            sqlstate: "42P02",
+        }),
         SqlExpr::Default => Err(ParseError::UnexpectedToken {
             expected: "expression",
             actual: "DEFAULT".into(),
@@ -3736,6 +3751,230 @@ fn source_relation_oids(column: &ScopeColumn) -> BTreeSet<u32> {
         relation_oids.insert(relation_oid);
     }
     relation_oids
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_grouped_xml_expr(
+    xml: &crate::include::nodes::parsenodes::RawXmlExpr,
+    clause: UngroupedColumnClause,
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    agg_list: &[CollectedAggregate],
+    n_keys: usize,
+) -> Result<Expr, ParseError> {
+    let text_type = SqlType::new(SqlTypeKind::Text);
+    let xml_type = SqlType::new(SqlTypeKind::Xml);
+    let bind_child = |expr: &SqlExpr| {
+        bind_agg_output_expr_in_clause(
+            expr,
+            clause.clone(),
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        )
+    };
+    let bind_as = |expr: &SqlExpr, target: SqlType| -> Result<Expr, ParseError> {
+        let source =
+            grouped_infer_sql_expr_type(expr, input_scope, catalog, outer_scopes, grouped_outer);
+        Ok(coerce_bound_expr(bind_child(expr)?, source, target))
+    };
+
+    let mut name = xml.name.clone();
+    let mut named_args = Vec::new();
+    let mut arg_names = xml.arg_names.clone();
+    let mut args = Vec::new();
+    let mut target_type = None;
+
+    match xml.op {
+        crate::include::nodes::parsenodes::RawXmlExprOp::Parse => {
+            args = xml
+                .args
+                .iter()
+                .map(|arg| bind_as(arg, text_type))
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        crate::include::nodes::parsenodes::RawXmlExprOp::Serialize => {
+            args = xml
+                .args
+                .iter()
+                .map(|arg| bind_as(arg, xml_type))
+                .collect::<Result<Vec<_>, _>>()?;
+            target_type = Some(resolve_raw_type_name(
+                &xml.target_type.clone().ok_or(ParseError::UnexpectedEof)?,
+                catalog,
+            )?);
+        }
+        crate::include::nodes::parsenodes::RawXmlExprOp::Root => {
+            if let Some(first) = xml.args.first() {
+                args.push(bind_as(first, xml_type)?);
+            }
+            if let Some(version) = xml.args.get(1) {
+                args.push(bind_as(version, text_type)?);
+            }
+        }
+        crate::include::nodes::parsenodes::RawXmlExprOp::Pi => {
+            args = xml
+                .args
+                .iter()
+                .map(|arg| bind_as(arg, text_type))
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        crate::include::nodes::parsenodes::RawXmlExprOp::IsDocument => {
+            args = xml
+                .args
+                .iter()
+                .map(|arg| bind_as(arg, xml_type))
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        crate::include::nodes::parsenodes::RawXmlExprOp::Element => {
+            let mut seen_names = BTreeSet::new();
+            for (raw_expr, raw_name) in xml.named_args.iter().zip(xml.arg_names.iter()) {
+                let inferred_name = if raw_name.is_empty() {
+                    match raw_expr {
+                        SqlExpr::Column(column)
+                            if !column.contains('.') && !column.ends_with(".*") =>
+                        {
+                            column.clone()
+                        }
+                        _ => {
+                            return Err(ParseError::DetailedError {
+                                message: "unnamed XML attribute value must be a column reference"
+                                    .into(),
+                                detail: None,
+                                hint: None,
+                                sqlstate: "42601",
+                            });
+                        }
+                    }
+                } else {
+                    raw_name.clone()
+                };
+                if !seen_names.insert(inferred_name.clone()) {
+                    return Err(ParseError::DetailedError {
+                        message: format!(
+                            "XML attribute name \"{inferred_name}\" appears more than once"
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42601",
+                    });
+                }
+                named_args.push(bind_child(raw_expr)?);
+                arg_names.push(inferred_name);
+            }
+            args = xml
+                .args
+                .iter()
+                .map(bind_child)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        crate::include::nodes::parsenodes::RawXmlExprOp::Forest => {
+            arg_names.clear();
+            for (raw_expr, raw_name) in xml.args.iter().zip(xml.arg_names.iter()) {
+                let inferred_name = if raw_name.is_empty() {
+                    match raw_expr {
+                        SqlExpr::Column(column)
+                            if !column.contains('.') && !column.ends_with(".*") =>
+                        {
+                            column.clone()
+                        }
+                        _ => {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "element alias for non-column XMLFOREST expression",
+                                actual: "XMLFOREST expression".into(),
+                            });
+                        }
+                    }
+                } else {
+                    raw_name.clone()
+                };
+                arg_names.push(inferred_name);
+                args.push(bind_child(raw_expr)?);
+            }
+        }
+        crate::include::nodes::parsenodes::RawXmlExprOp::Concat => {
+            args = xml
+                .args
+                .iter()
+                .map(|arg| {
+                    let source = grouped_infer_sql_expr_type(
+                        arg,
+                        input_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                    );
+                    let literal_like = matches!(
+                        arg,
+                        SqlExpr::Const(Value::Text(_))
+                            | SqlExpr::Const(Value::TextRef(_, _))
+                            | SqlExpr::Const(Value::Null)
+                    );
+                    if source.kind != SqlTypeKind::Xml && !literal_like {
+                        return Err(ParseError::DetailedError {
+                            message: format!(
+                                "argument of XMLCONCAT must be type xml, not type {}",
+                                sql_type_name(source)
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42804",
+                        });
+                    }
+                    Ok(coerce_bound_expr(bind_child(arg)?, source, xml_type))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+    }
+
+    Ok(Expr::Xml(Box::new(
+        crate::include::nodes::primnodes::XmlExpr {
+            op: match xml.op {
+                crate::include::nodes::parsenodes::RawXmlExprOp::Concat => {
+                    crate::include::nodes::primnodes::XmlExprOp::Concat
+                }
+                crate::include::nodes::parsenodes::RawXmlExprOp::Element => {
+                    crate::include::nodes::primnodes::XmlExprOp::Element
+                }
+                crate::include::nodes::parsenodes::RawXmlExprOp::Forest => {
+                    crate::include::nodes::primnodes::XmlExprOp::Forest
+                }
+                crate::include::nodes::parsenodes::RawXmlExprOp::Parse => {
+                    crate::include::nodes::primnodes::XmlExprOp::Parse
+                }
+                crate::include::nodes::parsenodes::RawXmlExprOp::Pi => {
+                    crate::include::nodes::primnodes::XmlExprOp::Pi
+                }
+                crate::include::nodes::parsenodes::RawXmlExprOp::Root => {
+                    crate::include::nodes::primnodes::XmlExprOp::Root
+                }
+                crate::include::nodes::parsenodes::RawXmlExprOp::Serialize => {
+                    crate::include::nodes::primnodes::XmlExprOp::Serialize
+                }
+                crate::include::nodes::parsenodes::RawXmlExprOp::IsDocument => {
+                    crate::include::nodes::primnodes::XmlExprOp::IsDocument
+                }
+            },
+            name: name.take(),
+            named_args,
+            arg_names,
+            args,
+            xml_option: xml.xml_option,
+            indent: xml.indent,
+            target_type,
+            standalone: xml.standalone,
+            root_version: xml.root_version,
+        },
+    )))
 }
 
 fn source_attnos_for_relation(column: &ScopeColumn, relation_oid: u32) -> BTreeSet<AttrNumber> {

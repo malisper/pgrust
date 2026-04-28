@@ -315,6 +315,7 @@ pub(crate) fn collect_sql_expr_column_names(expr: &SqlExpr, out: &mut BTreeSet<S
         SqlExpr::Column(name) => {
             out.insert(name.clone());
         }
+        SqlExpr::Parameter(_) => {}
         SqlExpr::Add(left, right)
         | SqlExpr::Sub(left, right)
         | SqlExpr::BitAnd(left, right)

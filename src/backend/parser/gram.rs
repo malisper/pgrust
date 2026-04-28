@@ -15468,11 +15468,19 @@ fn build_close_portal(pair: Pair<'_, Rule>) -> Result<ClosePortalStatement, Pars
 
 fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, ParseError> {
     let mut name = None;
+    let mut parameter_types = Vec::new();
     let mut query = None;
     let mut query_sql = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier => name = Some(build_identifier(part)),
+            Rule::prepare_type_list => {
+                parameter_types = part
+                    .into_inner()
+                    .filter(|part| part.as_rule() == Rule::type_name)
+                    .map(build_type_name)
+                    .collect();
+            }
             Rule::select_stmt => {
                 query_sql = Some(part.as_str().trim().to_string());
                 query = Some(build_select(part)?);
@@ -15482,18 +15490,32 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
     }
     Ok(PrepareStatement {
         name: name.ok_or(ParseError::UnexpectedEof)?,
+        parameter_types,
         query: query.ok_or(ParseError::UnexpectedEof)?,
         query_sql: query_sql.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 
 fn build_execute_statement(pair: Pair<'_, Rule>) -> Result<ExecuteStatement, ParseError> {
-    let name = pair
-        .into_inner()
-        .find(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier)
-        .ok_or(ParseError::UnexpectedEof)?;
-    Ok(ExecuteStatement { name })
+    let mut name = None;
+    let mut args = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::execute_arg_list => {
+                args = part
+                    .into_inner()
+                    .filter(|part| part.as_rule() == Rule::expr)
+                    .map(build_expr)
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            _ => {}
+        }
+    }
+    Ok(ExecuteStatement {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        args,
+    })
 }
 
 fn build_deallocate_statement(pair: Pair<'_, Rule>) -> Result<DeallocateStatement, ParseError> {
@@ -17327,6 +17349,7 @@ fn build_xml_table_regular_column(pair: Pair<'_, Rule>) -> Result<XmlTableColumn
                         not_null = option.as_str().to_ascii_lowercase().starts_with("not");
                     }
                     Rule::xml_table_named_option => {
+                        let position = option.as_span().start() + 1;
                         let name = option
                             .into_inner()
                             .find(|inner| inner.as_rule() == Rule::identifier)
@@ -17340,7 +17363,8 @@ fn build_xml_table_regular_column(pair: Pair<'_, Rule>) -> Result<XmlTableColumn
                                 detail: None,
                                 hint: None,
                                 sqlstate: "42601",
-                            });
+                            }
+                            .with_position(position));
                         }
                     }
                     _ => {}
@@ -23548,6 +23572,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         indent: None,
                         target_type: None,
                         standalone: None,
+                        root_version: XmlRootVersion::Omitted,
                     }));
                     Ok(if negated {
                         SqlExpr::Not(Box::new(expr))
@@ -24161,6 +24186,15 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::xml_root_expr => build_xml_root_expr(pair),
         Rule::xml_serialize_expr => build_xml_serialize_expr(pair),
         Rule::xml_exists_expr => build_xml_exists_expr(pair),
+        Rule::parameter_expr => {
+            let param = pair.as_str();
+            let index =
+                parse_usize_literal(&param[1..]).map_err(|_| ParseError::UnexpectedToken {
+                    expected: "valid parameter number",
+                    actual: param.into(),
+                })?;
+            Ok(SqlExpr::Parameter(index))
+        }
         Rule::typed_string_literal => {
             let mut inner = pair.into_inner();
             let first = inner.next().ok_or(ParseError::UnexpectedEof)?;
@@ -25226,6 +25260,7 @@ fn build_xml_element_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         indent: None,
         target_type: None,
         standalone: None,
+        root_version: XmlRootVersion::Omitted,
     })))
 }
 
@@ -25258,6 +25293,7 @@ fn build_xml_forest_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         indent: None,
         target_type: None,
         standalone: None,
+        root_version: XmlRootVersion::Omitted,
     })))
 }
 
@@ -25282,6 +25318,7 @@ fn build_xml_parse_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         indent: None,
         target_type: None,
         standalone: None,
+        root_version: XmlRootVersion::Omitted,
     })))
 }
 
@@ -25305,15 +25342,31 @@ fn build_xml_pi_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         indent: None,
         target_type: None,
         standalone: None,
+        root_version: XmlRootVersion::Omitted,
     })))
 }
 
 fn build_xml_root_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     let mut args = Vec::new();
     let mut standalone = None;
+    let mut root_version = XmlRootVersion::Omitted;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::expr => args.push(build_expr(part)?),
+            Rule::xml_root_version => {
+                let mut value = None;
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::expr => value = Some(build_expr(inner)?),
+                        Rule::kw_value => root_version = XmlRootVersion::NoValue,
+                        _ => {}
+                    }
+                }
+                if let Some(value) = value {
+                    args.push(value);
+                    root_version = XmlRootVersion::Value;
+                }
+            }
             Rule::xml_root_standalone => {
                 let has_yes = part.as_str().eq_ignore_ascii_case("yes");
                 let has_no_value = part
@@ -25341,6 +25394,7 @@ fn build_xml_root_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         indent: None,
         target_type: None,
         standalone,
+        root_version,
     })))
 }
 
@@ -25356,6 +25410,17 @@ fn build_xml_serialize_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError>
             Rule::kw_content => xml_option = Some(XmlOption::Content),
             Rule::expr => args.push(build_expr(part)?),
             Rule::type_name => target_type = Some(build_type_name(part)),
+            Rule::xml_serialize_no_indent => indent = Some(false),
+            Rule::xml_serialize_indent => indent = Some(true),
+            Rule::xml_serialize_indent_option => {
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::xml_serialize_no_indent => indent = Some(false),
+                        Rule::xml_serialize_indent => indent = Some(true),
+                        _ => {}
+                    }
+                }
+            }
             Rule::kw_no => saw_no = true,
             Rule::kw_indent => indent = Some(!saw_no),
             _ => {}
@@ -25371,6 +25436,7 @@ fn build_xml_serialize_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError>
         indent,
         target_type,
         standalone: None,
+        root_version: XmlRootVersion::Omitted,
     })))
 }
 

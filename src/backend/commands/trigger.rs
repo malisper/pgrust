@@ -792,6 +792,7 @@ fn rewrite_trigger_system_column_refs(expr: &mut SqlExpr) {
                 *name = TRIGGER_OLD_CTID_COLUMN.into();
             }
         }
+        SqlExpr::Parameter(_) => {}
         SqlExpr::Add(left, right)
         | SqlExpr::Sub(left, right)
         | SqlExpr::BitAnd(left, right)

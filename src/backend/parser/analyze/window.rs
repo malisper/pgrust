@@ -145,6 +145,7 @@ pub(super) fn expr_contains_window(expr: &SqlExpr) -> bool {
             .iter()
             .any(|expr| expr_contains_window(expr)),
         SqlExpr::Column(_)
+        | SqlExpr::Parameter(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)

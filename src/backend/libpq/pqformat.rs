@@ -1181,8 +1181,9 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(v.as_bytes());
             }
             Value::Xml(v) => {
-                buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
-                buf.extend_from_slice(v.as_bytes());
+                let text = crate::backend::executor::render_xml_output_text(v);
+                buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
+                buf.extend_from_slice(text.as_bytes());
             }
             Value::Jsonb(v) => {
                 let text = crate::backend::executor::jsonb::render_jsonb_bytes(v).unwrap();
@@ -1483,7 +1484,9 @@ pub(crate) fn encode_binary_data_row_value(
             Ok(value.as_text().unwrap_or_default().as_bytes().to_vec())
         }
         Value::Xml(text) if matches!(sql_type.kind, SqlTypeKind::Xml) => {
-            Ok(text.as_bytes().to_vec())
+            Ok(crate::backend::executor::render_xml_output_text(text)
+                .as_bytes()
+                .to_vec())
         }
         Value::InternalChar(byte) => Ok(vec![*byte]),
         Value::Float64(v) if matches!(sql_type.kind, SqlTypeKind::Float4) => {

@@ -86,13 +86,13 @@ use super::expr_reg;
 use super::expr_string::{
     eval_ascii_function, eval_bit_count_bytes, eval_bpchar_to_text_function, eval_bytea_overlay,
     eval_bytea_position_function, eval_bytea_substring, eval_chr_function, eval_concat_function,
-    eval_concat_ws_function, eval_convert_from_function, eval_crc32_function, eval_crc32c_function,
-    eval_decode_function, eval_encode_function, eval_format_function, eval_get_bit_bytes,
-    eval_get_byte, eval_initcap_function, eval_left_function, eval_length_function, eval_like,
-    eval_lower_function, eval_lpad_function, eval_md5_function, eval_parse_ident_function,
-    eval_pg_rust_is_catalog_text_unique_index_oid, eval_pg_rust_test_enc_conversion,
-    eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler, eval_pg_rust_test_int44in,
-    eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
+    eval_concat_ws_function, eval_convert_from_function, eval_convert_to_function,
+    eval_crc32_function, eval_crc32c_function, eval_decode_function, eval_encode_function,
+    eval_format_function, eval_get_bit_bytes, eval_get_byte, eval_initcap_function,
+    eval_left_function, eval_length_function, eval_like, eval_lower_function, eval_lpad_function,
+    eval_md5_function, eval_parse_ident_function, eval_pg_rust_is_catalog_text_unique_index_oid,
+    eval_pg_rust_test_enc_conversion, eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler,
+    eval_pg_rust_test_int44in, eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
     eval_pg_rust_test_pt_in_widget, eval_pg_rust_test_widget_in, eval_pg_rust_test_widget_out,
     eval_pg_size_bytes_function, eval_pg_size_pretty_function, eval_position_function,
     eval_quote_ident_function, eval_quote_literal_function, eval_repeat_function,
@@ -109,7 +109,8 @@ use super::expr_string::{
 use super::expr_txid::eval_txid_builtin_function;
 use super::expr_xml::{
     eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function,
-    eval_xpath_exists_function, eval_xpath_function, unsupported_xml_feature_error,
+    eval_xml_text_function, eval_xpath_exists_function, eval_xpath_function,
+    unsupported_xml_feature_error,
 };
 use super::node_types::*;
 use super::pg_regex::{
@@ -2018,6 +2019,9 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
     if name == "timezone" {
         return Ok(Value::Text(ctx.datetime_config.time_zone.clone().into()));
     }
+    if name == "server_encoding" {
+        return Ok(Value::Text("UTF8".into()));
+    }
     if name == "datestyle" {
         return Ok(Value::Text(
             crate::backend::utils::misc::guc_datetime::format_datestyle(&ctx.datetime_config)
@@ -2057,6 +2061,9 @@ fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecE
     };
     if name == "role" {
         return Ok(Value::Text("none".into()));
+    }
+    if name == "server_encoding" {
+        return Ok(Value::Text("UTF8".into()));
     }
     if let Some(value) = plpgsql_guc_default_value(&name) {
         return Ok(Value::Text(value.into()));
@@ -8175,6 +8182,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::SetByte => eval_set_byte(&values),
         BuiltinScalarFunction::Convert => eval_convert(&values),
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
+        BuiltinScalarFunction::ConvertTo => eval_convert_to_function(&values),
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
         BuiltinScalarFunction::Reverse => eval_reverse_function(&values),
         BuiltinScalarFunction::TextStartsWith => eval_text_starts_with_function(&values),
@@ -8253,6 +8261,7 @@ fn eval_plpgsql_builtin_function(
             eval_hash_builtin_function(kind, true, &values)
         }
         BuiltinScalarFunction::XmlComment => eval_xml_comment_function(&values, None),
+        BuiltinScalarFunction::XmlText => eval_xml_text_function(&values, None),
         BuiltinScalarFunction::XmlIsWellFormed => eval_xml_is_well_formed_function(
             &values,
             crate::backend::utils::misc::guc_xml::XmlOptionSetting::Content,
@@ -10315,6 +10324,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::BoolOrStateFunc => eval_boolor_statefunc(&values),
         BuiltinScalarFunction::UnsupportedXmlFeature => Err(unsupported_xml_feature_error()),
         BuiltinScalarFunction::XmlComment => eval_xml_comment_function(&values, Some(ctx)),
+        BuiltinScalarFunction::XmlText => eval_xml_text_function(&values, Some(ctx)),
         BuiltinScalarFunction::XmlIsWellFormed => {
             eval_xml_is_well_formed_function(&values, ctx.datetime_config.xml.option, Some(ctx))
         }
@@ -10571,6 +10581,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::SetByte => eval_set_byte(&values),
         BuiltinScalarFunction::Convert => eval_convert(&values),
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
+        BuiltinScalarFunction::ConvertTo => eval_convert_to_function(&values),
         BuiltinScalarFunction::Encode => eval_encode_function(&values),
         BuiltinScalarFunction::Decode => eval_decode_function(&values),
         BuiltinScalarFunction::Sha224 => eval_sha224_function(&values),

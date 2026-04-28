@@ -117,7 +117,7 @@ pub(crate) use expr_string::eval_to_char_function;
 pub(crate) use expr_txid::{
     cast_text_to_txid_snapshot, eval_txid_builtin_function, is_txid_snapshot_type_oid,
 };
-pub(crate) use expr_xml::validate_xml_input;
+pub(crate) use expr_xml::{render_xml_output_text, strip_xml_declaration, validate_xml_input};
 pub use fmgr::ScalarFunctionCallInfo;
 pub(crate) use nodes::{
     render_explain_expr, render_explain_join_expr, render_explain_projection_expr_with_qualifier,
