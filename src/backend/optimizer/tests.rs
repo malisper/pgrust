@@ -19,7 +19,7 @@ use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, RelOptInfo, RelOptKind,
 };
 use crate::include::nodes::plannodes::{
-    AggregateStrategy, IndexScanKeyArgument, Plan, PlanEstimate, PlannedStmt,
+    AggregatePhase, AggregateStrategy, IndexScanKeyArgument, Plan, PlanEstimate, PlannedStmt,
 };
 use crate::include::nodes::primnodes::{
     Aggref, AttrNumber, Expr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry,
@@ -2315,6 +2315,8 @@ fn aggregate_pathkeys_follow_strategy() {
         pathtarget: PathTarget::new(vec![var(10, 1)]),
         slot_id: 20,
         strategy: AggregateStrategy::Hashed,
+        phase: AggregatePhase::Complete,
+        semantic_accumulators: None,
         disabled: false,
         pathkeys: vec![key.clone()],
         input: Box::new(values_path(10, 1.0, 1.0)),
@@ -2335,6 +2337,8 @@ fn aggregate_pathkeys_follow_strategy() {
         pathtarget: PathTarget::new(vec![var(10, 1)]),
         slot_id: 20,
         strategy: AggregateStrategy::Sorted,
+        phase: AggregatePhase::Complete,
+        semantic_accumulators: None,
         disabled: false,
         pathkeys: vec![key.clone()],
         input: Box::new(values_path(10, 1.0, 1.0)),
