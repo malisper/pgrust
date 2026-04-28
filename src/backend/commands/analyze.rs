@@ -3,12 +3,13 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use super::tablecmds::{
     collect_matching_rows_heap, index_key_values_for_row, row_matches_index_predicate,
 };
+use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::value_io::decode_value_with_toast;
-use crate::backend::executor::{
-    ExecError, ExecutorContext, Value, format_array_value_text, render_datetime_value_text,
-    render_internal_char_text, render_tsquery_text, render_tsvector_text,
-};
+use crate::backend::executor::{ExecError, ExecutorContext, TupleSlot, Value, eval_expr};
+use crate::backend::parser::analyze::{bind_expr_with_outer_and_ctes, scope_for_relation};
 use crate::backend::parser::{BoundIndexRelation, BoundRelation, CatalogLookup, ParseError};
+use crate::backend::statistics::build::build_extended_statistics_payloads;
+use crate::backend::statistics::types::statistics_value_key;
 use crate::backend::storage::page::bufpage::ItemIdFlags;
 use crate::backend::storage::page::bufpage::{
     page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number,
@@ -16,10 +17,11 @@ use crate::backend::storage::page::bufpage::{
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
 use crate::include::access::htup::HeapTuple;
-use crate::include::catalog::PgStatisticRow;
+use crate::include::catalog::{PgStatisticExtDataRow, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::execnodes::ToastFetchContext;
 use crate::include::nodes::parsenodes::MaintenanceTarget;
+use crate::include::nodes::primnodes::expr_sql_type_hint;
 
 const DEFAULT_STATISTICS_TARGET: i16 = 100;
 const STATISTIC_KIND_MCV: i16 = 1;
@@ -33,12 +35,14 @@ pub(crate) struct AnalyzeRelationStats {
     pub reltuples: f64,
     pub clear_relhassubclass: bool,
     pub statistics: Vec<PgStatisticRow>,
+    pub statistics_ext_data: Vec<PgStatisticExtDataRow>,
 }
 
 #[derive(Debug, Clone)]
 struct InheritanceAnalyzeStats {
     reltuples: f64,
     statistics: Vec<PgStatisticRow>,
+    statistics_ext_data: Vec<PgStatisticExtDataRow>,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +217,7 @@ fn collect_analyze_stats_for_relation(
             InheritanceAnalyzeStats {
                 reltuples: 0.0,
                 statistics: Vec::new(),
+                statistics_ext_data: Vec::new(),
             }
         } else {
             sample_inheritance_tree(&relation, &selected, &member_oids, catalog, ctx)?
@@ -223,21 +228,23 @@ fn collect_analyze_stats_for_relation(
             reltuples: inherited.reltuples,
             clear_relhassubclass,
             statistics: inherited.statistics,
+            statistics_ext_data: inherited.statistics_ext_data,
         });
         return Ok(());
     }
     let root_stats = sample_relation(&relation, &selected, catalog, ctx)?;
     let mut statistics = root_stats.statistics;
+    let mut statistics_ext_data = root_stats.statistics_ext_data;
     let mut clear_relhassubclass = false;
     if !only && catalog.has_subclass(relation.relation_oid) {
         let member_oids = catalog.find_all_inheritors(relation.relation_oid);
         if member_oids.len() < 2 {
             clear_relhassubclass = true;
         } else {
-            statistics.extend(
-                sample_inheritance_tree(&relation, &selected, &member_oids, catalog, ctx)?
-                    .statistics,
-            );
+            let inherited =
+                sample_inheritance_tree(&relation, &selected, &member_oids, catalog, ctx)?;
+            statistics.extend(inherited.statistics);
+            statistics_ext_data.extend(inherited.statistics_ext_data);
         }
     }
     out.push(AnalyzeRelationStats {
@@ -246,6 +253,7 @@ fn collect_analyze_stats_for_relation(
         reltuples: root_stats.reltuples,
         clear_relhassubclass,
         statistics,
+        statistics_ext_data,
     });
     if selected.len() == relation.desc.columns.len() {
         out.extend(sample_expression_indexes(relation, catalog, ctx)?);
@@ -400,6 +408,15 @@ fn sample_relation(
         catalog,
         false,
     )?;
+    let statistics_ext_data = build_statistics_ext_data_rows(
+        relation,
+        selected_columns,
+        &rows,
+        reltuples,
+        catalog,
+        false,
+        ctx,
+    )?;
 
     Ok(AnalyzeRelationStats {
         relation_oid: relation.relation_oid,
@@ -407,6 +424,7 @@ fn sample_relation(
         reltuples,
         clear_relhassubclass: false,
         statistics,
+        statistics_ext_data,
     })
 }
 
@@ -471,6 +489,7 @@ fn sample_expression_indexes(
             reltuples,
             clear_relhassubclass: false,
             statistics,
+            statistics_ext_data: Vec::new(),
         });
     }
     Ok(out)
@@ -581,16 +600,27 @@ fn sample_inheritance_tree(
         }
     }
 
+    let rows = reservoir.into_inner();
+    let reltuples = visible_rows as f64;
     Ok(InheritanceAnalyzeStats {
-        reltuples: visible_rows as f64,
+        reltuples,
         statistics: build_statistics_rows(
             relation.relation_oid,
             &relation.desc,
             selected_columns,
-            &reservoir.into_inner(),
-            visible_rows as f64,
+            &rows,
+            reltuples,
             catalog,
             true,
+        )?,
+        statistics_ext_data: build_statistics_ext_data_rows(
+            relation,
+            selected_columns,
+            &rows,
+            reltuples,
+            catalog,
+            true,
+            ctx,
         )?,
     })
 }
@@ -674,6 +704,219 @@ fn inherited_selected_column_mapping(
         .collect()
 }
 
+fn build_statistics_ext_data_rows(
+    relation: &BoundRelation,
+    selected_columns: &[usize],
+    sample_rows: &[SampledRow],
+    reltuples: f64,
+    catalog: &dyn CatalogLookup,
+    stxdinherit: bool,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<PgStatisticExtDataRow>, ExecError> {
+    let statistic_ext_rows = catalog.statistic_ext_rows_for_relation(relation.relation_oid);
+    if statistic_ext_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let selected_map = selected_columns
+        .iter()
+        .enumerate()
+        .map(|(sample_index, column_index)| (*column_index, sample_index))
+        .collect::<HashMap<_, _>>();
+    let relation_name = catalog
+        .class_row_by_oid(relation.relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation.relation_oid.to_string());
+    let relation_scope = scope_for_relation(Some(&relation_name), &relation.desc);
+
+    let mut out = Vec::new();
+    for stat in statistic_ext_rows {
+        if stat.stxstattarget == Some(0) {
+            continue;
+        }
+        let expression_texts = statistics_expression_texts(&stat.stxexprs)?;
+        let mut target_ids = stat.stxkeys.clone();
+        target_ids.extend((0..expression_texts.len()).map(|idx| -((idx as i16) + 1)));
+        if target_ids.len() < 2 && expression_texts.is_empty() {
+            continue;
+        }
+
+        let mut column_sample_indices = Vec::with_capacity(stat.stxkeys.len());
+        let mut missing_column = false;
+        for attnum in &stat.stxkeys {
+            let Some(column_index) = attnum.checked_sub(1).map(|value| value as usize) else {
+                missing_column = true;
+                break;
+            };
+            let Some(sample_index) = selected_map.get(&column_index).copied() else {
+                missing_column = true;
+                break;
+            };
+            column_sample_indices.push(sample_index);
+        }
+        if missing_column {
+            continue;
+        }
+
+        let bound_exprs = expression_texts
+            .iter()
+            .map(|expr_text| {
+                let parsed = crate::backend::parser::parse_expr(expr_text)?;
+                bind_expr_with_outer_and_ctes(&parsed, &relation_scope, catalog, &[], None, &[])
+            })
+            .collect::<Result<Vec<_>, ParseError>>()?;
+        if !bound_exprs.is_empty() && selected_columns.len() != relation.desc.columns.len() {
+            continue;
+        }
+
+        let mut rows = Vec::with_capacity(sample_rows.len());
+        let mut expression_sample_rows = Vec::with_capacity(sample_rows.len());
+        for row in sample_rows {
+            let mut values = Vec::with_capacity(target_ids.len());
+            for sample_index in &column_sample_indices {
+                values.push(row.values[*sample_index].to_owned_value());
+            }
+            let mut expression_values = Vec::with_capacity(bound_exprs.len());
+            let mut expression_widths = Vec::with_capacity(bound_exprs.len());
+            if !bound_exprs.is_empty() {
+                let mut slot = TupleSlot::virtual_row(row.values.clone());
+                for expr in &bound_exprs {
+                    let value = eval_expr(expr, &mut slot, ctx)?;
+                    expression_widths.push(value_stats_text(&value).len());
+                    values.push(value.to_owned_value());
+                    expression_values.push(value);
+                }
+                expression_sample_rows.push(SampledRow {
+                    physical_ordinal: row.physical_ordinal,
+                    values: expression_values,
+                    widths: expression_widths,
+                });
+            }
+            rows.push(values);
+        }
+
+        let statistics_target = extended_statistics_target(&stat, relation);
+        let payloads = if target_ids.len() >= 2 {
+            build_extended_statistics_payloads(
+                &target_ids,
+                &rows,
+                reltuples,
+                &stat.stxkind,
+                statistics_target,
+            )
+            .map_err(|message| ExecError::DetailedError {
+                message: "could not build extended statistics".into(),
+                detail: Some(message),
+                hint: None,
+                sqlstate: "XX000",
+            })?
+        } else {
+            crate::backend::statistics::build::ExtendedStatisticsPayloads {
+                stxdndistinct: None,
+                stxddependencies: None,
+                stxdmcv: None,
+            }
+        };
+        let stxdexpr = if bound_exprs.is_empty() {
+            None
+        } else {
+            Some(build_expression_statistics_rows(
+                relation,
+                &bound_exprs,
+                &expression_sample_rows,
+                reltuples,
+                catalog,
+                statistics_target,
+                stxdinherit,
+            )?)
+        };
+        out.push(PgStatisticExtDataRow {
+            stxoid: stat.oid,
+            stxdinherit,
+            stxdndistinct: payloads.stxdndistinct,
+            stxddependencies: payloads.stxddependencies,
+            stxdmcv: payloads.stxdmcv,
+            stxdexpr,
+        });
+    }
+    Ok(out)
+}
+
+fn build_expression_statistics_rows(
+    relation: &BoundRelation,
+    expressions: &[crate::include::nodes::primnodes::Expr],
+    sample_rows: &[SampledRow],
+    reltuples: f64,
+    catalog: &dyn CatalogLookup,
+    statistics_target: i16,
+    stainherit: bool,
+) -> Result<Vec<PgStatisticRow>, ExecError> {
+    let expression_desc = crate::backend::executor::RelationDesc {
+        columns: expressions
+            .iter()
+            .enumerate()
+            .map(|(idx, expr)| {
+                let sql_type = expr_sql_type_hint(expr).unwrap_or_else(|| {
+                    crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Text)
+                });
+                let mut column = column_desc(format!("expr{}", idx + 1), sql_type, true);
+                column.attstattarget = statistics_target;
+                column
+            })
+            .collect(),
+    };
+    let selected = (0..expressions.len()).collect::<Vec<_>>();
+    let mut rows = build_statistics_rows(
+        relation.relation_oid,
+        &expression_desc,
+        &selected,
+        sample_rows,
+        reltuples,
+        catalog,
+        stainherit,
+    )?;
+    for (idx, row) in rows.iter_mut().enumerate() {
+        row.staattnum = -((idx as i16) + 1);
+    }
+    Ok(rows)
+}
+
+fn statistics_expression_texts(raw: &Option<String>) -> Result<Vec<String>, ExecError> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str::<Vec<String>>(raw).map_err(|err| ExecError::DetailedError {
+        message: "could not parse stored statistics expressions".into(),
+        detail: Some(err.to_string()),
+        hint: None,
+        sqlstate: "XX000",
+    })
+}
+
+fn extended_statistics_target(
+    stat: &crate::include::catalog::PgStatisticExtRow,
+    relation: &BoundRelation,
+) -> i16 {
+    stat.stxstattarget
+        .unwrap_or_else(|| {
+            stat.stxkeys
+                .iter()
+                .filter_map(|attnum| {
+                    attnum.checked_sub(1).and_then(|idx| {
+                        relation
+                            .desc
+                            .columns
+                            .get(idx as usize)
+                            .map(|column| column.attstattarget)
+                    })
+                })
+                .filter(|target| *target > 0)
+                .max()
+                .unwrap_or(DEFAULT_STATISTICS_TARGET)
+        })
+        .max(1)
+}
+
 fn build_statistics_rows(
     relation_oid: u32,
     relation_desc: &crate::backend::executor::RelationDesc,
@@ -737,6 +980,7 @@ fn build_statistics_rows(
         let mut stanumbers: [Option<ArrayValue>; 5] = Default::default();
         let mut stavalues: [Option<ArrayValue>; 5] = Default::default();
         let mut slot_idx = 0usize;
+        let supports_value_slots = !column.sql_type.is_array;
 
         let mut ranked = freq.into_iter().collect::<Vec<_>>();
         ranked.sort_by(|left, right| right.1.0.cmp(&left.1.0).then_with(|| left.0.cmp(&right.0)));
@@ -747,7 +991,7 @@ fn build_statistics_rows(
             .take(target)
             .cloned()
             .collect::<Vec<_>>();
-        if !mcv.is_empty() {
+        if supports_value_slots && !mcv.is_empty() {
             stakind[slot_idx] = STATISTIC_KIND_MCV;
             staop[slot_idx] = eq_op;
             stacoll[slot_idx] = column.collation_oid;
@@ -767,7 +1011,7 @@ fn build_statistics_rows(
             slot_idx += 1;
         }
 
-        if lt_op != 0 {
+        if supports_value_slots && lt_op != 0 {
             let mcv_values = mcv
                 .iter()
                 .map(|(value, _)| value.clone())
@@ -875,39 +1119,7 @@ fn sample_correlation(values: &[(usize, String)]) -> f64 {
 }
 
 fn value_stats_text(value: &Value) -> String {
-    match value {
-        Value::Null => "NULL".into(),
-        Value::Int16(v) => v.to_string(),
-        Value::Int32(v) => v.to_string(),
-        Value::Int64(v) => v.to_string(),
-        Value::Float64(v) => v.to_string(),
-        Value::Bool(v) => v.to_string(),
-        Value::Text(text) => text.to_string(),
-        Value::TextRef(_, _) => value.as_text().unwrap_or_default().to_string(),
-        Value::Numeric(v) => v.render(),
-        Value::Date(_) => render_datetime_value_text(value).unwrap_or_else(|| format!("{value:?}")),
-        Value::Time(_) => render_datetime_value_text(value).unwrap_or_else(|| format!("{value:?}")),
-        Value::TimeTz(_) => {
-            render_datetime_value_text(value).unwrap_or_else(|| format!("{value:?}"))
-        }
-        Value::Timestamp(_) => {
-            render_datetime_value_text(value).unwrap_or_else(|| format!("{value:?}"))
-        }
-        Value::TimestampTz(_) => {
-            render_datetime_value_text(value).unwrap_or_else(|| format!("{value:?}"))
-        }
-        Value::Bytea(v) => format!("{v:?}"),
-        Value::Bit(v) => format!("{:?}", v.bytes),
-        Value::Array(values) => format_array_value_text(&ArrayValue::from_1d(values.clone())),
-        Value::PgArray(array) => format_array_value_text(array),
-        Value::TsVector(v) => render_tsvector_text(v),
-        Value::TsQuery(v) => render_tsquery_text(v),
-        Value::InternalChar(v) => render_internal_char_text(*v),
-        Value::Json(text) => text.to_string(),
-        Value::Jsonb(bytes) => format!("{bytes:?}"),
-        Value::JsonPath(text) => text.to_string(),
-        other => format!("{other:?}"),
-    }
+    statistics_value_key(value).unwrap_or_else(|| "NULL".into())
 }
 
 fn target_sample_rows(statistics_target: i16) -> usize {

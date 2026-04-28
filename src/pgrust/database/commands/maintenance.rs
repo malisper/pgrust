@@ -90,6 +90,25 @@ fn relation_basename(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
+fn replace_statistics_ext_data_rows_for_analyze(
+    store: &mut crate::backend::catalog::store::CatalogStore,
+    rows: &[crate::include::catalog::PgStatisticExtDataRow],
+    ctx: &CatalogWriteContext,
+    catalog_effects: &mut Vec<CatalogMutationEffect>,
+) -> Result<(), ExecError> {
+    let mut rows_by_oid = BTreeMap::<u32, Vec<_>>::new();
+    for row in rows.iter().cloned() {
+        rows_by_oid.entry(row.stxoid).or_default().push(row);
+    }
+    for (statistics_oid, rows) in rows_by_oid {
+        let effect = store
+            .replace_statistics_data_rows_mvcc(statistics_oid, rows, ctx)
+            .map_err(ExecError::from)?;
+        catalog_effects.push(effect);
+    }
+    Ok(())
+}
+
 fn lookup_vacuum_relation_for_ddl(
     catalog: &dyn CatalogLookup,
     name: &str,
@@ -1256,6 +1275,12 @@ impl Database {
                     )
                     .map_err(ExecError::from)?;
                 catalog_effects.push(effect);
+                replace_statistics_ext_data_rows_for_analyze(
+                    &mut store,
+                    &analyze_result.statistics_ext_data,
+                    &write_ctx,
+                    catalog_effects,
+                )?;
                 session_stats.write().report_relation_analyze(
                     &self.stats,
                     analyze_result.relation_oid,
@@ -1297,6 +1322,12 @@ impl Database {
                 )
                 .map_err(ExecError::from)?;
             catalog_effects.push(effect);
+            replace_statistics_ext_data_rows_for_analyze(
+                &mut store,
+                &result.statistics_ext_data,
+                &write_ctx,
+                catalog_effects,
+            )?;
             session_stats.write().report_relation_analyze(
                 &self.stats,
                 result.relation_oid,
@@ -2130,6 +2161,12 @@ impl Database {
                 )
                 .map_err(ExecError::from)?;
             catalog_effects.push(effect);
+            replace_statistics_ext_data_rows_for_analyze(
+                &mut store,
+                &result.statistics_ext_data,
+                &write_ctx,
+                catalog_effects,
+            )?;
             session_stats.write().report_relation_analyze(
                 &self.stats,
                 result.relation_oid,
@@ -2334,6 +2371,12 @@ impl Database {
                     )
                     .map_err(ExecError::from)?;
                 catalog_effects.push(effect);
+                replace_statistics_ext_data_rows_for_analyze(
+                    &mut store,
+                    &analyze_result.statistics_ext_data,
+                    &write_ctx,
+                    catalog_effects,
+                )?;
                 session_stats.write().report_relation_analyze(
                     &self.stats,
                     analyze_result.relation_oid,
@@ -2375,6 +2418,12 @@ impl Database {
                 )
                 .map_err(ExecError::from)?;
             catalog_effects.push(effect);
+            replace_statistics_ext_data_rows_for_analyze(
+                &mut store,
+                &result.statistics_ext_data,
+                &write_ctx,
+                catalog_effects,
+            )?;
             session_stats.write().report_relation_analyze(
                 &self.stats,
                 result.relation_oid,
