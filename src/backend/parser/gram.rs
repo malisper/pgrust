@@ -8503,6 +8503,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     let mut support = None;
     let mut strict = false;
     let mut leakproof = false;
+    let mut security_definer = false;
     let mut volatility = crate::backend::parser::FunctionVolatility::Volatile;
     let mut parallel = crate::backend::parser::FunctionParallel::Unsafe;
     let mut config = Vec::new();
@@ -8583,6 +8584,27 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
             rest = next_rest;
             continue;
         }
+        if keyword_at_start(rest, "begin") {
+            if body.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "single function body",
+                    actual: rest.into(),
+                });
+            }
+            if !consume_keyword(rest, "begin")
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("atomic")
+            {
+                return Err(ParseError::FeatureNotSupported(
+                    "CREATE FUNCTION SQL-standard bodies must use BEGIN ATOMIC".into(),
+                ));
+            }
+            body = Some(rest.trim().to_string());
+            language.get_or_insert_with(|| "sql".into());
+            rest = "";
+            continue;
+        }
         if keyword_at_start(rest, "strict") {
             strict = true;
             rest = consume_keyword(rest, "strict");
@@ -8592,6 +8614,23 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
             leakproof = true;
             rest = consume_keyword(rest, "leakproof");
             continue;
+        }
+        if keyword_at_start(rest, "security") {
+            let next_rest = consume_keyword(rest, "security").trim_start();
+            if keyword_at_start(next_rest, "definer") {
+                security_definer = true;
+                rest = consume_keyword(next_rest, "definer");
+                continue;
+            }
+            if keyword_at_start(next_rest, "invoker") {
+                security_definer = false;
+                rest = consume_keyword(next_rest, "invoker");
+                continue;
+            }
+            return Err(ParseError::UnexpectedToken {
+                expected: "DEFINER or INVOKER",
+                actual: next_rest.into(),
+            });
         }
         if keyword_at_start(rest, "immutable") {
             volatility = crate::backend::parser::FunctionVolatility::Immutable;
@@ -8658,6 +8697,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         return_spec,
         strict,
         leakproof,
+        security_definer,
         volatility,
         parallel,
         language: language.ok_or(ParseError::UnexpectedEof)?,
@@ -12887,12 +12927,17 @@ fn parse_create_function_returns(
             "cost",
             "language",
             "as",
+            "begin",
             "strict",
             "immutable",
             "stable",
             "volatile",
             "leakproof",
             "parallel",
+            "security",
+            "set",
+            "support",
+            "return",
         ],
     )
     .unwrap_or(type_rest.len());

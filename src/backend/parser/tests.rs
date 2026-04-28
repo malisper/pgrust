@@ -5912,6 +5912,7 @@ fn parse_create_function_statement_with_returns_table() {
             ]),
             strict: false,
             leakproof: false,
+            security_definer: false,
             volatility: FunctionVolatility::Volatile,
             parallel: FunctionParallel::Unsafe,
             language: "plpgsql".into(),
@@ -5956,6 +5957,7 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
             ]),
             strict: false,
             leakproof: false,
+            security_definer: false,
             volatility: FunctionVolatility::Volatile,
             parallel: FunctionParallel::Unsafe,
             language: "plpgsql".into(),
@@ -6313,6 +6315,7 @@ fn parse_create_function_statement_with_unnamed_args() {
             },
             strict: false,
             leakproof: false,
+            security_definer: false,
             volatility: FunctionVolatility::Volatile,
             parallel: FunctionParallel::Unsafe,
             language: "plpgsql".into(),
@@ -6357,6 +6360,7 @@ fn parse_create_function_statement_with_variadic_arg() {
             },
             strict: false,
             leakproof: false,
+            security_definer: false,
             volatility: FunctionVolatility::Volatile,
             parallel: FunctionParallel::Unsafe,
             language: "sql".into(),
@@ -6424,6 +6428,7 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
             },
             strict: true,
             leakproof: false,
+            security_definer: false,
             volatility: FunctionVolatility::Stable,
             parallel: FunctionParallel::Safe,
             language: "c".into(),
@@ -6462,6 +6467,7 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
             },
             strict: true,
             leakproof: true,
+            security_definer: false,
             volatility: FunctionVolatility::Immutable,
             parallel: FunctionParallel::Safe,
             language: "sql".into(),
@@ -6470,6 +6476,33 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
             config: Vec::new(),
         })
     );
+}
+
+#[test]
+fn parse_create_function_sql_standard_body() {
+    let stmt = parse_statement(
+        "create function psql_df_sql (x integer)
+         returns integer
+         security definer
+         begin atomic select x + 1; end",
+    )
+    .unwrap();
+    let Statement::CreateFunction(stmt) = stmt else {
+        panic!("expected CREATE FUNCTION");
+    };
+    assert_eq!(stmt.function_name, "psql_df_sql");
+    assert_eq!(stmt.language, "sql");
+    assert!(stmt.security_definer);
+    assert_eq!(
+        stmt.return_spec,
+        CreateFunctionReturnSpec::Type {
+            ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            setof: false,
+        }
+    );
+    assert_eq!(stmt.args.len(), 1);
+    assert_eq!(stmt.args[0].name.as_deref(), Some("x"));
+    assert!(stmt.body.to_ascii_lowercase().starts_with("begin atomic"));
 }
 
 #[test]
@@ -6500,6 +6533,7 @@ fn parse_create_function_statement_with_cost_clause() {
             },
             strict: false,
             leakproof: false,
+            security_definer: false,
             volatility: FunctionVolatility::Volatile,
             parallel: FunctionParallel::Unsafe,
             language: "plpgsql".into(),

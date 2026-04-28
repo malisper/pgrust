@@ -759,34 +759,6 @@ fn eval_pg_index_column_has_property(
     }
 }
 
-fn regproc_type_name(sql_type: SqlType) -> &'static str {
-    match sql_type.element_type().kind {
-        SqlTypeKind::Bool => "boolean",
-        SqlTypeKind::Bytea => "bytea",
-        SqlTypeKind::Float4 => "real",
-        SqlTypeKind::Float8 => "double precision",
-        SqlTypeKind::Int2 => "smallint",
-        SqlTypeKind::Int4 => "integer",
-        SqlTypeKind::Int8 => "bigint",
-        SqlTypeKind::Internal => "internal",
-        SqlTypeKind::Shell => "shell",
-        SqlTypeKind::Cstring => "cstring",
-        SqlTypeKind::Name => "name",
-        SqlTypeKind::Oid => "oid",
-        SqlTypeKind::RegProc => "regproc",
-        SqlTypeKind::RegClass => "regclass",
-        SqlTypeKind::RegProcedure => "regprocedure",
-        SqlTypeKind::RegRole => "regrole",
-        SqlTypeKind::RegNamespace => "regnamespace",
-        SqlTypeKind::RegOper => "regoper",
-        SqlTypeKind::RegOperator => "regoperator",
-        SqlTypeKind::RegCollation => "regcollation",
-        SqlTypeKind::Text => "text",
-        SqlTypeKind::FdwHandler => "fdw_handler",
-        _ => "text",
-    }
-}
-
 fn catalog_lookup(ctx: Option<&ExecutorContext>) -> Option<&dyn CatalogLookup> {
     ctx.and_then(|ctx| ctx.catalog.as_deref())
 }
@@ -823,46 +795,8 @@ fn eval_regprocedure_to_text(value: &Value, ctx: &ExecutorContext) -> Result<Val
     ))
 }
 
-fn sql_type_identity_text(sql_type: SqlType) -> String {
-    let mut name = regproc_type_name(sql_type).to_string();
-    if sql_type.is_array {
-        name.push_str("[]");
-    }
-    name
-}
-
 fn type_identity_text(catalog: &dyn CatalogLookup, type_oid: u32) -> String {
-    catalog
-        .type_by_oid(type_oid)
-        .map(|row| {
-            if type_oid == ANYOID {
-                return "\"any\"".to_string();
-            }
-            if matches!(
-                row.sql_type.kind,
-                SqlTypeKind::AnyElement
-                    | SqlTypeKind::AnyArray
-                    | SqlTypeKind::AnyRange
-                    | SqlTypeKind::AnyMultirange
-                    | SqlTypeKind::AnyCompatible
-                    | SqlTypeKind::AnyCompatibleArray
-                    | SqlTypeKind::AnyCompatibleRange
-                    | SqlTypeKind::AnyCompatibleMultirange
-                    | SqlTypeKind::AnyEnum
-            ) {
-                return row.typname;
-            }
-            if !row.sql_type.is_array
-                && row.sql_type.type_oid == row.oid
-                && row.sql_type.kind == SqlTypeKind::Bytea
-                && row.oid != BYTEA_TYPE_OID
-            {
-                row.typname
-            } else {
-                sql_type_identity_text(row.sql_type)
-            }
-        })
-        .unwrap_or_else(|| type_oid.to_string())
+    expr_reg::format_type_text(type_oid, None, catalog)
 }
 
 fn function_signature_text(
@@ -1069,6 +1003,21 @@ fn format_function_arg(
     parts.join(" ")
 }
 
+fn function_result_text(
+    proc_row: &crate::include::catalog::PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    if proc_row.prokind == 'p' {
+        return None;
+    }
+    let result = type_identity_text(catalog, proc_row.prorettype);
+    Some(if proc_row.proretset {
+        format!("SETOF {result}")
+    } else {
+        result
+    })
+}
+
 fn function_definition_text(
     proc_row: &crate::include::catalog::PgProcRow,
     catalog: &dyn CatalogLookup,
@@ -1086,16 +1035,27 @@ fn function_definition_text(
         .language_row_by_oid(proc_row.prolang)
         .map(|row| row.lanname)
         .unwrap_or_else(|| proc_row.prolang.to_string());
-    let signature = format!(
-        "CREATE OR REPLACE {kind} {}({})\n LANGUAGE {}",
+    let mut lines = vec![format!(
+        "CREATE OR REPLACE {kind} {}({})",
         quote_qualified_identifier(&schema, &proc_row.proname),
-        function_arguments_text(proc_row, catalog),
-        quote_identifier(&language),
-    );
+        function_arguments_text(proc_row, catalog)
+    )];
+    if let Some(result) = function_result_text(proc_row, catalog) {
+        lines.push(format!(" RETURNS {result}"));
+    }
+    lines.push(format!(" LANGUAGE {}", quote_identifier(&language)));
+    let attributes = function_definition_attributes(proc_row, &language);
+    if !attributes.is_empty() {
+        lines.push(format!(" {}", attributes.join(" ")));
+    }
+    let signature = lines.join("\n");
     if proc_row.prokind == 'p'
         && let Some(body) = format_sql_standard_procedure_body(proc_row, catalog)
     {
         return format!("{signature}\n {body}\n");
+    }
+    if let Some(body) = sql_standard_function_body(&proc_row.prosrc) {
+        return format!("{signature}\n{body}\n");
     }
     let tag = if proc_row.prokind == 'p' {
         "$procedure$"
@@ -1104,6 +1064,56 @@ fn function_definition_text(
     };
     let body = proc_row.prosrc.trim().replace(tag, &format!("{tag} "));
     format!("{signature}\nAS {tag}\n{body}\n{tag}\n")
+}
+
+fn function_definition_attributes(
+    proc_row: &crate::include::catalog::PgProcRow,
+    language: &str,
+) -> Vec<String> {
+    let mut attributes = Vec::new();
+    match proc_row.provolatile {
+        'i' => attributes.push("IMMUTABLE".to_string()),
+        's' => attributes.push("STABLE".to_string()),
+        _ => {}
+    }
+    match proc_row.proparallel {
+        's' => attributes.push("PARALLEL SAFE".to_string()),
+        'r' => attributes.push("PARALLEL RESTRICTED".to_string()),
+        _ => {}
+    }
+    if proc_row.proisstrict {
+        attributes.push("STRICT".to_string());
+    }
+    if proc_row.prosecdef {
+        attributes.push("SECURITY DEFINER".to_string());
+    }
+    if proc_row.proleakproof {
+        attributes.push("LEAKPROOF".to_string());
+    }
+    let default_cost = if language.eq_ignore_ascii_case("sql") {
+        100.0
+    } else {
+        1.0
+    };
+    if (proc_row.procost - default_cost).abs() > f64::EPSILON {
+        attributes.push(format!("COST {}", format_function_cost(proc_row.procost)));
+    }
+    attributes
+}
+
+fn format_function_cost(cost: f64) -> String {
+    if cost.fract().abs() < f64::EPSILON {
+        format!("{cost:.0}")
+    } else {
+        cost.to_string()
+    }
+}
+
+fn sql_standard_function_body(body: &str) -> Option<String> {
+    let trimmed = body.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    (lowered.starts_with("begin atomic") || lowered.starts_with("return "))
+        .then(|| trimmed.trim_end_matches(';').trim_end().to_string())
 }
 
 fn sql_standard_procedure_body(body: &str) -> Option<&str> {
@@ -2986,12 +2996,9 @@ fn eval_pg_get_function_result(
             let Some(proc_row) = catalog.proc_row_by_oid(oid) else {
                 return Ok(Value::Null);
             };
-            if proc_row.prokind == 'p' {
-                return Ok(Value::Null);
-            }
-            Ok(Value::Text(
-                type_identity_text(catalog, proc_row.prorettype).into(),
-            ))
+            Ok(function_result_text(&proc_row, catalog)
+                .map(|text| Value::Text(text.into()))
+                .unwrap_or(Value::Null))
         }
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "pg_get_function_result(oid)",

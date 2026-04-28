@@ -353,9 +353,11 @@ fn documented_operator_description(oid: u32) -> Option<String> {
         match oid {
             349 => "append element onto end of array",
             374 => "prepend element onto front of array",
+            558 => "negate",
             966 => "add/update ACL item",
             967 => "remove ACL item",
             968 => "contains",
+            2750 => "overlaps",
             3213 => "get value from jsonb with path elements",
             3206 => "get value from jsonb as text with path elements",
             3966 => "get value from json with path elements",
