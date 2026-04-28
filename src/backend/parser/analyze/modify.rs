@@ -2,9 +2,10 @@ use super::paths::choose_modify_row_source;
 use super::query::rewrite_local_vars_for_output_exprs;
 use super::*;
 use crate::backend::rewrite::{
-    RlsWriteCheck, ViewDmlEvent, ViewDmlRewriteError, build_target_relation_row_security,
-    build_target_relation_row_security_for_user, pg_rewrite_query, relation_has_row_security,
-    relation_has_security_invoker, resolve_auto_updatable_view_target,
+    RlsWriteCheck, ViewDmlEvent, ViewDmlRewriteError, apply_query_row_security,
+    build_target_relation_row_security, build_target_relation_row_security_for_user,
+    pg_rewrite_query, relation_has_row_security, relation_has_security_invoker,
+    resolve_auto_updatable_view_target,
 };
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::PolicyCommand;
@@ -1230,11 +1231,25 @@ fn query_from_projection_with_target_security_quals(
     mut input: AnalyzedFrom,
     security_quals: Vec<Expr>,
     where_qual: Option<Expr>,
-) -> Query {
-    if let Some(target_rte) = input.rtable.first_mut() {
-        target_rte.security_quals.extend(security_quals);
+    catalog: &dyn CatalogLookup,
+) -> Result<Query, ParseError> {
+    if let Some(rte) = input.rtable.first_mut() {
+        match &mut rte.kind {
+            crate::include::nodes::parsenodes::RangeTblEntryKind::Subquery { query } => {
+                if let Some(target_rte) = query.rtable.first_mut() {
+                    target_rte.security_quals.extend(security_quals);
+                }
+                apply_query_row_security(query, catalog)?;
+            }
+            _ => {
+                rte.security_quals.extend(security_quals);
+                let mut query = query_from_projection_with_qual(input, where_qual);
+                apply_query_row_security(&mut query, catalog)?;
+                return Ok(query);
+            }
+        }
     }
-    query_from_projection_with_qual(input, where_qual)
+    Ok(query_from_projection_with_qual(input, where_qual))
 }
 
 fn prepend_visibility_quals(
@@ -4363,7 +4378,8 @@ fn bind_update_from(
         projected,
         target_rls.visibility_quals.clone(),
         user_predicate,
-    );
+        catalog,
+    )?;
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
         .map(|query| crate::backend::optimizer::planner(query, catalog))??;
 
@@ -4697,7 +4713,8 @@ fn bind_delete_using(
         projected,
         target_rls.visibility_quals,
         user_predicate,
-    );
+        catalog,
+    )?;
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
         .map(|query| crate::backend::optimizer::planner(query, catalog))??;
 

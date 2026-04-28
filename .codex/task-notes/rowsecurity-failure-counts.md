@@ -433,3 +433,19 @@ Inherited UPDATE RETURNING bucket:
   `/tmp/diffs/rowsecurity.diff`.
 - Remaining UPDATE-related gaps are mostly UPDATE FROM joined-input RLS filters,
   EXPLAIN plan shape/indentation, and notice ordering.
+
+UPDATE FROM source-RLS bucket:
+- Joined UPDATE/DELETE input plans now apply normal SELECT RLS inside their
+  projected target/source subquery after installing target DML security quals,
+  so source relations in `UPDATE ... FROM` cannot leak rows around RLS.
+- Added focused coverage where an UPDATE FROM source table policy exposes only
+  one source row and must leave the hidden row's target tuple unchanged.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  update_from_applies_source_relation_rls` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `697/774` matched, `77` mismatches, `1297` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.
+- Remaining UPDATE FROM gaps include target-side RLS in some joined-input plan
+  shapes, join algorithm/order differences, and EXPLAIN formatting.

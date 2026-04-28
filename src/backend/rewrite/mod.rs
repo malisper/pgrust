@@ -5,9 +5,9 @@ mod views;
 
 use row_security::apply_query_row_security_with_active_relations;
 pub(crate) use row_security::{
-    RlsWriteCheck, RlsWriteCheckSource, TargetRlsState, build_target_relation_row_security,
-    build_target_relation_row_security_for_user, relation_has_row_security,
-    relation_row_security_is_enabled_for_user,
+    RlsWriteCheck, RlsWriteCheckSource, TargetRlsState, apply_query_row_security,
+    build_target_relation_row_security, build_target_relation_row_security_for_user,
+    relation_has_row_security, relation_row_security_is_enabled_for_user,
 };
 pub(crate) use rules::{
     format_stored_rule_definition, format_stored_rule_definition_with_catalog,
