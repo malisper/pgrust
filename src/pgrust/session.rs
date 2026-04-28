@@ -16,7 +16,10 @@ use crate::backend::commands::copyto::{
     CopyToDmlEvent, CopyToSink, IoCopyToSink, begin_copy_to, begin_copy_to_dml_capture,
     finish_copy_to, finish_copy_to_dml_capture, write_copy_to, write_copy_to_row,
 };
-use crate::backend::commands::tablecmds::{execute_merge, execute_prepared_insert_row};
+use crate::backend::commands::tablecmds::{
+    check_planned_stmt_select_for_update_privileges, check_planned_stmt_select_privileges,
+    check_relation_column_privileges, execute_merge, execute_prepared_insert_row,
+};
 use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
@@ -2262,14 +2265,14 @@ impl Session {
         portal: &mut Portal,
         completed: bool,
         succeeded: bool,
-    ) {
+    ) -> Result<(), ExecError> {
         if !completed {
-            return;
+            return Ok(());
         }
         let crate::pgrust::portal::PortalExecution::Streaming(guard) = &mut portal.execution else {
-            return;
+            return Ok(());
         };
-        self.finish_streaming_select_guard(db, guard, succeeded);
+        self.finish_streaming_select_guard(db, guard, succeeded)
     }
 
     pub(crate) fn finish_streaming_select_guard(
@@ -2277,11 +2280,27 @@ impl Session {
         db: &Database,
         guard: &mut SelectGuard,
         succeeded: bool,
-    ) {
+    ) -> Result<(), ExecError> {
+        if self.active_txn.is_none() {
+            return self.finish_autocommit_streaming_select_guard(db, guard, succeeded);
+        }
+
         if let Some(xid) = guard.ctx.transaction_xid()
             && let Some(txn) = self.active_txn.as_mut()
         {
             txn.xid = Some(xid);
+            if txn.isolation_level.uses_transaction_snapshot()
+                && let Some(mut snapshot) = txn.transaction_snapshot.clone()
+            {
+                snapshot.current_xid = xid;
+                snapshot.current_cid = guard.base_command_id;
+                crate::backend::utils::time::snapmgr::set_transaction_snapshot_override(
+                    db,
+                    self.client_id,
+                    xid,
+                    snapshot,
+                );
+            }
         }
         self.merge_ctx_pending_async_notifications(&mut guard.ctx, succeeded);
         if succeeded {
@@ -2291,6 +2310,86 @@ impl Session {
             );
             self.process_catalog_command_end(db, guard.catalog_effect_start);
         }
+        Ok(())
+    }
+
+    fn finish_autocommit_streaming_select_guard(
+        &mut self,
+        db: &Database,
+        guard: &mut SelectGuard,
+        succeeded: bool,
+    ) -> Result<(), ExecError> {
+        let xid = guard.ctx.transaction_xid();
+        let next_command_id = guard.ctx.next_command_id;
+        let mut catalog_effects = mem::take(&mut guard.ctx.catalog_effects);
+        catalog_effects.extend(mem::take(&mut guard.ctx.pending_catalog_effects));
+        let temp_effects = mem::take(&mut guard.ctx.temp_effects);
+        let pending_table_locks = mem::take(&mut guard.ctx.pending_table_locks);
+        unlock_relations(&db.table_locks, self.client_id, &pending_table_locks);
+        let pending_async_notifications = if succeeded {
+            mem::take(&mut guard.ctx.pending_async_notifications)
+        } else {
+            guard.ctx.pending_async_notifications.clear();
+            Vec::new()
+        };
+
+        let Some(xid) = xid else {
+            debug_assert!(catalog_effects.is_empty());
+            debug_assert!(temp_effects.is_empty());
+            if succeeded {
+                db.async_notify_runtime
+                    .publish(self.client_id, &pending_async_notifications);
+            }
+            return Ok(());
+        };
+
+        if !succeeded {
+            let _ = db.finish_txn_with_async_notifications(
+                self.client_id,
+                xid,
+                Err(ExecError::DetailedError {
+                    message: "streaming SELECT failed".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                }),
+                &catalog_effects,
+                &temp_effects,
+                &[],
+                pending_async_notifications,
+            );
+            return Ok(());
+        }
+
+        let result = if let Some(deferred_foreign_keys) = guard.ctx.deferred_foreign_keys.as_ref() {
+            let search_path = self.configured_search_path();
+            let validation_catalog =
+                db.lazy_catalog_lookup(self.client_id, Some((xid, 1)), search_path.as_deref());
+            crate::pgrust::database::foreign_keys::validate_deferred_foreign_key_constraints(
+                db,
+                self.client_id,
+                &validation_catalog,
+                xid,
+                next_command_id.max(1),
+                self.interrupts(),
+                &guard.ctx.datetime_config,
+                deferred_foreign_keys,
+            )
+            .map(|_| StatementResult::AffectedRows(0))
+        } else {
+            Ok(StatementResult::AffectedRows(0))
+        };
+
+        db.finish_txn_with_async_notifications(
+            self.client_id,
+            xid,
+            result,
+            &catalog_effects,
+            &temp_effects,
+            &[],
+            pending_async_notifications,
+        )
+        .map(|_| ())
     }
 
     fn validate_constraints_for_active_txn(
@@ -4604,6 +4703,17 @@ impl Session {
                     );
                     return Ok(StatementResult::AffectedRows(0));
                 }
+                if self.active_txn.as_ref().is_some_and(|txn| txn.failed) {
+                    let txn = self.active_txn.take().unwrap();
+                    let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
+                    self.abort_taken_transaction(db, &txn);
+                    for rel in held_locks {
+                        db.table_locks.unlock_table(rel, self.client_id);
+                    }
+                    self.restore_guc_state(db, txn.guc_start_state);
+                    self.portals.drop_transaction_portals(false);
+                    return Ok(StatementResult::AffectedRows(0));
+                }
                 let result = self
                     .validate_constraints_for_active_txn(db, false)
                     .map(|_| StatementResult::AffectedRows(0));
@@ -5227,7 +5337,12 @@ impl Session {
                 .as_ref()
                 .map(|result| result.completed)
                 .unwrap_or(true);
-            self.merge_completed_streaming_portal(db, &mut portal, completed, fetch_result.is_ok());
+            self.merge_completed_streaming_portal(
+                db,
+                &mut portal,
+                completed,
+                fetch_result.is_ok(),
+            )?;
             fetch_result?
         };
         self.portals.put(portal);
@@ -7594,24 +7709,23 @@ impl Session {
                                     ));
                                 }
 
-                                execute_planned_stmt(
-                                    pg_plan_query_with_outer_scopes_and_ctes(
-                                        &outer_select,
-                                        &catalog,
-                                        &[],
-                                        &materialized_ctes,
-                                    )?,
-                                    &mut ctx,
-                                )
+                                let planned = pg_plan_query_with_outer_scopes_and_ctes(
+                                    &outer_select,
+                                    &catalog,
+                                    &[],
+                                    &materialized_ctes,
+                                )?;
+                                check_planned_stmt_select_privileges(&planned, &ctx)?;
+                                execute_planned_stmt(planned, &mut ctx)
                             })();
                             result
                         }
                     }
                     Statement::Select(select) if select.locking_clause.is_some() => {
-                        execute_planned_stmt(
-                            pg_plan_query_with_config(&select, &catalog, self.planner_config())?,
-                            &mut ctx,
-                        )
+                        let planned =
+                            pg_plan_query_with_config(&select, &catalog, self.planner_config())?;
+                        check_planned_stmt_select_for_update_privileges(&planned, &ctx)?;
+                        execute_planned_stmt(planned, &mut ctx)
                     }
                     other => execute_readonly_statement_with_config(
                         other,
@@ -8886,6 +9000,12 @@ impl Session {
                         actual: "no active transaction for prepared insert".into(),
                     }));
                 }
+                if self.transaction_failed() {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "ROLLBACK",
+                        actual: "current transaction is aborted, commands ignored until end of transaction block".into(),
+                    }));
+                }
                 let xid = self.ensure_active_xid(db);
                 let txn = self.active_txn.as_mut().ok_or_else(|| {
                     ExecError::Parse(ParseError::UnexpectedToken {
@@ -9294,12 +9414,17 @@ impl Session {
             return Ok(());
         };
         let catalog = self.catalog_lookup(db);
-        let desc = {
+        let (relation_oid, desc) = {
             let entry = catalog
                 .lookup_any_relation(name)
                 .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(name.to_string())))?;
-            entry.desc.clone()
+            (entry.relation_oid, entry.desc.clone())
         };
+        let snapshot = db
+            .txns
+            .read()
+            .snapshot_for_command(INVALID_TRANSACTION_ID, 0)?;
+        let mut ctx = self.executor_context_for_catalog(db, snapshot, 0, &catalog, None, None);
         let target_indexes = if let Some(columns) = columns {
             let mut indexes = Vec::with_capacity(columns.len());
             for name in columns {
@@ -9316,6 +9441,7 @@ impl Session {
         } else {
             desc.visible_column_indexes()
         };
+        check_relation_column_privileges(&ctx, relation_oid, 'a', target_indexes.iter().copied())?;
         let validation_default_indexes = if copy.options.default_marker.is_some() {
             desc.visible_column_indexes()
         } else {
@@ -9327,13 +9453,7 @@ impl Session {
         if validation_default_indexes.is_empty() {
             return Ok(());
         }
-
         let column_defaults = bind_copy_column_defaults(&desc, &catalog)?;
-        let snapshot = db
-            .txns
-            .read()
-            .snapshot_for_command(INVALID_TRANSACTION_ID, 0)?;
-        let mut ctx = self.executor_context_for_catalog(db, snapshot, 0, &catalog, None, None);
         for column_index in validation_default_indexes {
             let column = &desc.columns[column_index];
             if column.default_sequence_oid.is_some()
@@ -9624,6 +9744,12 @@ impl Session {
                         None,
                     );
                     ctx.interrupts = interrupts;
+                    check_relation_column_privileges(
+                        &ctx,
+                        relation_oid,
+                        'a',
+                        target_indexes.iter().copied(),
+                    )?;
                     let column_defaults = bind_copy_column_defaults(&desc, &catalog)?;
                     let omitted_default_indexes = desc
                         .visible_column_indexes()

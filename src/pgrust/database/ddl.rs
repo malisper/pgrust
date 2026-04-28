@@ -4,14 +4,15 @@ use super::{CatalogTxnContext, ClientId, Database};
 use crate::backend::access::common::toast_compression::ensure_attribute_compression_supported;
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
+use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
 use crate::backend::executor::{ColumnDesc, ExecError, Expr, RelationDesc};
 use crate::backend::parser::{
     AlterColumnExpressionAction, BoundRelation, CatalogLookup, CheckConstraintAction, ColumnDef,
     NotNullConstraintAction, OwnedSequenceSpec, ParseError, RawTypeName, SerialKind, SqlExpr,
     SqlType, SqlTypeKind, bind_generated_expr, bind_scalar_expr_in_scope,
     derive_literal_default_value, expr_references_column, is_collatable_type,
-    normalize_alter_table_add_column_constraints, raw_type_name_hint, resolve_collation_oid,
-    resolve_raw_type_name, sql_type_name,
+    normalize_alter_table_add_column_constraints, parse_expr, raw_type_name_hint,
+    resolve_collation_oid, resolve_raw_type_name, sql_type_name,
 };
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
@@ -27,7 +28,7 @@ use crate::include::catalog::{
     builtin_type_name_for_oid, relkind_is_analyzable,
 };
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::parsenodes::{Query, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{ColumnGeneratedKind, Query, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{Var, user_attrno};
 use crate::pgrust::database::{
     CatalogMutationEffect, CatalogWriteContext, CommandId, TransactionId,
@@ -933,6 +934,58 @@ pub(crate) fn reject_column_with_trigger_dependencies(
     })
 }
 
+pub(crate) fn reject_column_with_publication_dependencies(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    column_name: &str,
+    attnum: i16,
+) -> Result<(), ExecError> {
+    let relation_name = relation_name_for_oid(catalog, relation_oid);
+    let publications = catalog
+        .publication_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.pubname))
+        .collect::<BTreeMap<_, _>>();
+    let mut details = catalog
+        .publication_rel_rows()
+        .into_iter()
+        .filter(|row| row.prrelid == relation_oid)
+        .filter(|row| {
+            row.prattrs
+                .as_ref()
+                .is_some_and(|attrs| attrs.contains(&attnum))
+                || row.prqual.as_ref().is_some_and(|qual| {
+                    parse_expr(qual).is_ok_and(|expr| {
+                        let mut column_names = BTreeSet::new();
+                        collect_sql_expr_column_names(&expr, &mut column_names);
+                        column_names
+                            .iter()
+                            .any(|name| name.eq_ignore_ascii_case(column_name))
+                    })
+                })
+        })
+        .filter_map(|row| {
+            let publication_name = publications.get(&row.prpubid)?;
+            Some(format!(
+                "publication of table {relation_name} in publication {publication_name} depends on column {column_name} of table {relation_name}"
+            ))
+        })
+        .collect::<Vec<_>>();
+    details.sort();
+    details.dedup();
+    if details.is_empty() {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!(
+            "cannot drop column {column_name} of table {relation_name} because other objects depend on it"
+        ),
+        detail: Some(details.join("\n")),
+        hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+        sqlstate: "2BP01",
+    })
+}
+
 pub(crate) fn reject_column_with_rule_dependencies(
     db: &Database,
     client_id: ClientId,
@@ -1681,6 +1734,8 @@ pub(super) fn validate_alter_table_alter_column_default(
 
 pub(super) fn validate_alter_table_alter_column_expression(
     catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    namespace_oid: u32,
     desc: &RelationDesc,
     column_name: &str,
     action: &AlterColumnExpressionAction,
@@ -1714,6 +1769,20 @@ pub(super) fn validate_alter_table_alter_column_expression(
                     sqlstate: "428C9",
                 });
             };
+            if kind == ColumnGeneratedKind::Virtual
+                && relation_is_part_of_publication(catalog, relation_oid, namespace_oid)
+            {
+                return Err(ExecError::DetailedError {
+                    message: "ALTER TABLE / SET EXPRESSION is not supported for virtual generated columns in tables that are part of a publication".into(),
+                    detail: Some(format!(
+                        "Column \"{}\" of relation \"{}\" is a virtual generated column.",
+                        current_column.name,
+                        relation_name_for_oid(catalog, relation_oid)
+                    )),
+                    hint: None,
+                    sqlstate: "0A000",
+                });
+            }
             let mut desc_with_new_expression = desc.clone();
             let column = &mut desc_with_new_expression.columns[column_index];
             column.default_expr = Some(expr_sql.clone());
@@ -1756,6 +1825,43 @@ pub(super) fn validate_alter_table_alter_column_expression(
             })
         }
     }
+}
+
+fn relation_is_part_of_publication(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    namespace_oid: u32,
+) -> bool {
+    let publications = catalog
+        .publication_rows()
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    if catalog
+        .publication_rel_rows()
+        .into_iter()
+        .any(|row| row.prrelid == relation_oid && !row.prexcept)
+    {
+        return true;
+    }
+
+    let excluded_publication_oids = catalog
+        .publication_rel_rows()
+        .into_iter()
+        .filter(|row| row.prrelid == relation_oid && row.prexcept)
+        .map(|row| row.prpubid)
+        .collect::<BTreeSet<_>>();
+    if publications.values().any(|publication| {
+        publication.puballtables && !excluded_publication_oids.contains(&publication.oid)
+    }) {
+        return true;
+    }
+
+    catalog.publication_namespace_rows().into_iter().any(|row| {
+        row.pnnspid == namespace_oid
+            && publications.contains_key(&row.pnpubid)
+            && !excluded_publication_oids.contains(&row.pnpubid)
+    })
 }
 
 pub(super) fn validate_alter_table_alter_column_options(

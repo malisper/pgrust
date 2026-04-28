@@ -39,15 +39,16 @@ use crate::include::catalog::{
     PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow,
     PgDependRow, PgEnumRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow,
     PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
-    PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticExtDataRow,
-    PgStatisticExtRow, PgStatisticRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
-    PgTsTemplateRow, PgTypeRow, PgUserMappingRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows,
-    bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_database_rows, bootstrap_pg_enum_rows,
-    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
-    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, bootstrap_pg_ts_config_map_rows,
-    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_template_rows,
-    builtin_range_rows, builtin_type_row_by_name, builtin_type_row_by_oid, builtin_type_rows,
+    PgPartitionedTableRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRangeRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgStatisticRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsTemplateRow, PgTypeRow,
+    PgUserMappingRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows, bootstrap_pg_amop_rows,
+    bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_rows, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
+    bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_template_rows, builtin_range_rows,
+    builtin_type_row_by_name, builtin_type_row_by_oid, builtin_type_rows,
     is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
     proc_oid_for_builtin_aggregate_function, proc_oid_for_builtin_hypothetical_aggregate_function,
     range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
@@ -203,6 +204,7 @@ pub struct BoundIndexRelation {
     pub name: String,
     pub rel: RelFileLocator,
     pub relation_oid: u32,
+    pub relkind: char,
     pub desc: RelationDesc,
     pub index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     pub index_exprs: Vec<Expr>,
@@ -1329,6 +1331,22 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn inheritance_rows(&self) -> Vec<PgInheritsRow> {
+        Vec::new()
+    }
+
+    fn publication_rows(&self) -> Vec<PgPublicationRow> {
+        Vec::new()
+    }
+
+    fn publication_rel_rows(&self) -> Vec<PgPublicationRelRow> {
+        Vec::new()
+    }
+
+    fn publication_namespace_rows(&self) -> Vec<PgPublicationNamespaceRow> {
+        Vec::new()
+    }
+
     fn find_all_inheritors(&self, relation_oid: u32) -> Vec<u32> {
         let mut out = vec![relation_oid];
         let mut pending = vec![relation_oid];
@@ -1713,6 +1731,7 @@ pub(crate) fn bound_index_relation_from_relcache_entry_with_heap(
         name,
         rel: entry.rel,
         relation_oid: entry.relation_oid,
+        relkind: entry.relkind,
         desc: entry.desc.clone(),
         index_meta,
         index_exprs,
@@ -2090,6 +2109,10 @@ impl CatalogLookup for Catalog {
         CatCache::from_catalog(self).class_rows()
     }
 
+    fn attribute_rows(&self) -> Vec<PgAttributeRow> {
+        CatCache::from_catalog(self).attribute_rows()
+    }
+
     fn partitioned_table_row(&self, relation_oid: u32) -> Option<PgPartitionedTableRow> {
         let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
         catcache.partitioned_table_row(relation_oid).cloned()
@@ -2114,6 +2137,22 @@ impl CatalogLookup for Catalog {
             .filter(|row| row.inhparent == relation_oid)
             .cloned()
             .collect()
+    }
+
+    fn inheritance_rows(&self) -> Vec<PgInheritsRow> {
+        CatCache::from_catalog(self).inherit_rows()
+    }
+
+    fn publication_rows(&self) -> Vec<PgPublicationRow> {
+        CatCache::from_catalog(self).publication_rows()
+    }
+
+    fn publication_rel_rows(&self) -> Vec<PgPublicationRelRow> {
+        CatCache::from_catalog(self).publication_rel_rows()
+    }
+
+    fn publication_namespace_rows(&self) -> Vec<PgPublicationNamespaceRow> {
+        CatCache::from_catalog(self).publication_namespace_rows()
     }
 
     fn statistic_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticRow> {
@@ -3689,6 +3728,17 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
+            FromItem::XmlTable(table) => {
+                for namespace in &table.namespaces {
+                    self.visit_expr(&namespace.uri, context)?;
+                }
+                self.visit_expr(&table.row_path, context)?;
+                self.visit_expr(&table.document, context)?;
+                for column in &table.columns {
+                    self.visit_xml_table_column(column, context)?;
+                }
+                Ok(())
+            }
             FromItem::Lateral(source) | FromItem::Alias { source, .. } => {
                 self.visit_from(source, context)
             }
@@ -3747,6 +3797,25 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
             }
             JsonTableColumn::Ordinality { .. } | JsonTableColumn::Exists { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn visit_xml_table_column(
+        &mut self,
+        column: &XmlTableColumn,
+        context: RecursiveReferenceContext,
+    ) -> Result<(), ParseError> {
+        match column {
+            XmlTableColumn::Regular { path, default, .. } => {
+                if let Some(expr) = path {
+                    self.visit_expr(expr, context)?;
+                }
+                if let Some(expr) = default {
+                    self.visit_expr(expr, context)?;
+                }
+            }
+            XmlTableColumn::Ordinality { .. } => {}
         }
         Ok(())
     }
@@ -4067,6 +4136,7 @@ fn from_item_references_table(item: &FromItem, table_name: &str) -> bool {
                 || from_item_references_table(right, table_name)
         }
         FromItem::JsonTable(table) => json_table_expr_references_table(table, table_name),
+        FromItem::XmlTable(table) => xml_table_expr_references_table(table, table_name),
         FromItem::Values { .. } | FromItem::FunctionCall { .. } => false,
     }
 }
@@ -4104,6 +4174,32 @@ fn json_table_column_references_table(column: &JsonTableColumn, table_name: &str
             .iter()
             .any(|column| json_table_column_references_table(column, table_name)),
         JsonTableColumn::Ordinality { .. } | JsonTableColumn::Exists { .. } => false,
+    }
+}
+
+fn xml_table_expr_references_table(table: &XmlTableExpr, table_name: &str) -> bool {
+    table
+        .namespaces
+        .iter()
+        .any(|namespace| sql_expr_references_table(&namespace.uri, table_name))
+        || sql_expr_references_table(&table.row_path, table_name)
+        || sql_expr_references_table(&table.document, table_name)
+        || table
+            .columns
+            .iter()
+            .any(|column| xml_table_column_references_table(column, table_name))
+}
+
+fn xml_table_column_references_table(column: &XmlTableColumn, table_name: &str) -> bool {
+    match column {
+        XmlTableColumn::Regular { path, default, .. } => {
+            path.as_ref()
+                .is_some_and(|expr| sql_expr_references_table(expr, table_name))
+                || default
+                    .as_ref()
+                    .is_some_and(|expr| sql_expr_references_table(expr, table_name))
+        }
+        XmlTableColumn::Ordinality { .. } => false,
     }
 }
 

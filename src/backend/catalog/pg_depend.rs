@@ -310,7 +310,7 @@ fn generated_column_attrdef_depend_rows(
     rows
 }
 
-fn collect_sql_expr_column_names(expr: &SqlExpr, out: &mut BTreeSet<String>) {
+pub(crate) fn collect_sql_expr_column_names(expr: &SqlExpr, out: &mut BTreeSet<String>) {
     match expr {
         SqlExpr::Column(name) => {
             out.insert(name.clone());
@@ -926,6 +926,7 @@ pub fn trigger_depend_rows(
     relation_oid: u32,
     proc_oid: u32,
     column_attnums: &[i16],
+    constraint_oid: u32,
 ) -> Vec<PgDependRow> {
     let mut rows = vec![
         PgDependRow {
@@ -947,6 +948,17 @@ pub fn trigger_depend_rows(
             deptype: DEPENDENCY_NORMAL,
         },
     ];
+    if constraint_oid != 0 {
+        rows.push(PgDependRow {
+            classid: PG_TRIGGER_RELATION_OID,
+            objid: trigger_oid,
+            objsubid: 0,
+            refclassid: PG_CONSTRAINT_RELATION_OID,
+            refobjid: constraint_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_INTERNAL,
+        });
+    }
     rows.extend(
         column_attnums
             .iter()

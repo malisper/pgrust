@@ -636,7 +636,9 @@ fn prepare_set_returning_call_for_locking(
             output_columns,
             with_ordinality,
         },
-        sql @ SetReturningCall::SqlJsonTable(_) => sql.try_map_exprs(prepare_expr_for_locking)?,
+        sql @ (SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)) => {
+            sql.try_map_exprs(prepare_expr_for_locking)?
+        }
     })
 }
 
@@ -2710,7 +2712,7 @@ fn collect_set_returning_call_outer_refs(
                 collect_query_outer_refs_expr(arg, levelsup, exprs);
             }
         }
-        SetReturningCall::SqlJsonTable(_) => {
+        SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_) => {
             for arg in set_returning_call_exprs(call) {
                 collect_query_outer_refs_expr(arg, levelsup, exprs);
             }

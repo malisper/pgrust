@@ -7,8 +7,9 @@ use crate::include::catalog::PgPartitionedTableRow;
 use crate::include::nodes::primnodes::{
     AttrNumber, ColumnDesc, JoinType, JsonRecordFunction, SELF_ITEM_POINTER_ATTR_NO, SqlJsonTable,
     SqlJsonTableBehavior, SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePassingArg,
-    SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, TABLE_OID_ATTR_NO, Var,
-    expr_sql_type_hint, user_attrno,
+    SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn,
+    SqlXmlTableColumnKind, SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, expr_sql_type_hint,
+    user_attrno,
 };
 
 #[derive(Debug, Clone)]
@@ -618,6 +619,7 @@ fn from_item_is_lateral(item: &FromItem) -> bool {
         FromItem::Lateral(_) => true,
         FromItem::FunctionCall { .. } => true,
         FromItem::JsonTable(_) => true,
+        FromItem::XmlTable(_) => true,
         FromItem::Alias { source, .. } => from_item_is_lateral(source),
         _ => false,
     }
@@ -741,6 +743,13 @@ pub(super) fn bind_from_item_with_ctes(
             Ok((plan, scope))
         }
         FromItem::JsonTable(table) => bind_sql_json_table_from_item_with_ctes(
+            table,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        ),
+        FromItem::XmlTable(table) => bind_sql_xml_table_from_item_with_ctes(
             table,
             catalog,
             outer_scopes,
@@ -973,6 +982,158 @@ impl SqlJsonTableBindState {
             kind,
         });
         Ok(index)
+    }
+}
+
+fn bind_sql_xml_table_from_item_with_ctes(
+    table: &XmlTableExpr,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
+    let empty_scope = empty_scope();
+    let text_type = SqlType::new(SqlTypeKind::Text);
+    let xml_type = SqlType::new(SqlTypeKind::Xml);
+    let bind_as = |expr: &SqlExpr, target: SqlType| -> Result<Expr, ParseError> {
+        let source = infer_sql_expr_type_with_ctes(
+            expr,
+            &empty_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        );
+        Ok(coerce_bound_expr(
+            bind_expr_with_outer_and_ctes(
+                expr,
+                &empty_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
+            source,
+            target,
+        ))
+    };
+
+    let namespaces = table
+        .namespaces
+        .iter()
+        .map(|namespace| {
+            if namespace.name.is_none() {
+                return Err(ParseError::DetailedError {
+                    message: "DEFAULT namespace is not supported".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                });
+            }
+            Ok(SqlXmlTableNamespace {
+                name: namespace.name.clone(),
+                uri: bind_as(&namespace.uri, text_type)?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let row_path = bind_as(&table.row_path, text_type)?;
+    let document = bind_as(&table.document, xml_type)?;
+    let mut seen_names = std::collections::BTreeSet::new();
+    let mut ordinality_found = false;
+    let mut columns = Vec::new();
+    let mut output_columns = Vec::new();
+    for column in &table.columns {
+        match column {
+            XmlTableColumn::Ordinality { name } => {
+                if ordinality_found {
+                    return Err(ParseError::DetailedError {
+                        message: "only one FOR ORDINALITY column is allowed".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42601",
+                    });
+                }
+                ordinality_found = true;
+                push_xml_table_column_name(name, &mut seen_names)?;
+                let sql_type = SqlType::new(SqlTypeKind::Int4);
+                output_columns.push(QueryColumn {
+                    name: name.clone(),
+                    sql_type,
+                    wire_type_oid: None,
+                });
+                columns.push(SqlXmlTableColumn {
+                    name: name.clone(),
+                    sql_type,
+                    kind: SqlXmlTableColumnKind::Ordinality,
+                });
+            }
+            XmlTableColumn::Regular {
+                name,
+                type_name,
+                path,
+                default,
+                not_null,
+            } => {
+                push_xml_table_column_name(name, &mut seen_names)?;
+                let sql_type = resolve_raw_type_name(type_name, catalog)?;
+                let path = path
+                    .as_ref()
+                    .map(|expr| bind_as(expr, text_type))
+                    .transpose()?;
+                let default = default
+                    .as_ref()
+                    .map(|expr| bind_as(expr, sql_type))
+                    .transpose()?;
+                output_columns.push(QueryColumn {
+                    name: name.clone(),
+                    sql_type,
+                    wire_type_oid: None,
+                });
+                columns.push(SqlXmlTableColumn {
+                    name: name.clone(),
+                    sql_type,
+                    kind: SqlXmlTableColumnKind::Regular {
+                        path,
+                        default,
+                        not_null: *not_null,
+                    },
+                });
+            }
+        }
+    }
+
+    let desc = RelationDesc {
+        columns: output_columns
+            .iter()
+            .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+            .collect(),
+    };
+    let scope = scope_for_relation(Some("xmltable"), &desc);
+    Ok((
+        AnalyzedFrom::function(SetReturningCall::SqlXmlTable(SqlXmlTable {
+            namespaces,
+            row_path,
+            document,
+            columns,
+            output_columns,
+        })),
+        scope,
+    ))
+}
+
+fn push_xml_table_column_name(
+    name: &str,
+    seen_names: &mut std::collections::BTreeSet<String>,
+) -> Result<(), ParseError> {
+    if seen_names.insert(name.to_string()) {
+        Ok(())
+    } else {
+        Err(ParseError::DetailedError {
+            message: format!("column name \"{name}\" is not unique"),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        })
     }
 }
 
@@ -1943,7 +2104,9 @@ fn bind_function_from_item_with_ctes(
             )
         })
         .collect::<Vec<_>>();
-    let resolved = resolve_function_call(catalog, name, &actual_types, func_variadic).ok();
+    let resolved_result = resolve_function_call(catalog, name, &actual_types, func_variadic);
+    let resolved_error = resolved_result.as_ref().err().cloned();
+    let resolved = resolved_result.ok();
     let resolved_proc_oid = resolved.as_ref().map(|call| call.proc_oid).unwrap_or(0);
     let resolved_func_variadic = resolved
         .as_ref()
@@ -2481,11 +2644,13 @@ fn bind_function_from_item_with_ctes(
                     JsonTableFunction::ArrayElementsText => {
                         vec![QueryColumn::text("value")]
                     }
-                    JsonTableFunction::JsonbPathQuery => vec![QueryColumn {
-                        name: "jsonb_path_query".into(),
-                        sql_type: SqlType::new(SqlTypeKind::Jsonb),
-                        wire_type_oid: None,
-                    }],
+                    JsonTableFunction::JsonbPathQuery | JsonTableFunction::JsonbPathQueryTz => {
+                        vec![QueryColumn {
+                            name: "jsonb_path_query".into(),
+                            sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                            wire_type_oid: None,
+                        }]
+                    }
                     JsonTableFunction::JsonbObjectKeys => {
                         vec![QueryColumn::text("jsonb_object_keys")]
                     }
@@ -2994,7 +3159,7 @@ fn bind_function_from_item_with_ctes(
                 );
                 Ok((plan, scope, alias_single_function_output))
             } else {
-                Err(ParseError::UnknownTable(other.to_string()))
+                Err(resolved_error.unwrap_or_else(|| ParseError::UnknownTable(other.to_string())))
             }
         }
     }
@@ -3156,7 +3321,10 @@ fn bind_json_table_function_args(
         .enumerate()
         .map(|(index, arg)| {
             let target_type = match (kind, index) {
-                (JsonTableFunction::JsonbPathQuery, 0 | 2)
+                (
+                    JsonTableFunction::JsonbPathQuery | JsonTableFunction::JsonbPathQueryTz,
+                    0 | 2,
+                )
                 | (JsonTableFunction::JsonbObjectKeys, 0)
                 | (JsonTableFunction::JsonbEach, 0)
                 | (JsonTableFunction::JsonbEachText, 0)
@@ -3164,8 +3332,12 @@ fn bind_json_table_function_args(
                 | (JsonTableFunction::JsonbArrayElementsText, 0) => {
                     Some(SqlType::new(SqlTypeKind::Jsonb))
                 }
-                (JsonTableFunction::JsonbPathQuery, 1) => Some(SqlType::new(SqlTypeKind::JsonPath)),
-                (JsonTableFunction::JsonbPathQuery, 3) => Some(SqlType::new(SqlTypeKind::Bool)),
+                (JsonTableFunction::JsonbPathQuery | JsonTableFunction::JsonbPathQueryTz, 1) => {
+                    Some(SqlType::new(SqlTypeKind::JsonPath))
+                }
+                (JsonTableFunction::JsonbPathQuery | JsonTableFunction::JsonbPathQueryTz, 3) => {
+                    Some(SqlType::new(SqlTypeKind::Bool))
+                }
                 _ => None,
             };
             let raw_arg_type = infer_sql_expr_type_with_ctes(
@@ -3890,17 +4062,20 @@ fn apply_relation_alias(
         .filter_map(|(index, column)| (!column.hidden).then_some(index))
         .collect::<Vec<_>>();
     if column_aliases.len() > visible_positions.len() {
-        let actual = if plan.rtable.last().is_some_and(|rte| {
-            matches!(
-                rte.kind,
-                RangeTblEntryKind::Function {
-                    call: SetReturningCall::SqlJsonTable(_),
-                    ..
-                }
-            )
-        }) {
+        let table_function_name = plan.rtable.last().and_then(|rte| match &rte.kind {
+            RangeTblEntryKind::Function {
+                call: SetReturningCall::SqlJsonTable(_),
+                ..
+            } => Some("JSON_TABLE"),
+            RangeTblEntryKind::Function {
+                call: SetReturningCall::SqlXmlTable(_),
+                ..
+            } => Some("XMLTABLE"),
+            _ => None,
+        });
+        let actual = if let Some(name) = table_function_name {
             format!(
-                "JSON_TABLE function has {} columns available but {} columns specified",
+                "{name} function has {} columns available but {} columns specified",
                 visible_positions.len(),
                 column_aliases.len(),
             )

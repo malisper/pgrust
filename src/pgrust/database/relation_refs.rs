@@ -280,7 +280,8 @@ fn collect_rels_from_set_returning_call(
                 collect_rels_from_expr(arg, rels);
             }
         }
-        crate::include::nodes::primnodes::SetReturningCall::SqlJsonTable(_) => {
+        crate::include::nodes::primnodes::SetReturningCall::SqlJsonTable(_)
+        | crate::include::nodes::primnodes::SetReturningCall::SqlXmlTable(_) => {
             for arg in set_returning_call_exprs(call) {
                 collect_rels_from_expr(arg, rels);
             }
@@ -688,6 +689,9 @@ fn collect_direct_relation_oids_from_from_item(
         FromItem::JsonTable(table) => {
             collect_direct_relation_oids_from_json_table(table, catalog, visible_ctes, rels);
         }
+        FromItem::XmlTable(table) => {
+            collect_direct_relation_oids_from_xml_table(table, catalog, visible_ctes, rels);
+        }
         FromItem::Lateral(source) => {
             collect_direct_relation_oids_from_from_item(source, catalog, visible_ctes, rels);
         }
@@ -732,6 +736,32 @@ fn collect_direct_relation_oids_from_json_table(
     }
     for column in &table.columns {
         collect_direct_relation_oids_from_json_table_column(column, catalog, visible_ctes, rels);
+    }
+}
+
+fn collect_direct_relation_oids_from_xml_table(
+    table: &crate::include::nodes::parsenodes::XmlTableExpr,
+    catalog: &dyn CatalogLookup,
+    visible_ctes: &mut Vec<String>,
+    rels: &mut BTreeSet<u32>,
+) {
+    collect_direct_relation_oids_from_sql_expr(&table.row_path, catalog, visible_ctes, rels);
+    collect_direct_relation_oids_from_sql_expr(&table.document, catalog, visible_ctes, rels);
+    for namespace in &table.namespaces {
+        collect_direct_relation_oids_from_sql_expr(&namespace.uri, catalog, visible_ctes, rels);
+    }
+    for column in &table.columns {
+        if let crate::include::nodes::parsenodes::XmlTableColumn::Regular {
+            path, default, ..
+        } = column
+        {
+            if let Some(path) = path {
+                collect_direct_relation_oids_from_sql_expr(path, catalog, visible_ctes, rels);
+            }
+            if let Some(default) = default {
+                collect_direct_relation_oids_from_sql_expr(default, catalog, visible_ctes, rels);
+            }
+        }
     }
 }
 

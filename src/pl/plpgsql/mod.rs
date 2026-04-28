@@ -23,6 +23,53 @@ pub(crate) use exec::{
 };
 pub use gram::parse_block;
 
+pub(crate) fn validate_create_function_body(
+    body: &str,
+    has_output_args: bool,
+) -> Result<(), ParseError> {
+    if !has_output_args {
+        return Ok(());
+    }
+    let block = parse_block(body)?;
+    if block_contains_return_expr(&block) {
+        return Err(ParseError::DetailedError {
+            message: "RETURN cannot have a parameter in function with OUT parameters".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+    Ok(())
+}
+
+fn block_contains_return_expr(block: &Block) -> bool {
+    block.statements.iter().any(stmt_contains_return_expr)
+        || block
+            .exception_handlers
+            .iter()
+            .any(|handler| handler.statements.iter().any(stmt_contains_return_expr))
+}
+
+fn stmt_contains_return_expr(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return { expr: Some(_) } => true,
+        Stmt::Block(block) => block_contains_return_expr(block),
+        Stmt::If {
+            branches,
+            else_branch,
+        } => {
+            branches
+                .iter()
+                .any(|(_, body)| body.iter().any(stmt_contains_return_expr))
+                || else_branch.iter().any(stmt_contains_return_expr)
+        }
+        Stmt::While { body, .. } | Stmt::ForInt { body, .. } | Stmt::ForQuery { body, .. } => {
+            body.iter().any(stmt_contains_return_expr)
+        }
+        _ => false,
+    }
+}
+
 pub fn execute_do(stmt: &DoStatement) -> Result<StatementResult, ExecError> {
     let gucs = HashMap::new();
     execute_do_with_gucs(stmt, &gucs)

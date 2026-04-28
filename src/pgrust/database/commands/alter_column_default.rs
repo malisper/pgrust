@@ -191,6 +191,8 @@ impl Database {
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
         let plan = validate_alter_table_alter_column_expression(
             &catalog,
+            relation.relation_oid,
+            relation.namespace_oid,
             &relation.desc,
             &alter_stmt.column_name,
             &alter_stmt.action,

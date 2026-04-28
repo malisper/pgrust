@@ -948,13 +948,40 @@ fn try_parse_alter_table_replica_identity_statement(
     if rest.starts_with('*') {
         rest = rest[1..].trim_start();
     }
-    if !consume_keywords(rest, &["replica", "identity", "using", "index"]).is_some() {
+    if !keyword_at_start(rest, "replica") {
         return Ok(None);
     }
-    rest = consume_keywords(rest, &["replica", "identity", "using", "index"])
-        .expect("checked replica identity keywords")
-        .trim_start();
-    let (index_name, rest) = parse_sql_identifier(rest)?;
+    let Some(next) = consume_keywords(rest, &["replica", "identity"]) else {
+        return Ok(None);
+    };
+    rest = next.trim_start();
+    let (identity, rest) = if let Some(next) = consume_keywords(rest, &["using", "index"]) {
+        let (index_name, rest) = parse_sql_identifier(next.trim_start())?;
+        (
+            crate::include::nodes::parsenodes::ReplicaIdentityKind::Index(index_name),
+            rest,
+        )
+    } else if keyword_at_start(rest, "default") {
+        (
+            crate::include::nodes::parsenodes::ReplicaIdentityKind::Default,
+            consume_keyword(rest, "default"),
+        )
+    } else if keyword_at_start(rest, "full") {
+        (
+            crate::include::nodes::parsenodes::ReplicaIdentityKind::Full,
+            consume_keyword(rest, "full"),
+        )
+    } else if keyword_at_start(rest, "nothing") {
+        (
+            crate::include::nodes::parsenodes::ReplicaIdentityKind::Nothing,
+            consume_keyword(rest, "nothing"),
+        )
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "DEFAULT, FULL, NOTHING, or USING INDEX",
+            actual: rest.trim().into(),
+        });
+    };
     if !rest.trim().is_empty() {
         return Err(ParseError::UnexpectedToken {
             expected: "end of ALTER TABLE REPLICA IDENTITY statement",
@@ -970,7 +997,7 @@ fn try_parse_alter_table_replica_identity_statement(
             if_exists,
             only,
             table_name,
-            index_name,
+            identity,
         },
     )))
 }
@@ -2673,7 +2700,7 @@ fn build_alter_publication_statement(sql: &str) -> Result<AlterPublicationStatem
             let (options, rest) = parse_publication_options_clause(rest)?;
             (AlterPublicationAction::SetOptions(options), rest)
         } else {
-            let (target, rest) = parse_publication_target_spec(rest)?;
+            let (target, rest) = parse_alter_publication_set_target(rest)?;
             (AlterPublicationAction::SetObjects(target), rest)
         }
     } else if keyword_at_start(rest, "add") {
@@ -3198,16 +3225,140 @@ fn build_comment_on_constraint_statement(
 fn parse_create_publication_target(
     input: &str,
 ) -> Result<(PublicationTargetSpec, &str), ParseError> {
-    if let Some(rest) = consume_keywords(input, &["all", "tables"]) {
-        return Ok((
-            PublicationTargetSpec {
-                for_all_tables: true,
-                objects: Vec::new(),
-            },
-            rest,
-        ));
+    if let Some(target) = parse_publication_all_target_spec(input)? {
+        return Ok(target);
     }
     parse_publication_target_spec(input)
+}
+
+fn parse_alter_publication_set_target(
+    input: &str,
+) -> Result<(PublicationTargetSpec, &str), ParseError> {
+    if let Some(target) = parse_publication_all_target_spec(input)? {
+        return Ok(target);
+    }
+    parse_publication_target_spec(input)
+}
+
+fn parse_publication_all_target_spec(
+    input: &str,
+) -> Result<Option<(PublicationTargetSpec, &str)>, ParseError> {
+    let mut rest = input.trim_start();
+    let mut for_all_tables = false;
+    let mut for_all_sequences = false;
+    let mut except_tables = Vec::new();
+    let mut parsed_any = false;
+
+    loop {
+        if let Some(next) = consume_keywords(rest, &["all", "tables"]) {
+            if for_all_tables {
+                return Err(duplicate_publication_all_target_error("ALL TABLES"));
+            }
+            for_all_tables = true;
+            parsed_any = true;
+            let (tables, next) = parse_publication_except_clause(next)?;
+            except_tables = tables;
+            rest = next.trim_start();
+        } else if let Some(next) = consume_keywords(rest, &["all", "sequences"]) {
+            if for_all_sequences {
+                return Err(duplicate_publication_all_target_error("ALL SEQUENCES"));
+            }
+            for_all_sequences = true;
+            parsed_any = true;
+            rest = next.trim_start();
+        } else if parsed_any {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ALL TABLES or ALL SEQUENCES",
+                actual: rest.into(),
+            });
+        } else {
+            return Ok(None);
+        }
+
+        let Some(after_comma) = rest.strip_prefix(',') else {
+            break;
+        };
+        rest = after_comma.trim_start();
+    }
+
+    Ok(Some((
+        PublicationTargetSpec {
+            for_all_tables,
+            for_all_sequences,
+            except_tables,
+            objects: Vec::new(),
+        },
+        rest,
+    )))
+}
+
+fn parse_publication_except_clause(
+    input: &str,
+) -> Result<(Vec<PublicationTableSpec>, &str), ParseError> {
+    let rest = input.trim_start();
+    if !keyword_at_start(rest, "except") {
+        return Ok((Vec::new(), input));
+    }
+
+    let rest = consume_keyword(rest, "except").trim_start();
+    let (segment, rest) = take_parenthesized_segment(rest)?;
+    if !keyword_at_start(&segment, "table") {
+        return Err(publication_missing_object_kind_error());
+    }
+    let (target, trailing) = parse_publication_target_spec(&segment)?;
+    if !trailing.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of publication EXCEPT list",
+            actual: trailing.trim().into(),
+        });
+    }
+    if target.objects.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "TABLE ...",
+            actual: segment,
+        });
+    }
+    let except_tables = target
+        .objects
+        .into_iter()
+        .map(|object| match object {
+            PublicationObjectSpec::Table(table) => {
+                if !table.column_names.is_empty() || table.where_clause.is_some() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "publication EXCEPT table name",
+                        actual: table.relation_name,
+                    });
+                }
+                Ok(table)
+            }
+            PublicationObjectSpec::Schema(_) => Err(ParseError::UnexpectedToken {
+                expected: "TABLE ...",
+                actual: segment.clone(),
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((except_tables, rest))
+}
+
+fn duplicate_publication_all_target_error(target: &'static str) -> ParseError {
+    ParseError::DetailedError {
+        message: "invalid publication object list".into(),
+        detail: Some(format!("{target} can be specified only once.")),
+        hint: None,
+        sqlstate: "42601",
+    }
+}
+
+fn publication_missing_object_kind_error() -> ParseError {
+    ParseError::DetailedError {
+        message: "invalid publication object list".into(),
+        detail: Some(
+            "One of TABLE or TABLES IN SCHEMA must be specified before a standalone table or schema name."
+                .into(),
+        ),
+        hint: None,
+        sqlstate: "42601",
+    }
 }
 
 fn parse_publication_target_spec(input: &str) -> Result<(PublicationTargetSpec, &str), ParseError> {
@@ -3224,10 +3375,7 @@ fn parse_publication_target_spec(input: &str) -> Result<(PublicationTargetSpec, 
         rest = next;
         PublicationObjectMode::Schema
     } else {
-        return Err(ParseError::UnexpectedToken {
-            expected: "TABLE ... or TABLES IN SCHEMA ...",
-            actual: rest.into(),
-        });
+        return Err(publication_missing_object_kind_error());
     };
 
     let mut objects = Vec::new();
@@ -3277,6 +3425,8 @@ fn parse_publication_target_spec(input: &str) -> Result<(PublicationTargetSpec, 
     Ok((
         PublicationTargetSpec {
             for_all_tables: false,
+            for_all_sequences: false,
+            except_tables: Vec::new(),
             objects,
         },
         rest,
@@ -5954,6 +6104,7 @@ fn split_comma_separated_sql(input: &str) -> Result<Vec<&str>, ParseError> {
     let mut start = 0usize;
     let bytes = input.as_bytes();
     let mut index = 0usize;
+    let mut paren_depth = 0usize;
     while index < bytes.len() {
         if bytes[index] == b'\'' {
             let literal_len =
@@ -5961,7 +6112,12 @@ fn split_comma_separated_sql(input: &str) -> Result<Vec<&str>, ParseError> {
             index += literal_len;
             continue;
         }
-        if bytes[index] == b',' {
+        match bytes[index] {
+            b'(' => paren_depth = paren_depth.saturating_add(1),
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            _ => {}
+        }
+        if bytes[index] == b',' && paren_depth == 0 {
             parts.push(input[start..index].trim());
             start = index + 1;
         }
@@ -6207,8 +6363,14 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant usage on schema ") {
         return Ok(Statement::GrantObject(build_grant_schema_usage(sql)?));
     }
-    if lowered.starts_with("grant usage on type ") {
+    if is_type_usage_grant(&lowered) {
         return Ok(Statement::GrantObject(build_grant_type_usage(sql)?));
+    }
+    if lowered.starts_with("grant usage on language ")
+        || lowered.starts_with("grant all on language ")
+        || lowered.starts_with("grant all privileges on language ")
+    {
+        return Ok(Statement::GrantObject(build_grant_language_usage(sql)?));
     }
     if lowered.starts_with("grant usage on foreign data wrapper ")
         || lowered.starts_with("grant all on foreign data wrapper ")
@@ -6226,19 +6388,14 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
             sql,
         )?));
     }
-    if lowered.starts_with("grant execute on function ") {
+    if is_function_execute_grant(&lowered, "function") {
         return Ok(Statement::GrantObject(build_grant_function_execute(sql)?));
     }
-    if lowered.starts_with("grant execute on procedure ") {
+    if is_function_execute_grant(&lowered, "procedure") {
         return Ok(Statement::GrantObject(build_grant_procedure_execute(sql)?));
     }
-    if lowered.starts_with("grant execute on routine ") {
+    if is_function_execute_grant(&lowered, "routine") {
         return Ok(Statement::GrantObject(build_grant_routine_execute(sql)?));
-    }
-    if lowered.starts_with("grant select (") {
-        return Ok(Statement::GrantObject(build_grant_table_column_select(
-            sql,
-        )?));
     }
     if let Some(stmt) = try_build_grant_table_acl_statement(sql)? {
         return Ok(Statement::GrantObject(stmt));
@@ -6259,8 +6416,14 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("revoke usage on schema ") {
         return Ok(Statement::RevokeObject(build_revoke_schema_usage(sql)?));
     }
-    if lowered.starts_with("revoke usage on type ") {
+    if is_type_usage_revoke(&lowered) {
         return Ok(Statement::RevokeObject(build_revoke_type_usage(sql)?));
+    }
+    if lowered.starts_with("revoke usage on language ")
+        || lowered.starts_with("revoke all on language ")
+        || lowered.starts_with("revoke all privileges on language ")
+    {
+        return Ok(Statement::RevokeObject(build_revoke_language_usage(sql)?));
     }
     if lowered.starts_with("revoke usage on foreign data wrapper ")
         || lowered.starts_with("revoke all on foreign data wrapper ")
@@ -6278,21 +6441,16 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
             sql,
         )?));
     }
-    if lowered.starts_with("revoke execute on function ") {
+    if is_function_execute_revoke(&lowered, "function") {
         return Ok(Statement::RevokeObject(build_revoke_function_execute(sql)?));
     }
-    if lowered.starts_with("revoke execute on procedure ") {
+    if is_function_execute_revoke(&lowered, "procedure") {
         return Ok(Statement::RevokeObject(build_revoke_procedure_execute(
             sql,
         )?));
     }
-    if lowered.starts_with("revoke execute on routine ") {
+    if is_function_execute_revoke(&lowered, "routine") {
         return Ok(Statement::RevokeObject(build_revoke_routine_execute(sql)?));
-    }
-    if lowered.starts_with("revoke select (") {
-        return Ok(Statement::RevokeObject(build_revoke_table_column_select(
-            sql,
-        )?));
     }
     if let Some(stmt) = try_build_revoke_table_acl_statement(sql)? {
         return Ok(Statement::RevokeObject(stmt));
@@ -6312,7 +6470,7 @@ fn try_build_grant_table_acl_statement(
     let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
         return Ok(None);
     };
-    let Some(privilege) = parse_table_privilege_spec(privileges)? else {
+    let Some((privilege, columns)) = parse_table_privilege_spec(privileges)? else {
         return Ok(None);
     };
     let after_on = strip_optional_table_keyword(after_on.ok_or(ParseError::UnexpectedEof)?);
@@ -6320,7 +6478,7 @@ fn try_build_grant_table_acl_statement(
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(Some(GrantObjectStatement {
         privilege,
-        columns: Vec::new(),
+        columns,
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
@@ -6338,7 +6496,7 @@ fn try_build_revoke_table_acl_statement(
     let Some((privileges, after_on)) = split_optional_keyword(rest, "on") else {
         return Ok(None);
     };
-    let Some(privilege) = parse_table_privilege_spec(privileges)? else {
+    let Some((privilege, columns)) = parse_table_privilege_spec(privileges)? else {
         return Ok(None);
     };
     let after_on = strip_optional_table_keyword(after_on.ok_or(ParseError::UnexpectedEof)?);
@@ -6346,7 +6504,7 @@ fn try_build_revoke_table_acl_statement(
     let (grantee_names, grantee_cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(Some(RevokeObjectStatement {
         privilege,
-        columns: Vec::new(),
+        columns,
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade: cascade || grantee_cascade,
@@ -6362,49 +6520,130 @@ fn strip_optional_table_keyword(input: &str) -> &str {
     }
 }
 
-fn parse_table_privilege_spec(input: &str) -> Result<Option<GrantObjectPrivilege>, ParseError> {
-    if input.contains('(') {
-        return Ok(None);
-    }
-
+fn parse_table_privilege_spec(
+    input: &str,
+) -> Result<Option<(GrantObjectPrivilege, Vec<String>)>, ParseError> {
     let mut chars = String::new();
-    let mut saw_table_privilege = false;
+    let mut table_items = Vec::new();
+    let mut column_items = Vec::new();
     for item in split_comma_separated_sql(input)? {
-        let item = item.trim();
-        if item.is_empty() {
+        let Some((privilege, columns)) = parse_table_privilege_item(item)? else {
+            if table_items.is_empty() && column_items.is_empty() {
+                return Ok(None);
+            }
+            return Err(ParseError::UnexpectedToken {
+                expected: "table privilege",
+                actual: item.trim().into(),
+            });
+        };
+        if columns.is_empty() {
+            table_items.push(privilege.clone());
+            chars.push_str(table_privilege_chars_for_parser(&privilege).ok_or_else(|| {
+                ParseError::UnexpectedToken {
+                    expected: "table privilege",
+                    actual: item.trim().into(),
+                }
+            })?);
             continue;
         }
-        let privilege_chars = match item.to_ascii_lowercase().as_str() {
-            "all" | "all privileges" => TABLE_ALL_PRIVILEGE_CHARS,
-            "select" => "r",
-            "insert" => "a",
-            "update" => "w",
-            "delete" => "d",
-            "truncate" => "D",
-            "references" => "x",
-            "trigger" => "t",
-            "maintain" => "m",
-            _ if saw_table_privilege => {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "table privilege",
-                    actual: item.into(),
-                });
-            }
-            _ => return Ok(None),
-        };
-        saw_table_privilege = true;
-        chars.push_str(privilege_chars);
+
+        column_items.push(GrantTableColumnPrivilege { privilege, columns });
     }
 
-    if !saw_table_privilege {
+    if table_items.is_empty() && column_items.is_empty() {
         return Ok(None);
     }
-    Ok(Some(table_privilege_from_chars(
-        canonicalize_table_privilege_chars(&chars),
+    if !table_items.is_empty() && !column_items.is_empty() {
+        return Err(ParseError::FeatureNotSupported(
+            "mixed relation and column privilege lists".into(),
+        ));
+    }
+    if column_items.is_empty() {
+        return Ok(Some((
+            table_privilege_from_chars(canonicalize_table_privilege_chars(&chars)),
+            Vec::new(),
+        )));
+    }
+    if column_items.len() == 1 {
+        let spec = column_items.remove(0);
+        return Ok(Some((spec.privilege, spec.columns)));
+    }
+    Ok(Some((
+        GrantObjectPrivilege::TableColumnPrivileges(column_items),
+        Vec::new(),
     )))
 }
 
 const TABLE_ALL_PRIVILEGE_CHARS: &str = "arwdDxtm";
+const COLUMN_ALL_PRIVILEGE_CHARS: &str = "arwx";
+
+fn parse_table_privilege_item(
+    input: &str,
+) -> Result<Option<(GrantObjectPrivilege, Vec<String>)>, ParseError> {
+    let item = input.trim();
+    if item.is_empty() {
+        return Ok(None);
+    }
+    let (privilege_name, columns) = if let Some(open) = item.find('(') {
+        let close = item.rfind(')').ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "column privilege list",
+            actual: item.into(),
+        })?;
+        if close < open || !item[close + 1..].trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "column privilege list",
+                actual: item.into(),
+            });
+        }
+        (
+            item[..open].trim(),
+            parse_identifier_list(&item[open + 1..close])?,
+        )
+    } else {
+        (item, Vec::new())
+    };
+
+    let privilege = match privilege_name.to_ascii_lowercase().as_str() {
+        "all" | "all privileges" if columns.is_empty() => {
+            GrantObjectPrivilege::AllPrivilegesOnTable
+        }
+        "all" | "all privileges" => {
+            GrantObjectPrivilege::TablePrivileges(COLUMN_ALL_PRIVILEGE_CHARS.into())
+        }
+        "select" => GrantObjectPrivilege::SelectOnTable,
+        "insert" => GrantObjectPrivilege::InsertOnTable,
+        "update" => GrantObjectPrivilege::UpdateOnTable,
+        "delete" if columns.is_empty() => GrantObjectPrivilege::DeleteOnTable,
+        "truncate" if columns.is_empty() => GrantObjectPrivilege::TruncateOnTable,
+        "references" => GrantObjectPrivilege::ReferencesOnTable,
+        "trigger" if columns.is_empty() => GrantObjectPrivilege::TriggerOnTable,
+        "maintain" if columns.is_empty() => GrantObjectPrivilege::MaintainOnTable,
+        _ if columns.is_empty() => return Ok(None),
+        _ => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "column privilege",
+                actual: privilege_name.into(),
+            });
+        }
+    };
+    Ok(Some((privilege, columns)))
+}
+
+fn table_privilege_chars_for_parser(privilege: &GrantObjectPrivilege) -> Option<&str> {
+    match privilege {
+        GrantObjectPrivilege::AllPrivilegesOnTable => Some(TABLE_ALL_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::SelectOnTable => Some("r"),
+        GrantObjectPrivilege::InsertOnTable => Some("a"),
+        GrantObjectPrivilege::UpdateOnTable => Some("w"),
+        GrantObjectPrivilege::DeleteOnTable => Some("d"),
+        GrantObjectPrivilege::TruncateOnTable => Some("D"),
+        GrantObjectPrivilege::ReferencesOnTable => Some("x"),
+        GrantObjectPrivilege::TriggerOnTable => Some("t"),
+        GrantObjectPrivilege::MaintainOnTable => Some("m"),
+        GrantObjectPrivilege::TablePrivileges(chars) => Some(chars.as_str()),
+        _ => None,
+    }
+}
 
 fn canonicalize_table_privilege_chars(chars: &str) -> String {
     TABLE_ALL_PRIVILEGE_CHARS
@@ -6426,68 +6665,6 @@ fn table_privilege_from_chars(chars: String) -> GrantObjectPrivilege {
         "m" => GrantObjectPrivilege::MaintainOnTable,
         _ => GrantObjectPrivilege::TablePrivileges(chars),
     }
-}
-
-fn build_grant_table_column_select(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let after_privilege = sql
-        .get("grant select".len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let close = after_privilege
-        .find(')')
-        .ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "column privilege list",
-            actual: after_privilege.into(),
-        })?;
-    let columns = parse_identifier_list(&after_privilege[1..close])?;
-    let rest = after_privilege[close + 1..].trim_start();
-    if !keyword_at_start(rest, "on") {
-        return Err(ParseError::UnexpectedToken {
-            expected: "ON",
-            actual: rest.into(),
-        });
-    }
-    let rest = consume_keyword(rest, "on").trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "to")?;
-    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
-    Ok(GrantObjectStatement {
-        privilege: GrantObjectPrivilege::SelectOnTable,
-        columns,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        with_grant_option,
-    })
-}
-
-fn build_revoke_table_column_select(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    let after_privilege = sql
-        .get("revoke select".len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
-    let close = after_privilege
-        .find(')')
-        .ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "column privilege list",
-            actual: after_privilege.into(),
-        })?;
-    let columns = parse_identifier_list(&after_privilege[1..close])?;
-    let rest = after_privilege[close + 1..].trim_start();
-    if !keyword_at_start(rest, "on") {
-        return Err(ParseError::UnexpectedToken {
-            expected: "ON",
-            actual: rest.into(),
-        });
-    }
-    let rest = consume_keyword(rest, "on").trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "from")?;
-    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
-    Ok(RevokeObjectStatement {
-        privilege: GrantObjectPrivilege::SelectOnTable,
-        columns,
-        object_names: vec![normalize_simple_identifier(object_name)?],
-        grantee_names,
-        cascade,
-    })
 }
 
 fn build_alter_type_owner_statement(sql: &str) -> Result<AlterTypeOwnerStatement, ParseError> {
@@ -6578,15 +6755,57 @@ fn build_grant_schema_usage(sql: &str) -> Result<GrantObjectStatement, ParseErro
 }
 
 fn build_grant_type_usage(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant usage on type ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
+    let rest = type_usage_prefix(sql, "grant")?;
     let (object_names, rest) = split_once_keyword(rest, "to")?;
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnType,
+        columns: Vec::new(),
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
+fn is_type_usage_grant(lowered: &str) -> bool {
+    type_usage_prefix_len(lowered, "grant").is_some()
+}
+
+fn is_type_usage_revoke(lowered: &str) -> bool {
+    type_usage_prefix_len(lowered, "revoke").is_some()
+}
+
+fn type_usage_prefix<'a>(sql: &'a str, command: &'static str) -> Result<&'a str, ParseError> {
+    let lower = sql.to_ascii_lowercase();
+    let prefix_len =
+        type_usage_prefix_len(&lower, command).ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "type privilege",
+            actual: sql.into(),
+        })?;
+    Ok(sql
+        .get(prefix_len..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start())
+}
+
+fn type_usage_prefix_len(lowered: &str, command: &'static str) -> Option<usize> {
+    for object in ["type", "domain"] {
+        for privilege in ["usage", "all", "all privileges"] {
+            let prefix = format!("{command} {privilege} on {object} ");
+            if lowered.starts_with(&prefix) {
+                return Some(prefix.len());
+            }
+        }
+    }
+    None
+}
+
+fn build_grant_language_usage(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let (rest, privilege) = language_usage_prefix(sql, "grant")?;
+    let (object_names, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege,
         columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
@@ -6667,11 +6886,7 @@ fn build_grant_foreign_server_usage(sql: &str) -> Result<GrantObjectStatement, P
 }
 
 fn build_grant_function_execute(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    let prefix = "grant execute on function ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
+    let rest = function_execute_prefix(sql, "grant", "function")?;
     let (object_name, rest) = split_once_keyword(rest, "to")?;
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
@@ -6684,27 +6899,23 @@ fn build_grant_function_execute(sql: &str) -> Result<GrantObjectStatement, Parse
 }
 
 fn build_grant_procedure_execute(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    build_grant_routine_execute_with_prefix(
+    build_grant_routine_execute_with_object(
         sql,
-        "grant execute on procedure ",
+        "procedure",
         GrantObjectPrivilege::ExecuteOnProcedure,
     )
 }
 
 fn build_grant_routine_execute(sql: &str) -> Result<GrantObjectStatement, ParseError> {
-    build_grant_routine_execute_with_prefix(
-        sql,
-        "grant execute on routine ",
-        GrantObjectPrivilege::ExecuteOnRoutine,
-    )
+    build_grant_routine_execute_with_object(sql, "routine", GrantObjectPrivilege::ExecuteOnRoutine)
 }
 
-fn build_grant_routine_execute_with_prefix(
+fn build_grant_routine_execute_with_object(
     sql: &str,
-    prefix: &str,
+    object: &'static str,
     privilege: GrantObjectPrivilege,
 ) -> Result<GrantObjectStatement, ParseError> {
-    let rest = sql.get(prefix.len()..).ok_or(ParseError::UnexpectedEof)?;
+    let rest = function_execute_prefix(sql, "grant", object)?;
     let (object_name, rest) = split_once_keyword(rest.trim_start(), "to")?;
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
@@ -6714,6 +6925,46 @@ fn build_grant_routine_execute_with_prefix(
         grantee_names,
         with_grant_option,
     })
+}
+
+fn is_function_execute_grant(lowered: &str, object: &'static str) -> bool {
+    function_execute_prefix_len(lowered, "grant", object).is_some()
+}
+
+fn is_function_execute_revoke(lowered: &str, object: &'static str) -> bool {
+    function_execute_prefix_len(lowered, "revoke", object).is_some()
+}
+
+fn function_execute_prefix<'a>(
+    sql: &'a str,
+    command: &'static str,
+    object: &'static str,
+) -> Result<&'a str, ParseError> {
+    let lower = sql.to_ascii_lowercase();
+    let prefix_len = function_execute_prefix_len(&lower, command, object).ok_or_else(|| {
+        ParseError::UnexpectedToken {
+            expected: "routine privilege",
+            actual: sql.into(),
+        }
+    })?;
+    Ok(sql
+        .get(prefix_len..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start())
+}
+
+fn function_execute_prefix_len(
+    lowered: &str,
+    command: &'static str,
+    object: &'static str,
+) -> Option<usize> {
+    for privilege in ["execute", "all", "all privileges"] {
+        let prefix = format!("{command} {privilege} on {object} ");
+        if lowered.starts_with(&prefix) {
+            return Some(prefix.len());
+        }
+    }
+    None
 }
 
 fn build_revoke_database_create(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
@@ -6768,11 +7019,7 @@ fn build_revoke_schema_all(sql: &str) -> Result<RevokeObjectStatement, ParseErro
 }
 
 fn build_revoke_type_usage(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    let prefix = "revoke usage on type ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
+    let rest = type_usage_prefix(sql, "revoke")?;
     let (object_names, rest) = split_once_keyword(rest, "from")?;
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
@@ -6781,6 +7028,53 @@ fn build_revoke_type_usage(sql: &str) -> Result<RevokeObjectStatement, ParseErro
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
         cascade,
+    })
+}
+
+fn build_revoke_language_usage(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let (rest, privilege) = language_usage_prefix(sql, "revoke")?;
+    let (object_names, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege,
+        columns: Vec::new(),
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        cascade,
+    })
+}
+
+fn language_usage_prefix<'a>(
+    sql: &'a str,
+    command: &'static str,
+) -> Result<(&'a str, GrantObjectPrivilege), ParseError> {
+    let lower = sql.to_ascii_lowercase();
+    for (prefix, privilege) in [
+        (
+            format!("{command} usage on language "),
+            GrantObjectPrivilege::UsageOnLanguage,
+        ),
+        (
+            format!("{command} all on language "),
+            GrantObjectPrivilege::AllPrivilegesOnLanguage,
+        ),
+        (
+            format!("{command} all privileges on language "),
+            GrantObjectPrivilege::AllPrivilegesOnLanguage,
+        ),
+    ] {
+        if lower.starts_with(&prefix) {
+            return Ok((
+                sql.get(prefix.len()..)
+                    .ok_or(ParseError::UnexpectedEof)?
+                    .trim_start(),
+                privilege,
+            ));
+        }
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "language privilege",
+        actual: sql.into(),
     })
 }
 
@@ -6857,11 +7151,7 @@ fn build_revoke_foreign_server_usage(sql: &str) -> Result<RevokeObjectStatement,
 }
 
 fn build_revoke_function_execute(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    let prefix = "revoke execute on function ";
-    let rest = sql
-        .get(prefix.len()..)
-        .ok_or(ParseError::UnexpectedEof)?
-        .trim_start();
+    let rest = function_execute_prefix(sql, "revoke", "function")?;
     let (object_name, rest) = split_once_keyword(rest, "from")?;
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
@@ -6874,27 +7164,23 @@ fn build_revoke_function_execute(sql: &str) -> Result<RevokeObjectStatement, Par
 }
 
 fn build_revoke_procedure_execute(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    build_revoke_routine_execute_with_prefix(
+    build_revoke_routine_execute_with_object(
         sql,
-        "revoke execute on procedure ",
+        "procedure",
         GrantObjectPrivilege::ExecuteOnProcedure,
     )
 }
 
 fn build_revoke_routine_execute(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
-    build_revoke_routine_execute_with_prefix(
-        sql,
-        "revoke execute on routine ",
-        GrantObjectPrivilege::ExecuteOnRoutine,
-    )
+    build_revoke_routine_execute_with_object(sql, "routine", GrantObjectPrivilege::ExecuteOnRoutine)
 }
 
-fn build_revoke_routine_execute_with_prefix(
+fn build_revoke_routine_execute_with_object(
     sql: &str,
-    prefix: &str,
+    object: &'static str,
     privilege: GrantObjectPrivilege,
 ) -> Result<RevokeObjectStatement, ParseError> {
-    let rest = sql.get(prefix.len()..).ok_or(ParseError::UnexpectedEof)?;
+    let rest = function_execute_prefix(sql, "revoke", object)?;
     let (object_name, rest) = split_once_keyword(rest.trim_start(), "from")?;
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
@@ -6921,6 +7207,7 @@ fn build_grant_role_membership(sql: &str) -> Result<GrantRoleMembershipStatement
         role_names: parse_identifier_list(role_names)?,
         grantee_names: parse_identifier_list(grantee_names_text)?,
         admin_option: false,
+        admin_option_specified: false,
         inherit_option: None,
         set_option: None,
         granted_by: granted_by_clause.map(parse_role_grantor_spec).transpose()?,
@@ -6930,6 +7217,7 @@ fn build_grant_role_membership(sql: &str) -> Result<GrantRoleMembershipStatement
         let lowered = with_clause.to_ascii_lowercase();
         if lowered == "admin option" {
             stmt.admin_option = true;
+            stmt.admin_option_specified = true;
         } else {
             for option in with_clause.split(',') {
                 let option = option.trim();
@@ -6943,7 +7231,10 @@ fn build_grant_role_membership(sql: &str) -> Result<GrantRoleMembershipStatement
                     });
                 }
                 match name.to_ascii_lowercase().as_str() {
-                    "admin" => stmt.admin_option = parse_grant_bool(value)?,
+                    "admin" => {
+                        stmt.admin_option = parse_grant_bool(value)?;
+                        stmt.admin_option_specified = true;
+                    }
                     "inherit" => stmt.inherit_option = Some(parse_grant_bool(value)?),
                     "set" => stmt.set_option = Some(parse_grant_bool(value)?),
                     _ => {
@@ -7072,7 +7363,7 @@ fn parse_grantees_with_optional_grant(input: &str) -> Result<(Vec<String>, bool)
             actual: suffix.into(),
         });
     };
-    Ok((parse_identifier_list(grantees)?, with_grant_option))
+    Ok((parse_grantee_identifier_list(grantees)?, with_grant_option))
 }
 
 fn parse_revokee_list_with_optional_cascade(
@@ -7083,7 +7374,7 @@ fn parse_revokee_list_with_optional_cascade(
     // selection is not represented yet, so only keep the revokee list.
     let (input, _granted_by_clause) =
         split_optional_keyword(input, "granted by").unwrap_or((input.trim(), None));
-    Ok((parse_identifier_list(input)?, cascade))
+    Ok((parse_grantee_identifier_list(input)?, cascade))
 }
 
 fn parse_identifier_list(input: &str) -> Result<Vec<String>, ParseError> {
@@ -7091,6 +7382,22 @@ fn parse_identifier_list(input: &str) -> Result<Vec<String>, ParseError> {
         .split(',')
         .map(normalize_simple_identifier)
         .collect::<Result<Vec<_>, _>>()
+}
+
+fn parse_grantee_identifier_list(input: &str) -> Result<Vec<String>, ParseError> {
+    input
+        .split(',')
+        .map(normalize_grantee_identifier)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn normalize_grantee_identifier(input: &str) -> Result<String, ParseError> {
+    let trimmed = input.trim();
+    if keyword_at_start(trimmed, "group") {
+        normalize_simple_identifier(consume_keyword(trimmed, "group"))
+    } else {
+        normalize_simple_identifier(trimmed)
+    }
 }
 
 fn normalize_simple_identifier(input: &str) -> Result<String, ParseError> {
@@ -14876,6 +15183,7 @@ fn build_alter_group(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                 role_names: vec![role_name],
                 grantee_names,
                 admin_option: false,
+                admin_option_specified: false,
                 inherit_option: None,
                 set_option: None,
                 granted_by: None,
@@ -16212,6 +16520,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                         part.as_rule(),
                         Rule::values_from_item
                             | Rule::json_table_from_item
+                            | Rule::xml_table_from_item
                             | Rule::srf_from_item
                             | Rule::derived_from_item
                             | Rule::parenthesized_from_item
@@ -16293,6 +16602,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     | Rule::lateral_from_item
                     | Rule::values_from_item
                     | Rule::json_table_from_item
+                    | Rule::xml_table_from_item
                     | Rule::parenthesized_table_from_item
                     | Rule::srf_from_item
                     | Rule::derived_from_item
@@ -16347,6 +16657,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 .collect::<Result<Vec<_>, _>>()?,
         }),
         Rule::json_table_from_item => build_json_table_from_item(pair),
+        Rule::xml_table_from_item => build_xml_table_from_item(pair),
         Rule::srf_from_item => {
             let mut name = None;
             let mut parsed_args = ParsedFunctionArgs::default();
@@ -16403,6 +16714,169 @@ fn build_json_table_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseErr
         .find(|part| part.as_rule() == Rule::json_table_expr)
         .ok_or(ParseError::UnexpectedEof)?;
     build_json_table_expr(expr).map(FromItem::JsonTable)
+}
+
+fn build_xml_table_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
+    let expr = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::xml_table_expr)
+        .ok_or(ParseError::UnexpectedEof)?;
+    build_xml_table_expr(expr).map(FromItem::XmlTable)
+}
+
+fn build_xml_table_expr(pair: Pair<'_, Rule>) -> Result<XmlTableExpr, ParseError> {
+    let mut namespaces = Vec::new();
+    let mut row_path = None;
+    let mut document = None;
+    let mut columns = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::xml_namespaces_clause => namespaces = build_xml_namespaces_clause(part)?,
+            Rule::expr if row_path.is_none() => row_path = Some(build_expr(part)?),
+            Rule::xml_passing_clause => document = Some(build_xml_passing_clause(part)?),
+            Rule::xml_table_column_definition_list => {
+                columns = Some(build_xml_table_column_list(part)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(XmlTableExpr {
+        namespaces,
+        row_path: row_path.ok_or(ParseError::UnexpectedEof)?,
+        document: document.ok_or(ParseError::UnexpectedEof)?,
+        columns: columns.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_xml_namespaces_clause(pair: Pair<'_, Rule>) -> Result<Vec<XmlTableNamespace>, ParseError> {
+    let list = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::xml_namespace_list)
+        .ok_or(ParseError::UnexpectedEof)?;
+    list.into_inner()
+        .filter(|part| part.as_rule() == Rule::xml_namespace)
+        .map(build_xml_namespace)
+        .collect()
+}
+
+fn build_xml_namespace(pair: Pair<'_, Rule>) -> Result<XmlTableNamespace, ParseError> {
+    let is_default = pair
+        .as_str()
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("default");
+    let mut uri = None;
+    let mut name = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr => uri = Some(build_expr(part)?),
+            Rule::identifier => name = Some(build_identifier(part)),
+            _ => {}
+        }
+    }
+    Ok(XmlTableNamespace {
+        name: if is_default { None } else { name },
+        uri: uri.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_xml_passing_clause(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    pair.into_inner()
+        .find(|part| part.as_rule() == Rule::expr)
+        .ok_or(ParseError::UnexpectedEof)
+        .and_then(build_expr)
+}
+
+fn build_xml_table_column_list(pair: Pair<'_, Rule>) -> Result<Vec<XmlTableColumn>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::xml_table_column_definition)
+        .map(build_xml_table_column)
+        .collect()
+}
+
+fn build_xml_table_column(pair: Pair<'_, Rule>) -> Result<XmlTableColumn, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::xml_table_ordinality_column => {
+            let name = inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(XmlTableColumn::Ordinality { name })
+        }
+        Rule::xml_table_regular_column => build_xml_table_regular_column(inner),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "XMLTABLE column",
+            actual: inner.as_str().into(),
+        }),
+    }
+}
+
+fn build_xml_table_regular_column(pair: Pair<'_, Rule>) -> Result<XmlTableColumn, ParseError> {
+    let mut name = None;
+    let mut type_name = None;
+    let mut path = None;
+    let mut default = None;
+    let mut not_null = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::type_name => type_name = Some(build_type_name(part)),
+            Rule::xml_table_column_option => {
+                let option = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+                match option.as_rule() {
+                    Rule::xml_table_path_clause => {
+                        path = Some(
+                            option
+                                .into_inner()
+                                .find(|inner| inner.as_rule() == Rule::expr)
+                                .ok_or(ParseError::UnexpectedEof)
+                                .and_then(build_expr)?,
+                        );
+                    }
+                    Rule::xml_table_default_clause => {
+                        default = Some(
+                            option
+                                .into_inner()
+                                .find(|inner| inner.as_rule() == Rule::expr)
+                                .ok_or(ParseError::UnexpectedEof)
+                                .and_then(build_expr)?,
+                        );
+                    }
+                    Rule::xml_table_nullability_clause => {
+                        not_null = option.as_str().to_ascii_lowercase().starts_with("not");
+                    }
+                    Rule::xml_table_named_option => {
+                        let name = option
+                            .into_inner()
+                            .find(|inner| inner.as_rule() == Rule::identifier)
+                            .map(build_identifier)
+                            .ok_or(ParseError::UnexpectedEof)?;
+                        if name == "__pg__is_not_null" {
+                            return Err(ParseError::DetailedError {
+                                message: format!(
+                                    "option name \"{name}\" cannot be used in XMLTABLE"
+                                ),
+                                detail: None,
+                                hint: None,
+                                sqlstate: "42601",
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(XmlTableColumn::Regular {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        type_name: type_name.ok_or(ParseError::UnexpectedEof)?,
+        path,
+        default,
+        not_null,
+    })
 }
 
 fn build_json_table_expr(pair: Pair<'_, Rule>) -> Result<JsonTableExpr, ParseError> {
@@ -18206,6 +18680,22 @@ fn set_enforced_attribute(enforced: &mut Option<bool>, value: bool) -> Result<()
         return Err(ParseError::FeatureNotSupportedMessage(
             "multiple ENFORCED/NOT ENFORCED clauses not allowed".into(),
         ));
+    }
+    *enforced = Some(value);
+    Ok(())
+}
+
+fn set_alter_constraint_enforced_attribute(
+    enforced: &mut Option<bool>,
+    value: bool,
+) -> Result<(), ParseError> {
+    if enforced.is_some() {
+        return Err(ParseError::DetailedError {
+            message: "conflicting constraint properties".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
     }
     *enforced = Some(value);
     Ok(())
@@ -21035,6 +21525,8 @@ fn build_alter_table_alter_constraint(
     let mut only = false;
     let mut table_name = None;
     let mut constraint_name = None;
+    let mut not_valid = false;
+    let mut no_inherit = false;
     let mut deferrable = None;
     let mut initially_deferred = None;
     let mut enforced = None;
@@ -21054,6 +21546,8 @@ fn build_alter_table_alter_constraint(
             Rule::alter_table_constraint_action => {
                 for inner in part.into_inner() {
                     match inner.as_rule() {
+                        Rule::not_valid_constraint_attribute => not_valid = true,
+                        Rule::no_inherit_constraint_attribute => no_inherit = true,
                         Rule::deferrable_constraint_attribute => {
                             set_deferrable_attribute(&mut deferrable, initially_deferred, true)?
                         }
@@ -21075,10 +21569,10 @@ fn build_alter_table_alter_constraint(
                             )?
                         }
                         Rule::enforced_constraint_attribute => {
-                            set_enforced_attribute(&mut enforced, true)?
+                            set_alter_constraint_enforced_attribute(&mut enforced, true)?
                         }
                         Rule::not_enforced_constraint_attribute => {
-                            set_enforced_attribute(&mut enforced, false)?
+                            set_alter_constraint_enforced_attribute(&mut enforced, false)?
                         }
                         _ => {}
                     }
@@ -21092,6 +21586,8 @@ fn build_alter_table_alter_constraint(
         only,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         constraint_name: constraint_name.ok_or(ParseError::UnexpectedEof)?,
+        not_valid,
+        no_inherit,
         deferrable,
         initially_deferred,
         enforced,
@@ -25133,6 +25629,102 @@ mod tests {
             Statement::Select(select) => {
                 assert!(matches!(select.from, Some(FromItem::JsonTable(_))));
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_basic_xml_table_from_item() {
+        let sql = "SELECT * FROM XMLTABLE('/ROWS/ROW' PASSING data COLUMNS id int PATH '@id')";
+        match parse_statement(sql).unwrap() {
+            Statement::Select(select) => match select.from {
+                Some(FromItem::XmlTable(table)) => {
+                    assert_eq!(table.namespaces.len(), 0);
+                    assert_eq!(table.columns.len(), 1);
+                }
+                other => panic!("expected XMLTABLE from item, got {other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_xml_table_with_namespaces() {
+        let sql = "SELECT * FROM XMLTABLE(XMLNAMESPACES('urn:x' AS x), '/x:rows/x:row' PASSING data COLUMNS id int PATH '@id')";
+        match parse_statement(sql).unwrap() {
+            Statement::Select(select) => match select.from {
+                Some(FromItem::XmlTable(table)) => {
+                    assert_eq!(table.namespaces.len(), 1);
+                    assert_eq!(table.namespaces[0].name.as_deref(), Some("x"));
+                }
+                other => panic!("expected XMLTABLE from item, got {other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_xml_table_column_options() {
+        let sql = "SELECT * FROM XMLTABLE('/ROWS/ROW' PASSING data COLUMNS ord FOR ORDINALITY, name text PATH 'name' DEFAULT 'n/a' NOT NULL, note text NULL)";
+        match parse_statement(sql).unwrap() {
+            Statement::Select(select) => match select.from {
+                Some(FromItem::XmlTable(table)) => {
+                    assert!(matches!(
+                        table.columns[0],
+                        XmlTableColumn::Ordinality { .. }
+                    ));
+                    match &table.columns[1] {
+                        XmlTableColumn::Regular {
+                            path,
+                            default,
+                            not_null,
+                            ..
+                        } => {
+                            assert!(path.is_some());
+                            assert!(default.is_some());
+                            assert!(*not_null);
+                        }
+                        other => panic!("expected regular XMLTABLE column, got {other:?}"),
+                    }
+                    assert!(matches!(
+                        &table.columns[2],
+                        XmlTableColumn::Regular {
+                            not_null: false,
+                            ..
+                        }
+                    ));
+                }
+                other => panic!("expected XMLTABLE from item, got {other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_lowercase_xml_table_alias() {
+        let sql = "select * from xmltable('/r' passing data columns v text path '.') xt";
+        match parse_statement(sql).unwrap() {
+            Statement::Select(select) => match select.from {
+                Some(FromItem::Alias { source, alias, .. }) => {
+                    assert_eq!(alias, "xt");
+                    assert!(matches!(*source, FromItem::XmlTable(_)));
+                }
+                other => panic!("expected aliased XMLTABLE from item, got {other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_lateral_xml_table_from_item() {
+        let sql = "SELECT * FROM t CROSS JOIN LATERAL XMLTABLE('/r' PASSING t.data COLUMNS v text PATH '.')";
+        match parse_statement(sql).unwrap() {
+            Statement::Select(select) => match select.from {
+                Some(FromItem::Join { right, .. }) => {
+                    assert!(matches!(*right, FromItem::Lateral(_)));
+                }
+                other => panic!("expected join with lateral XMLTABLE, got {other:?}"),
+            },
             other => panic!("{other:?}"),
         }
     }

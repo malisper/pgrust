@@ -11,7 +11,8 @@ use crate::backend::access::transam::xact::{CommandId, Snapshot};
 use crate::backend::commands::trigger::trigger_is_enabled_for_session;
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::parser::{
-    BoundForeignKeyConstraint, BoundReferencedByForeignKey, ForeignKeyMatchType,
+    BoundForeignKeyConstraint, BoundReferencedByForeignKey, BoundRelation, CatalogLookup,
+    ForeignKeyAction, ForeignKeyMatchType,
 };
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
@@ -28,6 +29,7 @@ use super::expr_multirange::{
     multirange_overlaps_multirange, multirange_overlaps_range, normalize_multirange,
 };
 use super::expr_range::{range_contains_range, range_overlap};
+use super::permissions::relation_has_table_privilege;
 use super::relation_values_visible_for_error_detail;
 use super::{ConstraintTiming, ExecError, ExecutorContext, compare_order_values};
 
@@ -239,6 +241,7 @@ fn enforce_outbound_foreign_key(
     ) {
         return Ok(());
     }
+    check_referenced_table_select_privilege(constraint, ctx)?;
     let exists = if constraint.period_column_index.is_some() {
         temporal_referenced_key_exists(constraint, values, ctx)?
     } else {
@@ -259,6 +262,35 @@ fn enforce_outbound_foreign_key(
             render_key_values(&key_values, ctx),
             constraint.referenced_relation_name
         )),
+    })
+}
+
+fn check_referenced_table_select_privilege(
+    constraint: &BoundForeignKeyConstraint,
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    let Some(catalog) = ctx.catalog.as_ref() else {
+        return Ok(());
+    };
+    let Some(class_row) = catalog.class_row_by_oid(constraint.referenced_relation_oid) else {
+        return Ok(());
+    };
+    let authid_rows = catalog.authid_rows();
+    let auth_members_rows = catalog.auth_members_rows();
+    if relation_has_table_privilege(
+        &class_row,
+        &authid_rows,
+        &auth_members_rows,
+        ctx.current_user_oid,
+        'r',
+    ) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("permission denied for table {}", class_row.relname),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
     })
 }
 
@@ -307,6 +339,8 @@ pub(crate) fn enforce_inbound_foreign_keys_on_update(
                     ctx,
                 ));
             }
+        } else if constraint.on_update == ForeignKeyAction::Restrict {
+            enforce_inbound_foreign_key_restrict(relation_name, constraint, previous_values, ctx)?;
         } else {
             enforce_inbound_foreign_key(relation_name, constraint, previous_values, ctx)?;
         }
@@ -345,6 +379,8 @@ pub(crate) fn enforce_inbound_foreign_keys_on_delete(
                     ctx,
                 ));
             }
+        } else if constraint.on_delete == ForeignKeyAction::Restrict {
+            enforce_inbound_foreign_key_restrict(relation_name, constraint, values, ctx)?;
         } else {
             enforce_inbound_foreign_key(relation_name, constraint, values, ctx)?;
         }
@@ -382,6 +418,27 @@ fn enforce_inbound_foreign_key(
     enforce_inbound_foreign_key_reference(relation_name, constraint, &key_values, ctx)
 }
 
+fn enforce_inbound_foreign_key_restrict(
+    relation_name: &str,
+    constraint: &BoundReferencedByForeignKey,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let key_values = extract_key_values(values, &constraint.referenced_column_indexes);
+    if key_values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(());
+    }
+    if child_row_exists(constraint, &key_values, ctx)? {
+        return Err(inbound_restrict_foreign_key_violation(
+            relation_name,
+            constraint,
+            &key_values,
+            ctx,
+        ));
+    }
+    Ok(())
+}
+
 fn inbound_foreign_key_violation(
     relation_name: &str,
     constraint: &BoundReferencedByForeignKey,
@@ -412,6 +469,36 @@ fn inbound_foreign_key_violation(
     }
 }
 
+fn inbound_restrict_foreign_key_violation(
+    relation_name: &str,
+    constraint: &BoundReferencedByForeignKey,
+    key_values: &[Value],
+    ctx: &ExecutorContext,
+) -> ExecError {
+    let detail =
+        if relation_values_visible_for_error_detail(constraint.referenced_relation_oid, ctx) {
+            format!(
+                "Key ({})=({}) is referenced from table \"{}\".",
+                constraint.referenced_column_names.join(", "),
+                render_key_values(key_values, ctx),
+                constraint.child_relation_name
+            )
+        } else {
+            format!(
+                "Key is referenced from table \"{}\".",
+                constraint.child_relation_name
+            )
+        };
+    ExecError::ForeignKeyViolation {
+        constraint: constraint.constraint_name.clone(),
+        message: format!(
+            "update or delete on table \"{relation_name}\" violates RESTRICT setting of foreign key constraint \"{}\" on table \"{}\"",
+            constraint.constraint_name, constraint.child_relation_name
+        ),
+        detail: Some(detail),
+    }
+}
+
 fn referenced_key_exists(
     constraint: &BoundForeignKeyConstraint,
     key_values: &[Value],
@@ -419,6 +506,21 @@ fn referenced_key_exists(
 ) -> Result<bool, ExecError> {
     let mut snapshot = ctx.snapshot.clone();
     snapshot.current_cid = CommandId::MAX;
+    let partitioned_catalog = ctx.catalog.as_ref().and_then(|catalog| {
+        catalog
+            .relation_by_oid(constraint.referenced_relation_oid)
+            .is_some_and(|relation| relation.relkind == 'p')
+            .then(|| catalog.clone())
+    });
+    if let Some(catalog) = partitioned_catalog {
+        return partitioned_referenced_key_exists(
+            constraint,
+            key_values,
+            &snapshot,
+            catalog.as_ref(),
+            ctx,
+        );
+    }
     let key_values = referenced_key_values_in_index_order(constraint, key_values)?;
     index_has_visible_row(
         constraint.referenced_rel,
@@ -427,6 +529,35 @@ fn referenced_key_exists(
         &snapshot,
         ctx,
     )
+}
+
+fn partitioned_referenced_key_exists(
+    constraint: &BoundForeignKeyConstraint,
+    key_values: &[Value],
+    snapshot: &Snapshot,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    let leaves = partition_leaf_relations(catalog, constraint.referenced_relation_oid)?;
+    for leaf in leaves {
+        let leaf_key_indexes = map_column_indexes_by_name(
+            &constraint.referenced_desc,
+            &leaf.desc,
+            &constraint.referenced_column_indexes,
+        )?;
+        if heap_has_matching_row(
+            leaf.rel,
+            leaf.toast,
+            &leaf.desc,
+            &leaf_key_indexes,
+            key_values,
+            snapshot,
+            ctx,
+        )? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn referenced_key_values_in_index_order(
@@ -682,6 +813,34 @@ fn child_row_exists(
 ) -> Result<bool, ExecError> {
     let mut snapshot = ctx.snapshot.clone();
     snapshot.current_cid = CommandId::MAX;
+    let partitioned_catalog = ctx.catalog.as_ref().and_then(|catalog| {
+        catalog
+            .relation_by_oid(constraint.child_relation_oid)
+            .is_some_and(|relation| relation.relkind == 'p')
+            .then(|| catalog.clone())
+    });
+    if let Some(catalog) = partitioned_catalog {
+        let leaves = partition_leaf_relations(catalog.as_ref(), constraint.child_relation_oid)?;
+        for leaf in leaves {
+            let leaf_key_indexes = map_column_indexes_by_name(
+                &constraint.child_desc,
+                &leaf.desc,
+                &constraint.child_column_indexes,
+            )?;
+            if heap_has_matching_row(
+                leaf.rel,
+                leaf.toast,
+                &leaf.desc,
+                &leaf_key_indexes,
+                key_values,
+                &snapshot,
+                ctx,
+            )? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
     if let Some(index) = &constraint.child_index {
         return index_has_visible_row(constraint.child_rel, index, key_values, &snapshot, ctx);
     }
@@ -694,6 +853,51 @@ fn child_row_exists(
         &snapshot,
         ctx,
     )
+}
+
+fn partition_leaf_relations(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> Result<Vec<BoundRelation>, ExecError> {
+    let mut children = catalog.inheritance_children(relation_oid);
+    children.sort_by_key(|row| (row.inhseqno, row.inhrelid));
+    let mut leaves = Vec::new();
+    for child in children.into_iter().filter(|row| !row.inhdetachpending) {
+        let relation = catalog
+            .relation_by_oid(child.inhrelid)
+            .ok_or_else(|| foreign_key_internal_error("missing partition relation"))?;
+        if relation.relkind == 'p' {
+            leaves.extend(partition_leaf_relations(catalog, relation.relation_oid)?);
+        } else {
+            leaves.push(relation);
+        }
+    }
+    Ok(leaves)
+}
+
+fn map_column_indexes_by_name(
+    parent_desc: &crate::backend::executor::RelationDesc,
+    child_desc: &crate::backend::executor::RelationDesc,
+    parent_indexes: &[usize],
+) -> Result<Vec<usize>, ExecError> {
+    parent_indexes
+        .iter()
+        .map(|parent_index| {
+            let parent_column = parent_desc
+                .columns
+                .get(*parent_index)
+                .ok_or_else(|| foreign_key_internal_error("invalid parent column index"))?;
+            child_desc
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(_, column)| {
+                    !column.dropped && column.name.eq_ignore_ascii_case(&parent_column.name)
+                })
+                .map(|(index, _)| index)
+                .ok_or_else(|| foreign_key_internal_error("missing partition foreign key column"))
+        })
+        .collect()
 }
 
 fn index_has_visible_row(

@@ -160,7 +160,7 @@ impl Database {
                         created.oid,
                         current_user_oid,
                         false,
-                        false,
+                        created.rolinherit,
                         true,
                     ),
                     &ctx,
@@ -200,7 +200,7 @@ impl Database {
                         member.oid,
                         current_user_oid,
                         false,
-                        false,
+                        member.rolinherit,
                         true,
                     ),
                     &ctx,
@@ -235,7 +235,14 @@ impl Database {
                 .shared_catalog
                 .write()
                 .grant_role_membership_mvcc(
-                    &membership_row(created.oid, member.oid, current_user_oid, true, false, true),
+                    &membership_row(
+                        created.oid,
+                        member.oid,
+                        current_user_oid,
+                        true,
+                        member.rolinherit,
+                        true,
+                    ),
                     &ctx,
                 )
                 .map_err(|err| {
@@ -1547,7 +1554,7 @@ mod tests {
             row.roleid == parent_oid
                 && row.member == child_oid
                 && !row.admin_option
-                && !row.inherit_option
+                && row.inherit_option
                 && row.set_option
         }));
         let child_members = memberships_for_member(&catcache.auth_members_rows(), member_oid);

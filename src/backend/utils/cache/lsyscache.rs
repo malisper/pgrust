@@ -10,10 +10,10 @@ use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
     SysCacheId, SysCacheTuple, backend_catcache, ensure_am_rows, ensure_amop_rows,
     ensure_amproc_rows, ensure_attribute_rows, ensure_class_rows, ensure_constraint_rows,
-    ensure_index_rows, ensure_namespace_rows, ensure_opclass_rows, ensure_proc_rows,
-    ensure_rewrite_rows, ensure_statistic_rows, ensure_type_rows, relation_id_get_relation_db,
-    search_sys_cache_list1_db, search_sys_cache_list2_db, search_sys_cache_list3_db,
-    search_sys_cache1_db, search_sys_cache2_db,
+    ensure_index_rows, ensure_inherit_rows, ensure_namespace_rows, ensure_opclass_rows,
+    ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows, ensure_type_rows,
+    relation_id_get_relation_db, search_sys_cache_list1_db, search_sys_cache_list2_db,
+    search_sys_cache_list3_db, search_sys_cache1_db, search_sys_cache2_db,
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
@@ -29,8 +29,8 @@ use crate::include::catalog::{
     PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
     PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgEnumRow, PgIndexRow,
     PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
-    PgProcRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
-    PgTriggerRow, PgTypeRow,
+    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::SqlType;
@@ -2006,6 +2006,10 @@ impl CatalogLookup for LazyCatalogLookup {
         attribute_rows_for_relation(&self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
+    fn attribute_rows(&self) -> Vec<crate::include::catalog::PgAttributeRow> {
+        ensure_attribute_rows(&self.db, self.client_id, self.txn_ctx)
+    }
+
     fn class_rows(&self) -> Vec<PgClassRow> {
         ensure_class_rows(&self.db, self.client_id, self.txn_ctx)
     }
@@ -2023,6 +2027,28 @@ impl CatalogLookup for LazyCatalogLookup {
 
     fn inheritance_children(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
         inheritance_child_rows(&self.db, self.client_id, self.txn_ctx, relation_oid)
+    }
+
+    fn inheritance_rows(&self) -> Vec<PgInheritsRow> {
+        ensure_inherit_rows(&self.db, self.client_id, self.txn_ctx)
+    }
+
+    fn publication_rows(&self) -> Vec<PgPublicationRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.publication_rows())
+            .unwrap_or_default()
+    }
+
+    fn publication_rel_rows(&self) -> Vec<PgPublicationRelRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.publication_rel_rows())
+            .unwrap_or_default()
+    }
+
+    fn publication_namespace_rows(&self) -> Vec<PgPublicationNamespaceRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.publication_namespace_rows())
+            .unwrap_or_default()
     }
 
     fn statistic_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticRow> {

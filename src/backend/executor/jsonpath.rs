@@ -5,11 +5,18 @@ use num_traits::{Signed, Zero};
 
 use crate::backend::executor::ExecError;
 use crate::backend::executor::expr_bool::parse_pg_bool_text;
-use crate::backend::executor::expr_casts::{cast_text_value_with_config, parse_pg_float};
-use crate::backend::executor::expr_ops::parse_numeric_text;
-use crate::backend::executor::jsonb::{JsonbValue, compare_jsonb, render_temporal_jsonb_value};
+use crate::backend::executor::expr_casts::{
+    cast_text_value_with_config, cast_value_with_config, parse_pg_float,
+};
+use crate::backend::executor::expr_ops::{mixed_date_timestamp_ordering, parse_numeric_text};
+use crate::backend::executor::jsonb::{
+    JsonbValue, compare_jsonb, jsonb_nested_encoded_len_at, render_temporal_jsonb_value,
+};
 use crate::backend::executor::pg_regex::{eval_jsonpath_like_regex, validate_jsonpath_like_regex};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::misc::notices::push_warning;
+use crate::backend::utils::time::datetime::timezone_offset_seconds_at_utc;
+use crate::include::nodes::datetime::{TimeTzADT, USECS_PER_SEC};
 use crate::include::nodes::datum::{NumericValue, Value};
 use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
 
@@ -58,6 +65,10 @@ enum Expr {
     MethodCall {
         inner: Box<Expr>,
         method: Method,
+    },
+    Filter {
+        inner: Box<Expr>,
+        predicate: Box<Expr>,
     },
     Exists(Box<Expr>),
     Last,
@@ -136,8 +147,16 @@ enum MethodKind {
     Double,
     Floor,
     Integer,
+    KeyValue,
+    LTrim,
+    Lower,
     Number,
+    BTrim,
+    InitCap,
+    Replace,
+    RTrim,
     Size,
+    SplitPart,
     String,
     Time,
     TimeTz,
@@ -179,6 +198,11 @@ enum MethodArg {
 pub(crate) struct EvaluationContext<'a> {
     pub(crate) root: &'a JsonbValue,
     pub(crate) vars: Option<&'a JsonbValue>,
+    pub(crate) datetime_config: &'a DateTimeConfig,
+    pub(crate) allow_timezone: bool,
+    pub(crate) silent: bool,
+    pub(crate) preserve_step_prefix: bool,
+    pub(crate) preserve_unary_prefix: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -245,18 +269,35 @@ fn eval_expr(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<Vec<JsonbValue>, E
         Expr::Arithmetic { op, left, right } => {
             let left_values = eval_expr(left, ctx)?;
             let right_values = eval_expr(right, ctx)?;
-            eval_arithmetic_any_pair(&left_values, &right_values, *op)
+            eval_arithmetic_operands(&left_values, &right_values, *op, ctx)
         }
-        Expr::MethodCall { inner, method } => eval_expr(inner, ctx)?
-            .into_iter()
-            .map(|value| apply_method(&value, method, ctx.mode))
-            .collect(),
+        Expr::MethodCall { inner, method } => {
+            eval_expr(inner, ctx)?
+                .into_iter()
+                .try_fold(Vec::new(), |mut out, value| {
+                    out.extend(apply_method_values(&value, method, ctx)?);
+                    Ok(out)
+                })
+        }
+        Expr::Filter { inner, predicate } => {
+            eval_expr(inner, ctx)?
+                .into_iter()
+                .try_fold(Vec::new(), |mut out, value| {
+                    let nested = RuntimeContext {
+                        global: ctx.global,
+                        current: &value,
+                        mode: ctx.mode,
+                        last_index: ctx.last_index,
+                    };
+                    if eval_predicate(predicate, &nested)? == PredicateValue::True {
+                        out.push(value);
+                    }
+                    Ok(out)
+                })
+        }
         Expr::Unary { op, inner } => {
             let values = eval_expr(inner, ctx)?;
-            values
-                .into_iter()
-                .map(|value| eval_unary_value(value, *op))
-                .collect()
+            eval_unary_values(&values, *op, ctx)
         }
     }
 }
@@ -266,29 +307,34 @@ fn eval_predicate(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<PredicateValu
         Expr::Exists(inner) => Ok(match eval_expr(inner, ctx) {
             Ok(values) if values.is_empty() => PredicateValue::False,
             Ok(_) => PredicateValue::True,
+            Err(err) if is_jsonpath_fatal_error(&err) => return Err(err),
             Err(_) => PredicateValue::Unknown,
         }),
         Expr::Compare { op, left, right } => {
             let left_values = match eval_expr(left, ctx) {
                 Ok(values) => values,
+                Err(err) if is_jsonpath_fatal_error(&err) => return Err(err),
                 Err(_) => return Ok(PredicateValue::Unknown),
             };
             let right_values = match eval_expr(right, ctx) {
                 Ok(values) => values,
+                Err(err) if is_jsonpath_fatal_error(&err) => return Err(err),
                 Err(_) => return Ok(PredicateValue::Unknown),
             };
-            Ok(compare_any_pair(&left_values, &right_values, *op, ctx.mode))
+            compare_any_pair(&left_values, &right_values, *op, ctx)
         }
         Expr::StartsWith { left, right } => {
             let left_values = match eval_expr(left, ctx) {
                 Ok(values) => values,
+                Err(err) if is_jsonpath_fatal_error(&err) => return Err(err),
                 Err(_) => return Ok(PredicateValue::Unknown),
             };
             let right_values = match eval_expr(right, ctx) {
                 Ok(values) => values,
+                Err(err) if is_jsonpath_fatal_error(&err) => return Err(err),
                 Err(_) => return Ok(PredicateValue::Unknown),
             };
-            Ok(starts_with_any_pair(&left_values, &right_values))
+            Ok(starts_with_any_pair(&left_values, &right_values, ctx))
         }
         Expr::LikeRegex {
             expr,
@@ -297,9 +343,10 @@ fn eval_predicate(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<PredicateValu
         } => {
             let values = match eval_expr(expr, ctx) {
                 Ok(values) => values,
+                Err(err) if is_jsonpath_fatal_error(&err) => return Err(err),
                 Err(_) => return Ok(PredicateValue::Unknown),
             };
-            like_regex_any(&values, pattern, flags)
+            like_regex_any(&values, pattern, flags, ctx)
         }
         Expr::And(left, right) => {
             let left_value = eval_predicate(left, ctx)?;
@@ -345,6 +392,7 @@ fn predicate_value_from_items(
 ) -> Result<PredicateValue, ExecError> {
     let values = match eval_expr(expr, ctx) {
         Ok(values) => values,
+        Err(err) if is_jsonpath_fatal_error(&err) => return Err(err),
         Err(_) => return Ok(PredicateValue::Unknown),
     };
     if values.is_empty() {
@@ -374,16 +422,46 @@ fn predicate_value_to_jsonb(value: PredicateValue) -> JsonbValue {
 }
 
 fn lookup_var<'a>(ctx: &'a RuntimeContext<'_>, name: &str) -> Result<&'a JsonbValue, ExecError> {
-    let Some(JsonbValue::Object(items)) = ctx.global.vars else {
-        return Err(exec_jsonpath_error(
-            "jsonpath variables must be a jsonb object",
-        ));
+    let Some(vars) = ctx.global.vars else {
+        return Err(undefined_jsonpath_variable(name));
+    };
+    let JsonbValue::Object(items) = vars else {
+        return Err(jsonpath_vars_not_object_error());
     };
     items
         .iter()
         .find(|(key, _)| key == name)
         .map(|(_, value)| value)
-        .ok_or_else(|| exec_jsonpath_error(&format!("jsonpath variable \"{name}\" not found")))
+        .ok_or_else(|| undefined_jsonpath_variable(name))
+}
+
+fn undefined_jsonpath_variable(name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("could not find jsonpath variable \"{name}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "42704",
+    }
+}
+
+fn jsonpath_vars_not_object_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "\"vars\" argument is not an object".into(),
+        detail: Some(
+            "Jsonpath parameters should be encoded as key-value pairs of \"vars\" object.".into(),
+        ),
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+fn is_jsonpath_fatal_error(err: &ExecError) -> bool {
+    matches!(
+        err,
+        ExecError::DetailedError { message, .. }
+            if message.starts_with("could not find jsonpath variable ")
+                || message == "\"vars\" argument is not an object"
+    )
 }
 
 fn apply_step(
@@ -393,7 +471,12 @@ fn apply_step(
 ) -> Result<Vec<JsonbValue>, ExecError> {
     let mut out = Vec::new();
     for value in values {
-        apply_step_single(&value, step, ctx, &mut out)?;
+        if let Err(err) = apply_step_single(&value, step, ctx, &mut out) {
+            if ctx.global.preserve_step_prefix && !out.is_empty() {
+                return Ok(out);
+            }
+            return Err(err);
+        }
     }
     Ok(out)
 }
@@ -410,7 +493,9 @@ fn apply_step_single(
                 if let Some((_, found)) = items.iter().find(|(key, _)| key == name) {
                     out.push(found.clone());
                 } else if matches!(ctx.mode, PathMode::Strict) {
-                    return Err(exec_jsonpath_error("jsonpath member not found"));
+                    return Err(exec_jsonpath_error(&format!(
+                        "JSON object does not contain key \"{name}\""
+                    )));
                 }
             }
             JsonbValue::Array(items) if matches!(ctx.mode, PathMode::Lax) => {
@@ -420,7 +505,7 @@ fn apply_step_single(
             }
             _ if matches!(ctx.mode, PathMode::Strict) => {
                 return Err(exec_jsonpath_error(
-                    "jsonpath member access requires object",
+                    "jsonpath member accessor can only be applied to an object",
                 ));
             }
             _ => {}
@@ -434,7 +519,7 @@ fn apply_step_single(
             }
             _ if matches!(ctx.mode, PathMode::Strict) => {
                 return Err(exec_jsonpath_error(
-                    "jsonpath wildcard member access requires object",
+                    "jsonpath wildcard member accessor can only be applied to an object",
                 ));
             }
             _ => {}
@@ -456,7 +541,7 @@ fn apply_step_single(
             }
             _ if matches!(ctx.mode, PathMode::Strict) => {
                 return Err(exec_jsonpath_error(
-                    "jsonpath array subscript requires array",
+                    "jsonpath array accessor can only be applied to an array",
                 ));
             }
             _ => {}
@@ -466,7 +551,7 @@ fn apply_step_single(
             _ if matches!(ctx.mode, PathMode::Lax) => out.push(value.clone()),
             _ if matches!(ctx.mode, PathMode::Strict) => {
                 return Err(exec_jsonpath_error(
-                    "jsonpath array wildcard requires array",
+                    "jsonpath wildcard array accessor can only be applied to an array",
                 ));
             }
             _ => {}
@@ -476,10 +561,10 @@ fn apply_step_single(
                 if matches!(ctx.mode, PathMode::Lax) && method_auto_unwraps_array(kind) =>
             {
                 for item in items {
-                    out.push(apply_method(item, kind, ctx.mode)?);
+                    out.extend(apply_method_values(item, kind, ctx)?);
                 }
             }
-            _ => out.push(apply_method(value, kind, ctx.mode)?),
+            _ => out.extend(apply_method_values(value, kind, ctx)?),
         },
         Step::Filter(expr) => match value {
             JsonbValue::Array(items) if matches!(ctx.mode, PathMode::Lax) => {
@@ -627,10 +712,21 @@ fn apply_scalar_subscript_selections(
     Ok(())
 }
 
+fn apply_method_values(
+    value: &JsonbValue,
+    method: &Method,
+    ctx: &RuntimeContext<'_>,
+) -> Result<Vec<JsonbValue>, ExecError> {
+    if matches!(method.kind, MethodKind::KeyValue) {
+        return apply_keyvalue_method(value, ctx).map_err(|err| err);
+    }
+    Ok(vec![apply_method(value, method, ctx)?])
+}
+
 fn apply_method(
     value: &JsonbValue,
     method: &Method,
-    mode: PathMode,
+    ctx: &RuntimeContext<'_>,
 ) -> Result<JsonbValue, ExecError> {
     match method.kind {
         MethodKind::Abs => match value {
@@ -649,12 +745,12 @@ fn apply_method(
         },
         MethodKind::Date => {
             datetime_method_no_args(method)?;
-            apply_datetime_cast_method(value, ".date()", None, SqlType::new(SqlTypeKind::Date))
+            apply_datetime_cast_method(value, ".date()", None, SqlType::new(SqlTypeKind::Date), ctx)
         }
         MethodKind::Decimal => {
             apply_decimal_method(value, numeric_method_args(method, ".decimal()")?)
         }
-        MethodKind::Datetime => apply_datetime_method(value, method),
+        MethodKind::Datetime => apply_datetime_method(value, method, ctx),
         MethodKind::Double => apply_double_method(value),
         MethodKind::Floor => match value {
             JsonbValue::Numeric(numeric) => Ok(JsonbValue::Numeric(numeric_floor(numeric))),
@@ -663,21 +759,32 @@ fn apply_method(
             )),
         },
         MethodKind::Integer => apply_integer_method(value),
+        MethodKind::KeyValue => unreachable!("handled by apply_method_values"),
+        MethodKind::LTrim => apply_trim_method(value, method, TrimSide::Left),
+        MethodKind::Lower => {
+            apply_string_transform_method(value, ".lower()", |text| text.to_lowercase())
+        }
         MethodKind::Number => apply_number_method(value, ".number()"),
+        MethodKind::BTrim => apply_trim_method(value, method, TrimSide::Both),
+        MethodKind::InitCap => apply_string_transform_method(value, ".initcap()", initcap_text),
+        MethodKind::Replace => apply_replace_method(value, method),
+        MethodKind::RTrim => apply_trim_method(value, method, TrimSide::Right),
         MethodKind::Type => Ok(JsonbValue::String(jsonb_type_name(value).to_string())),
         MethodKind::Size => match value {
             JsonbValue::Array(items) => Ok(numeric_jsonb_from_i32(items.len() as i32)),
-            _ if matches!(mode, PathMode::Lax) => Ok(numeric_jsonb_from_i32(1)),
+            _ if matches!(ctx.mode, PathMode::Lax) => Ok(numeric_jsonb_from_i32(1)),
             _ => Err(exec_jsonpath_error(
                 "jsonpath item method .size() can only be applied to an array",
             )),
         },
+        MethodKind::SplitPart => apply_split_part_method(value, method),
         MethodKind::String => apply_string_method(value),
         MethodKind::Time => apply_datetime_cast_method(
             value,
             ".time()",
             datetime_method_precision_arg(method, ".time()")?,
             datetime_sql_type(SqlTypeKind::Time, numeric_method_arg(method, 0, ".time()")?),
+            ctx,
         ),
         MethodKind::TimeTz => apply_datetime_cast_method(
             value,
@@ -687,6 +794,7 @@ fn apply_method(
                 SqlTypeKind::TimeTz,
                 numeric_method_arg(method, 0, ".time_tz()")?,
             ),
+            ctx,
         ),
         MethodKind::Timestamp => apply_datetime_cast_method(
             value,
@@ -696,6 +804,7 @@ fn apply_method(
                 SqlTypeKind::Timestamp,
                 numeric_method_arg(method, 0, ".timestamp()")?,
             ),
+            ctx,
         ),
         MethodKind::TimestampTz => apply_datetime_cast_method(
             value,
@@ -705,12 +814,205 @@ fn apply_method(
                 SqlTypeKind::TimestampTz,
                 numeric_method_arg(method, 0, ".timestamp_tz()")?,
             ),
+            ctx,
         ),
     }
 }
 
 fn method_auto_unwraps_array(method: &Method) -> bool {
     !matches!(method.kind, MethodKind::Size | MethodKind::Type)
+}
+
+fn apply_keyvalue_method(
+    value: &JsonbValue,
+    ctx: &RuntimeContext<'_>,
+) -> Result<Vec<JsonbValue>, ExecError> {
+    let JsonbValue::Object(items) = value else {
+        return Err(exec_jsonpath_error(
+            "jsonpath item method .keyvalue() can only be applied to an object",
+        ));
+    };
+    let id = jsonpath_keyvalue_object_id(ctx.global.root, value).unwrap_or(0);
+    Ok(items
+        .iter()
+        .map(|(key, value)| {
+            JsonbValue::Object(vec![
+                ("key".to_string(), JsonbValue::String(key.clone())),
+                ("value".to_string(), value.clone()),
+                ("id".to_string(), numeric_jsonb_from_i64(id)),
+            ])
+        })
+        .collect())
+}
+
+fn jsonpath_keyvalue_object_id(root: &JsonbValue, target: &JsonbValue) -> Option<i64> {
+    find_jsonb_object_offset(root, target, 0).and_then(|offset| i64::try_from(offset).ok())
+}
+
+fn find_jsonb_object_offset(
+    value: &JsonbValue,
+    target: &JsonbValue,
+    container_offset: usize,
+) -> Option<usize> {
+    if matches!(value, JsonbValue::Object(_)) && value == target {
+        return Some(container_offset);
+    }
+    match value {
+        JsonbValue::Array(items) => {
+            let mut data_offset = container_offset + 4 + items.len() * 4;
+            for item in items {
+                if let Some(offset) = find_jsonb_object_offset(
+                    item,
+                    target,
+                    jsonb_child_container_offset(item, data_offset),
+                ) {
+                    return Some(offset);
+                }
+                data_offset += jsonb_nested_encoded_len_at(item, data_offset);
+            }
+            None
+        }
+        JsonbValue::Object(items) => {
+            let mut data_offset = container_offset + 4 + items.len() * 8;
+            for (key, _) in items {
+                data_offset += key.len();
+            }
+            for (_, item) in items {
+                if let Some(offset) = find_jsonb_object_offset(
+                    item,
+                    target,
+                    jsonb_child_container_offset(item, data_offset),
+                ) {
+                    return Some(offset);
+                }
+                data_offset += jsonb_nested_encoded_len_at(item, data_offset);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn jsonb_child_container_offset(value: &JsonbValue, data_offset: usize) -> usize {
+    match value {
+        JsonbValue::Array(_) | JsonbValue::Object(_) => align4(data_offset),
+        _ => data_offset,
+    }
+}
+
+fn align4(offset: usize) -> usize {
+    (offset + 3) & !3
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TrimSide {
+    Left,
+    Right,
+    Both,
+}
+
+fn apply_trim_method(
+    value: &JsonbValue,
+    method: &Method,
+    side: TrimSide,
+) -> Result<JsonbValue, ExecError> {
+    let chars = match method.args.as_slice() {
+        [] => " ",
+        [MethodArg::String(chars)] => chars.as_str(),
+        [_] | [_, ..] => return Err(exec_jsonpath_error("unsupported jsonpath item method")),
+    };
+    apply_string_transform_method(value, trim_method_name(side), |text| {
+        trim_text_chars(text, chars, side)
+    })
+}
+
+fn trim_method_name(side: TrimSide) -> &'static str {
+    match side {
+        TrimSide::Left => ".ltrim()",
+        TrimSide::Right => ".rtrim()",
+        TrimSide::Both => ".btrim()",
+    }
+}
+
+fn trim_text_chars(text: &str, chars: &str, side: TrimSide) -> String {
+    let should_trim = |ch: char| chars.chars().any(|trim| trim == ch);
+    match side {
+        TrimSide::Left => text.trim_start_matches(should_trim).to_string(),
+        TrimSide::Right => text.trim_end_matches(should_trim).to_string(),
+        TrimSide::Both => text.trim_matches(should_trim).to_string(),
+    }
+}
+
+fn apply_string_transform_method<F>(
+    value: &JsonbValue,
+    method_name: &str,
+    transform: F,
+) -> Result<JsonbValue, ExecError>
+where
+    F: FnOnce(&str) -> String,
+{
+    let JsonbValue::String(text) = value else {
+        return Err(exec_jsonpath_error(&format!(
+            "jsonpath item method {method_name} can only be applied to a string"
+        )));
+    };
+    Ok(JsonbValue::String(transform(text)))
+}
+
+fn initcap_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut start_word = true;
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            if start_word {
+                out.extend(ch.to_uppercase());
+                start_word = false;
+            } else {
+                out.extend(ch.to_lowercase());
+            }
+        } else {
+            start_word = true;
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn apply_replace_method(value: &JsonbValue, method: &Method) -> Result<JsonbValue, ExecError> {
+    let [MethodArg::String(from), MethodArg::String(to)] = method.args.as_slice() else {
+        return Err(exec_jsonpath_error("unsupported jsonpath item method"));
+    };
+    apply_string_transform_method(value, ".replace()", |text| text.replace(from, to))
+}
+
+fn apply_split_part_method(value: &JsonbValue, method: &Method) -> Result<JsonbValue, ExecError> {
+    let [MethodArg::String(delim), MethodArg::Numeric(field)] = method.args.as_slice() else {
+        return Err(exec_jsonpath_error("unsupported jsonpath item method"));
+    };
+    let field = field
+        .render()
+        .parse::<i32>()
+        .map_err(|_| exec_jsonpath_error("unsupported jsonpath item method"))?;
+    apply_string_transform_method(value, ".split_part()", |text| {
+        split_part_text(text, delim, field)
+    })
+}
+
+fn split_part_text(text: &str, delim: &str, field: i32) -> String {
+    if field == 0 || delim.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<&str> = text.split(delim).collect();
+    let index = if field > 0 {
+        field - 1
+    } else {
+        parts.len() as i32 + field
+    };
+    if index < 0 {
+        String::new()
+    } else {
+        parts.get(index as usize).copied().unwrap_or("").to_string()
+    }
 }
 
 fn numeric_method_args<'a>(
@@ -795,65 +1097,314 @@ fn apply_bigint_method(value: &JsonbValue) -> Result<JsonbValue, ExecError> {
     Ok(JsonbValue::Numeric(rendered))
 }
 
-fn apply_datetime_method(value: &JsonbValue, method: &Method) -> Result<JsonbValue, ExecError> {
+fn apply_datetime_method(
+    value: &JsonbValue,
+    method: &Method,
+    ctx: &RuntimeContext<'_>,
+) -> Result<JsonbValue, ExecError> {
     let JsonbValue::String(text) = value else {
         return Err(exec_jsonpath_error(
             "jsonpath item method .datetime() can only be applied to a string",
         ));
     };
     if let Some(template) = datetime_method_template_arg(method)? {
-        return apply_datetime_template_method(text, template);
+        return apply_datetime_template_method(text, template, ctx);
     }
     datetime_method_no_args(method)?;
-    for ty in [
-        SqlType::new(SqlTypeKind::Timestamp),
-        SqlType::new(SqlTypeKind::TimestampTz),
-        SqlType::new(SqlTypeKind::Time),
-        SqlType::new(SqlTypeKind::TimeTz),
-        SqlType::new(SqlTypeKind::Date),
-    ] {
-        if let Ok(parsed) = cast_text_value_with_config(text, ty, true, &DateTimeConfig::default())
-        {
-            return datetime_jsonb_from_value(parsed);
-        }
-    }
-    Err(ExecError::DetailedError {
-        message: format!("datetime format is not recognized: \"{text}\""),
-        detail: None,
-        hint: Some("Use a datetime template argument to specify the input data format.".into()),
-        sqlstate: "22007",
-    })
+    parse_datetime_source(text, ctx)
+        .and_then(|parsed| datetime_jsonb_from_value(parsed.value, parsed.offset_seconds))
+        .map_err(|_| ExecError::DetailedError {
+            message: format!("datetime format is not recognized: \"{text}\""),
+            detail: None,
+            hint: Some("Use a datetime template argument to specify the input data format.".into()),
+            sqlstate: "22007",
+        })
 }
 
 fn apply_datetime_cast_method(
     value: &JsonbValue,
     method_name: &str,
-    _precision: Option<i32>,
+    precision: Option<i32>,
     ty: SqlType,
+    ctx: &RuntimeContext<'_>,
 ) -> Result<JsonbValue, ExecError> {
     let JsonbValue::String(text) = value else {
         return Err(exec_jsonpath_error(&format!(
             "jsonpath item method {method_name} can only be applied to a string"
         )));
     };
-    cast_text_value_with_config(text, ty, true, &DateTimeConfig::default())
-        .map_err(|err| match err {
-            ExecError::InvalidStorageValue { .. } => exec_jsonpath_error(&format!(
-                "argument \"{text}\" of jsonpath item method {method_name} is invalid for type {}",
-                datetime_method_target_name(ty.kind)
-            )),
-            other => other,
-        })
-        .and_then(datetime_jsonb_from_value)
+    let parsed = parse_datetime_source(text, ctx).map_err(|_| ExecError::DetailedError {
+        message: format!(
+            "{} format is not recognized: \"{text}\"",
+            method_name.trim_matches(&['.', '(', ')'][..])
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "22007",
+    })?;
+    if datetime_target_rejects_source(parsed.kind, ty.kind) {
+        return Err(datetime_format_not_recognized_error(method_name, text));
+    }
+    validate_datetime_timezone_conversion(&parsed, ty.kind, method_name, ctx)?;
+    let mut converted = cast_value_with_config(parsed.value, ty, ctx.global.datetime_config)?;
+    if let Some(precision) = precision {
+        converted = crate::backend::executor::expr_datetime::apply_time_precision(
+            converted,
+            Some(precision),
+        );
+    }
+    let offset = datetime_output_offset(&converted, parsed.offset_seconds, ty.kind, ctx);
+    datetime_jsonb_from_value(converted, offset)
 }
 
-fn datetime_jsonb_from_value(value: Value) -> Result<JsonbValue, ExecError> {
+#[derive(Debug, Clone)]
+struct ParsedDateTimeValue {
+    value: Value,
+    kind: SqlTypeKind,
+    offset_seconds: Option<i32>,
+}
+
+fn parse_datetime_source(
+    text: &str,
+    ctx: &RuntimeContext<'_>,
+) -> Result<ParsedDateTimeValue, ExecError> {
+    let trimmed = text.trim();
+    let has_date = looks_like_date(trimmed);
+    let has_time = trimmed.contains(':');
+    let offset_seconds = jsonpath_datetime_offset_seconds(trimmed);
+    let kind = match (has_date, has_time, offset_seconds.is_some()) {
+        (true, true, true) => SqlTypeKind::TimestampTz,
+        (true, true, false) => SqlTypeKind::Timestamp,
+        (true, false, _) => SqlTypeKind::Date,
+        (false, true, true) => SqlTypeKind::TimeTz,
+        (false, true, false) => SqlTypeKind::Time,
+        _ => return Err(exec_jsonpath_error("datetime format is not recognized")),
+    };
+    let value = cast_datetime_source_text(trimmed, kind, offset_seconds, ctx)?;
+    Ok(ParsedDateTimeValue {
+        value,
+        kind,
+        offset_seconds,
+    })
+}
+
+fn cast_datetime_source_text(
+    text: &str,
+    kind: SqlTypeKind,
+    offset_seconds: Option<i32>,
+    ctx: &RuntimeContext<'_>,
+) -> Result<Value, ExecError> {
+    match cast_text_value_with_config(text, SqlType::new(kind), true, ctx.global.datetime_config) {
+        Ok(value) => Ok(value),
+        Err(err) => {
+            let Some(normalized) = normalized_iso_datetime_text(text, kind, offset_seconds) else {
+                return Err(err);
+            };
+            cast_text_value_with_config(
+                &normalized,
+                SqlType::new(kind),
+                true,
+                ctx.global.datetime_config,
+            )
+        }
+    }
+}
+
+fn normalized_iso_datetime_text(
+    text: &str,
+    kind: SqlTypeKind,
+    offset_seconds: Option<i32>,
+) -> Option<String> {
+    if !matches!(kind, SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz) {
+        return None;
+    }
+    let mut normalized = text.to_string();
+    if normalized.as_bytes().get(10) == Some(&b'T') {
+        normalized.replace_range(10..11, " ");
+    }
+    if matches!(kind, SqlTypeKind::TimestampTz) {
+        if normalized.ends_with('Z') {
+            normalized.truncate(normalized.len() - 1);
+            normalized.push_str(" +00");
+        } else if normalized.ends_with("EST") {
+            normalized.truncate(normalized.len() - 3);
+            normalized.push_str(" -05");
+        } else if let Some(offset_seconds) = offset_seconds {
+            if let Some(idx) = jsonpath_datetime_offset_start(&normalized) {
+                normalized.truncate(idx);
+                normalized.push(' ');
+                normalized.push_str(&jsonpath_offset_literal(offset_seconds));
+            }
+        }
+    }
+    (normalized != text).then_some(normalized)
+}
+
+fn jsonpath_datetime_offset_start(text: &str) -> Option<usize> {
+    for (idx, ch) in text.char_indices().rev() {
+        if ch == '+' || ch == '-' {
+            if text[..idx].contains(':') {
+                return Some(idx);
+            }
+            return None;
+        }
+    }
+    None
+}
+
+fn jsonpath_offset_literal(offset_seconds: i32) -> String {
+    let sign = if offset_seconds < 0 { '-' } else { '+' };
+    let mut remaining = offset_seconds.abs();
+    let hour = remaining / 3600;
+    remaining %= 3600;
+    let minute = remaining / 60;
+    if minute == 0 {
+        format!("{sign}{hour}")
+    } else {
+        format!("{sign}{hour}:{minute:02}")
+    }
+}
+
+fn looks_like_date(text: &str) -> bool {
+    let mut parts = text.splitn(4, '-');
+    let Some(year) = parts.next() else {
+        return false;
+    };
+    let Some(month) = parts.next() else {
+        return false;
+    };
+    let Some(day_and_rest) = parts.next() else {
+        return false;
+    };
+    let day = day_and_rest
+        .get(..2)
+        .filter(|day| day.as_bytes().iter().all(u8::is_ascii_digit));
+    !year.is_empty()
+        && year.as_bytes().iter().all(u8::is_ascii_digit)
+        && month.len() == 2
+        && month.as_bytes().iter().all(u8::is_ascii_digit)
+        && day.is_some()
+}
+
+fn jsonpath_datetime_offset_seconds(text: &str) -> Option<i32> {
+    if text.ends_with('Z') && text[..text.len().saturating_sub(1)].contains(':') {
+        return Some(0);
+    }
+    if text.ends_with("EST") && text[..text.len().saturating_sub(3)].contains(':') {
+        return Some(-5 * 3600);
+    }
+    for (idx, ch) in text.char_indices().rev() {
+        if ch != '+' && ch != '-' {
+            continue;
+        }
+        if !text[..idx].contains(':') {
+            continue;
+        }
+        let rest = &text[idx + 1..];
+        let mut parts = rest.split(':');
+        let hour = parts.next()?.parse::<i32>().ok()?;
+        let minute = parts
+            .next()
+            .map(str::parse::<i32>)
+            .transpose()
+            .ok()?
+            .unwrap_or(0);
+        if parts.next().is_some() {
+            return None;
+        }
+        let seconds = hour * 3600 + minute * 60;
+        return Some(if ch == '-' { -seconds } else { seconds });
+    }
+    None
+}
+
+fn datetime_target_rejects_source(source: SqlTypeKind, target: SqlTypeKind) -> bool {
+    match target {
+        SqlTypeKind::Date => matches!(source, SqlTypeKind::Time | SqlTypeKind::TimeTz),
+        SqlTypeKind::Time => matches!(source, SqlTypeKind::Date),
+        SqlTypeKind::TimeTz => matches!(source, SqlTypeKind::Date | SqlTypeKind::Timestamp),
+        SqlTypeKind::Timestamp => matches!(source, SqlTypeKind::Time | SqlTypeKind::TimeTz),
+        SqlTypeKind::TimestampTz => matches!(source, SqlTypeKind::Time | SqlTypeKind::TimeTz),
+        _ => false,
+    }
+}
+
+fn datetime_format_not_recognized_error(method_name: &str, text: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "{} format is not recognized: \"{text}\"",
+            method_name.trim_matches(&['.', '(', ')'][..])
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "22007",
+    }
+}
+
+fn validate_datetime_timezone_conversion(
+    parsed: &ParsedDateTimeValue,
+    target: SqlTypeKind,
+    _method_name: &str,
+    ctx: &RuntimeContext<'_>,
+) -> Result<(), ExecError> {
+    if ctx.global.allow_timezone {
+        return Ok(());
+    }
+    let source_has_tz = matches!(parsed.kind, SqlTypeKind::TimeTz | SqlTypeKind::TimestampTz);
+    let target_has_tz = matches!(target, SqlTypeKind::TimeTz | SqlTypeKind::TimestampTz);
+    if source_has_tz && !target_has_tz {
+        return Err(timezone_usage_error(parsed.kind, target));
+    }
+    if !source_has_tz && target_has_tz && parsed.kind != target {
+        return Err(timezone_usage_error(parsed.kind, target));
+    }
+    Ok(())
+}
+
+fn timezone_usage_error(source: SqlTypeKind, target: SqlTypeKind) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "cannot convert value from {} to {} without time zone usage",
+            datetime_method_target_name(source),
+            datetime_method_target_name(target)
+        ),
+        detail: None,
+        hint: Some("Use *_tz() function for time zone support.".into()),
+        sqlstate: "2202E",
+    }
+}
+
+fn datetime_output_offset(
+    value: &Value,
+    parsed_offset: Option<i32>,
+    target: SqlTypeKind,
+    ctx: &RuntimeContext<'_>,
+) -> Option<i32> {
+    if target != SqlTypeKind::TimestampTz {
+        return None;
+    }
+    parsed_offset.or_else(|| match value {
+        Value::TimestampTz(v) => Some(timezone_offset_seconds_at_utc(
+            ctx.global.datetime_config,
+            v.0,
+        )),
+        _ => None,
+    })
+}
+
+fn datetime_jsonb_from_value(
+    value: Value,
+    offset_seconds: Option<i32>,
+) -> Result<JsonbValue, ExecError> {
     Ok(match value {
         Value::Date(v) => JsonbValue::Date(v),
         Value::Time(v) => JsonbValue::Time(v),
         Value::TimeTz(v) => JsonbValue::TimeTz(v),
         Value::Timestamp(v) => JsonbValue::Timestamp(v),
-        Value::TimestampTz(v) => JsonbValue::TimestampTz(v),
+        Value::TimestampTz(v) => match offset_seconds {
+            Some(offset_seconds) => JsonbValue::TimestampTzWithOffset(v, offset_seconds),
+            None => JsonbValue::TimestampTz(v),
+        },
         _ => {
             return Err(exec_jsonpath_error(
                 "jsonpath item method produced non-datetime result",
@@ -893,12 +1444,33 @@ fn datetime_precision_arg_to_i32(
             "time precision of jsonpath item method {method_name} is out of range for type integer"
         ))
     })?;
-    if !(0..=6).contains(&parsed) {
+    if parsed > 6 {
+        push_datetime_precision_warning(method_name, parsed);
+        return Ok(6);
+    }
+    if parsed < 0 {
         return Err(exec_jsonpath_error(&format!(
             "time precision of jsonpath item method {method_name} is out of range for type integer"
         )));
     }
     Ok(parsed)
+}
+
+fn push_datetime_precision_warning(method_name: &str, precision: i32) {
+    let type_name = match method_name {
+        ".time()" => "TIME",
+        ".time_tz()" => "TIME",
+        ".timestamp()" => "TIMESTAMP",
+        ".timestamp_tz()" => "TIMESTAMP",
+        _ => return,
+    };
+    let tz_suffix = match method_name {
+        ".time_tz()" | ".timestamp_tz()" => " WITH TIME ZONE",
+        _ => "",
+    };
+    push_warning(format!(
+        "{type_name}({precision}){tz_suffix} precision reduced to maximum allowed, 6"
+    ));
 }
 
 fn datetime_sql_type(kind: SqlTypeKind, precision: Option<&NumericValue>) -> SqlType {
@@ -911,10 +1483,10 @@ fn datetime_sql_type(kind: SqlTypeKind, precision: Option<&NumericValue>) -> Sql
 fn datetime_method_target_name(kind: SqlTypeKind) -> &'static str {
     match kind {
         SqlTypeKind::Date => "date",
-        SqlTypeKind::Time => "time without time zone",
-        SqlTypeKind::TimeTz => "time with time zone",
-        SqlTypeKind::Timestamp => "timestamp without time zone",
-        SqlTypeKind::TimestampTz => "timestamp with time zone",
+        SqlTypeKind::Time => "time",
+        SqlTypeKind::TimeTz => "timetz",
+        SqlTypeKind::Timestamp => "timestamp",
+        SqlTypeKind::TimestampTz => "timestamptz",
         _ => unreachable!("datetime target type"),
     }
 }
@@ -941,7 +1513,11 @@ fn datetime_method_template_arg<'a>(method: &'a Method) -> Result<Option<&'a str
     }
 }
 
-fn apply_datetime_template_method(text: &str, template: &str) -> Result<JsonbValue, ExecError> {
+fn apply_datetime_template_method(
+    text: &str,
+    template: &str,
+    ctx: &RuntimeContext<'_>,
+) -> Result<JsonbValue, ExecError> {
     let items = parse_datetime_template(template)?;
     let mut offset = 0usize;
     let mut year = None;
@@ -983,6 +1559,14 @@ fn apply_datetime_template_method(text: &str, template: &str) -> Result<JsonbVal
             }
             DateTimeTemplateItem::Literal(literal) => {
                 if !text[offset..].starts_with(&literal) {
+                    if offset >= text.len() {
+                        return Err(ExecError::DetailedError {
+                            message: "input string is too short for datetime format".into(),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "22007",
+                        });
+                    }
                     return Err(ExecError::DetailedError {
                         message: format!("unmatched format character \"{literal}\""),
                         detail: None,
@@ -1064,8 +1648,19 @@ fn apply_datetime_template_method(text: &str, template: &str) -> Result<JsonbVal
         }
     };
 
-    cast_text_value_with_config(&rendered.1, rendered.0, true, &DateTimeConfig::default())
-        .and_then(datetime_jsonb_from_value)
+    let offset_seconds = template_offset_seconds(tz_hour, tz_minute);
+    cast_text_value_with_config(&rendered.1, rendered.0, true, ctx.global.datetime_config)
+        .and_then(|value| datetime_jsonb_from_value(value, offset_seconds))
+}
+
+fn template_offset_seconds(hour: Option<i32>, minute: Option<i32>) -> Option<i32> {
+    let hour = hour?;
+    let minute = minute.unwrap_or(0);
+    Some(if hour < 0 {
+        hour * 3600 - minute * 60
+    } else {
+        hour * 3600 + minute * 60
+    })
 }
 
 fn parse_datetime_template(template: &str) -> Result<Vec<DateTimeTemplateItem>, ExecError> {
@@ -1327,7 +1922,8 @@ fn apply_string_method(value: &JsonbValue) -> Result<JsonbValue, ExecError> {
         | JsonbValue::Time(_)
         | JsonbValue::TimeTz(_)
         | JsonbValue::Timestamp(_)
-        | JsonbValue::TimestampTz(_) => render_temporal_jsonb_value(value),
+        | JsonbValue::TimestampTz(_)
+        | JsonbValue::TimestampTzWithOffset(_, _) => render_temporal_jsonb_value(value),
         _ => {
             return Err(exec_jsonpath_error(
                 "jsonpath item method .string() can only be applied to a boolean, string, numeric, or datetime value",
@@ -1341,21 +1937,56 @@ fn compare_any_pair(
     left: &[JsonbValue],
     right: &[JsonbValue],
     op: CompareOp,
-    mode: PathMode,
+    ctx: &RuntimeContext<'_>,
+) -> Result<PredicateValue, ExecError> {
+    let mut found = false;
+    let mut unknown = false;
+    for left_value in left {
+        for right_value in right {
+            match compare_values(left_value, right_value, op, ctx)? {
+                PredicateValue::True => {
+                    if matches!(ctx.mode, PathMode::Lax) {
+                        return Ok(PredicateValue::True);
+                    }
+                    found = true;
+                }
+                PredicateValue::Unknown => {
+                    if matches!(ctx.mode, PathMode::Strict) {
+                        return Ok(PredicateValue::Unknown);
+                    }
+                    unknown = true;
+                }
+                PredicateValue::False => {}
+            }
+        }
+    }
+    Ok(if found {
+        PredicateValue::True
+    } else if unknown {
+        PredicateValue::Unknown
+    } else {
+        PredicateValue::False
+    })
+}
+
+fn starts_with_any_pair(
+    left: &[JsonbValue],
+    right: &[JsonbValue],
+    ctx: &RuntimeContext<'_>,
 ) -> PredicateValue {
     let mut found = false;
     let mut unknown = false;
     for left_value in left {
         for right_value in right {
-            match compare_values(left_value, right_value, op) {
+            match starts_with_values(left_value, right_value) {
                 PredicateValue::True => {
-                    if matches!(mode, PathMode::Lax) {
+                    if matches!(ctx.mode, PathMode::Lax) {
                         return PredicateValue::True;
                     }
                     found = true;
                 }
                 PredicateValue::Unknown => {
-                    if matches!(mode, PathMode::Strict) {
+                    if matches!(ctx.mode, PathMode::Strict) {
                         return PredicateValue::Unknown;
                     }
                     unknown = true;
@@ -1367,24 +1998,6 @@ fn compare_any_pair(
     if found {
         PredicateValue::True
     } else if unknown {
-        PredicateValue::Unknown
-    } else {
-        PredicateValue::False
-    }
-}
-
-fn starts_with_any_pair(left: &[JsonbValue], right: &[JsonbValue]) -> PredicateValue {
-    let mut unknown = false;
-    for left_value in left {
-        for right_value in right {
-            match starts_with_values(left_value, right_value) {
-                PredicateValue::True => return PredicateValue::True,
-                PredicateValue::Unknown => unknown = true,
-                PredicateValue::False => {}
-            }
-        }
-    }
-    if unknown {
         PredicateValue::Unknown
     } else {
         PredicateValue::False
@@ -1408,16 +2021,30 @@ fn like_regex_any(
     values: &[JsonbValue],
     pattern: &str,
     flags: &str,
+    ctx: &RuntimeContext<'_>,
 ) -> Result<PredicateValue, ExecError> {
+    let mut found = false;
     let mut unknown = false;
     for value in values {
         match like_regex_value(value, pattern, flags)? {
-            PredicateValue::True => return Ok(PredicateValue::True),
-            PredicateValue::Unknown => unknown = true,
+            PredicateValue::True => {
+                if matches!(ctx.mode, PathMode::Lax) {
+                    return Ok(PredicateValue::True);
+                }
+                found = true;
+            }
+            PredicateValue::Unknown => {
+                if matches!(ctx.mode, PathMode::Strict) {
+                    return Ok(PredicateValue::Unknown);
+                }
+                unknown = true;
+            }
             PredicateValue::False => {}
         }
     }
-    Ok(if unknown {
+    Ok(if found {
+        PredicateValue::True
+    } else if unknown {
         PredicateValue::Unknown
     } else {
         PredicateValue::False
@@ -1439,11 +2066,38 @@ fn like_regex_value(
     })
 }
 
-fn compare_values(left: &JsonbValue, right: &JsonbValue, op: CompareOp) -> PredicateValue {
+fn compare_values(
+    left: &JsonbValue,
+    right: &JsonbValue,
+    op: CompareOp,
+    ctx: &RuntimeContext<'_>,
+) -> Result<PredicateValue, ExecError> {
+    if matches!(left, JsonbValue::Array(_) | JsonbValue::Object(_))
+        || matches!(right, JsonbValue::Array(_) | JsonbValue::Object(_))
+    {
+        return Ok(PredicateValue::Unknown);
+    }
+    if matches!((left, right), (JsonbValue::Null, _) | (_, JsonbValue::Null)) {
+        return Ok(match (left, right, op) {
+            (JsonbValue::Null, JsonbValue::Null, CompareOp::Eq) => PredicateValue::True,
+            (JsonbValue::Null, JsonbValue::Null, CompareOp::NotEq) => PredicateValue::False,
+            (JsonbValue::Null, JsonbValue::Null, _) => PredicateValue::Unknown,
+            (_, _, CompareOp::Eq) => PredicateValue::False,
+            (_, _, CompareOp::NotEq) => PredicateValue::True,
+            _ => PredicateValue::Unknown,
+        });
+    }
+    if let Some(ordering) = compare_datetime_values(left, right, ctx)? {
+        return Ok(predicate_from_ordering(ordering, op));
+    }
     if !same_jsonb_type(left, right) {
-        return PredicateValue::Unknown;
+        return Ok(PredicateValue::Unknown);
     }
     let ordering = compare_jsonb(left, right);
+    Ok(predicate_from_ordering(ordering, op))
+}
+
+fn predicate_from_ordering(ordering: Ordering, op: CompareOp) -> PredicateValue {
     if match op {
         CompareOp::Eq => ordering == Ordering::Equal,
         CompareOp::NotEq => ordering != Ordering::Equal,
@@ -1458,6 +2112,150 @@ fn compare_values(left: &JsonbValue, right: &JsonbValue, op: CompareOp) -> Predi
     }
 }
 
+fn compare_datetime_values(
+    left: &JsonbValue,
+    right: &JsonbValue,
+    ctx: &RuntimeContext<'_>,
+) -> Result<Option<Ordering>, ExecError> {
+    let Some(left) = jsonb_temporal_to_value(left) else {
+        return Ok(None);
+    };
+    let Some(right) = jsonb_temporal_to_value(right) else {
+        return Ok(None);
+    };
+    compare_datetime_value_pair(left, right, ctx)
+}
+
+fn compare_datetime_value_pair(
+    left: Value,
+    right: Value,
+    ctx: &RuntimeContext<'_>,
+) -> Result<Option<Ordering>, ExecError> {
+    if let Some(ordering) =
+        mixed_date_timestamp_ordering(&left, &right, Some(ctx.global.datetime_config))
+    {
+        if matches!(
+            (&left, &right),
+            (Value::Date(_), Value::TimestampTz(_)) | (Value::TimestampTz(_), Value::Date(_))
+        ) {
+            ensure_datetime_timezone_is_allowed(SqlTypeKind::Date, SqlTypeKind::TimestampTz, ctx)?;
+        }
+        return Ok(Some(ordering));
+    }
+    Ok(Some(match (left, right) {
+        (Value::Date(left), Value::Date(right)) => left.0.cmp(&right.0),
+        (Value::Date(left), Value::Timestamp(right)) => datetime_sort_key(&cast_datetime_value(
+            Value::Date(left),
+            SqlTypeKind::Timestamp,
+            ctx,
+        )?)
+        .cmp(&datetime_sort_key(&Value::Timestamp(right))),
+        (Value::Timestamp(left), Value::Date(right)) => {
+            datetime_sort_key(&Value::Timestamp(left)).cmp(&datetime_sort_key(
+                &cast_datetime_value(Value::Date(right), SqlTypeKind::Timestamp, ctx)?,
+            ))
+        }
+        (Value::Date(left), Value::TimestampTz(right)) => {
+            ensure_datetime_timezone_is_allowed(SqlTypeKind::Date, SqlTypeKind::TimestampTz, ctx)?;
+            datetime_sort_key(&cast_datetime_value(
+                Value::Date(left),
+                SqlTypeKind::TimestampTz,
+                ctx,
+            )?)
+            .cmp(&datetime_sort_key(&Value::TimestampTz(right)))
+        }
+        (Value::TimestampTz(left), Value::Date(right)) => {
+            ensure_datetime_timezone_is_allowed(SqlTypeKind::Date, SqlTypeKind::TimestampTz, ctx)?;
+            datetime_sort_key(&Value::TimestampTz(left)).cmp(&datetime_sort_key(
+                &cast_datetime_value(Value::Date(right), SqlTypeKind::TimestampTz, ctx)?,
+            ))
+        }
+        (Value::Time(left), Value::Time(right)) => left.0.cmp(&right.0),
+        (Value::Time(left), Value::TimeTz(right)) => {
+            ensure_datetime_timezone_is_allowed(SqlTypeKind::Time, SqlTypeKind::TimeTz, ctx)?;
+            compare_timetz_values(cast_timetz_value(Value::Time(left), ctx)?, right)
+        }
+        (Value::TimeTz(left), Value::Time(right)) => {
+            ensure_datetime_timezone_is_allowed(SqlTypeKind::Time, SqlTypeKind::TimeTz, ctx)?;
+            compare_timetz_values(left, cast_timetz_value(Value::Time(right), ctx)?)
+        }
+        (Value::TimeTz(left), Value::TimeTz(right)) => compare_timetz_values(left, right),
+        (Value::Timestamp(left), Value::Timestamp(right)) => left.0.cmp(&right.0),
+        (Value::Timestamp(left), Value::TimestampTz(right)) => {
+            ensure_datetime_timezone_is_allowed(
+                SqlTypeKind::Timestamp,
+                SqlTypeKind::TimestampTz,
+                ctx,
+            )?;
+            datetime_sort_key(&cast_datetime_value(
+                Value::Timestamp(left),
+                SqlTypeKind::TimestampTz,
+                ctx,
+            )?)
+            .cmp(&datetime_sort_key(&Value::TimestampTz(right)))
+        }
+        (Value::TimestampTz(left), Value::Timestamp(right)) => {
+            ensure_datetime_timezone_is_allowed(
+                SqlTypeKind::Timestamp,
+                SqlTypeKind::TimestampTz,
+                ctx,
+            )?;
+            datetime_sort_key(&Value::TimestampTz(left)).cmp(&datetime_sort_key(
+                &cast_datetime_value(Value::Timestamp(right), SqlTypeKind::TimestampTz, ctx)?,
+            ))
+        }
+        (Value::TimestampTz(left), Value::TimestampTz(right)) => left.0.cmp(&right.0),
+        _ => return Ok(None),
+    }))
+}
+
+fn ensure_datetime_timezone_is_allowed(
+    source: SqlTypeKind,
+    target: SqlTypeKind,
+    ctx: &RuntimeContext<'_>,
+) -> Result<(), ExecError> {
+    if ctx.global.allow_timezone {
+        Ok(())
+    } else {
+        Err(timezone_usage_error(source, target))
+    }
+}
+
+fn cast_datetime_value(
+    value: Value,
+    target: SqlTypeKind,
+    ctx: &RuntimeContext<'_>,
+) -> Result<Value, ExecError> {
+    cast_value_with_config(value, SqlType::new(target), ctx.global.datetime_config)
+}
+
+fn cast_timetz_value(value: Value, ctx: &RuntimeContext<'_>) -> Result<TimeTzADT, ExecError> {
+    match cast_datetime_value(value, SqlTypeKind::TimeTz, ctx)? {
+        Value::TimeTz(value) => Ok(value),
+        _ => Err(exec_jsonpath_error(
+            "jsonpath datetime cast produced non-timetz result",
+        )),
+    }
+}
+
+fn datetime_sort_key(value: &Value) -> i64 {
+    match value {
+        Value::Timestamp(value) => value.0,
+        Value::TimestampTz(value) => value.0,
+        _ => unreachable!("datetime_sort_key expects timestamp value"),
+    }
+}
+
+fn compare_timetz_values(left: TimeTzADT, right: TimeTzADT) -> Ordering {
+    timetz_sort_key(left)
+        .cmp(&timetz_sort_key(right))
+        .then_with(|| (-left.offset_seconds).cmp(&(-right.offset_seconds)))
+}
+
+fn timetz_sort_key(value: TimeTzADT) -> i64 {
+    value.time.0 - i64::from(value.offset_seconds) * USECS_PER_SEC
+}
+
 fn same_jsonb_type(left: &JsonbValue, right: &JsonbValue) -> bool {
     matches!(
         (left, right),
@@ -1470,75 +2268,150 @@ fn same_jsonb_type(left: &JsonbValue, right: &JsonbValue) -> bool {
             | (JsonbValue::TimeTz(_), JsonbValue::TimeTz(_))
             | (JsonbValue::Timestamp(_), JsonbValue::Timestamp(_))
             | (JsonbValue::TimestampTz(_), JsonbValue::TimestampTz(_))
+            | (
+                JsonbValue::TimestampTz(_),
+                JsonbValue::TimestampTzWithOffset(_, _)
+            )
+            | (
+                JsonbValue::TimestampTzWithOffset(_, _),
+                JsonbValue::TimestampTz(_)
+            )
+            | (
+                JsonbValue::TimestampTzWithOffset(_, _),
+                JsonbValue::TimestampTzWithOffset(_, _),
+            )
             | (JsonbValue::Array(_), JsonbValue::Array(_))
             | (JsonbValue::Object(_), JsonbValue::Object(_))
     )
 }
 
-fn jsonb_temporal_to_value(value: &JsonbValue) -> Value {
+fn jsonb_temporal_to_value(value: &JsonbValue) -> Option<Value> {
     match value {
-        JsonbValue::Date(v) => Value::Date(*v),
-        JsonbValue::Time(v) => Value::Time(*v),
-        JsonbValue::TimeTz(v) => Value::TimeTz(*v),
-        JsonbValue::Timestamp(v) => Value::Timestamp(*v),
-        JsonbValue::TimestampTz(v) => Value::TimestampTz(*v),
-        _ => unreachable!("temporal conversion only accepts datetime values"),
+        JsonbValue::Date(v) => Some(Value::Date(*v)),
+        JsonbValue::Time(v) => Some(Value::Time(*v)),
+        JsonbValue::TimeTz(v) => Some(Value::TimeTz(*v)),
+        JsonbValue::Timestamp(v) => Some(Value::Timestamp(*v)),
+        JsonbValue::TimestampTz(v) => Some(Value::TimestampTz(*v)),
+        JsonbValue::TimestampTzWithOffset(v, _) => Some(Value::TimestampTz(*v)),
+        _ => None,
     }
 }
 
-fn eval_arithmetic_any_pair(
+fn eval_arithmetic_operands(
     left: &[JsonbValue],
     right: &[JsonbValue],
     op: ArithmeticOp,
+    ctx: &RuntimeContext<'_>,
 ) -> Result<Vec<JsonbValue>, ExecError> {
-    if left.is_empty() || right.is_empty() {
-        return Err(exec_jsonpath_error(
-            "jsonpath arithmetic requires numeric operands",
-        ));
-    }
-    let mut out = Vec::new();
-    for left_value in left {
-        for right_value in right {
-            out.push(eval_arithmetic_pair(left_value, right_value, op)?);
-        }
-    }
-    Ok(out)
+    let left_values = arithmetic_operand_values(left, ctx);
+    let right_values = arithmetic_operand_values(right, ctx);
+    let left = singleton_numeric_operand(&left_values, "left", op)?;
+    let right = singleton_numeric_operand(&right_values, "right", op)?;
+    eval_arithmetic_pair(left, right, op).map(|value| vec![value])
 }
 
 fn eval_arithmetic_pair(
-    left: &JsonbValue,
-    right: &JsonbValue,
+    left: NumericValue,
+    right: NumericValue,
     op: ArithmeticOp,
 ) -> Result<JsonbValue, ExecError> {
-    let left = numeric_from_jsonb(left)?;
-    let right = numeric_from_jsonb(right)?;
     let value = match op {
         ArithmeticOp::Add => left.add(&right),
         ArithmeticOp::Sub => left.sub(&right),
         ArithmeticOp::Mul => left.mul(&right),
         ArithmeticOp::Div => left
             .div(&right, 16)
-            .ok_or_else(|| exec_jsonpath_error("jsonpath division by zero"))?,
+            .ok_or_else(|| exec_jsonpath_error("division by zero"))?,
         ArithmeticOp::Mod => numeric_remainder(&left, &right)
-            .ok_or_else(|| exec_jsonpath_error("jsonpath division by zero"))?,
+            .ok_or_else(|| exec_jsonpath_error("division by zero"))?,
     };
     Ok(JsonbValue::Numeric(value))
 }
 
-fn eval_unary_value(value: JsonbValue, op: UnaryOp) -> Result<JsonbValue, ExecError> {
-    let numeric = numeric_from_jsonb(&value)?;
-    Ok(JsonbValue::Numeric(match op {
-        UnaryOp::Plus => numeric,
-        UnaryOp::Minus => numeric.negate(),
-    }))
+fn arithmetic_operand_values(values: &[JsonbValue], ctx: &RuntimeContext<'_>) -> Vec<JsonbValue> {
+    if matches!(ctx.mode, PathMode::Strict) {
+        return values.to_vec();
+    }
+    values.iter().fold(Vec::new(), |mut out, value| {
+        match value {
+            JsonbValue::Array(items) => out.extend(items.iter().cloned()),
+            _ => out.push(value.clone()),
+        }
+        out
+    })
 }
 
-fn numeric_from_jsonb(value: &JsonbValue) -> Result<NumericValue, ExecError> {
+fn singleton_numeric_operand(
+    values: &[JsonbValue],
+    side: &str,
+    op: ArithmeticOp,
+) -> Result<NumericValue, ExecError> {
+    let [value] = values else {
+        return Err(singleton_numeric_operand_error(side, op));
+    };
     match value {
         JsonbValue::Numeric(numeric) => Ok(numeric.clone()),
-        _ => Err(exec_jsonpath_error(
-            "jsonpath arithmetic requires numeric operands",
-        )),
+        _ => Err(singleton_numeric_operand_error(side, op)),
+    }
+}
+
+fn singleton_numeric_operand_error(side: &str, op: ArithmeticOp) -> ExecError {
+    exec_jsonpath_error(&format!(
+        "{side} operand of jsonpath operator {} is not a single numeric value",
+        arithmetic_op_symbol(op)
+    ))
+}
+
+fn arithmetic_op_symbol(op: ArithmeticOp) -> &'static str {
+    match op {
+        ArithmeticOp::Add => "+",
+        ArithmeticOp::Sub => "-",
+        ArithmeticOp::Mul => "*",
+        ArithmeticOp::Div => "/",
+        ArithmeticOp::Mod => "%",
+    }
+}
+
+fn eval_unary_values(
+    values: &[JsonbValue],
+    op: UnaryOp,
+    ctx: &RuntimeContext<'_>,
+) -> Result<Vec<JsonbValue>, ExecError> {
+    let values = arithmetic_operand_values(values, ctx);
+    let mut out = Vec::new();
+    for value in values {
+        match value {
+            JsonbValue::Numeric(numeric) => out.push(JsonbValue::Numeric(match op {
+                UnaryOp::Plus => numeric,
+                UnaryOp::Minus => numeric.negate(),
+            })),
+            _ if ctx.global.silent
+                && matches!(ctx.mode, PathMode::Lax)
+                && ctx.global.preserve_unary_prefix
+                && !out.is_empty() =>
+            {
+                break;
+            }
+            _ if ctx.global.silent
+                && matches!(ctx.mode, PathMode::Lax)
+                && !ctx.global.preserve_unary_prefix => {}
+            _ => return Err(unary_numeric_operand_error(op)),
+        }
+    }
+    Ok(out)
+}
+
+fn unary_numeric_operand_error(op: UnaryOp) -> ExecError {
+    exec_jsonpath_error(&format!(
+        "operand of unary jsonpath operator {} is not a numeric value",
+        unary_op_symbol(op)
+    ))
+}
+
+fn unary_op_symbol(op: UnaryOp) -> &'static str {
+    match op {
+        UnaryOp::Plus => "+",
+        UnaryOp::Minus => "-",
     }
 }
 
@@ -1611,6 +2484,10 @@ fn truncate_numeric_to_i32(value: &NumericValue) -> Result<i32, ExecError> {
 }
 
 fn numeric_jsonb_from_i32(value: i32) -> JsonbValue {
+    JsonbValue::Numeric(NumericValue::finite(num_bigint::BigInt::from(value), 0))
+}
+
+fn numeric_jsonb_from_i64(value: i64) -> JsonbValue {
     JsonbValue::Numeric(NumericValue::finite(num_bigint::BigInt::from(value), 0))
 }
 
@@ -1759,7 +2636,9 @@ fn jsonb_type_name(value: &JsonbValue) -> &'static str {
         JsonbValue::Time(_) => "time without time zone",
         JsonbValue::TimeTz(_) => "time with time zone",
         JsonbValue::Timestamp(_) => "timestamp without time zone",
-        JsonbValue::TimestampTz(_) => "timestamp with time zone",
+        JsonbValue::TimestampTz(_) | JsonbValue::TimestampTzWithOffset(_, _) => {
+            "timestamp with time zone"
+        }
         JsonbValue::Array(_) => "array",
         JsonbValue::Object(_) => "object",
     }
@@ -1927,6 +2806,12 @@ fn render_expr(expr: &Expr, out: &mut String) {
             render_operand(inner, out);
             render_method(method, out);
         }
+        Expr::Filter { inner, predicate } => {
+            render_operand(inner, out);
+            out.push_str(" ? (");
+            render_expr(predicate, out);
+            out.push(')');
+        }
         Expr::Exists(inner) => {
             out.push_str("exists(");
             render_expr(inner, out);
@@ -1959,6 +2844,7 @@ fn render_operand(expr: &Expr, out: &mut String) {
         | Expr::StartsWith { .. }
         | Expr::LikeRegex { .. }
         | Expr::Arithmetic { .. }
+        | Expr::Filter { .. }
         | Expr::And(..)
         | Expr::Or(..) => {
             out.push('(');
@@ -2037,8 +2923,16 @@ fn render_method(method: &Method, out: &mut String) {
         MethodKind::Double => ".double(",
         MethodKind::Floor => ".floor(",
         MethodKind::Integer => ".integer(",
+        MethodKind::KeyValue => ".keyvalue(",
+        MethodKind::LTrim => ".ltrim(",
+        MethodKind::Lower => ".lower(",
         MethodKind::Number => ".number(",
+        MethodKind::BTrim => ".btrim(",
+        MethodKind::InitCap => ".initcap(",
+        MethodKind::Replace => ".replace(",
+        MethodKind::RTrim => ".rtrim(",
         MethodKind::Size => ".size(",
+        MethodKind::SplitPart => ".split_part(",
         MethodKind::String => ".string(",
         MethodKind::Time => ".time(",
         MethodKind::TimeTz => ".time_tz(",
@@ -2064,6 +2958,47 @@ fn render_recursive_bound(bound: RecursiveBound, out: &mut String) {
         RecursiveBound::Int(value) => out.push_str(&value.to_string()),
         RecursiveBound::Last => out.push_str("last"),
     }
+}
+
+fn validate_method_arg_syntax(kind: MethodKind, args: &[MethodArg]) -> Result<(), ExecError> {
+    if matches!(kind, MethodKind::Date) && !args.is_empty() {
+        return Err(jsonpath_syntax_error_near(method_arg_syntax_token(
+            &args[0],
+        )));
+    }
+    if matches!(
+        kind,
+        MethodKind::Time | MethodKind::TimeTz | MethodKind::Timestamp | MethodKind::TimestampTz
+    ) {
+        for arg in args {
+            if let MethodArg::Numeric(value) = arg {
+                let text = value.render();
+                if text.starts_with('-') || text.contains('.') {
+                    let token = if text.starts_with('-') {
+                        "-"
+                    } else {
+                        text.as_str()
+                    };
+                    return Err(jsonpath_syntax_error_near(token));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn method_arg_syntax_token(arg: &MethodArg) -> String {
+    match arg {
+        MethodArg::Numeric(value) => value.render(),
+        MethodArg::String(value) => value.clone(),
+    }
+}
+
+fn jsonpath_syntax_error_near(token: impl AsRef<str>) -> ExecError {
+    exec_jsonpath_error(&format!(
+        "syntax error at or near \"{}\" of jsonpath input",
+        token.as_ref()
+    ))
 }
 
 fn render_subscript_selection(selection: &SubscriptSelection, out: &mut String) {
@@ -2099,7 +3034,8 @@ fn render_literal(value: &JsonbValue, out: &mut String) {
         | JsonbValue::Time(_)
         | JsonbValue::TimeTz(_)
         | JsonbValue::Timestamp(_)
-        | JsonbValue::TimestampTz(_) => {
+        | JsonbValue::TimestampTz(_)
+        | JsonbValue::TimestampTzWithOffset(_, _) => {
             render_quoted_string(&render_temporal_jsonb_value(value), out)
         }
         JsonbValue::Array(_) | JsonbValue::Object(_) => out.push_str("null"),
@@ -2140,11 +3076,16 @@ fn render_quoted_string(text: &str, out: &mut String) {
 struct Parser<'a> {
     input: &'a str,
     offset: usize,
+    allow_postfix_filter: bool,
 }
 
 impl<'a> Parser<'a> {
     fn new(input: &'a str) -> Self {
-        Self { input, offset: 0 }
+        Self {
+            input,
+            offset: 0,
+            allow_postfix_filter: true,
+        }
     }
 
     fn parse(mut self) -> Result<JsonPath, ExecError> {
@@ -2346,6 +3287,18 @@ impl<'a> Parser<'a> {
         loop {
             let saved = self.offset;
             self.skip_ws();
+            if self.allow_postfix_filter && self.consume("?") {
+                self.skip_ws();
+                self.expect("(")?;
+                let predicate = self.parse_or_expr()?;
+                self.skip_ws();
+                self.expect(")")?;
+                expr = Expr::Filter {
+                    inner: Box::new(expr),
+                    predicate: Box::new(predicate),
+                };
+                continue;
+            }
             if !self.consume(".") {
                 self.offset = saved;
                 return Ok(expr);
@@ -2458,7 +3411,11 @@ impl<'a> Parser<'a> {
                         self.skip_ws();
                         if self.consume_keyword("to") {
                             self.skip_ws();
-                            let end = self.parse_additive_expr()?;
+                            let allow_postfix_filter = self.allow_postfix_filter;
+                            self.allow_postfix_filter = false;
+                            let end = self.parse_additive_expr();
+                            self.allow_postfix_filter = allow_postfix_filter;
+                            let end = end?;
                             selections.push(SubscriptSelection::Range(
                                 subscript_expr_to_expr(start)?,
                                 end,
@@ -2518,7 +3475,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_subscript_expr(&mut self) -> Result<SubscriptExpr, ExecError> {
-        let expr = self.parse_additive_expr()?;
+        let allow_postfix_filter = self.allow_postfix_filter;
+        self.allow_postfix_filter = false;
+        let expr = self.parse_additive_expr();
+        self.allow_postfix_filter = allow_postfix_filter;
+        let expr = expr?;
         self.skip_ws();
         if self.consume("?") {
             self.skip_ws();
@@ -2546,8 +3507,16 @@ impl<'a> Parser<'a> {
             "double" => Ok(MethodKind::Double),
             "floor" => Ok(MethodKind::Floor),
             "integer" => Ok(MethodKind::Integer),
+            "keyvalue" => Ok(MethodKind::KeyValue),
+            "ltrim" => Ok(MethodKind::LTrim),
+            "lower" => Ok(MethodKind::Lower),
             "number" => Ok(MethodKind::Number),
+            "btrim" => Ok(MethodKind::BTrim),
+            "initcap" => Ok(MethodKind::InitCap),
+            "replace" => Ok(MethodKind::Replace),
+            "rtrim" => Ok(MethodKind::RTrim),
             "size" => Ok(MethodKind::Size),
+            "split_part" => Ok(MethodKind::SplitPart),
             "string" => Ok(MethodKind::String),
             "time" => Ok(MethodKind::Time),
             "time_tz" => Ok(MethodKind::TimeTz),
@@ -2561,6 +3530,7 @@ impl<'a> Parser<'a> {
     fn parse_method(&mut self, ident: &str) -> Result<Method, ExecError> {
         let kind = self.method_kind(ident)?;
         let args = self.parse_method_args()?;
+        validate_method_arg_syntax(kind, &args)?;
         Ok(Method { kind, args })
     }
 

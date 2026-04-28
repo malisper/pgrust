@@ -197,6 +197,17 @@ pub(super) fn bind_builtin_system_view(
         SyntheticSystemViewKind::PgMatviews => catalog.pg_matviews_rows(),
         SyntheticSystemViewKind::PgIndexes => catalog.pg_indexes_rows(),
         SyntheticSystemViewKind::PgPolicies => catalog.pg_policies_rows(),
+        SyntheticSystemViewKind::PgPublicationTables => {
+            crate::backend::utils::cache::system_views::build_pg_publication_tables_rows(
+                catalog.publication_rows(),
+                catalog.publication_rel_rows(),
+                catalog.publication_namespace_rows(),
+                catalog.namespace_rows(),
+                catalog.class_rows(),
+                catalog.attribute_rows(),
+                catalog.inheritance_rows(),
+            )
+        }
         SyntheticSystemViewKind::PgRules => catalog.pg_rules_rows(),
         SyntheticSystemViewKind::PgStats => catalog.pg_stats_rows(),
         SyntheticSystemViewKind::PgStatsExt => catalog.pg_stats_ext_rows(),

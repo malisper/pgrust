@@ -1,4 +1,39 @@
 Goal:
+Fix cargo-test CI failures on the PL/pgSQL regression PR.
+
+Key decisions:
+Restore the parser AST contract for SRFs with typed column definitions: implicit aliases use the function name instead of an empty sentinel.
+Expand variadic pg_proc declared argument OIDs before concretizing polymorphic declared argument types.
+Keep ANY arguments as per-argument targets instead of folding them through anyelement unification.
+
+Files touched:
+src/backend/parser/analyze/functions.rs
+src/backend/parser/analyze/scope.rs
+src/backend/parser/gram.rs
+
+Tests run:
+cargo fmt
+scripts/cargo_isolated.sh test --lib --quiet parse_srf_column_definitions_without_alias
+scripts/cargo_isolated.sh test --lib --quiet plpgsql_record_returning_function_from_accepts_column_definition_list
+scripts/cargo_isolated.sh test --lib --quiet create_aggregate_supports_plain_custom_aggregate_execution
+scripts/cargo_isolated.sh test --lib --quiet multirange_adjacency_uses_outer_endpoints_only
+scripts/cargo_isolated.sh test --lib --quiet user_defined_ranges_support_default_and_manual_multirange_names
+scripts/cargo_isolated.sh test --lib --quiet gist_range_index_handles_multirange_scan_keys
+scripts/cargo_isolated.sh test --lib --quiet create_gist_multirange_index_explain_and_query_use_it
+scripts/cargo_isolated.sh test --lib --quiet create_or_replace_aggregate_preserves_proc_oid
+scripts/cargo_isolated.sh test --lib --quiet custom_aggregate_window_execution_is_rejected
+scripts/cargo_isolated.sh test --lib --quiet reopen_missing_pg_aggregate_custom_rows_is_corrupt
+scripts/cargo_isolated.sh test --lib --quiet comment_on_aggregate_uses_pg_proc_description_rows
+scripts/cargo_isolated.sh test --lib --quiet drop_aggregate_removes_proc_and_aggregate_rows
+scripts/cargo_isolated.sh test --lib --quiet resolve_function_call
+scripts/cargo_isolated.sh check
+
+Remaining:
+No local failures in the attached CI repro set.
+
+---
+
+Goal:
 Fix CI failures reported in attached cargo test logs.
 
 Key decisions:

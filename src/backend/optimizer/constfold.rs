@@ -410,7 +410,7 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             output_columns,
             with_ordinality,
         },
-        sql @ SetReturningCall::SqlJsonTable(_) => {
+        sql @ (SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)) => {
             sql.try_map_exprs(|expr| simplify_expr(expr, None))?
         }
     })
