@@ -7,7 +7,7 @@ use crate::backend::parser::{
     SequenceOptionsPatchSpec, SequenceOptionsSpec, SequenceOwnedByClause, SerialKind, SqlType,
     SqlTypeKind,
 };
-use crate::include::catalog::{INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID};
+use crate::include::catalog::{INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, PgSequenceRow};
 use crate::include::nodes::datum::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -42,6 +42,19 @@ pub(crate) struct SequenceOptions {
 pub(crate) struct SequenceData {
     pub(crate) options: SequenceOptions,
     pub(crate) state: SequenceState,
+}
+
+pub(crate) fn pg_sequence_row(seqrelid: u32, data: &SequenceData) -> PgSequenceRow {
+    PgSequenceRow {
+        seqrelid,
+        seqtypid: data.options.type_oid,
+        seqstart: data.options.start,
+        seqincrement: data.options.increment,
+        seqmax: data.options.maxvalue,
+        seqmin: data.options.minvalue,
+        seqcache: data.options.cache,
+        seqcycle: data.options.cycle,
+    }
 }
 
 #[derive(Debug, Clone)]

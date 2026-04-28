@@ -12,19 +12,20 @@ use crate::backend::utils::cache::system_views::{
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PgAggregateRow, PgAmprocRow, PgAuthIdRow,
-    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow,
-    PgDependRow, PgEnumRow, PgForeignDataWrapperRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRangeRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTsConfigMapRow,
-    PgTsConfigRow, PgTsDictRow, PgTsTemplateRow, PgTypeRow, bootstrap_pg_aggregate_rows,
-    bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
+    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow,
+    PgDatabaseRow, PgDependRow, PgEnumRow, PgForeignDataWrapperRow, PgInheritsRow, PgLanguageRow,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow,
+    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRangeRow,
+    PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    bootstrap_pg_aggregate_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_conversion_rows, bootstrap_pg_database_rows,
+    bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
     bootstrap_pg_proc_row_by_oid, bootstrap_pg_proc_rows, bootstrap_pg_proc_rows_by_name,
     bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
-    bootstrap_pg_ts_template_rows, builtin_range_rows, builtin_type_rows,
-    synthetic_range_proc_rows_by_name,
+    bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows, builtin_range_rows,
+    builtin_type_rows, synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::pathnodes::PlannerIndexExprCacheEntry;
 use crate::pgrust::database::DatabaseStatsStore;
@@ -502,6 +503,13 @@ impl CatalogLookup for VisibleCatalog {
             .unwrap_or_else(bootstrap_pg_opclass_rows)
     }
 
+    fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.opfamily_rows())
+            .unwrap_or_else(bootstrap_pg_opfamily_rows)
+    }
+
     fn collation_rows(&self) -> Vec<PgCollationRow> {
         self.catcache
             .as_ref()
@@ -569,6 +577,13 @@ impl CatalogLookup for VisibleCatalog {
             .unwrap_or_else(|| bootstrap_pg_ts_config_rows().to_vec())
     }
 
+    fn ts_parser_rows(&self) -> Vec<PgTsParserRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.ts_parser_rows())
+            .unwrap_or_else(|| bootstrap_pg_ts_parser_rows().to_vec())
+    }
+
     fn ts_dict_rows(&self) -> Vec<PgTsDictRow> {
         self.catcache
             .as_ref()
@@ -610,6 +625,13 @@ impl CatalogLookup for VisibleCatalog {
             .as_ref()
             .map(|catcache| catcache.cast_rows())
             .unwrap_or_else(bootstrap_pg_cast_rows)
+    }
+
+    fn conversion_rows(&self) -> Vec<PgConversionRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.conversion_rows())
+            .unwrap_or_else(|| bootstrap_pg_conversion_rows().to_vec())
     }
 
     fn type_rows(&self) -> Vec<PgTypeRow> {
@@ -1104,6 +1126,7 @@ mod tests {
             base.inherit_rows(),
             base.index_rows(),
             base.rewrite_rows(),
+            base.sequence_rows(),
             base.trigger_rows(),
             base.policy_rows(),
             base.publication_rows(),

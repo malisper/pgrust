@@ -6390,6 +6390,7 @@ impl Session {
                     xid,
                     cid,
                     search_path.as_deref(),
+                    &mut txn.catalog_effects,
                     &mut txn.sequence_effects,
                 )
             }

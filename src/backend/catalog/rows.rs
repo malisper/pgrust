@@ -10,9 +10,9 @@ use crate::include::catalog::{
     PgDescriptionRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow,
     PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
     PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
-    PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow, PgUserMappingRow, bootstrap_composite_type_rows,
+    PgPublicationRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow, bootstrap_composite_type_rows,
     builtin_type_row_by_oid, composite_array_type_row, composite_type_row,
 };
 
@@ -32,6 +32,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub user_mappings: Vec<PgUserMappingRow>,
     pub indexes: Vec<PgIndexRow>,
     pub rewrites: Vec<PgRewriteRow>,
+    pub sequences: Vec<PgSequenceRow>,
     pub triggers: Vec<PgTriggerRow>,
     pub policies: Vec<PgPolicyRow>,
     pub publications: Vec<PgPublicationRow>,
@@ -142,6 +143,7 @@ pub(crate) fn drop_relation_sync_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgPublication,
         BootstrapCatalogKind::PgPublicationRel,
         BootstrapCatalogKind::PgPublicationNamespace,
+        BootstrapCatalogKind::PgSequence,
         BootstrapCatalogKind::PgStatistic,
         BootstrapCatalogKind::PgStatisticExt,
         BootstrapCatalogKind::PgStatisticExtData,
@@ -165,6 +167,7 @@ pub(crate) fn drop_relation_delete_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgPolicy,
         BootstrapCatalogKind::PgPublicationRel,
         BootstrapCatalogKind::PgPublicationNamespace,
+        BootstrapCatalogKind::PgSequence,
         BootstrapCatalogKind::PgStatistic,
         BootstrapCatalogKind::PgStatisticExt,
         BootstrapCatalogKind::PgStatisticExtData,
@@ -191,6 +194,7 @@ pub(crate) fn extend_physical_catalog_rows(
     target.user_mappings.extend(source.user_mappings);
     target.indexes.extend(source.indexes);
     target.rewrites.extend(source.rewrites);
+    target.sequences.extend(source.sequences);
     target.triggers.extend(source.triggers);
     target.publications.extend(source.publications);
     target.publication_rels.extend(source.publication_rels);
@@ -245,6 +249,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         user_mappings: catcache.user_mapping_rows(),
         indexes: catcache.index_rows(),
         rewrites: catcache.rewrite_rows(),
+        sequences: catcache.sequence_rows(),
         triggers: catcache.trigger_rows(),
         policies: catcache.policy_rows(),
         publications: catcache.publication_rows(),

@@ -24725,6 +24725,118 @@ fn create_sequence_supports_functions_and_sequence_scans() {
 }
 
 #[test]
+fn pg_sequence_catalog_tracks_sequence_metadata() {
+    let base = temp_dir("pg_sequence_catalog_metadata");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create sequence seq start with 5 increment by 2 minvalue 1 maxvalue 99 cache 7 cycle",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select s.seqtypid::int8, s.seqstart, s.seqincrement, s.seqmax, s.seqmin, s.seqcache, s.seqcycle \
+             from pg_catalog.pg_sequence s join pg_catalog.pg_class c on c.oid = s.seqrelid \
+             where c.relname = 'seq'"
+        ),
+        vec![vec![
+            Value::Int64(20),
+            Value::Int64(5),
+            Value::Int64(2),
+            Value::Int64(99),
+            Value::Int64(1),
+            Value::Int64(7),
+            Value::Bool(true),
+        ]]
+    );
+
+    db.execute(1, "alter sequence seq increment by 3 no cycle cache 4")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select s.seqincrement, s.seqcache, s.seqcycle \
+             from pg_catalog.pg_sequence s join pg_catalog.pg_class c on c.oid = s.seqrelid \
+             where c.relname = 'seq'"
+        ),
+        vec![vec![Value::Int64(3), Value::Int64(4), Value::Bool(false)]]
+    );
+
+    db.execute(1, "create table serial_items (id serial)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_catalog.pg_sequence s join pg_catalog.pg_class c on c.oid = s.seqrelid \
+             where c.relname = 'serial_items_id_seq'"
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(1, "drop sequence seq").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_catalog.pg_sequence s join pg_catalog.pg_class c on c.oid = s.seqrelid \
+             where c.relname = 'seq'"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn catalog_visibility_functions_cover_psql_describe_helpers() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_type_is_visible('int4'::regtype), \
+                    pg_type_is_visible(0::oid), \
+                    pg_operator_is_visible(0::oid), \
+                    pg_opclass_is_visible(0::oid), \
+                    pg_opfamily_is_visible(0::oid), \
+                    pg_conversion_is_visible(0::oid), \
+                    pg_ts_parser_is_visible(0::oid), \
+                    pg_ts_dict_is_visible(0::oid), \
+                    pg_ts_template_is_visible(0::oid), \
+                    pg_ts_config_is_visible(0::oid)"
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        ]]
+    );
+
+    for sql in [
+        "select pg_operator_is_visible(oid) from pg_operator where oprname = '=' order by oid limit 1",
+        "select pg_opclass_is_visible(oid) from pg_opclass where opcname = 'int4_ops' order by oid limit 1",
+        "select pg_opfamily_is_visible(oid) from pg_opfamily where opfname = 'integer_ops' order by oid limit 1",
+        "select pg_ts_parser_is_visible(oid) from pg_ts_parser where prsname = 'default'",
+        "select pg_ts_dict_is_visible(oid) from pg_ts_dict where dictname = 'simple'",
+        "select pg_ts_template_is_visible(oid) from pg_ts_template where tmplname = 'simple'",
+        "select pg_ts_config_is_visible(oid) from pg_ts_config where cfgname = 'simple'",
+    ] {
+        assert_eq!(query_rows(&db, 1, sql), vec![vec![Value::Bool(true)]]);
+    }
+}
+
+#[test]
 fn alter_sequence_rename_moves_conflicting_array_type_names() {
     let base = temp_dir("alter_sequence_rename_array_type_conflict");
     let db = Database::open(&base, 64).unwrap();

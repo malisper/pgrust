@@ -28,11 +28,11 @@ use crate::backend::catalog::rowcodec::{
     pg_opfamily_row_from_values, pg_partitioned_table_row_from_values, pg_policy_row_from_values,
     pg_proc_row_from_values, pg_publication_namespace_row_from_values,
     pg_publication_rel_row_from_values, pg_publication_row_from_values, pg_rewrite_row_from_values,
-    pg_statistic_ext_data_row_from_values, pg_statistic_ext_row_from_values,
-    pg_statistic_row_from_values, pg_tablespace_row_from_values, pg_trigger_row_from_values,
-    pg_ts_config_map_row_from_values, pg_ts_config_row_from_values, pg_ts_dict_row_from_values,
-    pg_ts_parser_row_from_values, pg_ts_template_row_from_values, pg_type_row_from_values,
-    pg_user_mapping_row_from_values,
+    pg_sequence_row_from_values, pg_statistic_ext_data_row_from_values,
+    pg_statistic_ext_row_from_values, pg_statistic_row_from_values, pg_tablespace_row_from_values,
+    pg_trigger_row_from_values, pg_ts_config_map_row_from_values, pg_ts_config_row_from_values,
+    pg_ts_dict_row_from_values, pg_ts_parser_row_from_values, pg_ts_template_row_from_values,
+    pg_type_row_from_values, pg_user_mapping_row_from_values,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
@@ -999,6 +999,12 @@ fn append_catalog_kind_rows(
                 .map(pg_rewrite_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
+        BootstrapCatalogKind::PgSequence => {
+            rows.sequences = values
+                .into_iter()
+                .map(pg_sequence_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
         BootstrapCatalogKind::PgTrigger => {
             rows.triggers = values
                 .into_iter()
@@ -1188,6 +1194,7 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
     let mut missing_tablespace = false;
     let mut missing_inherits = false;
     let mut missing_rewrite = false;
+    let mut missing_sequence = false;
     let mut missing_statistic = false;
     let mut missing_statistic_ext = false;
     let mut missing_statistic_ext_data = false;
@@ -1287,6 +1294,10 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
             }
             if kind == BootstrapCatalogKind::PgRewrite {
                 missing_rewrite = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgSequence {
+                missing_sequence = true;
                 continue;
             }
             if kind == BootstrapCatalogKind::PgStatistic {
@@ -1649,6 +1660,18 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         .map(pg_rewrite_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let sequence_rows = if missing_sequence {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgSequence],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgSequence),
+        )?
+        .into_iter()
+        .map(pg_sequence_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
     let policy_rows = scan_catalog_relation(
         &pool,
         rels[&BootstrapCatalogKind::PgPolicy],
@@ -1708,6 +1731,7 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         user_mappings: Vec::new(),
         indexes: index_rows,
         rewrites: rewrite_rows,
+        sequences: sequence_rows,
         triggers: Vec::new(),
         policies: policy_rows,
         publications: Vec::new(),
@@ -1798,6 +1822,7 @@ fn load_physical_catalog_rows_visible_legacy(
     let mut missing_tablespace = false;
     let mut missing_inherits = false;
     let mut missing_rewrite = false;
+    let mut missing_sequence = false;
     let mut missing_statistic = false;
     let mut missing_statistic_ext = false;
     let mut missing_statistic_ext_data = false;
@@ -1898,6 +1923,10 @@ fn load_physical_catalog_rows_visible_legacy(
             }
             if kind == BootstrapCatalogKind::PgRewrite {
                 missing_rewrite = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgSequence {
+                missing_sequence = true;
                 continue;
             }
             if kind == BootstrapCatalogKind::PgStatistic {
@@ -2352,6 +2381,21 @@ fn load_physical_catalog_rows_visible_legacy(
         .map(pg_rewrite_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let sequence_rows = if missing_sequence {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgSequence],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgSequence),
+        )?
+        .into_iter()
+        .map(pg_sequence_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
     let policy_rows = scan_catalog_relation_visible(
         pool,
         txns,
@@ -2423,6 +2467,7 @@ fn load_physical_catalog_rows_visible_legacy(
         user_mappings: Vec::new(),
         indexes: index_rows,
         rewrites: rewrite_rows,
+        sequences: sequence_rows,
         triggers: Vec::new(),
         policies: policy_rows,
         publications: Vec::new(),

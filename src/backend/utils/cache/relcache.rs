@@ -1335,6 +1335,7 @@ mod tests {
             rows.inherits,
             rows.indexes,
             rows.rewrites,
+            rows.sequences,
             rows.triggers,
             rows.policies,
             rows.publications,
