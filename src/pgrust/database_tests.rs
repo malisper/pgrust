@@ -8324,7 +8324,7 @@ fn partitioned_key_coverage_checks_fire_for_root_partition_of_and_attach_partiti
     session
         .execute(
             &db,
-            "create table attach_child_cov (a int, b int) partition by range (b)",
+            "create table attach_child_cov (a int not null, b int) partition by range (b)",
         )
         .unwrap();
     session
@@ -8461,7 +8461,7 @@ fn attach_partition_creates_missing_keys_and_fk_to_partitioned_key_stays_rejecte
         )
         .unwrap();
     session
-        .execute(&db, "create table attach_child (a int)")
+        .execute(&db, "create table attach_child (a int not null)")
         .unwrap();
     session
         .execute(
@@ -9864,7 +9864,9 @@ fn check_constraints_allow_tableoid_and_reject_other_system_columns() {
             relation,
             constraint,
             detail,
-        }) if relation == "sys_col_check_tbl" && constraint == "sys_col_check_tbl_check" => {
+        }) if relation == "sys_col_check_tbl"
+            && constraint == "sys_col_check_tbl_is_capital_check" =>
+        {
             assert_eq!(
                 detail.as_deref(),
                 Some("Failing row contains (Olympia, Washington, t, 100).")
@@ -17895,11 +17897,8 @@ fn alter_table_alter_column_set_default_rejects_mismatched_type() {
         .unwrap();
 
     match db.execute(1, "alter table items alter column id set default 'oops'") {
-        Err(ExecError::DetailedError {
-            message, sqlstate, ..
-        }) if message
-            == "column \"id\" is of type integer but default expression is of type text"
-            && sqlstate == "42804" => {}
+        Err(ExecError::InvalidIntegerInput { ty, value }) if ty == "integer" && value == "oops" => {
+        }
         other => panic!("expected default type mismatch error, got {other:?}"),
     }
 }
@@ -26477,11 +26476,15 @@ fn alter_table_add_constraints_support_not_valid_and_validate() {
     assert_eq!(rows[1][4], Value::Null);
 
     match db.execute(1, "alter table items validate constraint items_id_positive") {
-        Err(ExecError::CheckViolation {
-            relation,
-            constraint,
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
             ..
-        }) if relation == "items" && constraint == "items_id_positive" => {}
+        }) if message
+            == "check constraint \"items_id_positive\" of relation \"items\" is violated by some row"
+            && detail.is_none()
+            && sqlstate == "23514" => {}
         other => panic!("expected CHECK validate failure, got {other:?}"),
     }
 
@@ -29394,13 +29397,13 @@ fn alter_table_drop_primary_key_removes_only_pk_owned_not_null_constraints() {
 
     match db.execute(1, "alter table items drop constraint items_code_not_null") {
         Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
-            if actual.contains("PRIMARY KEY constraint \"items_pkey\"") => {}
+            if actual == "column \"code\" is in a primary key" => {}
         other => panic!("expected PK-owned NOT NULL drop rejection, got {other:?}"),
     }
 
     match db.execute(1, "alter table items alter column code drop not null") {
         Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
-            if actual.contains("PRIMARY KEY constraint \"items_pkey\"") => {}
+            if actual == "column \"code\" is in a primary key" => {}
         other => panic!("expected PK-owned column drop-not-null rejection, got {other:?}"),
     }
 

@@ -13847,7 +13847,7 @@ ORDER BY 1, 2;";
         });
         assert_eq!(
             exec_error_position(enforced_sql, &enforced_err),
-            find_case_insensitive_token_position(enforced_sql, "ENFORCED")
+            find_last_case_insensitive_token_position(enforced_sql, "ENFORCED")
         );
     }
 
