@@ -10830,6 +10830,23 @@ fn parse_merge_returning_clause() {
 }
 
 #[test]
+fn parse_merge_joined_source() {
+    let stmt = parse_statement(
+        "merge into target t \
+         using (select stable_one() as pid) as q join source s on q.pid = s.sid \
+         on t.tid = s.sid \
+         when matched then delete returning t.tid",
+    )
+    .unwrap();
+    let stmt = match stmt {
+        Statement::Merge(stmt) => stmt,
+        other => panic!("expected merge statement, got {other:?}"),
+    };
+    assert!(matches!(stmt.source, FromItem::Join { .. }));
+    assert_eq!(stmt.returning.len(), 1);
+}
+
+#[test]
 fn parse_merge_rejects_invalid_when_actions() {
     for sql in [
         "merge into target t using source s on t.id = s.id when matched then insert default values",

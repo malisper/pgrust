@@ -10718,6 +10718,47 @@ fn merge_returning_projects_action_old_new_and_source() {
 }
 
 #[test]
+fn merge_accepts_joined_source() {
+    let dir = temp_dir("merge_joined_source");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table merge_joined_target(id int4 primary key, name text)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table merge_joined_source(id int4, name text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into merge_joined_target values (1, 'old')")
+        .unwrap();
+    session
+        .execute(&db, "insert into merge_joined_source values (1, 'new')")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into merge_joined_target t \
+             using (values (1)) as q(pid) join merge_joined_source s on q.pid = s.id \
+             on t.id = s.id \
+             when matched then update set name = s.name \
+             returning merge_action(), t.id, t.name, s.name",
+        ),
+        vec![vec![
+            Value::Text("UPDATE".into()),
+            Value::Int32(1),
+            Value::Text("new".into()),
+            Value::Text("new".into()),
+        ]]
+    );
+}
+
+#[test]
 fn inherited_update_delete_follow_postgres_targeting_rules() {
     let dir = temp_dir("inheritance_guardrails");
     let db = Database::open(&dir, 128).unwrap();

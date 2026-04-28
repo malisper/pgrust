@@ -3687,6 +3687,18 @@ fn render_explain_expr_inner_with_qualifier(
         Expr::CurrentCatalog => "CURRENT_CATALOG".into(),
         Expr::CurrentSchema => "CURRENT_SCHEMA".into(),
         Expr::CurrentDate => "CURRENT_DATE".into(),
+        Expr::CurrentTime { precision } => {
+            render_explain_sql_datetime_keyword("CURRENT_TIME", *precision)
+        }
+        Expr::CurrentTimestamp { precision } => {
+            render_explain_sql_datetime_keyword("CURRENT_TIMESTAMP", *precision)
+        }
+        Expr::LocalTime { precision } => {
+            render_explain_sql_datetime_keyword("LOCALTIME", *precision)
+        }
+        Expr::LocalTimestamp { precision } => {
+            render_explain_sql_datetime_keyword("LOCALTIMESTAMP", *precision)
+        }
         Expr::CurrentUser => "CURRENT_USER".into(),
         Expr::CurrentRole => "CURRENT_ROLE".into(),
         Expr::SessionUser => "SESSION_USER".into(),
@@ -3716,6 +3728,13 @@ fn render_explain_expr_inner_with_qualifier(
             render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
         }),
         other => format!("{other:?}"),
+    }
+}
+
+fn render_explain_sql_datetime_keyword(keyword: &str, precision: Option<i32>) -> String {
+    match precision {
+        Some(precision) => format!("{keyword}({precision})"),
+        None => keyword.into(),
     }
 }
 
@@ -4515,6 +4534,7 @@ fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
         BuiltinScalarFunction::TextStartsWith => "starts_with".into(),
         BuiltinScalarFunction::Abs => "abs".into(),
         BuiltinScalarFunction::Substring => "substr".into(),
+        BuiltinScalarFunction::ToChar => "to_char".into(),
         other => format!("{other:?}"),
     }
 }
