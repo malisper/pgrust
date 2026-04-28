@@ -1714,6 +1714,67 @@ fn encode_proc_arg_defaults(defaults: &[Option<String>]) -> Option<String> {
         .then(|| serde_json::to_string(defaults).expect("procedure defaults serialize"))
 }
 
+fn callable_proc_arg_names(row: &PgProcRow) -> Vec<String> {
+    let input_count = row.pronargs.max(0) as usize;
+    let names = row.proargnames.clone().unwrap_or_default();
+    if let (Some(_all_argtypes), Some(modes)) =
+        (row.proallargtypes.as_ref(), row.proargmodes.as_ref())
+    {
+        let mut input_names = Vec::with_capacity(input_count);
+        for (index, mode) in modes.iter().copied().enumerate() {
+            if matches!(mode, b'i' | b'b' | b'v') {
+                input_names.push(names.get(index).cloned().unwrap_or_default());
+            }
+        }
+        input_names.resize(input_count, String::new());
+        return input_names;
+    }
+    let mut input_names = names;
+    input_names.resize(input_count, String::new());
+    input_names.truncate(input_count);
+    input_names
+}
+
+fn proc_drop_signature_hint(row: &PgProcRow, catalog: &dyn CatalogLookup) -> String {
+    let args = parse_proc_argtype_oids(&row.proargtypes)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|oid| proc_signature_type_name(catalog, oid))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Use DROP FUNCTION {}({}) first.", row.proname, args)
+}
+
+fn validate_replaced_proc_signature(
+    existing: &PgProcRow,
+    new_row: &PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    if existing.pronargdefaults > new_row.pronargdefaults {
+        return Err(ExecError::DetailedError {
+            message: "cannot remove parameter defaults from existing function".into(),
+            detail: None,
+            hint: Some(proc_drop_signature_hint(existing, catalog)),
+            sqlstate: "42P13",
+        });
+    }
+
+    for (old_name, new_name) in callable_proc_arg_names(existing)
+        .into_iter()
+        .zip(callable_proc_arg_names(new_row))
+    {
+        if !old_name.is_empty() && old_name != new_name {
+            return Err(ExecError::DetailedError {
+                message: format!("cannot change name of input parameter \"{old_name}\""),
+                detail: None,
+                hint: Some(proc_drop_signature_hint(existing, catalog)),
+                sqlstate: "42P13",
+            });
+        }
+    }
+    Ok(())
+}
+
 fn invalid_procedure_attribute() -> ExecError {
     ExecError::DetailedError {
         message: "invalid attribute in procedure definition".into(),
@@ -1729,6 +1790,14 @@ fn validate_proc_arg_order(args: &[CreateFunctionArg], proc_kind: char) -> Resul
     for arg in args {
         let is_input = matches!(arg.mode, FunctionArgMode::In | FunctionArgMode::InOut);
         let is_output = matches!(arg.mode, FunctionArgMode::Out | FunctionArgMode::InOut);
+        if arg.default_expr.is_some() && !is_input {
+            return Err(ExecError::DetailedError {
+                message: "only input parameters can have default values".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
+        }
         if saw_variadic_input && is_input {
             return Err(ExecError::DetailedError {
                 message: "VARIADIC parameter must be the last input parameter".into(),
@@ -3149,6 +3218,11 @@ impl Database {
             prosqlbody: None,
             proconfig: proc_config_from_options(&create_stmt.config),
         };
+        if proc_kind == 'f'
+            && let Some(existing) = existing_proc.as_ref()
+        {
+            validate_replaced_proc_signature(existing, &proc_row, &catalog)?;
+        }
 
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),

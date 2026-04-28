@@ -416,13 +416,25 @@ fn inline_sql_function_body(
         ));
     }
 
-    let mut sql = substitute_positional_args_with_catalog(body, args, catalog, datetime_config)?;
+    let arg_type_oids = proc_input_arg_type_oids(row);
+    let mut sql = substitute_positional_args_with_catalog(
+        body,
+        args,
+        &arg_type_oids,
+        catalog,
+        datetime_config,
+    )?;
     if let Some(names) = row.proargnames.as_ref() {
         for (index, name) in names.iter().enumerate() {
             if name.is_empty() || index >= args.len() {
                 continue;
             }
-            let replacement = parenthesized_sql_literal(&args[index], catalog, datetime_config)?;
+            let replacement = parenthesized_sql_literal(
+                &args[index],
+                arg_type_oids.get(index).copied(),
+                catalog,
+                datetime_config,
+            )?;
             sql = substitute_named_arg(&sql, name, &replacement);
         }
     }
@@ -432,6 +444,7 @@ fn inline_sql_function_body(
 fn substitute_positional_args_with_catalog(
     input: &str,
     args: &[Value],
+    arg_type_oids: &[u32],
     catalog: &dyn CatalogLookup,
     datetime_config: &DateTimeConfig,
 ) -> Result<String, ExecError> {
@@ -504,7 +517,12 @@ fn substitute_positional_args_with_catalog(
                         "42P02",
                     )
                 })?;
-                out.push_str(&parenthesized_sql_literal(arg, catalog, datetime_config)?);
+                out.push_str(&parenthesized_sql_literal(
+                    arg,
+                    arg_type_oids.get(position.saturating_sub(1)).copied(),
+                    catalog,
+                    datetime_config,
+                )?);
                 i = end;
             }
             _ => {
@@ -518,12 +536,13 @@ fn substitute_positional_args_with_catalog(
 
 fn parenthesized_sql_literal(
     value: &Value,
+    type_oid: Option<u32>,
     catalog: &dyn CatalogLookup,
     datetime_config: &DateTimeConfig,
 ) -> Result<String, ExecError> {
     Ok(format!(
         "({})",
-        render_sql_literal_with_catalog(value, catalog, datetime_config)?
+        render_sql_literal_with_catalog_and_type(value, type_oid, catalog, datetime_config)?
     ))
 }
 
@@ -607,6 +626,13 @@ pub(crate) fn substitute_positional_args(input: &str, args: &[Value]) -> Result<
         }
     }
     Ok(out)
+}
+
+fn proc_input_arg_type_oids(row: &PgProcRow) -> Vec<u32> {
+    row.proargtypes
+        .split_whitespace()
+        .filter_map(|oid| oid.parse::<u32>().ok())
+        .collect()
 }
 
 pub(crate) fn substitute_named_arg(input: &str, name: &str, replacement: &str) -> String {
@@ -802,6 +828,42 @@ fn render_sql_literal_with_catalog(
             ));
         }
     })
+}
+
+fn render_sql_literal_with_catalog_and_type(
+    value: &Value,
+    type_oid: Option<u32>,
+    catalog: &dyn CatalogLookup,
+    datetime_config: &DateTimeConfig,
+) -> Result<String, ExecError> {
+    let Some(type_oid) = type_oid else {
+        return render_sql_literal_with_catalog(value, catalog, datetime_config);
+    };
+    let Some(element_type_oid) = expected_array_element_type_oid(catalog, type_oid) else {
+        return render_sql_literal_with_catalog(value, catalog, datetime_config);
+    };
+    match value {
+        Value::Array(values) if values.is_empty() => {
+            let array = ArrayValue::from_1d(Vec::new());
+            let element_name = type_name_for_oid(catalog, element_type_oid)?;
+            let text = format_array_value_text_with_config(&array, datetime_config);
+            Ok(format!("{}::{element_name}[]", quote_sql_string(&text)))
+        }
+        Value::PgArray(array) if array.element_type_oid.is_none() && array.elements.is_empty() => {
+            let element_name = type_name_for_oid(catalog, element_type_oid)?;
+            let text = format_array_value_text_with_config(array, datetime_config);
+            Ok(format!("{}::{element_name}[]", quote_sql_string(&text)))
+        }
+        _ => render_sql_literal_with_catalog(value, catalog, datetime_config),
+    }
+}
+
+fn expected_array_element_type_oid(catalog: &dyn CatalogLookup, type_oid: u32) -> Option<u32> {
+    let sql_type = catalog.type_by_oid(type_oid)?.sql_type;
+    sql_type
+        .is_array
+        .then(|| catalog.type_oid_for_sql_type(sql_type.element_type()))
+        .flatten()
 }
 
 pub(crate) fn render_sql_literal(value: &Value) -> Result<String, ExecError> {

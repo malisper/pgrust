@@ -8723,6 +8723,7 @@ fn build_drop_function_statement(sql: &str) -> Result<DropFunctionStatement, Par
     }
     let ((schema_name, function_name), rest_after_name) = parse_qualified_sql_name(rest)?;
     let rest_after_name = rest_after_name.trim_start();
+    let arg_list_specified = rest_after_name.starts_with('(');
     let (arg_sql, suffix) = if rest_after_name.starts_with('(') {
         take_parenthesized_segment(rest_after_name)?
     } else {
@@ -8748,6 +8749,7 @@ fn build_drop_function_statement(sql: &str) -> Result<DropFunctionStatement, Par
         if_exists,
         schema_name,
         function_name,
+        arg_list_specified,
         arg_types,
         cascade,
     })
@@ -9289,6 +9291,7 @@ fn build_drop_routine_like_statement(
     }
     let ((schema_name, function_name), rest_after_name) = parse_qualified_sql_name(rest)?;
     let rest_after_name = rest_after_name.trim_start();
+    let arg_list_specified = rest_after_name.starts_with('(');
     let (arg_sql, suffix) = if rest_after_name.starts_with('(') {
         take_parenthesized_segment(rest_after_name)?
     } else {
@@ -9314,6 +9317,7 @@ fn build_drop_routine_like_statement(
         if_exists,
         schema_name,
         function_name,
+        arg_list_specified,
         arg_types,
         cascade,
     })
@@ -9398,7 +9402,7 @@ fn parse_create_procedure_args(input: &str) -> Result<Vec<CreateFunctionArg>, Pa
 }
 
 fn parse_create_procedure_arg(input: &str) -> Result<CreateFunctionArg, ParseError> {
-    let (trimmed, default_expr) = split_create_procedure_arg_default(input.trim())?;
+    let (trimmed, default_expr) = split_create_proc_arg_default(input.trim(), true)?;
     let prefix_variadic = keyword_at_start(trimmed, "variadic");
     let trimmed = if prefix_variadic {
         consume_keyword(trimmed, "variadic").trim_start()
@@ -9437,16 +9441,6 @@ fn parse_create_procedure_arg(input: &str) -> Result<CreateFunctionArg, ParseErr
     arg.default_expr = default_expr.map(str::to_string);
     arg.variadic = prefix_variadic;
     Ok(arg)
-}
-
-fn split_create_procedure_arg_default(input: &str) -> Result<(&str, Option<&str>), ParseError> {
-    if let Some((arg, default_expr)) = split_optional_keyword(input, "default") {
-        return Ok((arg.trim_end(), default_expr.map(str::trim)));
-    }
-    if let Some(index) = input.find(":=") {
-        return Ok((input[..index].trim_end(), Some(input[index + 2..].trim())));
-    }
-    Ok((input, None))
 }
 
 #[derive(Debug, Default)]
@@ -12779,18 +12773,12 @@ fn parse_create_function_arg_with_base(
     input: &str,
     arg_base_offset: Option<usize>,
 ) -> Result<CreateFunctionArg, ParseError> {
-    let trimmed = input.trim();
+    let (trimmed, default_expr) = split_create_proc_arg_default(input.trim(), false)?;
     if trimmed.is_empty() {
         return Err(ParseError::UnexpectedToken {
             expected: "function argument",
             actual: input.into(),
         });
-    }
-    let lowered = trimmed.to_ascii_lowercase();
-    if lowered.contains(" default ") || lowered.contains(":=") {
-        return Err(ParseError::FeatureNotSupported(
-            "default arguments are not supported in CREATE FUNCTION".into(),
-        ));
     }
 
     let (mode, rest) = if keyword_at_start(trimmed, "inout") {
@@ -12817,7 +12805,7 @@ fn parse_create_function_arg_with_base(
             name: None,
             ty,
             type_position,
-            default_expr: None,
+            default_expr: default_expr.map(str::to_string),
             variadic,
         });
     }
@@ -12843,9 +12831,29 @@ fn parse_create_function_arg_with_base(
         name,
         ty,
         type_position,
-        default_expr: None,
+        default_expr: default_expr.map(str::to_string),
         variadic,
     })
+}
+
+fn split_create_proc_arg_default(
+    input: &str,
+    allow_colon_equals: bool,
+) -> Result<(&str, Option<&str>), ParseError> {
+    if let Some(index) = find_top_level_keyword_token(input, "default") {
+        let default_expr = input[index + "default".len()..].trim();
+        return Ok((
+            input[..index].trim_end(),
+            (!default_expr.is_empty()).then_some(default_expr),
+        ));
+    }
+    if allow_colon_equals && let Some(index) = find_top_level_colon_equals(input) {
+        return Ok((input[..index].trim_end(), Some(input[index + 2..].trim())));
+    }
+    if let Some(index) = find_top_level_default_equals(input) {
+        return Ok((input[..index].trim_end(), Some(input[index + 1..].trim())));
+    }
+    Ok((input, None))
 }
 
 fn parse_create_function_returns(
@@ -13272,6 +13280,121 @@ fn find_next_top_level_keyword(input: &str, keywords: &[&str]) -> Option<usize> 
                     return Some(i);
                 }
             }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_top_level_keyword_token(input: &str, keyword: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            _ if depth == 0
+                && (i == 0
+                    || input[..i]
+                        .chars()
+                        .next_back()
+                        .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_')))
+                && keyword_at_boundary(input, i, keyword) =>
+            {
+                return Some(i);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_top_level_colon_equals(input: &str) -> Option<usize> {
+    find_top_level_operator(input, b':', Some(b'='))
+}
+
+fn find_top_level_default_equals(input: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b'=' if depth == 0 => {
+                let prev = i.checked_sub(1).and_then(|index| bytes.get(index).copied());
+                let next = bytes.get(i + 1).copied();
+                if !matches!(prev, Some(b'<' | b'>' | b'!' | b'='))
+                    && !matches!(next, Some(b'>' | b'='))
+                {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_top_level_operator(input: &str, first: u8, second: Option<u8>) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            byte if byte == first && depth == 0 => match second {
+                Some(second) if bytes.get(i + 1).copied() == Some(second) => return Some(i),
+                None => return Some(i),
+                _ => {}
+            },
             _ => {}
         }
         i += 1;

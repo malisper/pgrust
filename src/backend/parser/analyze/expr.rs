@@ -29,8 +29,8 @@ mod subquery;
 mod targets;
 
 use self::func::{
-    bind_row_to_json_call, bind_scalar_function_call, bind_scalar_function_call_from_typed_args,
-    bind_user_defined_scalar_function_call, bind_user_defined_scalar_function_call_from_typed_args,
+    bind_resolved_user_defined_scalar_function_call, bind_row_to_json_call,
+    bind_scalar_function_call, bind_scalar_function_call_from_typed_args,
 };
 use self::json::{
     bind_json_binary_expr, bind_jsonb_contained_expr, bind_jsonb_contains_expr,
@@ -4998,21 +4998,16 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                                 ctes,
                             );
                         }
-                        if positional_function_args && let Some(bound_args) = typed_args.take() {
-                            return Ok(bind_user_defined_scalar_function_call_from_typed_args(
-                                resolved.proc_oid,
-                                Some(resolved.proname.clone()),
-                                resolved.result_type,
-                                &resolved.declared_arg_types,
-                                bound_args,
-                            ));
-                        }
-                        return bind_user_defined_scalar_function_call(
-                            resolved.proc_oid,
-                            Some(resolved.proname.clone()),
-                            resolved.result_type,
-                            &resolved.declared_arg_types,
+                        let normalized = resolve_function_call_with_arg_defaults(
+                            catalog,
+                            name,
                             args_list,
+                            &actual_types,
+                            *func_variadic,
+                        )?;
+                        return bind_resolved_user_defined_scalar_function_call(
+                            &normalized.resolved,
+                            &normalized.args,
                             scope,
                             catalog,
                             outer_scopes,
@@ -5022,6 +5017,39 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     }
                     Err(err) => Some(err),
                 };
+            match resolve_function_call_with_arg_defaults(
+                catalog,
+                name,
+                args_list,
+                &actual_types,
+                *func_variadic,
+            ) {
+                Ok(normalized)
+                    if normalized.resolved.scalar_impl.is_none()
+                        && normalized.resolved.prokind == 'f'
+                        && !normalized.resolved.proretset =>
+                {
+                    return bind_resolved_user_defined_scalar_function_call(
+                        &normalized.resolved,
+                        &normalized.args,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                }
+                Err(
+                    err @ ParseError::DetailedError {
+                        sqlstate: "42725", ..
+                    },
+                ) => return Err(err),
+                Err(
+                    err @ ParseError::DetailedError { .. }
+                    | err @ ParseError::UnexpectedToken { .. },
+                ) if args_list.iter().any(|arg| arg.name.is_some()) => return Err(err),
+                _ => {}
+            }
             if name.eq_ignore_ascii_case("xmlconcat") {
                 if args.args().iter().any(|arg| arg.name.is_some()) {
                     return Err(ParseError::UnexpectedToken {
