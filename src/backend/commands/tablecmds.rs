@@ -24,17 +24,19 @@ use crate::backend::parser::{
     BoundExclusionConstraint, BoundForeignKeyConstraint, BoundIndexRelation, BoundInsertSource,
     BoundInsertStatement, BoundMergeAction, BoundMergeStatement, BoundMergeWhenClause,
     BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey, BoundRelation,
-    BoundRelationConstraints, BoundTemporalConstraint, BoundUpdateStatement, BoundUpdateTarget,
-    Catalog, CatalogLookup, CreateTableAsStatement, DomainConstraintLookupKind, DropTableStatement,
-    ExplainFormat, ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement,
-    OverridingKind, ParseError, SelectStatement, SqlType, SqlTypeKind, Statement,
-    TableAsObjectType, TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table,
+    BoundRelationConstraints, BoundRuleAction, BoundTemporalConstraint, BoundUpdateStatement,
+    BoundUpdateTarget, Catalog, CatalogLookup, CreateTableAsStatement, DeleteStatement,
+    DomainConstraintLookupKind, DropTableStatement, ExplainFormat, ExplainStatement,
+    ForeignKeyAction, MaintenanceTarget, MergeStatement, OverridingKind, ParseError, RuleEvent,
+    SelectStatement, SqlType, SqlTypeKind, Statement, TableAsObjectType, TruncateTableStatement,
+    UpdateStatement, VacuumStatement, bind_create_table, bind_delete,
     bind_expr_with_outer_and_ctes, bind_generated_expr, bind_referenced_by_foreign_keys,
-    bind_relation_constraints, bind_scalar_expr_in_scope, bind_update, parse_expr,
-    scope_for_relation,
+    bind_relation_constraints, bind_rule_action_statement, bind_scalar_expr_in_scope, bind_update,
+    parse_expr, scope_for_relation,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
+use crate::backend::rewrite::split_stored_rule_action_sql;
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
 use crate::backend::utils::time::instant::Instant;
@@ -90,8 +92,8 @@ use crate::include::nodes::parsenodes::{IndexColumnDef, RelOption};
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    QueryColumn, RelationPrivilegeMask, RelationPrivilegeRequirement, TargetEntry,
-    expr_sql_type_hint,
+    OUTER_VAR, QueryColumn, RelationPrivilegeMask, RelationPrivilegeRequirement, TargetEntry,
+    attrno_index, expr_sql_type_hint,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::database::commands::privilege::{
@@ -448,6 +450,9 @@ pub(crate) fn execute_explain(
     if let Statement::Update(update) = statement {
         return execute_explain_update(update, analyze, costs, verbose, catalog);
     }
+    if let Statement::Delete(delete) = statement {
+        return execute_explain_delete(delete, analyze, costs, verbose, catalog);
+    }
 
     let explain_target = match statement {
         Statement::Select(select) => EitherExplainTarget::Select(select),
@@ -730,6 +735,291 @@ fn execute_explain_update(
     })
 }
 
+fn execute_explain_delete(
+    stmt: DeleteStatement,
+    analyze: bool,
+    costs: bool,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+) -> Result<StatementResult, ExecError> {
+    if analyze {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "EXPLAIN ANALYZE DELETE".into(),
+        )));
+    }
+
+    let bound = finalize_bound_delete_stmt(bind_delete(&stmt, catalog)?, catalog);
+    let lines = explain_delete_lines(&bound, costs, verbose, catalog)?;
+    Ok(StatementResult::Query {
+        columns: vec![QueryColumn::text("QUERY PLAN")],
+        column_names: vec!["QUERY PLAN".into()],
+        rows: lines
+            .into_iter()
+            .map(|line| vec![Value::Text(line.into())])
+            .collect(),
+    })
+}
+
+#[derive(Clone)]
+struct ExplainRewriteRule {
+    is_instead: bool,
+    actions: Vec<BoundRuleAction>,
+}
+
+fn explain_delete_lines(
+    stmt: &BoundDeleteStatement,
+    show_costs: bool,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<String>, ExecError> {
+    let mut lines = Vec::new();
+    for target in &stmt.targets {
+        let rules = load_explain_delete_rules(target, catalog)?;
+        let mut saw_instead = false;
+        for rule in rules {
+            saw_instead |= rule.is_instead;
+            for action in rule.actions {
+                let BoundRuleAction::Delete(action) = action else {
+                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                        "EXPLAIN rule action".into(),
+                    )));
+                };
+                let action = finalize_bound_delete_stmt(action, catalog);
+                for action_target in &action.targets {
+                    if !lines.is_empty() {
+                        lines.push(String::new());
+                    }
+                    explain_rule_delete_action_lines(
+                        target,
+                        action_target,
+                        show_costs,
+                        verbose,
+                        &mut lines,
+                    );
+                }
+            }
+        }
+        if !saw_instead {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            explain_delete_target_lines(target, show_costs, verbose, &mut lines);
+        }
+    }
+    Ok(lines)
+}
+
+fn load_explain_delete_rules(
+    target: &BoundDeleteTarget,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<ExplainRewriteRule>, ExecError> {
+    catalog
+        .rewrite_rows_for_relation(target.relation_oid)
+        .into_iter()
+        .filter(|row| {
+            row.rulename != "_RETURN" && row.ev_type == rule_event_code(RuleEvent::Delete)
+        })
+        .map(|row| {
+            let mut actions = Vec::new();
+            for sql in split_stored_rule_action_sql(&row.ev_action) {
+                let statement = crate::backend::parser::parse_statement(sql)?;
+                actions.push(bind_rule_action_statement(
+                    &statement,
+                    &target.desc,
+                    catalog,
+                )?);
+            }
+            Ok(ExplainRewriteRule {
+                is_instead: row.is_instead,
+                actions,
+            })
+        })
+        .collect::<Result<Vec<_>, ParseError>>()
+        .map_err(ExecError::Parse)
+}
+
+fn rule_event_code(event: RuleEvent) -> char {
+    match event {
+        RuleEvent::Select => '1',
+        RuleEvent::Update => '2',
+        RuleEvent::Insert => '3',
+        RuleEvent::Delete => '4',
+    }
+}
+
+fn explain_delete_target_lines(
+    target: &BoundDeleteTarget,
+    show_costs: bool,
+    verbose: bool,
+    lines: &mut Vec<String>,
+) {
+    push_explain_line(
+        &format!(
+            "Delete on {}",
+            explain_update_target_name(&target.relation_name, verbose)
+        ),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    explain_delete_scan_lines(target, None, 2, show_costs, lines);
+}
+
+fn explain_rule_delete_action_lines(
+    event_target: &BoundDeleteTarget,
+    action_target: &BoundDeleteTarget,
+    show_costs: bool,
+    verbose: bool,
+    lines: &mut Vec<String>,
+) {
+    push_explain_line(
+        &format!(
+            "Delete on {}",
+            explain_update_target_name(&action_target.relation_name, verbose)
+        ),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    push_explain_line(
+        "  ->  Nested Loop",
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    explain_delete_scan_lines(event_target, None, 8, show_costs, lines);
+    let action_predicate = action_target
+        .predicate
+        .as_ref()
+        .map(|expr| substitute_old_constants_for_explain(expr, event_target));
+    explain_delete_scan_lines(
+        action_target,
+        action_predicate.as_ref(),
+        8,
+        show_costs,
+        lines,
+    );
+}
+
+fn explain_delete_scan_lines(
+    target: &BoundDeleteTarget,
+    predicate_override: Option<&Expr>,
+    indent: usize,
+    show_costs: bool,
+    lines: &mut Vec<String>,
+) {
+    let prefix = " ".repeat(indent);
+    push_explain_line(
+        &format!("{prefix}->  {}", explain_delete_scan_label(target)),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    let detail_prefix = " ".repeat(indent + 6);
+    if let Some(index_cond) = explain_delete_index_cond(target) {
+        lines.push(format!("{detail_prefix}Index Cond: {index_cond}"));
+    } else if let Some(predicate) = predicate_override.or(target.predicate.as_ref()) {
+        let column_names = target
+            .desc
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        lines.push(format!(
+            "{detail_prefix}Filter: {}",
+            crate::backend::executor::render_explain_expr(predicate, &column_names)
+        ));
+    }
+}
+
+fn explain_delete_scan_label(target: &BoundDeleteTarget) -> String {
+    match &target.row_source {
+        BoundModifyRowSource::Heap => format!("Seq Scan on {}", target.relation_name),
+        BoundModifyRowSource::Index { index, .. } => {
+            format!(
+                "Index Scan using {} on {}",
+                index.name, target.relation_name
+            )
+        }
+    }
+}
+
+fn explain_delete_index_cond(target: &BoundDeleteTarget) -> Option<String> {
+    let BoundModifyRowSource::Index { index, keys } = &target.row_source else {
+        return None;
+    };
+    let rendered = keys
+        .iter()
+        .filter_map(|key| {
+            let index_attno = usize::try_from(key.attribute_number).ok()?.checked_sub(1)?;
+            let heap_attno = usize::try_from(*index.index_meta.indkey.get(index_attno)?)
+                .ok()?
+                .checked_sub(1)?;
+            let column_name = target.desc.columns.get(heap_attno)?.name.clone();
+            Some(format!(
+                "({column_name} {} {})",
+                explain_strategy_operator(key.strategy),
+                render_explain_index_value(&key.argument)
+            ))
+        })
+        .collect::<Vec<_>>();
+    format_explain_index_quals(rendered)
+}
+
+fn substitute_old_constants_for_explain(expr: &Expr, event_target: &BoundDeleteTarget) -> Expr {
+    match expr {
+        Expr::Var(var) if var.varno == OUTER_VAR => {
+            explain_delete_target_constant(event_target, var.varattno)
+                .map(Expr::Const)
+                .unwrap_or_else(|| expr.clone())
+        }
+        Expr::Op(op) => {
+            let mut op = (**op).clone();
+            op.args = op
+                .args
+                .iter()
+                .map(|arg| substitute_old_constants_for_explain(arg, event_target))
+                .collect();
+            Expr::Op(Box::new(op))
+        }
+        Expr::Bool(bool_expr) => {
+            let mut bool_expr = (**bool_expr).clone();
+            bool_expr.args = bool_expr
+                .args
+                .iter()
+                .map(|arg| substitute_old_constants_for_explain(arg, event_target))
+                .collect();
+            Expr::Bool(Box::new(bool_expr))
+        }
+        Expr::Cast(inner, ty) => Expr::Cast(
+            Box::new(substitute_old_constants_for_explain(inner, event_target)),
+            *ty,
+        ),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(substitute_old_constants_for_explain(expr, event_target)),
+            collation_oid: *collation_oid,
+        },
+        _ => expr.clone(),
+    }
+}
+
+fn explain_delete_target_constant(target: &BoundDeleteTarget, attno: i32) -> Option<Value> {
+    let column_index = attrno_index(attno)?;
+    match &target.row_source {
+        BoundModifyRowSource::Index { index, keys } => keys.iter().find_map(|key| {
+            let index_attno = usize::try_from(key.attribute_number).ok()?.checked_sub(1)?;
+            let heap_attno = usize::try_from(*index.index_meta.indkey.get(index_attno)?)
+                .ok()?
+                .checked_sub(1)?;
+            (heap_attno == column_index).then(|| key.argument.clone())
+        }),
+        BoundModifyRowSource::Heap => None,
+    }
+}
+
 fn explain_update_lines(
     stmt: &UpdateStatement,
     bound: &BoundUpdateStatement,
@@ -923,11 +1213,24 @@ fn explain_update_index_cond(target: &BoundUpdateTarget) -> Option<String> {
             ))
         })
         .collect::<Vec<_>>();
-    (!rendered.is_empty()).then(|| format!("({})", rendered.join(" AND ")))
+    format_explain_index_quals(rendered)
+}
+
+fn format_explain_index_quals(rendered: Vec<String>) -> Option<String> {
+    match rendered.as_slice() {
+        [] => None,
+        [single] => Some(single.clone()),
+        _ => Some(format!("({})", rendered.join(" AND "))),
+    }
 }
 
 fn render_explain_index_value(value: &Value) -> String {
-    crate::backend::executor::render_explain_expr(&Expr::Const(value.clone()), &[])
+    let rendered = crate::backend::executor::render_explain_expr(&Expr::Const(value.clone()), &[]);
+    rendered
+        .strip_prefix('(')
+        .and_then(|inner| inner.strip_suffix(')'))
+        .unwrap_or(&rendered)
+        .to_string()
 }
 
 fn explain_strategy_operator(strategy: u16) -> &'static str {
@@ -3153,9 +3456,7 @@ fn key_columns_changed(previous_values: &[Value], values: &[Value], indexes: &[u
     indexes.iter().any(|index| {
         let previous = previous_values.get(*index).unwrap_or(&Value::Null);
         let current = values.get(*index).unwrap_or(&Value::Null);
-        compare_order_values(previous, current, None, None, false)
-            .expect("foreign-key key comparisons use implicit default collation")
-            != std::cmp::Ordering::Equal
+        previous != current
     })
 }
 
@@ -10166,6 +10467,7 @@ pub(crate) fn apply_base_delete_row(
                     ctx,
                 )?;
                 validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
+                cancel_deferred_foreign_key_checks_for_deleted_row(target, &current_values, ctx)?;
                 return Ok(true);
             }
             Err(HeapError::TupleAlreadyModified(_)) => {
@@ -10199,4 +10501,23 @@ pub(crate) fn apply_base_delete_row(
             Err(err) => return Err(err.into()),
         }
     }
+}
+
+fn cancel_deferred_foreign_key_checks_for_deleted_row(
+    target: &BoundDeleteTarget,
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    let Some(tracker) = ctx.deferred_foreign_keys.as_ref() else {
+        return Ok(());
+    };
+    let Some(catalog) = ctx.catalog.as_deref() else {
+        return Ok(());
+    };
+    let constraints = bind_relation_constraints(None, target.relation_oid, &target.desc, catalog)
+        .map_err(ExecError::Parse)?;
+    for constraint in constraints.foreign_keys {
+        tracker.cancel_foreign_key_check(constraint.constraint_oid, values);
+    }
+    Ok(())
 }

@@ -42,19 +42,30 @@ pub(crate) enum InsertForeignKeyCheckPhase {
 
 fn maybe_defer_constraint(
     ctx: &ExecutorContext,
-    constraint_oid: u32,
-    deferrable: bool,
-    initially_deferred: bool,
+    relation_name: &str,
+    constraint: &BoundForeignKeyConstraint,
+    previous_values: Option<&[Value]>,
+    values: &[Value],
 ) -> bool {
-    if ctx.constraint_timing(constraint_oid, deferrable, initially_deferred)
-        != ConstraintTiming::Deferred
+    if ctx.constraint_timing(
+        constraint.constraint_oid,
+        constraint.deferrable,
+        constraint.initially_deferred,
+    ) != ConstraintTiming::Deferred
     {
         return false;
     }
     let Some(tracker) = ctx.deferred_foreign_keys.as_ref() else {
         return false;
     };
-    tracker.record(constraint_oid);
+    if let Some(previous_values) = previous_values {
+        tracker.cancel_foreign_key_check(constraint.constraint_oid, previous_values);
+    }
+    tracker.record_foreign_key_check(
+        constraint.constraint_oid,
+        relation_name.to_string(),
+        values.iter().map(Value::to_owned_value).collect::<Vec<_>>(),
+    );
     true
 }
 
@@ -265,12 +276,7 @@ fn enforce_outbound_foreign_key(
             ForeignKeyMatchType::Partial => return Ok(()),
         }
     }
-    if maybe_defer_constraint(
-        ctx,
-        constraint.constraint_oid,
-        constraint.deferrable,
-        constraint.initially_deferred,
-    ) {
+    if maybe_defer_constraint(ctx, relation_name, constraint, previous_values, values) {
         return Ok(());
     }
     check_referenced_table_select_privilege(constraint, ctx)?;
@@ -1403,9 +1409,7 @@ fn key_columns_changed(previous_values: &[Value], values: &[Value], indexes: &[u
     indexes.iter().any(|index| {
         let previous = previous_values.get(*index).unwrap_or(&Value::Null);
         let current = values.get(*index).unwrap_or(&Value::Null);
-        compare_order_values(previous, current, None, None, false)
-            .expect("foreign-key key comparisons use implicit default collation")
-            != Ordering::Equal
+        previous != current
     })
 }
 

@@ -230,13 +230,26 @@ pub struct PendingParentForeignKeyCheck {
     pub replacement_parent_values: Option<Vec<Value>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingForeignKeyCheck {
+    pub constraint_oid: u32,
+    pub relation_name: String,
+    pub values: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Default)]
 struct DeferredConstraintState {
     all_override: Option<ConstraintTiming>,
     named_overrides: BTreeMap<u32, ConstraintTiming>,
     affected_constraint_oids: BTreeSet<u32>,
+    pending_foreign_key_checks: Vec<PendingForeignKeyCheck>,
     pending_parent_foreign_key_checks: Vec<PendingParentForeignKeyCheck>,
     pending_unique_checks: HashMap<u32, HashSet<PendingUniqueCheck>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DeferredConstraintSnapshot {
+    state: DeferredConstraintState,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -255,6 +268,39 @@ impl DeferredConstraintTracker {
             .lock()
             .affected_constraint_oids
             .insert(constraint_oid);
+    }
+
+    pub fn record_foreign_key_check(
+        &self,
+        constraint_oid: u32,
+        relation_name: String,
+        mut values: Vec<Value>,
+    ) {
+        if constraint_oid == 0 {
+            return;
+        }
+        Value::materialize_all(&mut values);
+        let mut state = self.state.lock();
+        state.affected_constraint_oids.insert(constraint_oid);
+        state
+            .pending_foreign_key_checks
+            .push(PendingForeignKeyCheck {
+                constraint_oid,
+                relation_name,
+                values,
+            });
+    }
+
+    pub fn cancel_foreign_key_check(&self, constraint_oid: u32, values: &[Value]) {
+        if constraint_oid == 0 {
+            return;
+        }
+        let mut values = values.iter().map(Value::to_owned_value).collect::<Vec<_>>();
+        Value::materialize_all(&mut values);
+        self.state
+            .lock()
+            .pending_foreign_key_checks
+            .retain(|check| check.constraint_oid != constraint_oid || check.values != values);
     }
 
     pub fn record_parent_foreign_key_check(
@@ -312,6 +358,10 @@ impl DeferredConstraintTracker {
             .collect()
     }
 
+    pub fn pending_foreign_key_checks(&self) -> Vec<PendingForeignKeyCheck> {
+        self.state.lock().pending_foreign_key_checks.clone()
+    }
+
     pub fn pending_unique_constraint_oids(&self) -> Vec<u32> {
         self.state
             .lock()
@@ -339,6 +389,13 @@ impl DeferredConstraintTracker {
         for constraint_oid in constraint_oids {
             state.affected_constraint_oids.remove(constraint_oid);
         }
+    }
+
+    pub fn clear_foreign_key_checks(&self, constraint_oids: &BTreeSet<u32>) {
+        self.state
+            .lock()
+            .pending_foreign_key_checks
+            .retain(|check| !constraint_oids.contains(&check.constraint_oid));
     }
 
     pub fn clear_parent_foreign_key_checks(&self, constraint_oids: &BTreeSet<u32>) {
@@ -393,9 +450,20 @@ impl DeferredConstraintTracker {
             })
     }
 
+    pub fn snapshot(&self) -> DeferredConstraintSnapshot {
+        DeferredConstraintSnapshot {
+            state: self.state.lock().clone(),
+        }
+    }
+
+    pub fn restore(&self, snapshot: DeferredConstraintSnapshot) {
+        *self.state.lock() = snapshot.state;
+    }
+
     pub fn is_empty(&self) -> bool {
         let state = self.state.lock();
         state.affected_constraint_oids.is_empty()
+            && state.pending_foreign_key_checks.is_empty()
             && state.pending_parent_foreign_key_checks.is_empty()
             && state.pending_unique_checks.is_empty()
     }

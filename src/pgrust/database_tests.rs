@@ -16361,6 +16361,45 @@ fn update_and_delete_rules_propagate_old_and_new_values() {
 }
 
 #[test]
+fn explain_delete_expands_delete_rule_actions() {
+    let base = temp_dir("explain_delete_rule_action");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table t1 (a int4 primary key)")
+        .unwrap();
+    db.execute(1, "create table t2 (b int4)").unwrap();
+    db.execute(
+        1,
+        "create rule r1 as on delete to t1 do delete from t2 where t2.b = old.a",
+    )
+    .unwrap();
+
+    let rows = query_rows(&db, 1, "explain (costs off) delete from t1 where a = 1");
+    let lines = rows
+        .into_iter()
+        .map(|row| match row.as_slice() {
+            [Value::Text(line)] => line.to_string(),
+            other => panic!("expected text explain row, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        vec![
+            "Delete on t2",
+            "  ->  Nested Loop",
+            "        ->  Index Scan using t1_pkey on t1",
+            "              Index Cond: (a = 1)",
+            "        ->  Seq Scan on t2",
+            "              Filter: (b = 1)",
+            "",
+            "Delete on t1",
+            "  ->  Index Scan using t1_pkey on t1",
+            "        Index Cond: (a = 1)",
+        ]
+    );
+}
+
+#[test]
 fn insert_rules_fire_in_alphabetical_order() {
     let base = temp_dir("rule_fire_order");
     let db = Database::open(&base, 16).unwrap();
@@ -27532,6 +27571,147 @@ fn alter_table_alter_constraint_initially_deferred_parent_delete_fails_at_commit
     assert_eq!(
         query_rows(&db, 1, "select id, parent_id from children order by id",),
         vec![vec![Value::Int32(1), Value::Int32(1)]]
+    );
+}
+
+#[test]
+fn deferred_foreign_key_checks_survive_savepoint_rollback() {
+    let base = temp_dir("deferred_fk_savepoint_rollback");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parents (id int4 primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table children (parent_id int4 references parents deferrable initially deferred)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into parents values (1)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into children values (1)")
+        .unwrap();
+    session.execute(&db, "savepoint x").unwrap();
+    session.execute(&db, "delete from children").unwrap();
+    session.execute(&db, "rollback to x").unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into children values (2)")
+        .unwrap();
+    session.execute(&db, "savepoint x").unwrap();
+    session.execute(&db, "delete from children").unwrap();
+    session.execute(&db, "rollback to x").unwrap();
+    match session.execute(&db, "commit") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_id_fkey");
+        }
+        other => panic!("expected deferred foreign-key violation after rollback, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_drop_foreign_key_rejects_pending_trigger_events() {
+    let base = temp_dir("fk_drop_pending_trigger_events");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parents (id int4 primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table children (parent_id int4 references parents deferrable initially deferred)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into parents values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into children values (1)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into children values (2)")
+        .unwrap();
+    match session.execute(
+        &db,
+        "alter table children drop constraint children_parent_id_fkey",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "55006");
+            assert_eq!(
+                message,
+                "cannot ALTER TABLE \"children\" because it has pending trigger events"
+            );
+        }
+        other => panic!("expected pending child trigger-event error, got {other:?}"),
+    }
+    session.execute(&db, "commit").unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "delete from parents where id = 1")
+        .unwrap();
+    match session.execute(
+        &db,
+        "alter table children drop constraint children_parent_id_fkey",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "55006");
+            assert_eq!(
+                message,
+                "cannot ALTER TABLE \"parents\" because it has pending trigger events"
+            );
+        }
+        other => panic!("expected pending parent trigger-event error, got {other:?}"),
+    }
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn foreign_key_cascade_update_treats_negative_zero_as_changed() {
+    let base = temp_dir("fk_cascade_negative_zero");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parents (a float8, b float8, primary key (a, b))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table children (
+            x float8,
+            y float8,
+            foreign key (x, y) references parents (a, b) on update cascade
+        )",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values ('-0', '-0')")
+        .unwrap();
+    db.execute(1, "insert into children values ('-0', '-0')")
+        .unwrap();
+
+    db.execute(1, "update parents set a = '0' where a = '-0'")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select x, y from children"),
+        vec![vec![Value::Float64(0.0), Value::Float64(-0.0)]]
     );
 }
 

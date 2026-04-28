@@ -23,9 +23,9 @@ use crate::backend::commands::tablecmds::{
 use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
-    DeferredForeignKeyTracker, ExecError, ExecutorContext, ExecutorTransactionState, Expr,
-    RelationDesc, SessionReplicationRole, StatementResult, Value, cast_value,
-    cast_value_with_source_type_catalog_and_config, execute_planned_stmt,
+    DeferredConstraintSnapshot, DeferredForeignKeyTracker, ExecError, ExecutorContext,
+    ExecutorTransactionState, Expr, RelationDesc, SessionReplicationRole, StatementResult, Value,
+    cast_value, cast_value_with_source_type_catalog_and_config, execute_planned_stmt,
     execute_readonly_statement_with_config, parse_bytea_text, render_sql_literal,
     substitute_named_arg, substitute_positional_args,
 };
@@ -62,8 +62,8 @@ use crate::backend::utils::misc::stack_depth::{
     MIN_MAX_STACK_DEPTH_KB, StackDepthGuard, max_stack_depth_limit_kb,
 };
 use crate::include::catalog::{
-    ANYARRAYOID, ANYELEMENTOID, ANYOID, INT4_TYPE_OID, NUMERIC_TYPE_OID, PG_CHECKPOINT_OID,
-    PG_EXECUTE_SERVER_PROGRAM_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID,
+    ANYARRAYOID, ANYELEMENTOID, ANYOID, CONSTRAINT_FOREIGN, INT4_TYPE_OID, NUMERIC_TYPE_OID,
+    PG_CHECKPOINT_OID, PG_EXECUTE_SERVER_PROGRAM_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID,
     PG_WRITE_SERVER_FILES_OID, PgProcRow, TEXT_TYPE_OID,
 };
 use crate::include::nodes::execnodes::ScalarType;
@@ -1401,6 +1401,7 @@ struct SavepointState {
     prior_catalog_invalidation_len: usize,
     temp_effect_len: usize,
     sequence_effect_len: usize,
+    deferred_foreign_key_snapshot: DeferredConstraintSnapshot,
     guc_effective_state: GucState,
     guc_commit_state: GucState,
 }
@@ -2123,6 +2124,21 @@ fn parse_plpgsql_extra_checks(value: &str) -> Result<String, ExecError> {
         Ok("none".to_string())
     } else {
         Ok(checks.join(","))
+    }
+}
+
+fn relation_name_for_error(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+fn pending_trigger_events_error(relation_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "cannot ALTER TABLE \"{relation_name}\" because it has pending trigger events"
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "55006",
     }
 }
 
@@ -4131,6 +4147,54 @@ impl Session {
                 &txn.deferred_foreign_keys,
             )
         }
+    }
+
+    fn reject_drop_constraint_with_pending_trigger_events(
+        &self,
+        db: &Database,
+        drop_stmt: &crate::backend::parser::AlterTableDropConstraintStatement,
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<(), ExecError> {
+        let Some(txn) = self.active_txn.as_ref() else {
+            return Ok(());
+        };
+        let catalog = self.catalog_lookup_for_command(db, xid, cid);
+        let Some(relation) = catalog.lookup_any_relation(&drop_stmt.table_name) else {
+            return Ok(());
+        };
+        let Some(row) = catalog
+            .constraint_rows_for_relation(relation.relation_oid)
+            .into_iter()
+            .find(|row| row.conname.eq_ignore_ascii_case(&drop_stmt.constraint_name))
+        else {
+            return Ok(());
+        };
+        if row.contype != CONSTRAINT_FOREIGN {
+            return Ok(());
+        }
+
+        if txn
+            .deferred_foreign_keys
+            .pending_foreign_key_checks()
+            .iter()
+            .any(|check| check.constraint_oid == row.oid)
+        {
+            return Err(pending_trigger_events_error(relation_name_for_error(
+                &drop_stmt.table_name,
+            )));
+        }
+
+        if let Some(check) = txn
+            .deferred_foreign_keys
+            .pending_parent_foreign_key_checks()
+            .into_iter()
+            .find(|check| check.constraint_oid == row.oid)
+        {
+            return Err(pending_trigger_events_error(&check.relation_name));
+        }
+
+        Ok(())
     }
 
     fn finalize_taken_transaction(
@@ -6617,6 +6681,7 @@ impl Session {
                     prior_catalog_invalidation_len: txn.prior_cmd_catalog_invalidations.len(),
                     temp_effect_len: txn.temp_effects.len(),
                     sequence_effect_len: txn.sequence_effects.len(),
+                    deferred_foreign_key_snapshot: txn.deferred_foreign_keys.snapshot(),
                     guc_effective_state,
                     guc_commit_state: txn.guc_commit_state.clone(),
                 });
@@ -6713,6 +6778,8 @@ impl Session {
                     txn.current_cmd_catalog_invalidations.clear();
                     txn.temp_effects.truncate(savepoint.temp_effect_len);
                     txn.sequence_effects.truncate(savepoint.sequence_effect_len);
+                    txn.deferred_foreign_keys
+                        .restore(savepoint.deferred_foreign_key_snapshot.clone());
                     let repair_invalidation =
                         Database::catalog_invalidation_from_effect(&repair_effect);
                     if !repair_invalidation.is_empty() {
@@ -8691,6 +8758,9 @@ impl Session {
                             ))
                         })?;
                     self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                    self.reject_drop_constraint_with_pending_trigger_events(
+                        db, alter_stmt, xid, cid,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_drop_constraint_stmt_in_transaction_with_search_path(
