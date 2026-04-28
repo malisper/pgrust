@@ -2985,10 +2985,15 @@ pub(crate) fn eval_pg_describe_object(
                 return Ok(Value::Null);
             };
             let objsubid = i32::try_from(objsubid).map_err(|_| ExecError::OidOutOfRange)?;
-            if objsubid != 0 {
-                return Ok(Value::Null);
-            }
             let description = match class_row.relname.as_str() {
+                "pg_class" if objsubid > 0 => catalog.class_row_by_oid(objid).and_then(|row| {
+                    let attr = catalog
+                        .attribute_rows_for_relation(objid)
+                        .into_iter()
+                        .find(|attr| i32::from(attr.attnum) == objsubid)?;
+                    Some(format!("column {} of table {}", attr.attname, row.relname))
+                }),
+                _ if objsubid != 0 => None,
                 "pg_namespace" => catalog
                     .namespace_row_by_oid(objid)
                     .map(|row| format!("schema {}", row.nspname)),
@@ -3018,6 +3023,14 @@ pub(crate) fn eval_pg_describe_object(
                 "pg_event_trigger" => catalog
                     .event_trigger_row_by_oid(objid)
                     .map(|row| format!("event trigger {}", quote_identifier(&row.evtname))),
+                "pg_rewrite" => catalog
+                    .rewrite_rows()
+                    .into_iter()
+                    .find(|row| row.oid == objid)
+                    .and_then(|row| {
+                        let class = catalog.class_row_by_oid(row.ev_class)?;
+                        Some(format!("rule {} on view {}", row.rulename, class.relname))
+                    }),
                 "pg_statistic_ext" => catalog.statistic_ext_row_by_oid(objid).and_then(|row| {
                     let namespace = catalog.namespace_row_by_oid(row.stxnamespace)?;
                     Some(format!(
@@ -9390,6 +9403,7 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::Power
         | BuiltinScalarFunction::Exp
         | BuiltinScalarFunction::Ln
+        | BuiltinScalarFunction::Sin
         | BuiltinScalarFunction::Sinh
         | BuiltinScalarFunction::Cosh
         | BuiltinScalarFunction::Tanh
@@ -11431,6 +11445,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::Power => eval_power_function(&values),
         BuiltinScalarFunction::Exp => eval_exp_function(&values),
         BuiltinScalarFunction::Ln => eval_ln_function(&values),
+        BuiltinScalarFunction::Sin => eval_unary_float_function("sin", &values, |v| Ok(v.sin())),
         BuiltinScalarFunction::Sinh => eval_unary_float_function("sinh", &values, |v| Ok(v.sinh())),
         BuiltinScalarFunction::Cosh => eval_unary_float_function("cosh", &values, |v| Ok(v.cosh())),
         BuiltinScalarFunction::Tanh => eval_unary_float_function("tanh", &values, |v| Ok(v.tanh())),

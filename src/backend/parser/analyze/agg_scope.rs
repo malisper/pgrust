@@ -1186,6 +1186,7 @@ fn analyze_expr_internal(
                 )?);
             }
         }
+        SqlExpr::ParamRef(_) => {}
         SqlExpr::JsonQueryFunction(func) => {
             for child in func.child_exprs() {
                 info.merge(analyze_expr_internal(

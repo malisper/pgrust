@@ -523,15 +523,26 @@ pub(crate) fn execute_bound_insert_with_rules(
     let result = (|| {
         let rules = load_prepared_rules(stmt.relation_oid, RuleEvent::Insert, &stmt.desc, catalog)?;
         let rows = materialize_insert_rows(&stmt, catalog, ctx)?;
+        // :HACK: PostgreSQL's rule rewriter duplicates the original INSERT
+        // expressions into DO ALSO rule actions. Until pgrust stores and
+        // executes rewritten query trees, re-evaluate the INSERT source for
+        // table DO ALSO rules so volatile defaults such as serial nextval()
+        // behave like the duplicated rule expansion.
+        let rule_new_rows =
+            if matches!(stmt.relkind, 'r' | 'p') && rules.iter().any(|rule| !rule.is_instead) {
+                materialize_insert_rows(&stmt, catalog, ctx)?
+            } else {
+                rows.clone()
+            };
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
         let null_old = vec![Value::Null; stmt.desc.columns.len()];
 
-        for row in rows {
+        for (row, rule_new_row) in rows.into_iter().zip(rule_new_rows.into_iter()) {
             let outcome = execute_matching_rules(
                 &rules,
                 &null_old,
-                &row,
+                &rule_new_row,
                 catalog,
                 ctx,
                 xid,

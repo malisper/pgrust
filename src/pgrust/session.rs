@@ -3120,6 +3120,7 @@ impl Session {
             subplans: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: Arc::clone(&self.plpgsql_function_cache),
             pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),

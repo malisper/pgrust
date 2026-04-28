@@ -380,6 +380,7 @@ fn ddl_executor_context(
         pending_table_locks: Vec::new(),
         catalog: Some(crate::backend::executor::executor_catalog(catalog)),
         scalar_function_cache: std::collections::HashMap::new(),
+        srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: db.plpgsql_function_cache(client_id),
         pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),

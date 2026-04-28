@@ -3292,6 +3292,47 @@ fn bind_insert_assignment_expr(
     bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, None, local_ctes)
 }
 
+fn bind_insert_values_whole_row_star_rows(
+    rows: &[Vec<SqlExpr>],
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+) -> Result<Option<Vec<Vec<Expr>>>, ParseError> {
+    let mut relation_names = Vec::with_capacity(rows.len());
+    for row in rows {
+        let [expr] = row.as_slice() else {
+            return Ok(None);
+        };
+        let Some(name) = whole_row_star_relation_name(expr) else {
+            return Ok(None);
+        };
+        relation_names.push(name);
+    }
+
+    relation_names
+        .into_iter()
+        .map(|name| {
+            resolve_relation_row_expr_with_outer(scope, outer_scopes, name)
+                .map(|fields| fields.into_iter().map(|(_, expr)| expr).collect())
+                .ok_or_else(|| ParseError::UnknownColumn(format!("{name}.*")))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn whole_row_star_relation_name(expr: &SqlExpr) -> Option<&str> {
+    match expr {
+        SqlExpr::Column(name) => name.strip_suffix(".*"),
+        SqlExpr::FieldSelect { expr, field } if field == "*" => {
+            if let SqlExpr::Column(name) = expr.as_ref() {
+                Some(name.as_str())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn ensure_generated_assignment_allowed(
     desc: &RelationDesc,
     target: &BoundAssignmentTarget,
@@ -3602,71 +3643,98 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
 
     let source = match &stmt.source {
         InsertSource::Values(rows) => {
-            let target_columns = if let Some(columns) = &stmt.columns {
-                columns
-                    .iter()
-                    .map(|column| {
-                        bind_assignment_target(column, &target_scope, catalog, &visible_ctes)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
+            if stmt.columns.is_none()
+                && let Some(bound_rows) =
+                    bind_insert_values_whole_row_star_rows(rows, &expr_scope, outer_scopes)?
+            {
+                let target_columns = visible_assignment_targets(&entry.desc);
+                for row in &bound_rows {
+                    if target_columns.len() != row.len() {
+                        return Err(ParseError::InvalidInsertTargetCount {
+                            expected: target_columns.len(),
+                            actual: row.len(),
+                        });
+                    }
+                }
+                let source = if bound_rows.iter().flatten().any(expr_contains_set_returning) {
+                    BoundInsertSource::ProjectSetValues(bound_rows)
+                } else {
+                    BoundInsertSource::Values(bound_rows)
+                };
+                (target_columns, source)
             } else {
-                let visible_targets = visible_assignment_targets(&entry.desc);
-                let width = rows.first().map(Vec::len).unwrap_or(0);
-                if width > visible_targets.len() {
-                    return Err(ParseError::InvalidInsertTargetCount {
-                        expected: visible_targets.len(),
-                        actual: width,
-                    });
-                }
-                visible_targets.into_iter().take(width).collect()
-            };
-            for row in rows {
-                if target_columns.len() != row.len() {
-                    return Err(ParseError::InvalidInsertTargetCount {
-                        expected: target_columns.len(),
-                        actual: row.len(),
-                    });
-                }
-            }
-            let bound_rows = rows
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .zip(target_columns.iter())
-                        .map(|(expr, target)| {
-                            ensure_generated_assignment_allowed(&entry.desc, target, Some(expr))?;
-                            if matches!(expr, SqlExpr::Default) {
-                                reject_default_indirection_assignment(target)?;
-                                return Ok(column_defaults[target.column_index].clone());
-                            }
-                            match normalize_identity_insert_expr(
-                                &entry.desc,
-                                target,
-                                expr,
-                                stmt.overriding,
-                            )? {
-                                NormalizedInsertExpr::Default => {
-                                    Ok(column_defaults[target.column_index].clone())
-                                }
-                                NormalizedInsertExpr::Expr(expr) => bind_insert_assignment_expr(
-                                    expr,
-                                    target,
-                                    &expr_scope,
-                                    catalog,
-                                    outer_scopes,
-                                    &visible_ctes,
-                                ),
-                            }
+                let target_columns = if let Some(columns) = &stmt.columns {
+                    columns
+                        .iter()
+                        .map(|column| {
+                            bind_assignment_target(column, &target_scope, catalog, &visible_ctes)
                         })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let source = if bound_rows.iter().flatten().any(expr_contains_set_returning) {
-                BoundInsertSource::ProjectSetValues(bound_rows)
-            } else {
-                BoundInsertSource::Values(bound_rows)
-            };
-            (target_columns, source)
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    let visible_targets = visible_assignment_targets(&entry.desc);
+                    let width = rows.first().map(Vec::len).unwrap_or(0);
+                    if width > visible_targets.len() {
+                        return Err(ParseError::InvalidInsertTargetCount {
+                            expected: visible_targets.len(),
+                            actual: width,
+                        });
+                    }
+                    visible_targets.into_iter().take(width).collect()
+                };
+                for row in rows {
+                    if target_columns.len() != row.len() {
+                        return Err(ParseError::InvalidInsertTargetCount {
+                            expected: target_columns.len(),
+                            actual: row.len(),
+                        });
+                    }
+                }
+                let bound_rows = rows
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .zip(target_columns.iter())
+                            .map(|(expr, target)| {
+                                ensure_generated_assignment_allowed(
+                                    &entry.desc,
+                                    target,
+                                    Some(expr),
+                                )?;
+                                if matches!(expr, SqlExpr::Default) {
+                                    reject_default_indirection_assignment(target)?;
+                                    return Ok(column_defaults[target.column_index].clone());
+                                }
+                                match normalize_identity_insert_expr(
+                                    &entry.desc,
+                                    target,
+                                    expr,
+                                    stmt.overriding,
+                                )? {
+                                    NormalizedInsertExpr::Default => {
+                                        Ok(column_defaults[target.column_index].clone())
+                                    }
+                                    NormalizedInsertExpr::Expr(expr) => {
+                                        bind_insert_assignment_expr(
+                                            expr,
+                                            target,
+                                            &expr_scope,
+                                            catalog,
+                                            outer_scopes,
+                                            &visible_ctes,
+                                        )
+                                    }
+                                }
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let source = if bound_rows.iter().flatten().any(expr_contains_set_returning) {
+                    BoundInsertSource::ProjectSetValues(bound_rows)
+                } else {
+                    BoundInsertSource::Values(bound_rows)
+                };
+                (target_columns, source)
+            }
         }
         InsertSource::DefaultValues => (
             visible_assignment_targets(&entry.desc),

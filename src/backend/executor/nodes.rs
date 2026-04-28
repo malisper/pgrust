@@ -46,7 +46,7 @@ use crate::include::catalog::{
     TIMESTAMPTZ_TYPE_OID,
 };
 use crate::include::nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimestampTzADT};
-use crate::include::nodes::datum::Value;
+use crate::include::nodes::datum::{ArrayValue, Value};
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, BitmapOrState,
     BitmapQualState, CteScanState, FilterState, FunctionScanRows, FunctionScanState, GatherState,
@@ -3695,7 +3695,9 @@ fn render_explain_expr_inner_with_qualifier(
             | crate::include::nodes::primnodes::OpExprKind::BitXor
             | crate::include::nodes::primnodes::OpExprKind::Shl
             | crate::include::nodes::primnodes::OpExprKind::Shr
-            | crate::include::nodes::primnodes::OpExprKind::Concat => {
+            | crate::include::nodes::primnodes::OpExprKind::Concat
+            | crate::include::nodes::primnodes::OpExprKind::JsonGet
+            | crate::include::nodes::primnodes::OpExprKind::JsonGetText => {
                 let [left, right] = op.args.as_slice() else {
                     return format!("{expr:?}");
                 };
@@ -3711,6 +3713,8 @@ fn render_explain_expr_inner_with_qualifier(
                     crate::include::nodes::primnodes::OpExprKind::Shl => "<<",
                     crate::include::nodes::primnodes::OpExprKind::Shr => ">>",
                     crate::include::nodes::primnodes::OpExprKind::Concat => "||",
+                    crate::include::nodes::primnodes::OpExprKind::JsonGet => "->",
+                    crate::include::nodes::primnodes::OpExprKind::JsonGetText => "->>",
                     _ => unreachable!(),
                 };
                 format!(
@@ -4112,6 +4116,12 @@ fn render_explain_func_expr(
     ) {
         return render_explain_timezone_function(func, qualifier, column_names);
     }
+    if matches!(
+        func.implementation,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::JsonbPathQueryArray)
+    ) {
+        return render_explain_jsonb_path_query_array_function(func, qualifier, column_names);
+    }
     let name = match func.implementation {
         ScalarFunctionImpl::Builtin(builtin) => builtin_scalar_function_name(builtin),
         ScalarFunctionImpl::UserDefined { proc_oid } => func
@@ -4161,6 +4171,49 @@ fn render_explain_geometry_subscript_func(
         }
         _ => format!("{rendered_arg}[{index}]"),
     })
+}
+
+fn render_explain_jsonb_path_query_array_function(
+    func: &FuncExpr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    let mut args = func
+        .args
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            if index == 1 {
+                render_explain_jsonpath_arg(arg)
+            } else {
+                let rendered =
+                    render_explain_expr_inner_with_qualifier(arg, qualifier, column_names);
+                if index == 0 && matches!(arg, Expr::Op(_)) {
+                    format!("({rendered})")
+                } else {
+                    rendered
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    if args.len() == 2 {
+        args.push("'{}'::jsonb".into());
+        args.push("false".into());
+    }
+    format!("jsonb_path_query_array({})", args.join(", "))
+}
+
+fn render_explain_jsonpath_arg(expr: &Expr) -> String {
+    match expr {
+        Expr::Const(value) if value.as_text().is_some() => {
+            let path = value.as_text().unwrap_or_default();
+            format!("'{}'::jsonpath", path.replace('\'', "''"))
+        }
+        Expr::Const(Value::JsonPath(path)) => {
+            format!("'{}'::jsonpath", path.to_string().replace('\'', "''"))
+        }
+        other => render_explain_expr_inner(other, &[]),
+    }
 }
 
 fn render_explain_scalar_array_op(
@@ -4769,6 +4822,7 @@ fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
         BuiltinScalarFunction::JsonBuildObject => "json_build_object".into(),
         BuiltinScalarFunction::JsonbBuildArray => "jsonb_build_array".into(),
         BuiltinScalarFunction::JsonbBuildObject => "jsonb_build_object".into(),
+        BuiltinScalarFunction::JsonbPathQueryArray => "jsonb_path_query_array".into(),
         BuiltinScalarFunction::RowToJson => "row_to_json".into(),
         BuiltinScalarFunction::ArrayToJson => "array_to_json".into(),
         BuiltinScalarFunction::ToJson => "to_json".into(),
@@ -4854,6 +4908,8 @@ fn infix_operator_text(
         crate::include::nodes::primnodes::OpExprKind::ArrayOverlap => Some("&&"),
         crate::include::nodes::primnodes::OpExprKind::ArrayContains => Some("@>"),
         crate::include::nodes::primnodes::OpExprKind::ArrayContained => Some("<@"),
+        crate::include::nodes::primnodes::OpExprKind::JsonGet => Some("->"),
+        crate::include::nodes::primnodes::OpExprKind::JsonGetText => Some("->>"),
         _ => None,
     }
 }
@@ -5464,17 +5520,65 @@ fn render_explain_const(value: &Value) -> String {
             ),
             None => render_explain_literal(value),
         },
-        Value::PgArray(array) => match value.sql_type_hint() {
-            Some(sql_type) => format!(
-                "'{}'::{}",
-                crate::backend::executor::format_array_value_text(array),
-                render_explain_sql_type_name(sql_type)
-            ),
-            None => format!(
-                "'{}'",
+        Value::PgArray(array) => {
+            let rendered = if array
+                .elements
+                .iter()
+                .any(|item| matches!(item, Value::Jsonb(_)))
+            {
+                render_explain_array_items(&array.elements)
+            } else {
                 crate::backend::executor::format_array_value_text(array)
-            ),
-        },
+            };
+            match value.sql_type_hint() {
+                Some(sql_type) => {
+                    format!("'{rendered}'::{}", render_explain_sql_type_name(sql_type))
+                }
+                None => format!("'{rendered}'"),
+            }
+        }
+        Value::Array(items) => {
+            let rendered = if items.iter().any(|item| matches!(item, Value::Jsonb(_))) {
+                render_explain_array_items(items)
+            } else {
+                let array = ArrayValue::from_1d(items.clone());
+                crate::backend::executor::format_array_value_text(&array)
+            };
+            let escaped = rendered.replace('\'', "''");
+            let array_type = items
+                .iter()
+                .find_map(Value::sql_type_hint)
+                .map(SqlType::array_of);
+            match array_type {
+                Some(sql_type) => {
+                    format!("'{escaped}'::{}", render_explain_sql_type_name(sql_type))
+                }
+                None => format!("'{escaped}'"),
+            }
+        }
+        Value::Jsonb(bytes) => {
+            let rendered = crate::backend::executor::jsonb::render_jsonb_bytes(bytes)
+                .unwrap_or_else(|_| "null".into())
+                .replace('\'', "''");
+            format!("'{rendered}'::jsonb")
+        }
+        Value::JsonPath(path) => {
+            let rendered = path.to_string().replace('\'', "''");
+            format!("'{rendered}'::jsonpath")
+        }
+        Value::Record(record) => {
+            let rendered =
+                crate::backend::executor::value_io::format_record_text(record).replace('\'', "''");
+            let record_type = record.sql_type();
+            if record_type.type_oid != crate::include::catalog::RECORD_TYPE_OID {
+                format!(
+                    "'{rendered}'::{}",
+                    render_explain_sql_type_name(record_type)
+                )
+            } else {
+                format!("'{rendered}'::record")
+            }
+        }
         Value::TsQuery(_) | Value::TsVector(_) => match value.sql_type_hint() {
             Some(sql_type) => format!(
                 "{}::{}",
@@ -5498,6 +5602,40 @@ fn render_explain_const(value: &Value) -> String {
         Value::Null => "NULL".to_string(),
         other => format!("{other:?}"),
     }
+}
+
+fn render_explain_array_items(items: &[Value]) -> String {
+    let mut out = String::from("{");
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        match item {
+            Value::Null => out.push_str("NULL"),
+            Value::Jsonb(bytes) => {
+                let rendered = crate::backend::executor::jsonb::render_jsonb_bytes(bytes)
+                    .unwrap_or_else(|_| "null".into());
+                push_explain_array_quoted_element(&mut out, &rendered);
+            }
+            other => out.push_str(&render_explain_const(other)),
+        }
+    }
+    out.push('}');
+    out
+}
+
+fn push_explain_array_quoted_element(out: &mut String, text: &str) {
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
 }
 
 fn render_explain_projection_const(value: &Value) -> String {
@@ -5627,6 +5765,10 @@ pub(crate) fn render_explain_literal(value: &Value) -> String {
             let rendered = crate::backend::executor::value_io::format_array_value_text(array);
             format!("'{}'", rendered.replace('\'', "''"))
         }
+        Value::Record(record) => {
+            let rendered = crate::backend::executor::value_io::format_record_text(record);
+            format!("'{}'", rendered.replace('\'', "''"))
+        }
         Value::Date(date) => {
             format!("'{}'", format_date_text(*date, &DateTimeConfig::default()))
         }
@@ -5713,6 +5855,14 @@ fn render_explain_array_literal_value(value: &Value, element_type: SqlType) -> S
         }
         Value::Float64(v) => format_float8_text(*v, FloatFormatOptions::default()),
         Value::Numeric(v) => v.render(),
+        Value::Jsonb(bytes) => {
+            let rendered = crate::backend::executor::jsonb::render_jsonb_bytes(bytes)
+                .unwrap_or_else(|_| "null".into())
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\'', "''");
+            format!("\"{rendered}\"")
+        }
         Value::Null => "NULL".into(),
         _ => render_explain_literal(&value),
     }

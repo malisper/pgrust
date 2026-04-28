@@ -151,6 +151,7 @@ fn reject_restricted_views_in_from_item(
         }
         FromItem::Values { .. }
         | FromItem::FunctionCall { .. }
+        | FromItem::RowsFrom { .. }
         | FromItem::JsonTable(_)
         | FromItem::XmlTable(_) => Ok(()),
     }
@@ -1607,6 +1608,7 @@ impl Database {
                     pending_table_locks: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1938,6 +1940,7 @@ impl Database {
                         visible_catalog.clone(),
                     )),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -2067,6 +2070,7 @@ impl Database {
                     pending_table_locks: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -2307,6 +2311,7 @@ impl Database {
                     pending_table_locks: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -2424,6 +2429,7 @@ impl Database {
                     pending_table_locks: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -2918,6 +2924,7 @@ impl Database {
                     pending_table_locks: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -3152,6 +3159,7 @@ impl Database {
             pending_table_locks: Vec::new(),
             catalog: visible_catalog_snapshot,
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: self.plpgsql_function_cache(client_id),
             pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),

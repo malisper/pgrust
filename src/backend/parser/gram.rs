@@ -13568,7 +13568,7 @@ fn parse_create_function_arg_with_base(
         });
     }
 
-    let (mode, rest) = if keyword_at_start(trimmed, "inout") {
+    let (mut mode, rest) = if keyword_at_start(trimmed, "inout") {
         (FunctionArgMode::InOut, consume_keyword(trimmed, "inout"))
     } else if keyword_at_start(trimmed, "out") {
         (FunctionArgMode::Out, consume_keyword(trimmed, "out"))
@@ -13601,6 +13601,18 @@ fn parse_create_function_arg_with_base(
         _ => (None, rest),
     };
     let mut type_sql = type_sql;
+    if name.is_some() {
+        if keyword_at_start(type_sql, "inout") {
+            mode = FunctionArgMode::InOut;
+            type_sql = consume_keyword(type_sql, "inout").trim_start();
+        } else if keyword_at_start(type_sql, "out") {
+            mode = FunctionArgMode::Out;
+            type_sql = consume_keyword(type_sql, "out").trim_start();
+        } else if keyword_at_start(type_sql, "in") {
+            mode = FunctionArgMode::In;
+            type_sql = consume_keyword(type_sql, "in").trim_start();
+        }
+    }
     if keyword_at_start(type_sql, "variadic") {
         variadic = true;
         type_sql = consume_keyword(type_sql, "variadic").trim_start();
@@ -17931,6 +17943,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     matches!(
                         part.as_rule(),
                         Rule::values_from_item
+                            | Rule::rows_from_item
                             | Rule::json_table_from_item
                             | Rule::xml_table_from_item
                             | Rule::srf_from_item
@@ -18014,6 +18027,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     | Rule::table_from_item
                     | Rule::lateral_from_item
                     | Rule::values_from_item
+                    | Rule::rows_from_item
                     | Rule::json_table_from_item
                     | Rule::xml_table_from_item
                     | Rule::parenthesized_table_from_item
@@ -18077,6 +18091,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 .map(build_values_row)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
+        Rule::rows_from_item => build_rows_from_item(pair),
         Rule::json_table_from_item => build_json_table_from_item(pair),
         Rule::xml_table_from_item => build_xml_table_from_item(pair),
         Rule::srf_from_item => {
@@ -18142,6 +18157,53 @@ fn build_table_sample_clause(pair: Pair<'_, Rule>) -> Result<RawTableSampleClaus
         method: method.ok_or(ParseError::UnexpectedEof)?,
         args,
         repeatable,
+    })
+}
+
+fn build_rows_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
+    let mut functions = Vec::new();
+    let mut with_ordinality = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::rows_from_function => functions.push(build_rows_from_function(part)?),
+            Rule::srf_with_ordinality => with_ordinality = true,
+            _ => {}
+        }
+    }
+    Ok(FromItem::RowsFrom {
+        functions,
+        with_ordinality,
+    })
+}
+
+fn build_rows_from_function(pair: Pair<'_, Rule>) -> Result<RowsFromFunction, ParseError> {
+    let mut name = None;
+    let mut parsed_args = ParsedFunctionArgs::default();
+    let mut column_definitions = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::qualified_srf_name if name.is_none() => {
+                name = Some(build_qualified_srf_name(part)?);
+            }
+            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::function_arg_list => {
+                parsed_args = build_function_arg_list(part)?;
+            }
+            Rule::rows_from_column_definitions => {
+                column_definitions = part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::alias_column_def)
+                    .map(build_alias_column_def)
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            _ => {}
+        }
+    }
+    Ok(RowsFromFunction {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        args: parsed_args.args,
+        func_variadic: parsed_args.func_variadic,
+        column_definitions,
     })
 }
 
@@ -24181,7 +24243,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 "macaddr8" => SqlType::new(SqlTypeKind::MacAddr8),
                 "money" => SqlType::new(SqlTypeKind::Money),
                 "float4" | "real" => SqlType::new(SqlTypeKind::Float4),
-                "float8" => SqlType::new(SqlTypeKind::Float8),
+                "float" | "float8" => SqlType::new(SqlTypeKind::Float8),
                 "timestamp" => SqlType::new(SqlTypeKind::Timestamp),
                 "json" => SqlType::new(SqlTypeKind::Json),
                 "jsonb" => SqlType::new(SqlTypeKind::Jsonb),
@@ -24231,7 +24293,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
         Rule::kw_macaddr8 => RawTypeName::Builtin(SqlType::new(SqlTypeKind::MacAddr8)),
         Rule::kw_money => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Money)),
         Rule::kw_float4 | Rule::kw_real => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float4)),
-        Rule::kw_float8 | Rule::double_precision_type => {
+        Rule::kw_float | Rule::kw_float8 | Rule::double_precision_type => {
             RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float8))
         }
         Rule::numeric_type => {
@@ -25177,6 +25239,12 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             SqlExpr::Const(Value::Bit(parse_bit_string_literal(pair.as_str())?)),
         ),
         Rule::identifier => Ok(SqlExpr::Column(build_identifier(pair))),
+        Rule::parameter_ref => Ok(SqlExpr::ParamRef(
+            pair.as_str()
+                .trim_start_matches('$')
+                .parse::<usize>()
+                .map_err(|_| ParseError::InvalidInteger(pair.as_str().to_string()))?,
+        )),
         Rule::kw_default => Ok(SqlExpr::Default),
         Rule::numeric_literal => Ok(SqlExpr::NumericLiteral(pair.as_str().to_string())),
         Rule::hex_integer => Ok(SqlExpr::IntegerLiteral(parse_prefixed_integer_literal(
