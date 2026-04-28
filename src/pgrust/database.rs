@@ -1221,7 +1221,7 @@ impl Database {
         self.domains
             .read()
             .values()
-            .find(|domain| domain.oid == domain_oid)
+            .find(|domain| domain.oid == domain_oid || domain.array_oid == domain_oid)
             .map(|domain| crate::backend::parser::DomainLookup {
                 oid: domain.oid,
                 name: domain.name.clone(),
@@ -1254,19 +1254,17 @@ impl Database {
         self.domains
             .read()
             .values()
-            .map(|domain| {
-                (
-                    domain.oid,
-                    crate::backend::parser::DomainLookup {
-                        oid: domain.oid,
-                        name: domain.name.clone(),
-                        sql_type: domain.sql_type,
-                        default: domain.default.clone(),
-                        check: domain.check.clone(),
-                        not_null: domain.not_null,
-                        constraints: domain_constraint_lookup_rows(domain),
-                    },
-                )
+            .flat_map(|domain| {
+                let lookup = crate::backend::parser::DomainLookup {
+                    oid: domain.oid,
+                    name: domain.name.clone(),
+                    sql_type: domain.sql_type,
+                    default: domain.default.clone(),
+                    check: domain.check.clone(),
+                    not_null: domain.not_null,
+                    constraints: domain_constraint_lookup_rows(domain),
+                };
+                [(domain.oid, lookup.clone()), (domain.array_oid, lookup)]
             })
             .collect()
     }

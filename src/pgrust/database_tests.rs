@@ -47063,6 +47063,62 @@ fn create_plpgsql_function_assigns_composite_array_field_subscript() {
 }
 
 #[test]
+fn plpgsql_orderedarray_domain_cast_enforces_array_subscript_check() {
+    fn assert_orderedarray_violation(err: ExecError) {
+        let err = match err {
+            ExecError::WithContext { source, .. } => *source,
+            other => other,
+        };
+        assert!(matches!(
+            err,
+            ExecError::DetailedError {
+                message,
+                sqlstate: "23514",
+                ..
+            } if message == "value for domain orderedarray violates check constraint \"sorted\""
+        ));
+    }
+
+    let dir = temp_dir("plpgsql_orderedarray_domain_cast");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create domain orderedarray as int[2] constraint sorted check (value[1] < value[2])",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ('{1,2}'::orderedarray)[1], ('{1,2}'::orderedarray)[2]"
+        ),
+        vec![vec![Value::Int32(1), Value::Int32(2)]]
+    );
+    assert_orderedarray_violation(db.execute(1, "select '{2,1}'::orderedarray").unwrap_err());
+
+    db.execute(
+        1,
+        "create function testoa(x1 int, x2 int, x3 int) returns orderedarray
+         language plpgsql as $$
+         declare res orderedarray;
+         begin
+           res := array[x1, x2];
+           res[2] := x3;
+           return res;
+         end$$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select (testoa(1,2,3))[1], (testoa(1,2,3))[2]"),
+        vec![vec![Value::Int32(1), Value::Int32(3)]]
+    );
+    assert_orderedarray_violation(db.execute(1, "select testoa(2,1,3)").unwrap_err());
+    assert_orderedarray_violation(db.execute(1, "select testoa(1,2,1)").unwrap_err());
+}
+
+#[test]
 fn create_function_supports_void_returns_and_regprocedure_oid_lookup() {
     let dir = temp_dir("create_function_void_regprocedure");
     let db = Database::open(&dir, 64).unwrap();

@@ -7072,7 +7072,16 @@ fn bind_domain_constraint_expr(
     let Some(domain) = domain else {
         return expr;
     };
-    let check = domain
+    let has_enforced_constraint = domain.not_null
+        || domain.check.is_some()
+        || domain
+            .constraints
+            .iter()
+            .any(|constraint| constraint.enforced);
+    if !has_enforced_constraint {
+        return expr;
+    }
+    let upper_less_than_check = domain
         .constraints
         .iter()
         .filter(|constraint| {
@@ -7080,24 +7089,26 @@ fn bind_domain_constraint_expr(
         })
         .filter_map(|constraint| constraint.expr.as_deref())
         .find(|check| parse_domain_upper_less_than_check(check).is_some())
-        .or(domain.check.as_deref());
-    let Some(check) = check else {
-        return expr;
-    };
-    let Some(limit) = parse_domain_upper_less_than_check(check) else {
-        return expr;
-    };
-    Expr::func_with_impl(
-        0,
-        Some(target_type),
-        false,
-        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::PgRustDomainCheckUpperLessThan),
-        vec![
-            expr,
-            Expr::Const(Value::Text(domain.name.clone().into())),
-            Expr::Const(Value::Int32(limit)),
-        ],
-    )
+        .or_else(|| {
+            domain
+                .check
+                .as_deref()
+                .filter(|check| parse_domain_upper_less_than_check(check).is_some())
+        });
+    if let Some(limit) = upper_less_than_check.and_then(parse_domain_upper_less_than_check) {
+        return Expr::func_with_impl(
+            0,
+            Some(target_type),
+            false,
+            ScalarFunctionImpl::Builtin(BuiltinScalarFunction::PgRustDomainCheckUpperLessThan),
+            vec![
+                expr,
+                Expr::Const(Value::Text(domain.name.clone().into())),
+                Expr::Const(Value::Int32(limit)),
+            ],
+        );
+    }
+    Expr::Cast(Box::new(expr), target_type)
 }
 
 fn parse_domain_upper_less_than_check(check: &str) -> Option<i32> {
