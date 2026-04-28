@@ -1222,7 +1222,8 @@ pub fn default_opclass_for_am_and_type(
                 && row.opcintype == crate::include::catalog::ANYMULTIRANGEOID
         });
     }
-    let input_type = type_row_by_oid(db, client_id, txn_ctx, input_type_oid)?;
+    let search_path = db.effective_search_path(client_id, None);
+    let input_type = visible_type_row_by_oid(db, client_id, txn_ctx, &search_path, input_type_oid)?;
     if input_type.typtype == 'd'
         && input_type.typbasetype != 0
         && let Some(row) =

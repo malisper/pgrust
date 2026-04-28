@@ -904,14 +904,14 @@ fn quantified_similar_any_all_array_operators_work() {
     );
 }
 
-fn assert_stack_depth_limit_error(err: ExecError) {
-    fn root_error(err: &ExecError) -> &ExecError {
-        match err {
-            ExecError::WithContext { source, .. } => root_error(source),
-            other => other,
-        }
+fn root_error(err: &ExecError) -> &ExecError {
+    match err {
+        ExecError::WithContext { source, .. } => root_error(source),
+        other => other,
     }
+}
 
+fn assert_stack_depth_limit_error(err: ExecError) {
     match root_error(&err) {
         ExecError::DetailedError {
             message,
@@ -32901,22 +32901,28 @@ fn update_and_copy_from_enforce_check_and_not_null_constraints() {
         other => panic!("expected update not-null violation, got {other:?}"),
     }
 
-    match session.copy_from_rows(&db, "items", &[vec!["0".into(), "copy".into()]]) {
-        Err(ExecError::CheckViolation {
+    let err = session
+        .copy_from_rows(&db, "items", &[vec!["0".into(), "copy".into()]])
+        .unwrap_err();
+    match root_error(&err) {
+        ExecError::CheckViolation {
             relation,
             constraint,
             ..
-        }) if relation == "items" && constraint == "items_id_positive" => {}
+        } if relation == "items" && constraint == "items_id_positive" => {}
         other => panic!("expected copy check violation, got {other:?}"),
     }
 
-    match session.copy_from_rows(&db, "items", &[vec!["2".into(), "\\N".into()]]) {
-        Err(ExecError::NotNullViolation {
+    let err = session
+        .copy_from_rows(&db, "items", &[vec!["2".into(), "\\N".into()]])
+        .unwrap_err();
+    match root_error(&err) {
+        ExecError::NotNullViolation {
             relation,
             column,
             constraint,
             ..
-        }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
+        } if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected copy not-null violation, got {other:?}"),
     }
 
@@ -32999,8 +33005,11 @@ fn prepared_insert_and_copy_from_enforce_foreign_keys() {
     .unwrap();
     db.execute(1, "insert into parents values (1)").unwrap();
 
-    match session.copy_from_rows(&db, "children", &[vec!["1".into(), "2".into()]]) {
-        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+    let err = session
+        .copy_from_rows(&db, "children", &[vec!["1".into(), "2".into()]])
+        .unwrap_err();
+    match root_error(&err) {
+        ExecError::ForeignKeyViolation { constraint, .. } => {
             assert_eq!(constraint, "children_parent_id_fkey");
         }
         other => panic!("expected COPY foreign-key violation, got {other:?}"),
@@ -55257,8 +55266,11 @@ fn copy_uses_domain_input_semantics() {
     let copy = crate::pgrust::session::parse_copy_command("copy copy_domain(v) from stdin")
         .unwrap()
         .unwrap();
-    match session.copy_from_text(&db, &copy, "notsoshorttext\n\\.") {
-        Err(ExecError::StringDataRightTruncation { ty }) => {
+    let err = session
+        .copy_from_text(&db, &copy, "notsoshorttext\n\\.")
+        .unwrap_err();
+    match root_error(&err) {
+        ExecError::StringDataRightTruncation { ty } => {
             assert_eq!(ty, "character varying(5)");
         }
         other => panic!("expected varchar truncation error, got {other:?}"),

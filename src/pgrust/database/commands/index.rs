@@ -622,6 +622,7 @@ fn index_type_oid_for_sql_type(
             multirange_type_ref_for_sql_type(sql_type)
                 .map(|multirange_type| multirange_type.type_oid())
         })
+        .or_else(|| (!sql_type.is_array && sql_type.type_oid != 0).then_some(sql_type.type_oid))
         .or_else(|| {
             (matches!(
                 sql_type.element_type().kind,
@@ -701,6 +702,7 @@ fn catalog_type_oid(
             multirange_type_ref_for_sql_type(sql_type)
                 .map(|multirange_type| multirange_type.type_oid())
         })
+        .or_else(|| (!sql_type.is_array && sql_type.type_oid != 0).then_some(sql_type.type_oid))
         .or_else(|| {
             catalog
                 .type_rows()

@@ -1288,6 +1288,39 @@ fn evaluate_copy_column_default(
     )
 }
 
+fn copy_column_default_needs_validation(
+    desc: &RelationDesc,
+    column_index: usize,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    let column = &desc.columns[column_index];
+    if column.default_sequence_oid.is_some() {
+        return false;
+    }
+    column.default_expr.is_some()
+        || column.missing_default_value.is_some()
+        || catalog
+            .type_oid_for_sql_type(column.sql_type)
+            .and_then(|type_oid| catalog.type_default_sql(type_oid))
+            .is_some()
+}
+
+fn validate_copy_column_defaults(
+    desc: &RelationDesc,
+    column_defaults: &[Expr],
+    column_indexes: impl IntoIterator<Item = usize>,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for column_index in column_indexes {
+        if !copy_column_default_needs_validation(desc, column_index, catalog) {
+            continue;
+        }
+        let _ = evaluate_copy_column_default(desc, column_defaults, column_index, ctx)?;
+    }
+    Ok(())
+}
+
 impl ResolvedCopyWhereFilter {
     fn matches(&self, values: &[Value]) -> Result<bool, ExecError> {
         let Some(value) = values.get(self.column_index) else {
@@ -14152,16 +14185,13 @@ impl Session {
             return Ok(());
         }
         let column_defaults = bind_copy_column_defaults(&desc, &catalog)?;
-        for column_index in validation_default_indexes {
-            let column = &desc.columns[column_index];
-            if column.default_sequence_oid.is_some()
-                || column.default_expr.is_none() && column.missing_default_value.is_none()
-            {
-                continue;
-            }
-            let _ = evaluate_copy_column_default(&desc, &column_defaults, column_index, &mut ctx)?;
-        }
-        Ok(())
+        validate_copy_column_defaults(
+            &desc,
+            &column_defaults,
+            validation_default_indexes,
+            &catalog,
+            &mut ctx,
+        )
     }
 
     fn apply_copy_header(
@@ -14460,6 +14490,20 @@ impl Session {
                         .into_iter()
                         .filter(|column_index| !target_indexes.contains(column_index))
                         .collect::<Vec<_>>();
+                    if rows.is_empty() {
+                        let validation_default_indexes = if options.default_marker.is_some() {
+                            desc.visible_column_indexes()
+                        } else {
+                            omitted_default_indexes.clone()
+                        };
+                        validate_copy_column_defaults(
+                            &desc,
+                            &column_defaults,
+                            validation_default_indexes,
+                            &catalog,
+                            &mut ctx,
+                        )?;
+                    }
 
                     let mut skipped = 0usize;
                     let mut excluded = 0usize;
