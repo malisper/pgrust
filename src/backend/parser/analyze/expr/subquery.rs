@@ -118,6 +118,57 @@ fn bind_array_literal_elements_as_type(
     }
 }
 
+fn bind_array_left_quantified_list_expr(
+    bound_left: &TypedExpr,
+    elements: &[SqlExpr],
+    bound_elements: &[TypedExpr],
+    op: SubqueryComparisonOp,
+    is_all: bool,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    if !bound_left.sql_type.is_array {
+        return Ok(None);
+    }
+    let (op_text, op_kind, bool_kind) = match (op, is_all) {
+        (SubqueryComparisonOp::Eq, false) => (
+            "=",
+            OpExprKind::Eq,
+            crate::include::nodes::primnodes::BoolExprType::Or,
+        ),
+        (SubqueryComparisonOp::NotEq, true) => (
+            "<>",
+            OpExprKind::NotEq,
+            crate::include::nodes::primnodes::BoolExprType::And,
+        ),
+        _ => return Ok(None),
+    };
+    let mut arms = Vec::with_capacity(bound_elements.len());
+    for (element, bound_element) in elements.iter().zip(bound_elements) {
+        let element_type = coerce_unknown_string_literal_type(
+            element,
+            bound_element.sql_type,
+            bound_left.sql_type,
+        );
+        arms.push(bind_lowered_comparison_expr(
+            op_text,
+            op_kind,
+            bound_left.expr.clone(),
+            bound_left.sql_type,
+            bound_left.sql_type,
+            bound_element.expr.clone(),
+            bound_element.sql_type,
+            element_type,
+            None,
+            None,
+            catalog,
+        )?);
+    }
+    Ok(Some(match arms.as_slice() {
+        [single] => single.clone(),
+        _ => Expr::bool_expr(bool_kind, arms),
+    }))
+}
+
 fn bind_single_column_sublink(
     select: &SelectStatement,
     sublink_type: SubLinkType,
@@ -461,6 +512,18 @@ pub(super) fn bind_quantified_array_expr(
                     )
                 })
                 .collect::<Result<Vec<_>, ParseError>>()?;
+            if !regex_array_op
+                && let Some(expr) = bind_array_left_quantified_list_expr(
+                    &bound_left,
+                    elements,
+                    &bound_elements,
+                    op,
+                    is_all,
+                    catalog,
+                )?
+            {
+                return Ok(expr);
+            }
             let raw_array_element_type = elements
                 .iter()
                 .zip(bound_elements.iter())

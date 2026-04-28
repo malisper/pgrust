@@ -6904,6 +6904,16 @@ fn partition_bounds_accept_array_hash_enum_and_composite_keys() {
         session_query_rows(&mut session, &db, "select count(*) from hp_arr_1"),
         vec![vec![Value::Int64(1)]]
     );
+    let lines = explain_lines(
+        &db,
+        1,
+        "(costs off) select * from hp_arr where a in ('{4, 5}', '{1}')",
+    );
+    let plan = lines.join("\n");
+    assert!(plan.contains("a = '{4,5}'::integer[]"), "{plan}");
+    assert!(plan.contains("a = '{1}'::integer[]"), "{plan}");
+    assert!(!plan.contains("ANY"), "{plan}");
+    assert!(!plan.contains("(a)::integer"), "{plan}");
 
     session
         .execute(&db, "create type part_color as enum ('green', 'blue')")
