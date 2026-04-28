@@ -3323,92 +3323,8 @@ fn try_handle_pg_cursors_query(
     Ok(true)
 }
 
-// :HACK: These session-state views and utility statements live in the wire
-// connection today. Long-term, pg_prepared_statements/current_schemas and SQL
-// PREPARE should be modeled in normal catalog/executor paths.
-fn try_handle_prepare_statement(
-    stream: &mut impl Write,
-    state: &mut ConnectionState,
-    sql: &str,
-) -> io::Result<bool> {
-    let Some((name, prepared_sql)) = parse_sql_prepare_statement(sql) else {
-        return Ok(false);
-    };
-    state.prepared.insert(
-        name,
-        PreparedStatement {
-            sql: prepared_sql,
-            param_type_oids: Vec::new(),
-        },
-    );
-    send_command_complete(stream, "PREPARE")?;
-    Ok(true)
-}
-
-fn parse_sql_prepare_statement(sql: &str) -> Option<(String, String)> {
-    let trimmed = sql.trim();
-    let rest = strip_keyword_ci(trimmed, "prepare")?.trim_start();
-    let (name_token, after_name) = split_prepare_name_token(rest)?;
-    if name_token.is_empty() {
-        return None;
-    }
-    let name = unquote_identifier_token(name_token);
-    let lower_rest = after_name.to_ascii_lowercase();
-    let as_pos = lower_rest.find(" as ")?;
-    let prepared_sql = after_name[as_pos + 4..].trim().to_string();
-    if prepared_sql.is_empty() {
-        return None;
-    }
-    Some((name, prepared_sql))
-}
-
-fn split_prepare_name_token(rest: &str) -> Option<(&str, &str)> {
-    if rest.starts_with('"') {
-        let bytes = rest.as_bytes();
-        let mut index = 1;
-        while index < bytes.len() {
-            if bytes[index] == b'"' {
-                if bytes.get(index + 1) == Some(&b'"') {
-                    index += 2;
-                    continue;
-                }
-                return Some((&rest[..=index], &rest[index + 1..]));
-            }
-            index += 1;
-        }
-        return None;
-    }
-    let name_end = rest
-        .find(|ch: char| ch.is_ascii_whitespace() || ch == '(')
-        .unwrap_or(rest.len());
-    Some((&rest[..name_end], &rest[name_end..]))
-}
-
-fn strip_keyword_ci<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
-    let prefix = text.get(..keyword.len())?;
-    if !prefix.eq_ignore_ascii_case(keyword) {
-        return None;
-    }
-    let rest = text.get(keyword.len()..)?;
-    if rest
-        .chars()
-        .next()
-        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-    {
-        return None;
-    }
-    Some(rest)
-}
-
-fn unquote_identifier_token(token: &str) -> String {
-    let token = token.trim();
-    if token.starts_with('"') && token.ends_with('"') && token.len() >= 2 {
-        token[1..token.len() - 1].replace("\"\"", "\"")
-    } else {
-        token.to_ascii_lowercase()
-    }
-}
-
+// :HACK: This session-state view lives in the wire connection today. Long-term,
+// pg_prepared_statements should be modeled in normal catalog/executor paths.
 fn try_handle_pg_prepared_statements_query(
     stream: &mut impl Write,
     state: &ConnectionState,
@@ -3420,9 +3336,11 @@ fn try_handle_pg_prepared_statements_query(
     {
         return Ok(false);
     }
-    let name_only = normalized.trim_start().starts_with("select name ");
-    let columns = if name_only {
+    let projection = pg_prepared_statements_projection(&normalized);
+    let columns = if projection == PreparedStatementsProjection::Name {
         vec![QueryColumn::text("name")]
+    } else if projection == PreparedStatementsProjection::NameStatement {
+        vec![QueryColumn::text("name"), QueryColumn::text("statement")]
     } else {
         vec![
             QueryColumn::text("name"),
@@ -3434,25 +3352,31 @@ fn try_handle_pg_prepared_statements_query(
             },
         ]
     };
-    let mut names = state.prepared.keys().cloned().collect::<Vec<_>>();
-    names.sort();
-    let rows = names
+    let mut prepared_rows = state
+        .prepared
+        .iter()
+        .map(|(name, prepared)| (name.clone(), prepared.sql.clone(), false))
+        .chain(
+            state
+                .session
+                .prepared_statement_rows()
+                .into_iter()
+                .map(|(name, sql)| (name, sql, true)),
+        )
+        .collect::<Vec<_>>();
+    prepared_rows.sort_by(|left, right| left.0.cmp(&right.0));
+    let rows = prepared_rows
         .into_iter()
-        .map(|name| {
-            if name_only {
-                vec![Value::Text(name.into())]
-            } else {
-                let statement = state
-                    .prepared
-                    .get(&name)
-                    .map(|prepared| prepared.sql.clone())
-                    .unwrap_or_default();
-                vec![
-                    Value::Text(name.into()),
-                    Value::Text(statement.into()),
-                    Value::Bool(true),
-                ]
+        .map(|(name, statement, from_sql)| match projection {
+            PreparedStatementsProjection::Name => vec![Value::Text(name.into())],
+            PreparedStatementsProjection::NameStatement => {
+                vec![Value::Text(name.into()), Value::Text(statement.into())]
             }
+            PreparedStatementsProjection::All => vec![
+                Value::Text(name.into()),
+                Value::Text(statement.into()),
+                Value::Bool(from_sql),
+            ],
         })
         .collect::<Vec<_>>();
     send_query_result(
@@ -3472,6 +3396,27 @@ fn try_handle_pg_prepared_statements_query(
         None,
     )?;
     Ok(true)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreparedStatementsProjection {
+    Name,
+    NameStatement,
+    All,
+}
+
+fn pg_prepared_statements_projection(normalized_sql: &str) -> PreparedStatementsProjection {
+    let Some(select_clause) = normalized_sql.split(" from ").next() else {
+        return PreparedStatementsProjection::All;
+    };
+    let Some(projection) = select_clause.trim_start().strip_prefix("select") else {
+        return PreparedStatementsProjection::All;
+    };
+    match projection.split_whitespace().collect::<String>().as_str() {
+        "name" => PreparedStatementsProjection::Name,
+        "name,statement" => PreparedStatementsProjection::NameStatement,
+        _ => PreparedStatementsProjection::All,
+    }
 }
 
 fn try_handle_pg_listening_channels_query(
@@ -3633,10 +3578,6 @@ fn execute_query_statement(
     if try_handle_statistics_catalog_query(stream, db, state, &sql)? {
         return Ok(QueryStatementFlow::Continue);
     }
-    if try_handle_prepare_statement(stream, state, &sql)? {
-        return Ok(QueryStatementFlow::Continue);
-    }
-
     if let Some(copy) = parse_copy_command(&sql) {
         match copy {
             Ok(copy) => {
@@ -13090,22 +13031,6 @@ ORDER BY 1, 2;";
                 "\nselect 1;",
                 "\n",
             ]
-        );
-    }
-
-    #[test]
-    fn parse_sql_prepare_statement_extracts_name_and_query() {
-        assert_eq!(
-            parse_sql_prepare_statement("PREPARE foo AS SELECT 1"),
-            Some(("foo".into(), "SELECT 1".into()))
-        );
-        assert_eq!(
-            parse_sql_prepare_statement("prepare \"Mixed Name\"(int4) as select $1"),
-            Some(("Mixed Name".into(), "select $1".into()))
-        );
-        assert_eq!(
-            parse_sql_prepare_statement("prepared foo as select 1"),
-            None
         );
     }
 
