@@ -408,6 +408,14 @@ fn finalize_bound_merge(
             ..clause
         })
         .collect();
+    stmt.returning = stmt
+        .returning
+        .into_iter()
+        .map(|target| TargetEntry {
+            expr: finalize_expr_subqueries(target.expr, catalog, &mut subplans),
+            ..target
+        })
+        .collect();
     stmt.input_plan.subplans = subplans;
     stmt
 }
@@ -4922,11 +4930,13 @@ fn execute_insert_rows_with_routing(
                 let projected_row =
                     remap_child_row_to_parent(leaf_row, &result_rel_info.relation.desc, desc)
                         .unwrap_or_else(|| parent_row.clone());
-                let row = project_returning_row_with_metadata(
+                let row = project_returning_row_with_old_new(
                     returning,
                     &projected_row,
                     None,
                     Some(result_rel_info.relation.relation_oid),
+                    None,
+                    Some(&projected_row),
                     ctx,
                 )?;
                 capture_copy_to_dml_returning_row(row.clone());
@@ -5490,15 +5500,23 @@ fn check_merge_privileges(
     Ok(())
 }
 
+struct MergeActionOutput {
+    action: &'static str,
+    old_values: Option<Vec<Value>>,
+    new_values: Option<Vec<Value>>,
+    target_values: Vec<Value>,
+}
+
 fn execute_merge_insert_action(
     stmt: &BoundMergeStatement,
+    catalog: &dyn CatalogLookup,
     target_columns: &[BoundAssignmentTarget],
     values: Option<&[Expr]>,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
-) -> Result<bool, ExecError> {
+) -> Result<Option<Vec<Value>>, ExecError> {
     let mut row_values = vec![Value::Null; stmt.desc.columns.len()];
     let mut default_slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
     for (column_index, expr) in stmt.column_defaults.iter().enumerate() {
@@ -5510,7 +5528,8 @@ fn execute_merge_insert_action(
             apply_assignment_target(&stmt.desc, &mut row_values, target, value, slot, ctx)?;
         }
     }
-    let inserted = execute_insert_values(
+    let inserted = execute_insert_rows_with_routing(
+        catalog,
         &stmt.relation_name,
         stmt.relation_oid,
         stmt.rel,
@@ -5521,16 +5540,19 @@ fn execute_merge_insert_action(
         &[],
         &stmt.indexes,
         &[row_values],
+        None,
         ctx,
         xid,
         cid,
     )?;
-    if inserted > 0 {
+    if let Some(inserted_values) = inserted.into_iter().next() {
         ctx.session_stats
             .write()
             .note_relation_insert(stmt.relation_oid);
+        Ok(Some(inserted_values))
+    } else {
+        Ok(None)
     }
-    Ok(inserted > 0)
 }
 
 fn execute_merge_update_row(
@@ -5542,7 +5564,7 @@ fn execute_merge_update_row(
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
-) -> Result<bool, ExecError> {
+) -> Result<Option<Vec<Value>>, ExecError> {
     let mut updated_values = original_values.to_vec();
     for assignment in assignments {
         let value = eval_expr(&assignment.expr, slot, ctx)?;
@@ -5664,21 +5686,21 @@ fn execute_merge_update_row(
             ctx.session_stats
                 .write()
                 .note_relation_update(stmt.relation_oid);
-            Ok(true)
+            Ok(Some(updated_values))
         }
         Err(HeapError::TupleUpdated(_, _)) => {
             cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
             if ctx.uses_transaction_snapshot() {
                 return Err(serialization_failure_due_to_concurrent_update());
             }
-            Ok(false)
+            Ok(None)
         }
         Err(HeapError::TupleAlreadyModified(_)) => {
             cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
             if ctx.uses_transaction_snapshot() {
                 return Err(serialization_failure_due_to_concurrent_delete());
             }
-            Ok(false)
+            Ok(None)
         }
         Err(err) => {
             cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
@@ -5773,6 +5795,7 @@ pub(crate) fn execute_merge(
     let result = (|| {
         let mut state = executor_start(stmt.input_plan.plan_tree.clone());
         let mut affected_rows = 0usize;
+        let mut returned_rows = Vec::new();
         let mut matched_target_rows = HashSet::new();
         while let Some(slot) = state.exec_proc_node(ctx)? {
             ctx.check_for_interrupts()?;
@@ -5814,6 +5837,7 @@ pub(crate) fn execute_merge(
             let target_matched = target_tid.is_some();
             let visible_values = row_values[..stmt.visible_column_count].to_vec();
             let target_values = visible_values[..stmt.desc.columns.len()].to_vec();
+            let source_values = visible_values[stmt.desc.columns.len()..].to_vec();
             let mut eval_slot = TupleSlot::virtual_row(visible_values);
 
             for clause in &stmt.when_clauses {
@@ -5833,13 +5857,26 @@ pub(crate) fn execute_merge(
                 {
                     continue;
                 }
-                let changed = match &clause.action {
-                    BoundMergeAction::DoNothing => false,
+                let action_output = match &clause.action {
+                    BoundMergeAction::DoNothing => None,
                     BoundMergeAction::Delete => {
-                        if let Some(target_tid) = target_tid {
-                            execute_merge_delete_row(&stmt, target_tid, &target_values, ctx, xid)?
+                        if let Some(target_tid) = target_tid
+                            && execute_merge_delete_row(
+                                &stmt,
+                                target_tid,
+                                &target_values,
+                                ctx,
+                                xid,
+                            )?
+                        {
+                            Some(MergeActionOutput {
+                                action: "DELETE",
+                                old_values: Some(target_values.clone()),
+                                new_values: None,
+                                target_values: target_values.clone(),
+                            })
                         } else {
-                            false
+                            None
                         }
                     }
                     BoundMergeAction::Update { assignments } => {
@@ -5854,8 +5891,14 @@ pub(crate) fn execute_merge(
                                 xid,
                                 cid,
                             )?
+                            .map(|updated_values| MergeActionOutput {
+                                action: "UPDATE",
+                                old_values: Some(target_values.clone()),
+                                new_values: Some(updated_values.clone()),
+                                target_values: updated_values,
+                            })
                         } else {
-                            false
+                            None
                         }
                     }
                     BoundMergeAction::Insert {
@@ -5863,21 +5906,51 @@ pub(crate) fn execute_merge(
                         values,
                     } => execute_merge_insert_action(
                         &stmt,
+                        catalog,
                         target_columns,
                         values.as_deref(),
                         &mut eval_slot,
                         ctx,
                         xid,
                         cid,
-                    )?,
+                    )?
+                    .map(|inserted_values| MergeActionOutput {
+                        action: "INSERT",
+                        old_values: None,
+                        new_values: Some(inserted_values.clone()),
+                        target_values: inserted_values,
+                    }),
                 };
-                if changed {
+                if let Some(action_output) = action_output {
                     affected_rows += 1;
+                    if !stmt.returning.is_empty() {
+                        let mut returning_values = action_output.target_values.clone();
+                        returning_values.extend(source_values.iter().cloned());
+                        returning_values.push(Value::Text(action_output.action.into()));
+                        let row = project_returning_row_with_old_new(
+                            &stmt.returning,
+                            &returning_values,
+                            None,
+                            None,
+                            action_output.old_values.as_deref(),
+                            action_output.new_values.as_deref(),
+                            ctx,
+                        )?;
+                        capture_copy_to_dml_returning_row(row.clone());
+                        returned_rows.push(row);
+                    }
                 }
                 break;
             }
         }
-        Ok(StatementResult::AffectedRows(affected_rows))
+        if stmt.returning.is_empty() {
+            Ok(StatementResult::AffectedRows(affected_rows))
+        } else {
+            Ok(build_returning_result(
+                returning_result_columns(&stmt.returning),
+                returned_rows,
+            ))
+        }
     })();
     ctx.subplans = saved_subplans;
     result
@@ -7503,7 +7576,7 @@ fn project_returning_row(
     row: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
-    project_returning_row_with_metadata(targets, row, None, None, ctx)
+    project_returning_row_with_old_new(targets, row, None, None, None, None, ctx)
 }
 
 fn project_returning_row_with_metadata(
@@ -7513,13 +7586,46 @@ fn project_returning_row_with_metadata(
     table_oid: Option<u32>,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
+    project_returning_row_with_old_new(targets, row, tid, table_oid, None, None, ctx)
+}
+
+pub(crate) fn project_returning_row_with_old_new(
+    targets: &[TargetEntry],
+    row: &[Value],
+    tid: Option<ItemPointerData>,
+    table_oid: Option<u32>,
+    old_row: Option<&[Value]>,
+    new_row: Option<&[Value]>,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let saved_bindings = ctx.expr_bindings.clone();
+    let pseudo_width = old_row
+        .map(<[Value]>::len)
+        .or_else(|| new_row.map(<[Value]>::len))
+        .unwrap_or(row.len());
+    ctx.expr_bindings.outer_tuple = Some(
+        old_row
+            .map(<[Value]>::to_vec)
+            .unwrap_or_else(|| vec![Value::Null; pseudo_width]),
+    );
+    ctx.expr_bindings.inner_tuple = Some(
+        new_row
+            .map(<[Value]>::to_vec)
+            .unwrap_or_else(|| vec![Value::Null; pseudo_width]),
+    );
+    ctx.expr_bindings.outer_system_bindings.clear();
+    ctx.expr_bindings.inner_system_bindings.clear();
     let mut slot = TupleSlot::virtual_row_with_metadata(row.to_vec(), tid, table_oid);
-    let mut values = targets
+    let result = targets
         .iter()
         .map(|target| eval_expr(&target.expr, &mut slot, ctx).map(|value| value.to_owned_value()))
-        .collect::<Result<Vec<_>, _>>()?;
-    Value::materialize_all(&mut values);
-    Ok(values)
+        .collect::<Result<Vec<_>, _>>();
+    let result = result.map(|mut values| {
+        Value::materialize_all(&mut values);
+        values
+    });
+    ctx.expr_bindings = saved_bindings;
+    result
 }
 
 fn build_returning_result(columns: Vec<QueryColumn>, rows: Vec<Vec<Value>>) -> StatementResult {
@@ -7614,11 +7720,13 @@ pub(crate) fn execute_insert_rows(
             maintain_indexes_for_row(rel, desc, indexes, &values, heap_tid, ctx)?;
             inserted_rows.push(values.clone());
             if let Some(returning) = returning {
-                let row = project_returning_row_with_metadata(
+                let row = project_returning_row_with_old_new(
                     returning,
                     &values,
                     Some(heap_tid),
                     Some(relation_oid),
+                    None,
+                    Some(&values),
                     ctx,
                 )?;
                 capture_copy_to_dml_returning_row(row.clone());
@@ -8071,8 +8179,15 @@ pub fn execute_update_with_waiter(
                                 .write()
                                 .note_relation_update(target.relation_oid);
                             if !stmt.returning.is_empty() {
-                                let row =
-                                    project_returning_row(&stmt.returning, &triggered_values, ctx)?;
+                                let row = project_returning_row_with_old_new(
+                                    &stmt.returning,
+                                    &triggered_values,
+                                    None,
+                                    None,
+                                    Some(&current_old_values),
+                                    Some(&triggered_values),
+                                    ctx,
+                                )?;
                                 capture_copy_to_dml_returning_row(row.clone());
                                 returned_rows.push(row);
                             }
@@ -8265,6 +8380,7 @@ fn update_from_predicate_matches(
 fn project_update_from_returning_row(
     stmt: &BoundUpdateStatement,
     target: &BoundUpdateTarget,
+    old_values: &[Value],
     new_values: &[Value],
     source_values: &[Value],
     tid: ItemPointerData,
@@ -8272,11 +8388,13 @@ fn project_update_from_returning_row(
 ) -> Result<Vec<Value>, ExecError> {
     let mut visible_values = project_update_target_visible_values(target, new_values, tid, ctx)?;
     visible_values.extend(source_values.iter().cloned());
-    project_returning_row_with_metadata(
+    project_returning_row_with_old_new(
         &stmt.returning,
         &visible_values,
         Some(tid),
         Some(target.relation_oid),
+        Some(old_values),
+        Some(new_values),
         ctx,
     )
 }
@@ -8455,6 +8573,7 @@ fn execute_update_from_joined_input(
                             let row = project_update_from_returning_row(
                                 stmt,
                                 target,
+                                &current_old_values,
                                 &triggered_values,
                                 &source_values,
                                 new_tid,
@@ -8730,8 +8849,15 @@ pub fn execute_delete_with_waiter(
                                 .write()
                                 .note_relation_delete(target.relation_oid);
                             if !stmt.returning.is_empty() {
-                                let row =
-                                    project_returning_row(&stmt.returning, &current_values, ctx)?;
+                                let row = project_returning_row_with_old_new(
+                                    &stmt.returning,
+                                    &current_values,
+                                    None,
+                                    None,
+                                    Some(&current_values),
+                                    None,
+                                    ctx,
+                                )?;
                                 capture_copy_to_dml_returning_row(row.clone());
                                 returned_rows.push(row);
                             }
