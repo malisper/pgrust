@@ -6348,6 +6348,25 @@ fn parse_create_function_statement_with_variadic_arg() {
 }
 
 #[test]
+fn parse_create_function_statement_with_default_args() {
+    let stmt = parse_statement(
+        "create function dfunc(a int = 1, b text default ('x,y'), variadic rest int[] default array[]::int[]) returns int language sql as $$ select 1 $$",
+    )
+    .unwrap();
+    let Statement::CreateFunction(stmt) = stmt else {
+        panic!("expected CREATE FUNCTION");
+    };
+    assert_eq!(stmt.args.len(), 3);
+    assert_eq!(stmt.args[0].name.as_deref(), Some("a"));
+    assert_eq!(stmt.args[0].default_expr.as_deref(), Some("1"));
+    assert_eq!(stmt.args[1].name.as_deref(), Some("b"));
+    assert_eq!(stmt.args[1].default_expr.as_deref(), Some("('x,y')"));
+    assert_eq!(stmt.args[2].name.as_deref(), Some("rest"));
+    assert!(stmt.args[2].variadic);
+    assert_eq!(stmt.args[2].default_expr.as_deref(), Some("array[]::int[]"));
+}
+
+#[test]
 fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
     let stmt = parse_statement(
         "create function binary_coercible(oid, oid) returns bool as 'regress', 'binary_coercible' language c strict stable parallel safe",
@@ -6503,6 +6522,7 @@ fn parse_drop_function_statement_with_signature() {
             if_exists: false,
             schema_name: Some("public".into()),
             function_name: "p2text".into(),
+            arg_list_specified: true,
             arg_types: vec!["p2".into()],
             cascade: false,
         })
@@ -6518,6 +6538,7 @@ fn parse_drop_function_statement_without_signature() {
             if_exists: true,
             schema_name: Some("public".into()),
             function_name: "p2text".into(),
+            arg_list_specified: false,
             arg_types: vec![],
             cascade: true,
         })

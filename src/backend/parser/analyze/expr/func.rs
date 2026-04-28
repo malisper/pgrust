@@ -378,6 +378,76 @@ pub(super) fn bind_user_defined_scalar_function_call_from_typed_args(
     Expr::user_defined_func(proc_oid, funcname, Some(result_type), false, coerced_args)
 }
 
+pub(super) fn bind_user_defined_scalar_function_call_from_resolved_typed_args(
+    resolved: &ResolvedFunctionCall,
+    _args: &[SqlExpr],
+    bound_args_with_types: Vec<TypedExpr>,
+    catalog: &dyn CatalogLookup,
+) -> Result<Expr, ParseError> {
+    let arg_types = bound_args_with_types
+        .iter()
+        .map(|typed| typed.sql_type)
+        .collect::<Vec<_>>();
+    let bound_args = bound_args_with_types
+        .into_iter()
+        .map(|typed| typed.expr)
+        .collect::<Vec<_>>();
+    let rewritten_args = rewrite_variadic_bound_args(
+        bound_args,
+        &arg_types,
+        resolved.func_variadic,
+        resolved.nvargs,
+        resolved.vatype_oid,
+        catalog,
+    )?;
+    let coerced_args = if resolved.func_variadic {
+        rewritten_args
+    } else {
+        rewritten_args
+            .into_iter()
+            .zip(arg_types)
+            .zip(resolved.declared_arg_types.iter().copied())
+            .map(|((arg, actual_type), declared_type)| {
+                coerce_bound_expr(arg, actual_type, declared_type)
+            })
+            .collect()
+    };
+    Ok(Expr::user_defined_func(
+        resolved.proc_oid,
+        Some(resolved.proname.clone()),
+        Some(resolved.result_type),
+        false,
+        coerced_args,
+    ))
+}
+
+pub(super) fn bind_resolved_user_defined_scalar_function_call(
+    resolved: &ResolvedFunctionCall,
+    args: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let bound_args = args
+        .iter()
+        .map(|arg| {
+            bind_typed_expr_with_outer_and_ctes(
+                arg,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    bind_user_defined_scalar_function_call_from_resolved_typed_args(
+        resolved, args, bound_args, catalog,
+    )
+}
+
 pub(super) fn bind_resolved_scalar_function_call(
     resolved: &ResolvedFunctionCall,
     args: &[SqlExpr],
@@ -405,17 +475,9 @@ pub(super) fn bind_resolved_scalar_function_call(
         );
     }
 
-    let positional_args = args
-        .iter()
-        .cloned()
-        .map(|value| SqlFunctionArg { name: None, value })
-        .collect::<Vec<_>>();
-    bind_user_defined_scalar_function_call(
-        resolved.proc_oid,
-        Some(resolved.proname.clone()),
-        resolved.result_type,
-        &resolved.declared_arg_types,
-        &positional_args,
+    bind_resolved_user_defined_scalar_function_call(
+        resolved,
+        args,
         scope,
         catalog,
         outer_scopes,

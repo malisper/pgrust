@@ -38351,6 +38351,102 @@ fn create_function_scalar_calls_work_in_select_and_where() {
 }
 
 #[test]
+fn create_function_defaults_and_named_calls_work() {
+    let dir = temp_dir("create_function_defaults_named");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function dfunc(a int4 = 1, b int4 = 2) returns int4 language sql as $$ select $1 + $2 $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select dfunc(), dfunc(10), dfunc(10, 20)"),
+        vec![vec![Value::Int32(3), Value::Int32(12), Value::Int32(30)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select dfunc(a := 7), dfunc(b => 11, a => 4)"),
+        vec![vec![Value::Int32(9), Value::Int32(15)]]
+    );
+
+    db.execute(
+        1,
+        "create function choose_text(a text, b text default 'fallback', flag bool default true) returns text language sql as $$ select case when $3 then $1 else $2 end $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select choose_text('a'), choose_text('a', 'b', flag := false), choose_text(b => 'b', a => 'a')",
+        ),
+        vec![vec![
+            Value::Text("a".into()),
+            Value::Text("b".into()),
+            Value::Text("a".into()),
+        ]]
+    );
+
+    db.execute(
+        1,
+        "create function default_series(a int4 default 1, b int4 default 2) returns setof int4 language sql as $$ values ($1), ($2) $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from default_series(b => 5)"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(5)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select * from default_series()"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+
+    match db.execute(1, "select choose_text(a => 'a', a => 'b')") {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. }))
+            if message == "argument name \"a\" used more than once" => {}
+        other => panic!("expected duplicate named argument error, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_or_replace_function_preserves_default_contract() {
+    let dir = temp_dir("create_function_replace_defaults");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function replace_default(a int4 default 1, b int4 default 2) returns int4 language sql as $$ select $1 + $2 $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create or replace function replace_default(a int4 default 10, b int4 default 20) returns int4 language sql as $$ select $1 + $2 $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select replace_default()"),
+        vec![vec![Value::Int32(30)]]
+    );
+
+    match db.execute(
+        1,
+        "create or replace function replace_default(a int4, b int4) returns int4 language sql as $$ select $1 + $2 $$",
+    ) {
+        Err(ExecError::DetailedError { message, .. })
+            if message == "cannot remove parameter defaults from existing function" => {}
+        other => panic!("expected cannot remove defaults error, got {other:?}"),
+    }
+    match db.execute(
+        1,
+        "create or replace function replace_default(x int4 default 10, b int4 default 20) returns int4 language sql as $$ select $1 + $2 $$",
+    ) {
+        Err(ExecError::DetailedError { message, .. })
+            if message == "cannot change name of input parameter \"a\"" => {}
+        other => panic!("expected cannot change input parameter name error, got {other:?}"),
+    }
+}
+
+#[test]
 fn create_or_replace_function_updates_existing_body() {
     let dir = temp_dir("create_or_replace_function");
     let db = Database::open(&dir, 64).unwrap();

@@ -3363,6 +3363,7 @@ pub struct DropFunctionStatement {
     pub if_exists: bool,
     pub schema_name: Option<String>,
     pub function_name: String,
+    pub arg_list_specified: bool,
     pub arg_types: Vec<String>,
     pub cascade: bool,
 }

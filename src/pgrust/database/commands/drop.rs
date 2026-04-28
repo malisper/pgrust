@@ -1234,6 +1234,7 @@ impl Database {
                 if_exists: drop_stmt.if_exists,
                 schema_name: procedure.schema_name.clone(),
                 function_name: procedure.routine_name.clone(),
+                arg_list_specified: false,
                 arg_types: procedure.arg_types.clone(),
                 cascade: drop_stmt.cascade,
             };
@@ -1287,6 +1288,7 @@ impl Database {
                 if_exists: drop_stmt.if_exists,
                 schema_name: routine.schema_name.clone(),
                 function_name: routine.routine_name.clone(),
+                arg_list_specified: false,
                 arg_types: routine.arg_types.clone(),
                 cascade: drop_stmt.cascade,
             };
@@ -1370,9 +1372,13 @@ impl Database {
                 } else {
                     proc_kind
                 };
-                drop_routine_signature_matches(row, &desired_arg_specs, effective_kind)
-                    && (row.prokind == proc_kind
-                        || (proc_kind == 'r' && matches!(row.prokind, 'f' | 'p')))
+                drop_routine_signature_matches(
+                    row,
+                    &desired_arg_specs,
+                    effective_kind,
+                    drop_stmt.arg_list_specified,
+                ) && (row.prokind == proc_kind
+                    || (proc_kind == 'r' && matches!(row.prokind, 'f' | 'p')))
                     && schema_oid
                         .map(|schema_oid| row.pronamespace == schema_oid)
                         .unwrap_or(true)
@@ -1383,7 +1389,12 @@ impl Database {
             .into_iter()
             .filter(|row| {
                 proc_kind != 'r'
-                    && drop_routine_signature_matches(row, &desired_arg_specs, proc_kind)
+                    && drop_routine_signature_matches(
+                        row,
+                        &desired_arg_specs,
+                        proc_kind,
+                        drop_stmt.arg_list_specified,
+                    )
                     && row.prokind != proc_kind
                     && schema_oid
                         .map(|schema_oid| row.pronamespace == schema_oid)
@@ -3112,9 +3123,15 @@ fn drop_routine_signature_matches(
     row: &crate::include::catalog::PgProcRow,
     specs: &[DropRoutineArgSpec],
     proc_kind: char,
+    arg_list_specified: bool,
 ) -> bool {
     if specs.is_empty() {
-        return true;
+        if !arg_list_specified {
+            return true;
+        }
+        return parse_proc_argtype_oids(&row.proargtypes)
+            .map(|input_oids| input_oids.is_empty())
+            .unwrap_or(false);
     }
     if proc_kind != 'p' || row.proallargtypes.is_none() {
         let input_oids = parse_proc_argtype_oids(&row.proargtypes).unwrap_or_default();

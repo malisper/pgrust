@@ -913,7 +913,7 @@ fn function_arguments_text(
             .enumerate()
             .map(|(index, type_oid)| {
                 let mode = modes.get(index).copied().unwrap_or(b'i');
-                let default = if matches!(mode, b'i' | b'b') {
+                let default = if matches!(mode, b'i' | b'b' | b'v') {
                     let default = defaults.get(input_index).and_then(|value| value.as_deref());
                     input_index += 1;
                     default
