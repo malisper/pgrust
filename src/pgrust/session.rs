@@ -1991,6 +1991,9 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         | "enable_indexscan"
         | "enable_indexonlyscan"
         | "enable_bitmapscan"
+        | "enable_hashjoin"
+        | "enable_mergejoin"
+        | "enable_memoize"
         | "enable_hashagg"
         | "enable_sort" => Some("on"),
         _ => None,
@@ -2450,14 +2453,19 @@ impl Session {
                 .get("enable_nestloop")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
+            enable_hashjoin: self
+                .gucs
+                .get("enable_hashjoin")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
             enable_mergejoin: self
                 .gucs
                 .get("enable_mergejoin")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
-            enable_hashjoin: self
+            enable_memoize: self
                 .gucs
-                .get("enable_hashjoin")
+                .get("enable_memoize")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
             retain_partial_index_filters: false,
@@ -10923,6 +10931,9 @@ impl Session {
                 | "enable_indexscan"
                 | "enable_indexonlyscan"
                 | "enable_bitmapscan"
+                | "enable_hashjoin"
+                | "enable_mergejoin"
+                | "enable_memoize"
                 | "enable_hashagg"
                 | "enable_sort"
                 | "default_text_search_config"
@@ -13014,6 +13025,9 @@ fn apply_guc_value_to_state(
         | "enable_indexscan"
         | "enable_indexonlyscan"
         | "enable_bitmapscan"
+        | "enable_hashjoin"
+        | "enable_mergejoin"
+        | "enable_memoize"
         | "enable_hashagg"
         | "enable_sort" => {
             parse_bool_guc(value).ok_or_else(|| {

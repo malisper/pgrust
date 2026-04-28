@@ -2827,6 +2827,338 @@ fn exec_param_sources(params: &[ExecParamSource]) -> BTreeSet<usize> {
     params.iter().map(|param| param.paramid).collect()
 }
 
+fn collect_index_scan_key_exec_paramids(keys: &[IndexScanKey], out: &mut BTreeSet<usize>) {
+    for key in keys {
+        if let IndexScanKeyArgument::Runtime(expr) = &key.argument {
+            collect_expr_exec_paramids(expr, out);
+        }
+        if let Some(display_expr) = &key.display_expr {
+            collect_expr_exec_paramids(display_expr, out);
+        }
+    }
+}
+
+fn collect_expr_exec_paramids(expr: &Expr, out: &mut BTreeSet<usize>) {
+    match expr {
+        Expr::Param(Param {
+            paramkind: ParamKind::Exec,
+            paramid,
+            ..
+        }) => {
+            out.insert(*paramid);
+        }
+        Expr::Aggref(aggref) => {
+            aggref
+                .args
+                .iter()
+                .for_each(|arg| collect_expr_exec_paramids(arg, out));
+            aggref
+                .aggorder
+                .iter()
+                .for_each(|item| collect_expr_exec_paramids(&item.expr, out));
+            if let Some(filter) = &aggref.aggfilter {
+                collect_expr_exec_paramids(filter, out);
+            }
+        }
+        Expr::WindowFunc(window_func) => {
+            window_func
+                .args
+                .iter()
+                .for_each(|arg| collect_expr_exec_paramids(arg, out));
+        }
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .for_each(|arg| collect_expr_exec_paramids(arg, out)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .for_each(|arg| collect_expr_exec_paramids(arg, out)),
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_expr_exec_paramids(arg, out);
+            }
+            case_expr.args.iter().for_each(|arm| {
+                collect_expr_exec_paramids(&arm.expr, out);
+                collect_expr_exec_paramids(&arm.result, out);
+            });
+            collect_expr_exec_paramids(&case_expr.defresult, out);
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .for_each(|arg| collect_expr_exec_paramids(arg, out)),
+        Expr::SubPlan(subplan) => {
+            if let Some(testexpr) = &subplan.testexpr {
+                collect_expr_exec_paramids(testexpr, out);
+            }
+            subplan
+                .args
+                .iter()
+                .for_each(|arg| collect_expr_exec_paramids(arg, out));
+        }
+        Expr::ScalarArrayOp(saop) => {
+            collect_expr_exec_paramids(&saop.left, out);
+            collect_expr_exec_paramids(&saop.right, out);
+        }
+        Expr::Cast(inner, _)
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => collect_expr_exec_paramids(inner, out),
+        Expr::Collate { expr: inner, .. } => collect_expr_exec_paramids(inner, out),
+        Expr::Coalesce(left, right)
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            collect_expr_exec_paramids(left, out);
+            collect_expr_exec_paramids(right, out);
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_expr_exec_paramids(expr, out);
+            collect_expr_exec_paramids(pattern, out);
+            if let Some(escape) = escape {
+                collect_expr_exec_paramids(escape, out);
+            }
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .for_each(|element| collect_expr_exec_paramids(element, out)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .for_each(|(_, expr)| collect_expr_exec_paramids(expr, out)),
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_expr_exec_paramids(array, out);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_expr_exec_paramids(lower, out);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_expr_exec_paramids(upper, out);
+                }
+            }
+        }
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .for_each(|expr| collect_expr_exec_paramids(expr, out)),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .for_each(|expr| collect_expr_exec_paramids(expr, out)),
+        _ => {}
+    }
+}
+
+fn collect_plan_exec_paramids(plan: &Plan, out: &mut BTreeSet<usize>) {
+    match plan {
+        Plan::Result { .. } | Plan::SeqScan { .. } | Plan::WorkTableScan { .. } => {}
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+            children
+                .iter()
+                .for_each(|child| collect_plan_exec_paramids(child, out));
+        }
+        Plan::Unique { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        }
+        | Plan::ProjectSet { input, .. } => collect_plan_exec_paramids(input, out),
+        Plan::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        }
+        | Plan::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        } => {
+            collect_index_scan_key_exec_paramids(keys, out);
+            collect_index_scan_key_exec_paramids(order_by_keys, out);
+        }
+        Plan::BitmapIndexScan {
+            keys, index_quals, ..
+        } => {
+            collect_index_scan_key_exec_paramids(keys, out);
+            index_quals
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+        }
+        Plan::BitmapOr { children, .. } | Plan::SetOp { children, .. } => {
+            children
+                .iter()
+                .for_each(|child| collect_plan_exec_paramids(child, out));
+        }
+        Plan::BitmapHeapScan {
+            bitmapqual,
+            recheck_qual,
+            filter_qual,
+            ..
+        } => {
+            collect_plan_exec_paramids(bitmapqual, out);
+            recheck_qual
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+            filter_qual
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+        }
+        Plan::Hash {
+            input, hash_keys, ..
+        } => {
+            collect_plan_exec_paramids(input, out);
+            hash_keys
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+        }
+        Plan::Memoize {
+            input, cache_keys, ..
+        } => {
+            collect_plan_exec_paramids(input, out);
+            cache_keys
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+        }
+        Plan::NestedLoopJoin {
+            left,
+            right,
+            nest_params,
+            join_qual,
+            qual,
+            ..
+        } => {
+            collect_plan_exec_paramids(left, out);
+            collect_plan_exec_paramids(right, out);
+            nest_params
+                .iter()
+                .for_each(|param| collect_expr_exec_paramids(&param.expr, out));
+            join_qual
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+            qual.iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+        }
+        Plan::HashJoin {
+            left,
+            right,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            collect_plan_exec_paramids(left, out);
+            collect_plan_exec_paramids(right, out);
+            hash_clauses
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+            hash_keys
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+            join_qual
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+            qual.iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+        }
+        Plan::MergeJoin {
+            left,
+            right,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            collect_plan_exec_paramids(left, out);
+            collect_plan_exec_paramids(right, out);
+            merge_clauses
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+            outer_merge_keys
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+            inner_merge_keys
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+            join_qual
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+            qual.iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+        }
+        Plan::Aggregate {
+            input,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            having,
+            ..
+        } => {
+            collect_plan_exec_paramids(input, out);
+            group_by
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+            passthrough_exprs
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+            accumulators.iter().for_each(|accum| {
+                accum
+                    .args
+                    .iter()
+                    .for_each(|expr| collect_expr_exec_paramids(expr, out))
+            });
+            if let Some(having) = having {
+                collect_expr_exec_paramids(having, out);
+            }
+        }
+        Plan::WindowAgg { input, clause, .. } => {
+            collect_plan_exec_paramids(input, out);
+            clause
+                .spec
+                .partition_by
+                .iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+            clause
+                .spec
+                .order_by
+                .iter()
+                .for_each(|item| collect_expr_exec_paramids(&item.expr, out));
+        }
+        Plan::FunctionScan { call, .. } => {
+            set_returning_call_exprs(call)
+                .into_iter()
+                .for_each(|expr| collect_expr_exec_paramids(expr, out));
+        }
+        Plan::Values { rows, .. } => rows
+            .iter()
+            .flatten()
+            .for_each(|expr| collect_expr_exec_paramids(expr, out)),
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            collect_plan_exec_paramids(anchor, out);
+            collect_plan_exec_paramids(recursive, out);
+        }
+    }
+}
+
 fn validate_executable_index_scan_keys(
     keys: &[IndexScanKey],
     plan_node: &str,
@@ -3137,6 +3469,14 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
         } => {
             hash_keys.iter().for_each(|expr| {
                 validate_executable_expr(expr, "Hash", "hash_keys", allowed_exec_params)
+            });
+            validate_executable_plan_with_params(input, allowed_exec_params);
+        }
+        Plan::Memoize {
+            input, cache_keys, ..
+        } => {
+            cache_keys.iter().for_each(|expr| {
+                validate_executable_expr(expr, "Memoize", "cache_keys", allowed_exec_params)
             });
             validate_executable_plan_with_params(input, allowed_exec_params);
         }
@@ -4276,6 +4616,7 @@ fn set_nested_loop_join_references(
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Plan {
     let left_tlist = build_path_tlist(ctx.root, &left);
+    let left_rows = left.plan_info().plan_rows.as_f64();
     let (join_restrict_clauses, other_restrict_clauses) =
         split_join_restrict_clauses(kind, &restrict_clauses);
     let join_qual = lower_join_clause_list(ctx, join_restrict_clauses, &left, &right);
@@ -4342,6 +4683,7 @@ fn set_nested_loop_join_references(
             (plan, params)
         }
     };
+    let right_plan = maybe_wrap_memoize(ctx.root, right_plan, &nest_params, left_rows);
     let left_plan = set_plan_refs(ctx, *left);
     Plan::NestedLoopJoin {
         plan_info,
@@ -4351,6 +4693,70 @@ fn set_nested_loop_join_references(
         nest_params,
         join_qual,
         qual,
+    }
+}
+
+fn maybe_wrap_memoize(
+    root: Option<&PlannerInfo>,
+    right_plan: Plan,
+    nest_params: &[ExecParamSource],
+    _outer_rows: f64,
+) -> Plan {
+    if !root.is_some_and(|root| root.config.enable_memoize) || nest_params.is_empty() {
+        return right_plan;
+    }
+    let mut dependent_paramids = BTreeSet::new();
+    collect_plan_exec_paramids(&right_plan, &mut dependent_paramids);
+    if dependent_paramids.is_empty() {
+        return right_plan;
+    }
+    let key_paramids = nest_params
+        .iter()
+        .filter_map(|param| {
+            dependent_paramids
+                .contains(&param.paramid)
+                .then_some(param.paramid)
+        })
+        .collect::<Vec<_>>();
+    if key_paramids.is_empty() {
+        return right_plan;
+    }
+    let cache_keys = key_paramids
+        .iter()
+        .filter_map(|paramid| {
+            nest_params
+                .iter()
+                .find(|source| source.paramid == *paramid)
+                .map(|source| source.expr.clone())
+        })
+        .collect::<Vec<_>>();
+    let binary_mode = memoize_uses_binary_mode(&right_plan);
+    Plan::Memoize {
+        plan_info: right_plan.plan_info(),
+        input: Box::new(right_plan),
+        cache_keys,
+        key_paramids,
+        dependent_paramids: dependent_paramids.into_iter().collect(),
+        binary_mode,
+        single_row: false,
+        est_entries: 0,
+    }
+}
+
+fn memoize_uses_binary_mode(plan: &Plan) -> bool {
+    match plan {
+        Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => {
+            keys.iter().any(|key| key.strategy != 3)
+        }
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. } => memoize_uses_binary_mode(input),
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+            children.iter().any(memoize_uses_binary_mode)
+        }
+        _ => false,
     }
 }
 

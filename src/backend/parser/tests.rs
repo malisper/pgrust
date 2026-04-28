@@ -12906,6 +12906,7 @@ fn build_plan_for_recursive_mixed_cte_query() {
             | Plan::MergeAppend { children, .. }
             | Plan::SetOp { children, .. } => children.iter().any(plan_contains_cte_scan),
             Plan::Hash { input, .. }
+            | Plan::Memoize { input, .. }
             | Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
             | Plan::IncrementalSort { input, .. }

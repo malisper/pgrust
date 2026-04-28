@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 use crate::include::nodes::pathnodes::{Path, PathKey, RelOptInfo};
+use crate::include::nodes::primnodes::Expr;
 use crate::include::nodes::primnodes::JoinType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +150,17 @@ pub(super) fn preferred_parameterized_index_nested_loop(path: &Path) -> bool {
     }
 }
 
+pub(super) fn preferred_parameterized_nested_loop(path: &Path) -> bool {
+    match path {
+        Path::NestedLoopJoin {
+            right,
+            kind: JoinType::Inner | JoinType::Left,
+            ..
+        } => path_uses_immediate_outer(right),
+        _ => false,
+    }
+}
+
 pub(super) fn preferred_function_outer_hash_join(path: &Path) -> bool {
     match path {
         Path::HashJoin {
@@ -218,6 +230,81 @@ fn path_has_runtime_index_scan(path: &Path) -> bool {
         | Path::CteScan {
             cte_plan: input, ..
         } => path_has_runtime_index_scan(input),
+        _ => false,
+    }
+}
+
+fn path_uses_immediate_outer(path: &Path) -> bool {
+    match path {
+        Path::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        }
+        | Path::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        } => keys.iter().chain(order_by_keys.iter()).any(|key| {
+            matches!(
+                key.argument,
+                crate::include::nodes::plannodes::IndexScanKeyArgument::Runtime(_)
+            ) || key
+                .display_expr
+                .as_ref()
+                .is_some_and(expr_uses_immediate_outer)
+        }),
+        Path::Filter {
+            input, predicate, ..
+        } => path_uses_immediate_outer(input) || expr_uses_immediate_outer(predicate),
+        Path::Projection { input, targets, .. } => {
+            path_uses_immediate_outer(input)
+                || targets
+                    .iter()
+                    .any(|target| expr_uses_immediate_outer(&target.expr))
+        }
+        Path::OrderBy { input, items, .. } | Path::IncrementalSort { input, items, .. } => {
+            path_uses_immediate_outer(input)
+                || items
+                    .iter()
+                    .any(|item| expr_uses_immediate_outer(&item.expr))
+        }
+        Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. } => path_uses_immediate_outer(input),
+        Path::Append { children, .. } | Path::MergeAppend { children, .. } => {
+            children.iter().any(path_uses_immediate_outer)
+        }
+        _ => false,
+    }
+}
+
+fn expr_uses_immediate_outer(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup == 1,
+        Expr::Param(_) => true,
+        Expr::Op(op) => op.args.iter().any(expr_uses_immediate_outer),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_uses_immediate_outer),
+        Expr::Func(func) => func.args.iter().any(expr_uses_immediate_outer),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_uses_immediate_outer(inner),
+        Expr::Coalesce(left, right)
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            expr_uses_immediate_outer(left) || expr_uses_immediate_outer(right)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_uses_immediate_outer(&saop.left) || expr_uses_immediate_outer(&saop.right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_uses_immediate_outer),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_uses_immediate_outer(expr)),
         _ => false,
     }
 }

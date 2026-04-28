@@ -603,15 +603,17 @@ fn push_explain_state_line(
         let actual = if stats.loops == 0 {
             "never executed".to_string()
         } else if show_timing {
+            let actual_rows = stats.rows as f64 / stats.loops as f64;
             format!(
                 "actual time={:.3}..{:.3} rows={:.2} loops={}",
                 stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
                 stats.total_time.as_secs_f64() * 1000.0,
-                stats.rows as f64,
+                actual_rows,
                 stats.loops,
             )
         } else {
-            format!("actual rows={:.2} loops={}", stats.rows as f64, stats.loops)
+            let actual_rows = stats.rows as f64 / stats.loops as f64;
+            format!("actual rows={actual_rows:.2} loops={}", stats.loops)
         };
         if show_costs {
             lines.push(format!(
@@ -737,6 +739,25 @@ fn push_nonverbose_plan_details(
                     render_verbose_expr(having, &plan_join_output_exprs(plan, ctx, true), ctx)
                 ));
             }
+            true
+        }
+        Plan::Memoize {
+            cache_keys,
+            binary_mode,
+            ..
+        } => {
+            if !cache_keys.is_empty() {
+                let rendered = cache_keys
+                    .iter()
+                    .map(|expr| render_verbose_expr(expr, &[], ctx))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(format!("{prefix}Cache Key: {rendered}"));
+            }
+            lines.push(format!(
+                "{prefix}Cache Mode: {}",
+                if *binary_mode { "binary" } else { "logical" }
+            ));
             true
         }
         Plan::NestedLoopJoin {
@@ -2637,6 +2658,7 @@ fn child_leaf_scan_source(plan: &Plan) -> Option<LeafScanSource> {
         | Plan::IndexScan { relation_name, .. }
         | Plan::BitmapHeapScan { relation_name, .. } => relation_leaf_scan_source(relation_name),
         Plan::Hash { input, .. }
+        | Plan::Memoize { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -2861,6 +2883,7 @@ fn plan_join_output_exprs(
         } => qualified_scan_output_exprs_with_context(relation_name, desc, ctx),
         Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
         Plan::Hash { input, .. }
+        | Plan::Memoize { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -3080,6 +3103,7 @@ fn verbose_plan_output_exprs(
         } => qualified_base_scan_output_exprs(relation_name, desc),
         Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
         Plan::Hash { input, .. }
+        | Plan::Memoize { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -3987,6 +4011,7 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
             Vec::new()
         }
         Plan::Hash { input, .. }
+        | Plan::Memoize { input, .. }
         | Plan::Unique { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -4109,6 +4134,11 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         }
         Plan::Hash { hash_keys, .. } => {
             for expr in hash_keys {
+                collect_direct_expr_subplans(expr, &mut found);
+            }
+        }
+        Plan::Memoize { cache_keys, .. } => {
+            for expr in cache_keys {
                 collect_direct_expr_subplans(expr, &mut found);
             }
         }

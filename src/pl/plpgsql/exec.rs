@@ -15,7 +15,8 @@ use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
     TupleSlot, Value, cast_value, cast_value_with_config,
     cast_value_with_source_type_catalog_and_config, compare_order_values, eval_expr,
-    eval_plpgsql_expr, execute_planned_stmt, execute_readonly_statement, render_interval_text,
+    eval_plpgsql_expr, execute_planned_stmt, execute_readonly_statement_with_config,
+    render_interval_text,
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::libpq::pqformat::format_exec_error;
@@ -23,7 +24,8 @@ use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::parser::{
     Catalog, CatalogLookup, ParseError, SqlType, SqlTypeKind, Statement, TriggerLevel,
     TriggerTiming, bind_scalar_expr_in_named_slot_scope, parse_statement,
-    pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
+    pg_plan_query_with_outer_scopes_and_ctes_config,
+    pg_plan_values_query_with_outer_scopes_and_ctes_config,
 };
 use crate::backend::utils::misc::notices::push_notice;
 use crate::backend::utils::record::{
@@ -37,6 +39,7 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::{RecordDescriptor, RecordValue};
 use crate::include::nodes::execnodes::{MaterializedCteTable, MaterializedRow};
+use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::{QueryColumn, expr_sql_type_hint};
 use crate::pgrust::session::ByteaOutputFormat;
 
@@ -2967,26 +2970,29 @@ fn execute_dynamic_statement(
             "0A000",
         )
     })?;
+    let planner_config = planner_config_from_executor_gucs(&ctx.gucs);
 
     let result = execute_function_query_with_bindings(compiled, state, ctx, false, |ctx| {
         let stmt = parse_statement(&sql).map_err(ExecError::Parse)?;
         match stmt {
             crate::backend::parser::Statement::Select(stmt) => execute_planned_stmt(
-                pg_plan_query_with_outer_scopes_and_ctes(
+                pg_plan_query_with_outer_scopes_and_ctes_config(
                     &stmt,
                     catalog.as_ref(),
                     &[],
                     &compiled.local_ctes,
+                    planner_config,
                 )
                 .map_err(ExecError::Parse)?,
                 ctx,
             ),
             crate::backend::parser::Statement::Values(stmt) => execute_planned_stmt(
-                pg_plan_values_query_with_outer_scopes_and_ctes(
+                pg_plan_values_query_with_outer_scopes_and_ctes_config(
                     &stmt,
                     catalog.as_ref(),
                     &[],
                     &compiled.local_ctes,
+                    planner_config,
                 )
                 .map_err(ExecError::Parse)?,
                 ctx,
@@ -3048,13 +3054,41 @@ fn execute_dynamic_statement(
                 // helpers use SET LOCAL jit=0 only to stabilize EXPLAIN.
                 Ok(crate::backend::executor::StatementResult::AffectedRows(0))
             }
-            other => execute_readonly_statement(other, catalog.as_ref(), ctx),
+            other => {
+                execute_readonly_statement_with_config(other, catalog.as_ref(), ctx, planner_config)
+            }
         }
     });
     result.map_err(|err| ExecError::WithContext {
         source: Box::new(err),
         context: format!("SQL statement \"{sql}\""),
     })
+}
+
+fn planner_config_from_executor_gucs(gucs: &HashMap<String, String>) -> PlannerConfig {
+    PlannerConfig {
+        enable_partitionwise_join: bool_executor_guc(gucs, "enable_partitionwise_join", false),
+        enable_seqscan: bool_executor_guc(gucs, "enable_seqscan", true),
+        enable_indexscan: bool_executor_guc(gucs, "enable_indexscan", true),
+        enable_indexonlyscan: bool_executor_guc(gucs, "enable_indexonlyscan", true),
+        enable_bitmapscan: bool_executor_guc(gucs, "enable_bitmapscan", true),
+        enable_hashjoin: bool_executor_guc(gucs, "enable_hashjoin", true),
+        enable_mergejoin: bool_executor_guc(gucs, "enable_mergejoin", true),
+        enable_memoize: bool_executor_guc(gucs, "enable_memoize", true),
+        retain_partial_index_filters: false,
+        enable_hashagg: bool_executor_guc(gucs, "enable_hashagg", true),
+        enable_sort: bool_executor_guc(gucs, "enable_sort", true),
+    }
+}
+
+fn bool_executor_guc(gucs: &HashMap<String, String>, name: &str, default: bool) -> bool {
+    gucs.get(name)
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "on" | "true" | "yes" | "1" | "t" => Some(true),
+            "off" | "false" | "no" | "0" | "f" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(default)
 }
 
 fn execute_function_query_with_bindings<T>(

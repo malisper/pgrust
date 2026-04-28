@@ -254,6 +254,16 @@ pub enum Plan {
         input: Box<Plan>,
         hash_keys: Vec<Expr>,
     },
+    Memoize {
+        plan_info: PlanEstimate,
+        input: Box<Plan>,
+        cache_keys: Vec<Expr>,
+        key_paramids: Vec<usize>,
+        dependent_paramids: Vec<usize>,
+        binary_mode: bool,
+        single_row: bool,
+        est_entries: usize,
+    },
     NestedLoopJoin {
         plan_info: PlanEstimate,
         left: Box<Plan>,
@@ -401,6 +411,7 @@ impl Plan {
             | Plan::BitmapOr { plan_info, .. }
             | Plan::BitmapHeapScan { plan_info, .. }
             | Plan::Hash { plan_info, .. }
+            | Plan::Memoize { plan_info, .. }
             | Plan::NestedLoopJoin { plan_info, .. }
             | Plan::HashJoin { plan_info, .. }
             | Plan::MergeJoin { plan_info, .. }
@@ -436,6 +447,7 @@ impl Plan {
             | Plan::BitmapOr { plan_info, .. }
             | Plan::BitmapHeapScan { plan_info, .. }
             | Plan::Hash { plan_info, .. }
+            | Plan::Memoize { plan_info, .. }
             | Plan::NestedLoopJoin { plan_info, .. }
             | Plan::HashJoin { plan_info, .. }
             | Plan::MergeJoin { plan_info, .. }
@@ -499,7 +511,7 @@ impl Plan {
                     wire_type_oid: None,
                 })
                 .collect(),
-            Plan::Hash { input, .. } => input.columns(),
+            Plan::Hash { input, .. } | Plan::Memoize { input, .. } => input.columns(),
             Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
             | Plan::IncrementalSort { input, .. }

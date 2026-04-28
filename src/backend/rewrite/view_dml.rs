@@ -405,7 +405,7 @@ fn analyze_simple_view_query(
     if !raw_select.with.is_empty() {
         return Err(unsupported(WITH_DETAIL));
     }
-    if query.limit_count.is_some() || query.limit_offset != 0 {
+    if query.limit_count.is_some() || query.limit_offset.is_some() {
         return Err(unsupported(LIMIT_OFFSET_DETAIL));
     }
     if !query.accumulators.is_empty() {

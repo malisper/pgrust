@@ -1049,7 +1049,7 @@ fn rewrite_target_outer_aggregate_sublink_expr(
         || aggregate_query.having_qual.is_some()
         || !aggregate_query.sort_clause.is_empty()
         || aggregate_query.limit_count.is_some()
-        || aggregate_query.limit_offset != 0
+        || aggregate_query.limit_offset.is_some()
         || aggregate_query.locking_clause.is_some()
         || !aggregate_query.row_marks.is_empty()
         || aggregate_query.has_target_srfs
@@ -1097,7 +1097,7 @@ fn scalar_sublink_has_unique_lookup(
         || subquery.having_qual.is_some()
         || !subquery.sort_clause.is_empty()
         || subquery.limit_count.is_some()
-        || subquery.limit_offset != 0
+        || subquery.limit_offset.is_some()
         || subquery.locking_clause.is_some()
         || !subquery.row_marks.is_empty()
         || subquery.has_target_srfs
@@ -1374,7 +1374,7 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
         sort_clause,
         constraint_deps: query.constraint_deps.clone(),
         limit_count: Some(1),
-        limit_offset: 0,
+        limit_offset: None,
         locking_clause: None,
         row_marks: Vec::new(),
         has_target_srfs: false,

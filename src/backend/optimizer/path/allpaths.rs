@@ -24,7 +24,8 @@ use crate::include::nodes::pathnodes::{
 use crate::include::nodes::plannodes::{AggregateStrategy, PlanEstimate, SetOpStrategy};
 use crate::include::nodes::primnodes::{
     BoolExprType, Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc, SortGroupClause,
-    ToastRelationRef, Var, attrno_index, expr_contains_set_returning, is_system_attr, user_attrno,
+    ToastRelationRef, Var, attrno_index, expr_contains_set_returning, is_system_attr,
+    set_returning_call_exprs, user_attrno,
 };
 
 use super::super::bestpath;
@@ -139,20 +140,44 @@ fn assign_base_restrictinfo(root: &mut PlannerInfo) {
     }
     if let Some(where_qual) = root.parse.where_qual.as_ref() {
         for clause in flatten_and_conjuncts(where_qual) {
-            let restrict = joininfo::make_restrict_info(expand_join_rte_vars(root, clause));
-            if !is_pushable_base_clause(root, &restrict.required_relids) {
-                continue;
-            }
-            let relid = restrict.required_relids[0];
-            if let Some(rel) = root
-                .simple_rel_array
-                .get_mut(relid)
-                .and_then(Option::as_mut)
+            let clause = expand_join_rte_vars(root, clause);
+            let restrict = joininfo::make_restrict_info(clause.clone());
+            let push_relid = if is_pushable_base_clause(root, &restrict.required_relids) {
+                restrict.required_relids.first().copied()
+            } else {
+                nullable_outer_join_filter_pushdown_relid(root, &clause, &restrict.required_relids)
+            };
+            if let Some(relid) = push_relid
+                && let Some(rel) = root
+                    .simple_rel_array
+                    .get_mut(relid)
+                    .and_then(Option::as_mut)
             {
                 rel.baserestrictinfo.push(restrict);
             }
         }
     }
+}
+
+fn nullable_outer_join_filter_pushdown_relid(
+    root: &PlannerInfo,
+    clause: &Expr,
+    relids: &[usize],
+) -> Option<usize> {
+    if relids.len() != 1 {
+        return None;
+    }
+    let relid = relids[0];
+    if !super::super::base_rel_is_nullable_by_outer_join(root, relid) {
+        return None;
+    }
+    if !joininfo::strict_relids(clause).contains(&relid) {
+        return None;
+    }
+    root.simple_rel_array
+        .get(relid)
+        .and_then(Option::as_ref)
+        .map(|_| relid)
 }
 
 fn base_filter_expr(rel: &RelOptInfo) -> Option<Expr> {
@@ -846,7 +871,11 @@ fn collect_relation_access_paths(
     let mut paths = if config.enable_seqscan || relkind != 'r' {
         seq_paths.clone()
     } else {
-        Vec::new()
+        let mut disabled_seq_paths = seq_paths.clone();
+        for path in &mut disabled_seq_paths {
+            mark_seqscan_disabled(path);
+        }
+        disabled_seq_paths
     };
     if relkind != 'r' || relation_uses_virtual_scan(relation_oid) {
         return paths;
@@ -862,6 +891,10 @@ fn collect_relation_access_paths(
     {
         let target_index_only =
             filter.is_none() && index_supports_index_only_attrs(index, required_index_only_attrs);
+        let full_index_only_scan = target_index_only
+            || (!config.enable_seqscan
+                && filter.is_none()
+                && index_supports_index_only_attrs(index, &visible_user_attr_indexes(&desc)));
         if let Some(spec) = build_index_path_spec(
             filter.as_ref(),
             None,
@@ -913,7 +946,7 @@ fn collect_relation_access_paths(
             && config.enable_indexonlyscan
             && query_order_items.is_none()
             && filter.is_none()
-            && target_index_only
+            && full_index_only_scan
             && access_method_supports_index_scan(index.index_meta.am_oid)
         {
             paths.push(
@@ -977,11 +1010,6 @@ fn collect_relation_access_paths(
         catalog,
     ));
     if paths.is_empty() {
-        if !config.enable_seqscan && relkind == 'r' {
-            for path in &mut seq_paths {
-                mark_seqscan_disabled(path);
-            }
-        }
         paths = seq_paths;
     }
     paths
@@ -993,6 +1021,14 @@ fn mark_seqscan_disabled(path: &mut Path) {
         Path::Filter { input, .. } | Path::OrderBy { input, .. } => mark_seqscan_disabled(input),
         _ => {}
     }
+}
+
+fn visible_user_attr_indexes(desc: &RelationDesc) -> Vec<usize> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| (!column.dropped).then_some(index))
+        .collect()
 }
 
 fn collect_relation_ordered_index_paths(
@@ -1278,7 +1314,7 @@ fn plan_set_operation_child_path(
 fn set_operation_child_can_accept_required_order(query: &Query) -> bool {
     query.sort_clause.is_empty()
         && query.limit_count.is_none()
-        && query.limit_offset == 0
+        && query.limit_offset.is_none()
         && query.locking_clause.is_none()
         && query.row_marks.is_empty()
 }
@@ -1890,7 +1926,7 @@ fn subquery_filter_pushdown_is_safe(query: &Query) -> bool {
         && query.having_qual.is_none()
         && query.sort_clause.is_empty()
         && query.limit_count.is_none()
-        && query.limit_offset == 0
+        && query.limit_offset.is_none()
         && query.locking_clause.is_none()
         && query.row_marks.is_empty()
         && !query.has_target_srfs
@@ -1906,7 +1942,7 @@ fn set_operation_filter_pushdown_is_safe(query: &Query) -> bool {
         && query.having_qual.is_none()
         && query.sort_clause.is_empty()
         && query.limit_count.is_none()
-        && query.limit_offset == 0
+        && query.limit_offset.is_none()
         && query.locking_clause.is_none()
         && query.row_marks.is_empty()
         && !query.has_target_srfs
@@ -2199,6 +2235,13 @@ fn subquery_target_preserves_simple_source_name(
     query: &Query,
     target: &crate::include::nodes::primnodes::TargetEntry,
 ) -> bool {
+    if query
+        .target_list
+        .iter()
+        .any(|target| expr_contains_outer_var(&target.expr))
+    {
+        return true;
+    }
     let Expr::Var(var) = &target.expr else {
         return true;
     };
@@ -2217,6 +2260,118 @@ fn subquery_target_preserves_simple_source_name(
         .and_then(|rte| rte.desc.columns.get(att_index))
         .map(|column| column.name.eq_ignore_ascii_case(&target.name))
         .unwrap_or(true)
+}
+
+fn expr_contains_outer_var(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup > 0,
+        Expr::Aggref(aggref) => {
+            aggref.args.iter().any(expr_contains_outer_var)
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_contains_outer_var)
+        }
+        Expr::WindowFunc(window_func) => {
+            window_func.args.iter().any(expr_contains_outer_var)
+                || match &window_func.kind {
+                    crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => aggref
+                        .aggfilter
+                        .as_ref()
+                        .is_some_and(expr_contains_outer_var),
+                    crate::include::nodes::primnodes::WindowFuncKind::Builtin(_) => false,
+                }
+        }
+        Expr::Op(op) => op.args.iter().any(expr_contains_outer_var),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_outer_var),
+        Expr::Func(func) => func.args.iter().any(expr_contains_outer_var),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_contains_outer_var(inner),
+        Expr::Coalesce(left, right)
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            expr_contains_outer_var(left) || expr_contains_outer_var(right)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_outer_var(&saop.left) || expr_contains_outer_var(&saop.right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_outer_var),
+        Expr::Row { fields, .. } => fields.iter().any(|(_, expr)| expr_contains_outer_var(expr)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_outer_var(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_outer_var)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_outer_var)
+                })
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_outer_var(expr)
+                || expr_contains_outer_var(pattern)
+                || escape.as_deref().is_some_and(expr_contains_outer_var)
+        }
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_contains_outer_var)
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_outer_var(&arm.expr) || expr_contains_outer_var(&arm.result)
+                })
+                || expr_contains_outer_var(&case_expr.defresult)
+        }
+        Expr::SqlJsonQueryFunction(func) => {
+            func.child_exprs().into_iter().any(expr_contains_outer_var)
+        }
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_contains_outer_var),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_contains_outer_var),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_deref()
+                .is_some_and(expr_contains_outer_var)
+                || subplan.args.iter().any(expr_contains_outer_var)
+        }
+        Expr::Xml(xml) => xml.child_exprs().any(expr_contains_outer_var),
+        Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
 }
 
 fn rewrite_filter_for_subquery(
@@ -3535,6 +3690,16 @@ fn path_dominates(left: &Path, right: &Path) -> bool {
     }
     if bestpath::preferred_parameterized_index_nested_loop(left)
         && !bestpath::preferred_parameterized_index_nested_loop(right)
+    {
+        return true;
+    }
+    if bestpath::preferred_parameterized_nested_loop(right)
+        && !bestpath::preferred_parameterized_nested_loop(left)
+    {
+        return false;
+    }
+    if bestpath::preferred_parameterized_nested_loop(left)
+        && !bestpath::preferred_parameterized_nested_loop(right)
     {
         return true;
     }

@@ -6053,6 +6053,7 @@ fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
         }
         Plan::Unique { input, .. }
         | Plan::Hash { input, .. }
+        | Plan::Memoize { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -6103,6 +6104,7 @@ fn plan_contains_lock_rows(plan: &Plan) -> bool {
         | Plan::BitmapOr { children, .. } => children.iter().any(plan_contains_lock_rows),
         Plan::Unique { input, .. }
         | Plan::Hash { input, .. }
+        | Plan::Memoize { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -7049,7 +7051,7 @@ fn execute_insert_project_set_row(
         sort_clause: Vec::new(),
         constraint_deps: Vec::new(),
         limit_count: None,
-        limit_offset: 0,
+        limit_offset: None,
         locking_clause: None,
         row_marks: Vec::new(),
         has_target_srfs: true,

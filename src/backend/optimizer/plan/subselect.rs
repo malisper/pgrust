@@ -1223,6 +1223,28 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             key_indices,
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
         },
+        Plan::Memoize {
+            plan_info,
+            input,
+            cache_keys,
+            key_paramids,
+            dependent_paramids,
+            binary_mode,
+            single_row,
+            est_entries,
+        } => Plan::Memoize {
+            plan_info,
+            input: Box::new(rebase_plan_subplan_ids(*input, base)),
+            cache_keys: cache_keys
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
+            key_paramids,
+            dependent_paramids,
+            binary_mode,
+            single_row,
+            est_entries,
+        },
         Plan::BitmapIndexScan {
             plan_info,
             source_id,
@@ -1721,6 +1743,28 @@ pub(super) fn finalize_plan_subqueries(
             plan_info,
             key_indices,
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+        },
+        Plan::Memoize {
+            plan_info,
+            input,
+            cache_keys,
+            key_paramids,
+            dependent_paramids,
+            binary_mode,
+            single_row,
+            est_entries,
+        } => Plan::Memoize {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+            cache_keys: cache_keys
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
+            key_paramids,
+            dependent_paramids,
+            binary_mode,
+            single_row,
+            est_entries,
         },
         Plan::BitmapHeapScan {
             plan_info,

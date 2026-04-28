@@ -408,7 +408,7 @@ pub(super) fn query_from_from_projection(input: AnalyzedFrom, targets: Vec<Targe
         sort_clause: Vec::new(),
         constraint_deps: Vec::new(),
         limit_count: None,
-        limit_offset: 0,
+        limit_offset: None,
         locking_clause: None,
         row_marks: Vec::new(),
         has_target_srfs: false,

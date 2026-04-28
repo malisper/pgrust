@@ -226,7 +226,7 @@ fn render_relation_expr_sql_with_options(
         sort_clause: Vec::new(),
         constraint_deps: Vec::new(),
         limit_count: None,
-        limit_offset: 0,
+        limit_offset: None,
         locking_clause: None,
         row_marks: Vec::new(),
         has_target_srfs: false,

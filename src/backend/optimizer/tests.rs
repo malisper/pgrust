@@ -823,6 +823,39 @@ fn catalog_with_indexed_items() -> Catalog {
     catalog
 }
 
+fn catalog_with_expr_key() -> Catalog {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "expr_key",
+            RelationDesc {
+                columns: vec![
+                    column_desc("x", SqlType::new(SqlTypeKind::Numeric), false),
+                    column_desc("t", SqlType::new(SqlTypeKind::Text), false),
+                ],
+            },
+        )
+        .expect("create expr_key");
+    let index = catalog
+        .create_index(
+            "expr_key_idx_x_t",
+            "expr_key",
+            false,
+            &["x".into(), "t".into()],
+        )
+        .expect("create expr_key index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark expr_key index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 64, 40.0)
+        .expect("seed expr_key table stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 32, 40.0)
+        .expect("seed expr_key index stats");
+    catalog
+}
+
 fn catalog_with_indexed_later_column() -> Catalog {
     let mut catalog = Catalog::default();
     let table = catalog
@@ -1328,6 +1361,7 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children.iter().find_map(append_with_join_children),
         Plan::Hash { input, .. }
+        | Plan::Memoize { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
@@ -1390,6 +1424,7 @@ fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
             }
         }
         Plan::Hash { input, .. }
+        | Plan::Memoize { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
@@ -1667,6 +1702,7 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
             children.iter().any(|child| plan_contains(child, predicate))
         }
         Plan::Hash { input, .. }
+        | Plan::Memoize { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -1692,6 +1728,21 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
             recursive: right,
             ..
         } => plan_contains(left, predicate) || plan_contains(right, predicate),
+    }
+}
+
+fn contains_exec_param_for_tests(expr: &Expr) -> bool {
+    match expr {
+        Expr::Param(Param {
+            paramkind: ParamKind::Exec,
+            ..
+        }) => true,
+        Expr::Op(op) => op.args.iter().any(contains_exec_param_for_tests),
+        Expr::Func(func) => func.args.iter().any(contains_exec_param_for_tests),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            contains_exec_param_for_tests(inner)
+        }
+        _ => false,
     }
 }
 
@@ -1783,6 +1834,7 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children.iter().find_map(find_aggregate_plan),
         Plan::Hash { input, .. }
+        | Plan::Memoize { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
@@ -2065,6 +2117,7 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
     match plan {
         Plan::SeqScan { .. } => Some(plan),
         Plan::Hash { input, .. }
+        | Plan::Memoize { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -2119,6 +2172,7 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
             .map(|child| count_plan_nodes(child, predicate))
             .sum(),
         Plan::Hash { input, .. }
+        | Plan::Memoize { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -3574,6 +3628,42 @@ fn planner_uses_runtime_index_key_for_correlated_limit_subplan() {
 }
 
 #[test]
+fn planner_memoizes_expression_key_nested_loop() {
+    let catalog = catalog_with_expr_key();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select * from expr_key t1 inner join expr_key t2 on t1.x = t2.t::numeric and t1.t::numeric = t2.x",
+        &catalog,
+        PlannerConfig {
+            enable_hashjoin: false,
+            enable_mergejoin: false,
+            ..PlannerConfig::default()
+        },
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Memoize { .. }
+        )),
+        "expected Memoize in expression-key join plan: {:#?}",
+        planned.plan_tree
+    );
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| {
+            match plan {
+            Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => keys.iter().any(
+                |key| matches!(&key.argument, IndexScanKeyArgument::Runtime(expr) if contains_exec_param_for_tests(expr))
+            ),
+            _ => false,
+        }
+        }),
+        "expected runtime index probe in expression-key join plan: {:#?}",
+        planned.plan_tree
+    );
+    validate_planned_stmt_for_tests(&planned);
+}
+
+#[test]
 fn planner_simplifies_outer_max_of_unique_scalar_sublink() {
     let catalog = catalog_with_unique_indexed_items();
     let planned = planned_stmt_for_sql_with_catalog_and_larger_parse_stack(
@@ -3662,6 +3752,7 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
         match plan {
             Plan::ProjectSet { .. } => Some(plan),
             Plan::Hash { input, .. }
+            | Plan::Memoize { input, .. }
             | Plan::Filter { input, .. }
             | Plan::Projection { input, .. }
             | Plan::OrderBy { input, .. }
@@ -3736,6 +3827,7 @@ fn grouped_target_srf_uses_project_set_before_aggregate() {
                 plan_contains(input, |child| matches!(child, Plan::ProjectSet { .. }))
             }
             Plan::Hash { input, .. }
+            | Plan::Memoize { input, .. }
             | Plan::Filter { input, .. }
             | Plan::Projection { input, .. }
             | Plan::OrderBy { input, .. }

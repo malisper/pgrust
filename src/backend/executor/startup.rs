@@ -5,16 +5,17 @@ use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, BitmapOrState,
     BitmapQualState, CteScanState, FilterState, FunctionScanState, HashJoinState, HashState,
     IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
-    MergeAppendState, MergeJoinState, NestedLoopJoinState, NodeExecStats, OrderByState,
-    ProjectSetState, ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState,
-    SeqScanState, SetOpState, SubqueryScanState, UniqueState, ValuesState, WindowAggState,
-    WorkTableScanState,
+    MemoizeState, MergeAppendState, MergeJoinState, NestedLoopJoinState, NodeExecStats,
+    OrderByState, ProjectSetState, ProjectionState, RecursiveUnionState, RecursiveWorkTable,
+    ResultState, SeqScanState, SetOpState, SubqueryScanState, UniqueState, ValuesState,
+    WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{
     Expr, OpExprKind, SetReturningCall, expr_sql_type_hint, set_returning_call_exprs,
 };
 
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 fn expr_uses_outer_columns(expr: &Expr) -> bool {
@@ -257,6 +258,9 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         Plan::Hash {
             input, hash_keys, ..
         } => plan_uses_outer_columns(input) || hash_keys.iter().any(expr_uses_outer_columns),
+        Plan::Memoize {
+            input, cache_keys, ..
+        } => plan_uses_outer_columns(input) || cache_keys.iter().any(expr_uses_outer_columns),
         Plan::NestedLoopJoin {
             left,
             right,
@@ -694,6 +698,42 @@ pub fn executor_start(plan: Plan) -> PlanState {
             input,
             hash_keys,
         } => Box::new(build_hash_state(plan_info, *input, hash_keys)),
+        Plan::Memoize {
+            plan_info,
+            input,
+            cache_keys,
+            key_paramids,
+            dependent_paramids,
+            binary_mode,
+            single_row,
+            est_entries,
+        } => {
+            let input_plan = *input;
+            let column_names = input_plan.column_names();
+            let ncols = column_names.len();
+            Box::new(MemoizeState {
+                input: executor_start(input_plan.clone()),
+                input_plan,
+                cache_keys,
+                key_paramids,
+                dependent_paramids,
+                binary_mode,
+                single_row,
+                est_entries,
+                cache: HashMap::new(),
+                lru: VecDeque::new(),
+                active_rows: Vec::new(),
+                active_index: 0,
+                scan_prepared: false,
+                last_nonkey_dependents: None,
+                slot: TupleSlot::empty(ncols),
+                current_bindings: Vec::new(),
+                column_names,
+                plan_info,
+                stats: NodeExecStats::default(),
+                memoize_stats: Default::default(),
+            })
+        }
         Plan::NestedLoopJoin {
             plan_info,
             left,

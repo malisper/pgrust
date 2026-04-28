@@ -40,8 +40,8 @@ use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument, PlanE
 use crate::include::nodes::primnodes::SetReturningCall;
 use crate::include::nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, JoinType, OpExprKind, OrderByEntry,
-    ProjectSetTarget, QueryColumn, RelationDesc, ScalarFunctionImpl, ToastRelationRef, Var,
-    attrno_index, set_returning_call_exprs, user_attrno,
+    ProjectSetTarget, QueryColumn, RelationDesc, ScalarFunctionImpl, TargetEntry, ToastRelationRef,
+    Var, attrno_index, set_returning_call_exprs, user_attrno,
 };
 
 use super::super::pathnodes::{expr_sql_type, slot_output_target};
@@ -50,7 +50,7 @@ use super::super::{
     DEFAULT_EQ_SEL, DEFAULT_INEQ_SEL, DEFAULT_NUM_PAGES, DEFAULT_NUM_ROWS, ExtendedStatistic,
     HashJoinClauses, IndexPathSpec, IndexableQual, MergeJoinClauses, RANDOM_PAGE_COST,
     RelationStats, SEQ_PAGE_COST, STATISTIC_KIND_CORRELATION, STATISTIC_KIND_HISTOGRAM,
-    STATISTIC_KIND_MCV, path_relids, relids_subset,
+    STATISTIC_KIND_MCV, expr_relids, path_relids, relids_subset,
 };
 use super::gistcost::estimate_gist_scan_cost;
 use super::regex_prefix::{RegexFixedPrefix, regex_fixed_prefix, regex_prefix_upper_bound};
@@ -2490,98 +2490,483 @@ fn parameterized_inner_index_path(
 ) -> Option<(Path, Vec<RestrictInfo>)> {
     let root = root?;
     let catalog = catalog?;
+    if let Path::SubqueryScan {
+        pathtarget,
+        rtindex,
+        subroot,
+        query,
+        input,
+        output_columns,
+        pathkeys,
+        ..
+    } = inner
+    {
+        return parameterized_subquery_inner_path(
+            root,
+            catalog,
+            pathtarget,
+            *rtindex,
+            subroot,
+            query,
+            input,
+            output_columns,
+            pathkeys,
+            outer_relids,
+            restrict_clauses,
+        );
+    }
+    match inner {
+        Path::Filter {
+            plan_info,
+            pathtarget,
+            input,
+            predicate,
+        } => {
+            let (input, remaining) = parameterized_inner_index_path(
+                Some(root),
+                Some(catalog),
+                input,
+                outer_relids,
+                inner_relids,
+                restrict_clauses,
+            )?;
+            return Some((
+                Path::Filter {
+                    plan_info: *plan_info,
+                    pathtarget: pathtarget.clone(),
+                    input: Box::new(input),
+                    predicate: predicate.clone(),
+                },
+                remaining,
+            ));
+        }
+        Path::Projection {
+            plan_info,
+            pathtarget,
+            slot_id,
+            input,
+            targets,
+        } => {
+            let (input, remaining) = parameterized_inner_index_path(
+                Some(root),
+                Some(catalog),
+                input,
+                outer_relids,
+                inner_relids,
+                restrict_clauses,
+            )?;
+            return Some((
+                Path::Projection {
+                    plan_info: *plan_info,
+                    pathtarget: pathtarget.clone(),
+                    slot_id: *slot_id,
+                    input: Box::new(input),
+                    targets: targets.clone(),
+                },
+                remaining,
+            ));
+        }
+        Path::Limit {
+            plan_info,
+            pathtarget,
+            input,
+            limit,
+            offset,
+        } => {
+            let (input, remaining) = parameterized_inner_index_path(
+                Some(root),
+                Some(catalog),
+                input,
+                outer_relids,
+                inner_relids,
+                restrict_clauses,
+            )?;
+            return Some((
+                Path::Limit {
+                    plan_info: *plan_info,
+                    pathtarget: pathtarget.clone(),
+                    input: Box::new(input),
+                    limit: *limit,
+                    offset: *offset,
+                },
+                remaining,
+            ));
+        }
+        Path::LockRows {
+            plan_info,
+            pathtarget,
+            input,
+            row_marks,
+        } => {
+            let (input, remaining) = parameterized_inner_index_path(
+                Some(root),
+                Some(catalog),
+                input,
+                outer_relids,
+                inner_relids,
+                restrict_clauses,
+            )?;
+            return Some((
+                Path::LockRows {
+                    plan_info: *plan_info,
+                    pathtarget: pathtarget.clone(),
+                    input: Box::new(input),
+                    row_marks: row_marks.clone(),
+                },
+                remaining,
+            ));
+        }
+        _ => {}
+    }
+    let (parameterized_clauses, parameterized_indexes) =
+        collect_parameterized_inner_clauses(restrict_clauses, outer_relids, inner_relids);
+    let filter = and_exprs(parameterized_clauses)?;
+    let remaining = restrict_clauses
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !parameterized_indexes.contains(index))
+        .map(|(_, restrict)| restrict.clone())
+        .collect::<Vec<_>>();
     let Path::SeqScan {
         source_id,
         rel,
         relation_name,
         relation_oid,
         relkind,
-        relispopulated: _,
+        relispopulated,
         toast,
         desc,
         ..
     } = inner
     else {
-        return None;
+        return Some((wrap_parameterized_filter(inner.clone(), filter), remaining));
     };
-    if *relkind != 'r' || !root.config.enable_indexscan || relation_uses_virtual_scan(*relation_oid)
+
+    let mut best: Option<AccessCandidate> = None;
+    if *relkind == 'r' && root.config.enable_indexscan && !relation_uses_virtual_scan(*relation_oid)
     {
-        return None;
+        let stats = relation_stats(catalog, *relation_oid, desc);
+        for index in catalog
+            .index_relations_for_heap(*relation_oid)
+            .iter()
+            .filter(|index| {
+                index.index_meta.indisvalid
+                    && index.index_meta.indisready
+                    && !index.index_meta.indisexclusion
+                    && !index.index_meta.indkey.is_empty()
+            })
+        {
+            let Some(spec) = build_index_path_spec(
+                Some(&filter),
+                None,
+                index,
+                root.config.retain_partial_index_filters,
+            ) else {
+                continue;
+            };
+            if !spec.keys.iter().any(|key| {
+                matches!(key.argument, IndexScanKeyArgument::Runtime(_))
+                    || key
+                        .display_expr
+                        .as_ref()
+                        .is_some_and(expr_contains_runtime_input)
+            }) {
+                continue;
+            }
+            let candidate = estimate_index_candidate(
+                *source_id,
+                *rel,
+                relation_name.clone(),
+                *relation_oid,
+                *toast,
+                desc.clone(),
+                &stats,
+                spec,
+                None,
+                None,
+                false,
+                root.config,
+                catalog,
+            );
+            if path_contains_runtime_index_arg(&candidate.plan)
+                && best
+                    .as_ref()
+                    .is_none_or(|current| candidate.total_cost < current.total_cost)
+            {
+                best = Some(candidate);
+            }
+        }
     }
 
+    let plan = best.map(|candidate| candidate.plan).unwrap_or_else(|| {
+        wrap_parameterized_filter(
+            Path::SeqScan {
+                plan_info: inner.plan_info(),
+                pathtarget: inner.semantic_output_target(),
+                source_id: *source_id,
+                rel: *rel,
+                relation_name: relation_name.clone(),
+                relation_oid: *relation_oid,
+                relkind: *relkind,
+                relispopulated: *relispopulated,
+                toast: *toast,
+                desc: desc.clone(),
+                disabled: false,
+            },
+            filter,
+        )
+    });
+    Some((plan, remaining))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parameterized_subquery_inner_path(
+    root: &PlannerInfo,
+    catalog: &dyn CatalogLookup,
+    pathtarget: &PathTarget,
+    rtindex: usize,
+    subroot: &crate::include::nodes::pathnodes::PlannerSubroot,
+    query: &crate::include::nodes::parsenodes::Query,
+    input: &Path,
+    output_columns: &[QueryColumn],
+    pathkeys: &[PathKey],
+    outer_relids: &[usize],
+    restrict_clauses: &[RestrictInfo],
+) -> Option<(Path, Vec<RestrictInfo>)> {
+    let visible_targets = query
+        .target_list
+        .iter()
+        .filter(|target| !target.resjunk)
+        .collect::<Vec<_>>();
+    let child_relids = path_relids(input);
+    let mut rewritten_restricts = Vec::new();
+    let mut original_indexes = Vec::new();
+    for (index, restrict) in restrict_clauses.iter().enumerate() {
+        let Some(rewritten) = rewrite_parameterized_subquery_filter(
+            restrict.clause.clone(),
+            rtindex,
+            &visible_targets,
+        ) else {
+            continue;
+        };
+        let rewritten = parameterize_outer_vars(rewritten, outer_relids);
+        if !expr_contains_runtime_input(&rewritten) {
+            continue;
+        }
+        let required_relids = expr_relids(&rewritten);
+        if required_relids.is_empty()
+            || !required_relids
+                .iter()
+                .all(|relid| child_relids.contains(relid))
+        {
+            continue;
+        }
+        rewritten_restricts.push(RestrictInfo::new(rewritten, required_relids));
+        original_indexes.push(index);
+    }
+    if rewritten_restricts.is_empty() {
+        return None;
+    }
+    let (input, _) = parameterized_inner_index_path(
+        Some(root),
+        Some(catalog),
+        input,
+        outer_relids,
+        &child_relids,
+        &rewritten_restricts,
+    )?;
+    let input_info = input.plan_info();
+    let width = output_columns
+        .iter()
+        .map(|column| estimate_sql_type_width(column.sql_type))
+        .sum();
+    let remaining = restrict_clauses
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !original_indexes.contains(index))
+        .map(|(_, restrict)| restrict.clone())
+        .collect();
+    Some((
+        Path::SubqueryScan {
+            plan_info: PlanEstimate::new(
+                input_info.startup_cost.as_f64(),
+                input_info.total_cost.as_f64() + CPU_TUPLE_COST,
+                input_info.plan_rows.as_f64(),
+                width,
+            ),
+            pathtarget: pathtarget.clone(),
+            rtindex,
+            subroot: subroot.clone(),
+            query: Box::new(query.clone()),
+            input: Box::new(input),
+            output_columns: output_columns.to_vec(),
+            pathkeys: pathkeys.to_vec(),
+        },
+        remaining,
+    ))
+}
+
+fn collect_parameterized_inner_clauses(
+    restrict_clauses: &[RestrictInfo],
+    outer_relids: &[usize],
+    inner_relids: &[usize],
+) -> (Vec<Expr>, Vec<usize>) {
     let mut parameterized_clauses = Vec::new();
     let mut parameterized_indexes = Vec::new();
     for (index, restrict) in restrict_clauses.iter().enumerate() {
-        if !restrict_clause_can_parameterize(restrict, outer_relids, inner_relids) {
-            continue;
-        }
-        let clause = parameterize_outer_vars(restrict.clause.clone(), outer_relids);
-        if expr_contains_runtime_input(&clause) {
+        if let Some(clause) = parameterized_inner_clause(restrict, outer_relids, inner_relids) {
             parameterized_clauses.push(clause);
             parameterized_indexes.push(index);
         }
     }
-    let filter = and_exprs(parameterized_clauses)?;
-    let stats = relation_stats(catalog, *relation_oid, desc);
-    let mut best: Option<AccessCandidate> = None;
-    for index in catalog
-        .index_relations_for_heap(*relation_oid)
-        .iter()
-        .filter(|index| {
-            index.index_meta.indisvalid
-                && index.index_meta.indisready
-                && !index.index_meta.indisexclusion
-                && !index.index_meta.indkey.is_empty()
-        })
-    {
-        let Some(spec) = build_index_path_spec(
-            Some(&filter),
-            None,
-            index,
-            root.config.retain_partial_index_filters,
-        ) else {
-            continue;
-        };
-        if !spec.keys.iter().any(|key| {
-            matches!(key.argument, IndexScanKeyArgument::Runtime(_))
-                || key
-                    .display_expr
-                    .as_ref()
-                    .is_some_and(expr_contains_runtime_input)
-        }) {
-            continue;
-        }
-        let candidate = estimate_index_candidate(
-            *source_id,
-            *rel,
-            relation_name.clone(),
-            *relation_oid,
-            *toast,
-            desc.clone(),
-            &stats,
-            spec,
-            None,
-            None,
-            false,
-            root.config,
-            catalog,
-        );
-        if path_contains_runtime_index_arg(&candidate.plan)
-            && best
-                .as_ref()
-                .is_none_or(|current| candidate.total_cost < current.total_cost)
-        {
-            best = Some(candidate);
+    (parameterized_clauses, parameterized_indexes)
+}
+
+fn parameterized_inner_clause(
+    restrict: &RestrictInfo,
+    outer_relids: &[usize],
+    inner_relids: &[usize],
+) -> Option<Expr> {
+    if restrict_clause_can_parameterize(restrict, outer_relids, inner_relids) {
+        let clause = parameterize_outer_vars(restrict.clause.clone(), outer_relids);
+        if expr_contains_runtime_input(&clause) {
+            return Some(clause);
         }
     }
+    let required_relids = expr_relids(&restrict.clause);
+    if expr_contains_runtime_input(&restrict.clause)
+        && !required_relids.is_empty()
+        && required_relids
+            .iter()
+            .all(|relid| inner_relids.contains(relid))
+    {
+        return Some(restrict.clause.clone());
+    }
+    None
+}
 
-    let remaining = restrict_clauses
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| !parameterized_indexes.contains(index))
-        .map(|(_, restrict)| restrict.clone())
-        .collect();
-    Some((best?.plan, remaining))
+fn wrap_parameterized_filter(input: Path, predicate: Expr) -> Path {
+    let input_info = input.plan_info();
+    let rows = clamp_rows(input_info.plan_rows.as_f64() * DEFAULT_EQ_SEL);
+    let total_cost = input_info.total_cost.as_f64()
+        + input_info.plan_rows.as_f64() * predicate_cost(&predicate) * CPU_OPERATOR_COST;
+    Path::Filter {
+        plan_info: PlanEstimate::new(
+            input_info.startup_cost.as_f64(),
+            total_cost,
+            rows,
+            input_info.plan_width,
+        ),
+        pathtarget: input.semantic_output_target(),
+        input: Box::new(input),
+        predicate,
+    }
+}
+
+fn rewrite_parameterized_subquery_filter(
+    expr: Expr,
+    rtindex: usize,
+    targets: &[&TargetEntry],
+) -> Option<Expr> {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 && var.varno == rtindex => {
+            let index = attrno_index(var.varattno)?;
+            Some(targets.get(index)?.expr.clone())
+        }
+        Expr::Var(_) | Expr::Param(_) | Expr::Const(_) => Some(expr),
+        Expr::Op(mut op) => {
+            op.args = op
+                .args
+                .into_iter()
+                .map(|arg| rewrite_parameterized_subquery_filter(arg, rtindex, targets))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr::Op(op))
+        }
+        Expr::Bool(mut bool_expr) => {
+            bool_expr.args = bool_expr
+                .args
+                .into_iter()
+                .map(|arg| rewrite_parameterized_subquery_filter(arg, rtindex, targets))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr::Bool(bool_expr))
+        }
+        Expr::Func(mut func) => {
+            func.args = func
+                .args
+                .into_iter()
+                .map(|arg| rewrite_parameterized_subquery_filter(arg, rtindex, targets))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr::Func(func))
+        }
+        Expr::Cast(inner, ty) => Some(Expr::Cast(
+            Box::new(rewrite_parameterized_subquery_filter(
+                *inner, rtindex, targets,
+            )?),
+            ty,
+        )),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Some(Expr::Collate {
+            expr: Box::new(rewrite_parameterized_subquery_filter(
+                *expr, rtindex, targets,
+            )?),
+            collation_oid,
+        }),
+        Expr::IsNull(inner) => Some(Expr::IsNull(Box::new(
+            rewrite_parameterized_subquery_filter(*inner, rtindex, targets)?,
+        ))),
+        Expr::IsNotNull(inner) => Some(Expr::IsNotNull(Box::new(
+            rewrite_parameterized_subquery_filter(*inner, rtindex, targets)?,
+        ))),
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Some(Expr::FieldSelect {
+            expr: Box::new(rewrite_parameterized_subquery_filter(
+                *expr, rtindex, targets,
+            )?),
+            field,
+            field_type,
+        }),
+        Expr::Coalesce(left, right) => Some(Expr::Coalesce(
+            Box::new(rewrite_parameterized_subquery_filter(
+                *left, rtindex, targets,
+            )?),
+            Box::new(rewrite_parameterized_subquery_filter(
+                *right, rtindex, targets,
+            )?),
+        )),
+        Expr::ScalarArrayOp(mut saop) => {
+            saop.left = Box::new(rewrite_parameterized_subquery_filter(
+                *saop.left, rtindex, targets,
+            )?);
+            saop.right = Box::new(rewrite_parameterized_subquery_filter(
+                *saop.right,
+                rtindex,
+                targets,
+            )?);
+            Some(Expr::ScalarArrayOp(saop))
+        }
+        Expr::IsDistinctFrom(left, right) => Some(Expr::IsDistinctFrom(
+            Box::new(rewrite_parameterized_subquery_filter(
+                *left, rtindex, targets,
+            )?),
+            Box::new(rewrite_parameterized_subquery_filter(
+                *right, rtindex, targets,
+            )?),
+        )),
+        Expr::IsNotDistinctFrom(left, right) => Some(Expr::IsNotDistinctFrom(
+            Box::new(rewrite_parameterized_subquery_filter(
+                *left, rtindex, targets,
+            )?),
+            Box::new(rewrite_parameterized_subquery_filter(
+                *right, rtindex, targets,
+            )?),
+        )),
+        _ => None,
+    }
 }
 
 fn restrict_clause_can_parameterize(
@@ -2687,11 +3072,15 @@ fn path_contains_runtime_index_arg(path: &Path) -> bool {
             .iter()
             .chain(order_by_keys.iter())
             .any(|key| matches!(key.argument, IndexScanKeyArgument::Runtime(_))),
+        Path::Append { children, .. } | Path::MergeAppend { children, .. } => {
+            children.iter().any(path_contains_runtime_index_arg)
+        }
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
         | Path::Limit { input, .. }
-        | Path::LockRows { input, .. } => path_contains_runtime_index_arg(input),
+        | Path::LockRows { input, .. }
+        | Path::SubqueryScan { input, .. } => path_contains_runtime_index_arg(input),
         _ => false,
     }
 }
@@ -2731,6 +3120,16 @@ fn better_join_path(candidate: &Path, current: &Path) -> bool {
     }
     if super::super::bestpath::preferred_parameterized_index_nested_loop(current)
         && !super::super::bestpath::preferred_parameterized_index_nested_loop(candidate)
+    {
+        return false;
+    }
+    if super::super::bestpath::preferred_parameterized_nested_loop(candidate)
+        && !super::super::bestpath::preferred_parameterized_nested_loop(current)
+    {
+        return true;
+    }
+    if super::super::bestpath::preferred_parameterized_nested_loop(current)
+        && !super::super::bestpath::preferred_parameterized_nested_loop(candidate)
     {
         return false;
     }
@@ -6060,6 +6459,57 @@ fn index_argument_type_oid(argument: &IndexScanKeyArgument) -> Option<u32> {
     }
 }
 
+fn index_argument_sql_type(argument: &IndexScanKeyArgument) -> Option<SqlType> {
+    match argument {
+        IndexScanKeyArgument::Const(value) => value.sql_type_hint(),
+        IndexScanKeyArgument::Runtime(expr) => Some(expr_sql_type(expr)),
+    }
+}
+
+fn builtin_btree_strategy_type_compatible(
+    index: &BoundIndexRelation,
+    index_pos: usize,
+    argument_type: Option<SqlType>,
+) -> bool {
+    let Some(argument_type) = argument_type else {
+        return true;
+    };
+    let Some(column) = index.desc.columns.get(index_pos) else {
+        return true;
+    };
+    if column.sql_type.is_array != argument_type.is_array {
+        return false;
+    }
+    if column.sql_type.kind == argument_type.kind {
+        return true;
+    }
+    let same_string_family = matches!(
+        (column.sql_type.kind, argument_type.kind),
+        (
+            SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char,
+            SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char
+        )
+    );
+    let same_numeric_family = matches!(
+        (column.sql_type.kind, argument_type.kind),
+        (
+            SqlTypeKind::Int2
+                | SqlTypeKind::Int4
+                | SqlTypeKind::Int8
+                | SqlTypeKind::Float4
+                | SqlTypeKind::Float8
+                | SqlTypeKind::Numeric,
+            SqlTypeKind::Int2
+                | SqlTypeKind::Int4
+                | SqlTypeKind::Int8
+                | SqlTypeKind::Float4
+                | SqlTypeKind::Float8
+                | SqlTypeKind::Numeric
+        )
+    );
+    same_string_family || same_numeric_family
+}
+
 fn index_key_argument(expr: &Expr) -> Option<IndexScanKeyArgument> {
     if let Some(value) = const_argument(expr) {
         return Some(IndexScanKeyArgument::Const(value));
@@ -6110,6 +6560,7 @@ fn runtime_index_argument_expr(expr: &Expr) -> bool {
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
             runtime_index_argument_expr(inner)
         }
+        Expr::Func(func) => func.args.iter().all(runtime_index_argument_expr),
         Expr::Op(op) => op.args.iter().all(runtime_index_argument_expr),
         _ => false,
     }
@@ -6122,7 +6573,9 @@ fn expr_contains_runtime_input(expr: &Expr) -> bool {
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
             expr_contains_runtime_input(inner)
         }
+        Expr::Func(func) => func.args.iter().any(expr_contains_runtime_input),
         Expr::Op(op) => op.args.iter().any(expr_contains_runtime_input),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_runtime_input),
         _ => false,
     }
 }
@@ -6256,21 +6709,26 @@ fn qual_strategy(
                 .index_meta
                 .amop_strategy_for_operator(&index.desc, index_pos, oid, argument_type_oid)
                 .or_else(|| {
-                    (index.index_meta.am_oid == BTREE_AM_OID
+                    ((index.index_meta.am_oid == BTREE_AM_OID
                         || index.index_meta.am_oid == BRIN_AM_OID)
-                        .then(|| btree_builtin_strategy(kind))
-                        .flatten()
-                        .or_else(|| {
-                            (index.index_meta.am_oid == SPGIST_AM_OID)
-                                .then(|| spgist_text_builtin_strategy(index, index_pos, kind))
-                                .flatten()
-                        })
-                        .or_else(|| {
-                            (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
-                                .then_some(1)
-                        })
-                        .or_else(|| gin_array_builtin_strategy(index, index_pos, kind))
-                        .or_else(|| gist_operator_builtin_strategy(index, index_pos, kind))
+                        && builtin_btree_strategy_type_compatible(
+                            index,
+                            index_pos,
+                            index_argument_sql_type(&qual.argument),
+                        ))
+                    .then(|| btree_builtin_strategy(kind))
+                    .flatten()
+                    .or_else(|| {
+                        (index.index_meta.am_oid == SPGIST_AM_OID)
+                            .then(|| spgist_text_builtin_strategy(index, index_pos, kind))
+                            .flatten()
+                    })
+                    .or_else(|| {
+                        (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
+                            .then_some(1)
+                    })
+                    .or_else(|| gin_array_builtin_strategy(index, index_pos, kind))
+                    .or_else(|| gist_operator_builtin_strategy(index, index_pos, kind))
                 })
         }
         super::super::IndexStrategyLookup::Proc(proc_oid) => index

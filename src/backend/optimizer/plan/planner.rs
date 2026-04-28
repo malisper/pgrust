@@ -1035,7 +1035,7 @@ fn make_ordered_rel(
     );
     let required_pathkeys = required_query_pathkeys_for_rel(root, &input_rel);
     let mut extra_presorted_paths = Vec::new();
-    if (root.parse.limit_count.is_some() || root.parse.limit_offset != 0)
+    if (root.parse.limit_count.is_some() || root.parse.limit_offset.is_some())
         && let [rtindex] = input_rel.relids.as_slice()
         && !rtindex_has_inheritance_children(root, catalog, *rtindex)
     {
@@ -1066,7 +1066,7 @@ fn make_ordered_rel(
         let display_items = sort_key_display_items(root, &root.query_pathkeys, catalog);
         rel.add_path(path_with_sort_display_items(path.clone(), &display_items));
     }
-    if root.parse.limit_count.is_some() || root.parse.limit_offset != 0 {
+    if root.parse.limit_count.is_some() || root.parse.limit_offset.is_some() {
         let cheapest_presorted_startup = input_rel
             .pathlist
             .iter()
@@ -2379,12 +2379,12 @@ pub(super) fn grouping_planner(
         current_rel = make_lock_rows_rel(root, current_rel, &root.parse.row_marks, catalog);
     }
 
-    if root.parse.limit_count.is_some() || root.parse.limit_offset != 0 {
+    if root.parse.limit_count.is_some() || root.parse.limit_offset.is_some() {
         current_rel = make_limit_rel(
             root,
             current_rel,
             root.parse.limit_count,
-            root.parse.limit_offset,
+            root.parse.limit_offset.unwrap_or(0),
             catalog,
         );
     }

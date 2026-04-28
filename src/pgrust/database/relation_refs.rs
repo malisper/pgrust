@@ -305,7 +305,9 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_plan(child, rels);
             }
         }
-        Plan::Unique { input, .. } => collect_rels_from_plan(input, rels),
+        Plan::Unique { input, .. } | Plan::Memoize { input, .. } => {
+            collect_rels_from_plan(input, rels)
+        }
         Plan::SeqScan { rel, .. }
         | Plan::IndexOnlyScan { rel, .. }
         | Plan::IndexScan { rel, .. }
