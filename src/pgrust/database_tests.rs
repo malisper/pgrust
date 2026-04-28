@@ -17156,6 +17156,74 @@ fn plpgsql_get_stacked_diagnostics_requires_exception_handler() {
 }
 
 #[test]
+fn plpgsql_exception_sqlstate_condition_matches_error_code() {
+    let base = temp_dir("plpgsql_exception_sqlstate_condition");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_sqlstate_condition_test() returns void language plpgsql as $$
+         begin
+           perform 1/0;
+         exception
+           when sqlstate '22012' then
+             raise notice using message = sqlstate;
+             raise sqlstate '22012' using message = 'substitute message';
+         end
+         $$",
+    )
+    .unwrap();
+
+    clear_notices();
+    match db.execute(1, "select plpgsql_sqlstate_condition_test()") {
+        Err(err) => {
+            assert_eq!(take_notice_messages(), vec![String::from("22012")]);
+            let Some((message, sqlstate)) = exec_error_detailed_message_sqlstate(&err) else {
+                panic!("expected detailed error, got {err:?}");
+            };
+            assert_eq!(message, "substitute message");
+            assert_eq!(sqlstate, "22012");
+        }
+        other => panic!("expected substitute error, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create function plpgsql_sqlstate_restore_test() returns void language plpgsql as $$
+         begin
+           begin
+             raise exception 'user exception';
+           exception when others then
+             raise notice 'caught exception % %', sqlstate, sqlerrm;
+             begin
+               raise notice '% %', sqlstate, sqlerrm;
+               perform 10/0;
+             exception
+               when division_by_zero then
+                 raise notice 'caught exception % %', sqlstate, sqlerrm;
+             end;
+             raise notice '% %', sqlstate, sqlerrm;
+           end;
+         end
+         $$",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "select plpgsql_sqlstate_restore_test()")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            String::from("caught exception P0001 user exception"),
+            String::from("P0001 user exception"),
+            String::from("caught exception 22012 division by zero"),
+            String::from("P0001 user exception"),
+        ]
+    );
+}
+
+#[test]
 fn comment_on_function_missing_signature_uses_canonical_type_names() {
     let base = temp_dir("comment_on_function_missing_sig");
     let db = Database::open(&base, 16).unwrap();

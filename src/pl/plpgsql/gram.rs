@@ -2026,6 +2026,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_exception_sqlstate_condition() {
+        let block = parse_block(
+            "
+            begin
+                perform 1/0;
+            exception
+                when sqlstate '22012' then
+                    null;
+            end
+            ",
+        )
+        .unwrap();
+
+        assert_eq!(block.exception_handlers.len(), 1);
+        assert_eq!(
+            block.exception_handlers[0].conditions,
+            vec![ExceptionCondition::SqlState("22012".into())]
+        );
+    }
+
+    #[test]
     fn parse_raise_accepts_dollar_quoted_message() {
         let block = parse_block(
             r#"

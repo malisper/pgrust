@@ -18,10 +18,13 @@ use crate::backend::parser::{
     bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
     bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
     parse_statement, parse_type_name, pg_plan_query_with_outer_scopes_and_ctes,
-    pg_plan_values_query_with_outer_scopes_and_ctes, resolve_raw_type_name,
+    pg_plan_query_with_outer_scopes_and_ctes_config,
+    pg_plan_values_query_with_outer_scopes_and_ctes,
+    pg_plan_values_query_with_outer_scopes_and_ctes_config, resolve_raw_type_name,
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{EVENT_TRIGGER_TYPE_OID, PgProcRow, RECORD_TYPE_OID};
+use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, Var, user_attrno};
 
@@ -1921,11 +1924,12 @@ fn plan_select_for_env(
     env: &CompileEnv,
 ) -> Result<PlannedStmt, ParseError> {
     let stmt = normalize_plpgsql_select(stmt.clone(), env);
-    pg_plan_query_with_outer_scopes_and_ctes(
+    pg_plan_query_with_outer_scopes_and_ctes_config(
         &stmt,
         catalog,
         &[outer_scope_for_sql(env)],
         &env.local_ctes,
+        plpgsql_planner_config(),
     )
 }
 
@@ -1935,12 +1939,20 @@ fn plan_values_for_env(
     env: &CompileEnv,
 ) -> Result<PlannedStmt, ParseError> {
     let stmt = normalize_plpgsql_values(stmt.clone(), env);
-    pg_plan_values_query_with_outer_scopes_and_ctes(
+    pg_plan_values_query_with_outer_scopes_and_ctes_config(
         &stmt,
         catalog,
         &[outer_scope_for_sql(env)],
         &env.local_ctes,
+        plpgsql_planner_config(),
     )
+}
+
+fn plpgsql_planner_config() -> PlannerConfig {
+    PlannerConfig {
+        fold_constants: false,
+        ..PlannerConfig::default()
+    }
 }
 
 fn compile_static_query_source(
@@ -2284,11 +2296,12 @@ fn compile_exec_sql_stmt(
     let outer_scope = outer_scope_for_sql(env);
     match stmt {
         Statement::Select(stmt) => Ok(CompiledStmt::Perform {
-            plan: pg_plan_query_with_outer_scopes_and_ctes(
+            plan: pg_plan_query_with_outer_scopes_and_ctes_config(
                 &stmt,
                 catalog,
                 &[outer_scope],
                 &env.local_ctes,
+                plpgsql_planner_config(),
             )?,
             line: 1,
             sql: Some(rewritten_sql.clone()),

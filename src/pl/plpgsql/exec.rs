@@ -1524,18 +1524,36 @@ fn exec_do_exception_handlers(
         return Ok(None);
     };
     let current = exception_data_from_error(err);
+    let saved_sqlstate = block
+        .exception_sqlstate_slot
+        .map(|slot| (slot, values[slot].clone()));
+    let saved_sqlerrm = block
+        .exception_sqlerrm_slot
+        .map(|slot| (slot, values[slot].clone()));
     if let Some(slot) = block.exception_sqlstate_slot {
         values[slot] = Value::Text(current.sqlstate.into());
     }
     if let Some(slot) = block.exception_sqlerrm_slot {
         values[slot] = Value::Text(current.message.into());
     }
+    let mut result = Ok(());
     for stmt in &handler.statements {
-        if matches!(exec_do_stmt(stmt, values, gucs)?, DoControl::LoopContinue) {
-            return Ok(Some(()));
+        match exec_do_stmt(stmt, values, gucs) {
+            Ok(DoControl::Continue) => {}
+            Ok(DoControl::LoopContinue) => break,
+            Err(err) => {
+                result = Err(err);
+                break;
+            }
         }
     }
-    Ok(Some(()))
+    if let Some((slot, value)) = saved_sqlstate {
+        values[slot] = value;
+    }
+    if let Some((slot, value)) = saved_sqlerrm {
+        values[slot] = value;
+    }
+    result.map(|()| Some(()))
 }
 
 fn exec_do_stmt(
@@ -1964,6 +1982,8 @@ fn exec_function_exception_handlers(
         return Ok(None);
     };
     let saved_exception = state.current_exception.clone();
+    let saved_sqlstate = state.values[compiled.sqlstate_slot].clone();
+    let saved_sqlerrm = state.values[compiled.sqlerrm_slot].clone();
     let current = exception_data_from_error(err);
     state.values[compiled.sqlstate_slot] = Value::Text(current.sqlstate.into());
     state.values[compiled.sqlerrm_slot] = Value::Text(current.message.clone().into());
@@ -1977,6 +1997,8 @@ fn exec_function_exception_handlers(
     )
     .map(Some);
     state.current_exception = saved_exception;
+    state.values[compiled.sqlstate_slot] = saved_sqlstate;
+    state.values[compiled.sqlerrm_slot] = saved_sqlerrm;
     result
 }
 

@@ -2760,6 +2760,7 @@ impl Session {
                 .get("max_parallel_workers_per_gather")
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(2),
+            fold_constants: true,
         }
     }
 
