@@ -704,6 +704,84 @@ fn try_parse_alter_table_multi_action_statement(
             },
         )));
     }
+    if !parsed_statements.is_empty()
+        && parsed_statements
+            .iter()
+            .all(|stmt| matches!(stmt, Statement::AlterTableInherit(_)))
+    {
+        let mut if_exists = false;
+        let mut only = false;
+        let mut table_name = None;
+        let mut parent_names = Vec::with_capacity(parsed_statements.len());
+        for stmt in &parsed_statements {
+            let Statement::AlterTableInherit(inherit) = stmt else {
+                unreachable!("all parsed statements are INHERIT");
+            };
+            if let Some(table_name) = &table_name {
+                if inherit.if_exists != if_exists
+                    || inherit.only != only
+                    || inherit.table_name != *table_name
+                {
+                    return Ok(Some(Statement::AlterTableMulti(statements)));
+                }
+            } else {
+                if_exists = inherit.if_exists;
+                only = inherit.only;
+                table_name = Some(inherit.table_name.clone());
+            }
+            parent_names.push(inherit.parent_name.clone());
+            parent_names.extend(inherit.additional_parent_names.iter().cloned());
+        }
+        let mut parent_names = parent_names.into_iter();
+        return Ok(Some(Statement::AlterTableInherit(
+            AlterTableInheritStatement {
+                if_exists,
+                only,
+                table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+                parent_name: parent_names.next().ok_or(ParseError::UnexpectedEof)?,
+                additional_parent_names: parent_names.collect(),
+            },
+        )));
+    }
+    if !parsed_statements.is_empty()
+        && parsed_statements
+            .iter()
+            .all(|stmt| matches!(stmt, Statement::AlterTableNoInherit(_)))
+    {
+        let mut if_exists = false;
+        let mut only = false;
+        let mut table_name = None;
+        let mut parent_names = Vec::with_capacity(parsed_statements.len());
+        for stmt in &parsed_statements {
+            let Statement::AlterTableNoInherit(inherit) = stmt else {
+                unreachable!("all parsed statements are NO INHERIT");
+            };
+            if let Some(table_name) = &table_name {
+                if inherit.if_exists != if_exists
+                    || inherit.only != only
+                    || inherit.table_name != *table_name
+                {
+                    return Ok(Some(Statement::AlterTableMulti(statements)));
+                }
+            } else {
+                if_exists = inherit.if_exists;
+                only = inherit.only;
+                table_name = Some(inherit.table_name.clone());
+            }
+            parent_names.push(inherit.parent_name.clone());
+            parent_names.extend(inherit.additional_parent_names.iter().cloned());
+        }
+        let mut parent_names = parent_names.into_iter();
+        return Ok(Some(Statement::AlterTableNoInherit(
+            AlterTableNoInheritStatement {
+                if_exists,
+                only,
+                table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+                parent_name: parent_names.next().ok_or(ParseError::UnexpectedEof)?,
+                additional_parent_names: parent_names.collect(),
+            },
+        )));
+    }
     if parsed_statements
         .iter()
         .any(alter_table_action_can_run_as_compound)
@@ -23469,6 +23547,7 @@ fn build_alter_table_no_inherit(
         only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         parent_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        additional_parent_names: parts.collect(),
     })
 }
 
@@ -23497,6 +23576,7 @@ fn build_alter_table_inherit(
         only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         parent_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        additional_parent_names: parts.collect(),
     })
 }
 

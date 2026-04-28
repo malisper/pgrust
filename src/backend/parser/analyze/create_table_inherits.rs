@@ -529,12 +529,17 @@ fn merge_inherited_columns(
 
     for constraint in stmt.constraints() {
         match constraint {
-            TableConstraint::NotNull { column, .. } => {
-                mark_local_table_not_null(&mut merged, &column_lookup, column)?;
+            TableConstraint::NotNull { column, attributes } => {
+                mark_local_table_not_null(&mut merged, &column_lookup, column, attributes.clone())?;
             }
             TableConstraint::PrimaryKey { columns, .. } => {
                 for column in columns {
-                    mark_local_table_not_null(&mut merged, &column_lookup, column)?;
+                    mark_local_table_not_null(
+                        &mut merged,
+                        &column_lookup,
+                        column,
+                        ConstraintAttributes::default(),
+                    )?;
                 }
             }
             _ => {}
@@ -594,6 +599,7 @@ fn mark_local_table_not_null(
     merged: &mut [MergedColumnSpec],
     column_lookup: &BTreeMap<String, usize>,
     column_name: &str,
+    attributes: ConstraintAttributes,
 ) -> Result<(), ParseError> {
     let Some(index) = column_lookup
         .get(&column_name.to_ascii_lowercase())
@@ -602,11 +608,28 @@ fn mark_local_table_not_null(
         return Err(ParseError::UnknownColumn(column_name.to_string()));
     };
     let column = &mut merged[index];
-    if column.not_null_is_local || column.column.nullable() {
+    if column.not_null_is_local {
         return Ok(());
     }
     column.not_null_is_local = true;
-    replace_not_null_constraint(&mut column.column, ConstraintAttributes::default());
+    if column.column.nullable() {
+        column
+            .column
+            .constraints
+            .push(ColumnConstraint::NotNull { attributes });
+    } else if attributes.no_inherit {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "cannot define not-null constraint with NO INHERIT on column \"{}\"",
+                column.column.name
+            ),
+            detail: Some("The column has an inherited not-null constraint.".into()),
+            hint: None,
+            sqlstate: "42P16",
+        });
+    } else {
+        replace_not_null_constraint(&mut column.column, attributes);
+    }
     Ok(())
 }
 
@@ -894,11 +917,19 @@ fn mark_inherited_check_actions(
             action.is_local = true;
             action.enforced =
                 local.enforced.unwrap_or(true) || matches.iter().any(|row| row.conenforced);
-            action.not_valid = local.not_valid;
+            action.not_valid = if action.enforced {
+                false
+            } else {
+                local.not_valid
+            };
         } else {
             action.is_local = false;
             action.enforced = matches.iter().any(|row| row.conenforced);
-            action.not_valid = !matches.iter().any(|row| row.convalidated);
+            action.not_valid = if action.enforced {
+                false
+            } else {
+                !matches.iter().any(|row| row.convalidated)
+            };
         }
         action.parent_constraint_oid = matches.first().map(|row| row.oid);
         action.inhcount = matches.len().min(i16::MAX as usize) as i16;

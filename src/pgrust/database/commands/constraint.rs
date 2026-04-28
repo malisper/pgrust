@@ -984,6 +984,33 @@ fn not_null_constraint_for_column(
     .cloned())
 }
 
+fn relation_with_shape(
+    shape_catalog: &dyn CatalogLookup,
+    mut relation: crate::backend::parser::BoundRelation,
+) -> crate::backend::parser::BoundRelation {
+    if relation.desc.columns.is_empty()
+        && let Some(shaped) = shape_catalog.lookup_relation_by_oid(relation.relation_oid)
+    {
+        relation.desc = shaped.desc;
+    }
+    relation
+}
+
+fn not_null_constraint_for_column_with_shape(
+    catalog: &dyn CatalogLookup,
+    shape_catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    column_name: &str,
+) -> Result<Option<PgConstraintRow>, ExecError> {
+    let Some(relation) = shape_catalog.lookup_relation_by_oid(relation_oid) else {
+        return Ok(None);
+    };
+    let column_index = relation_column_index_by_name(&relation, column_name)?;
+    let attnum = (column_index + 1) as i16;
+    let rows = catalog.constraint_rows_for_relation(relation_oid);
+    Ok(not_null_constraint_for_attnum(&rows, attnum).cloned())
+}
+
 fn inherited_not_null_parent_count(
     catalog: &dyn CatalogLookup,
     relation: &crate::backend::parser::BoundRelation,
@@ -997,6 +1024,28 @@ fn inherited_not_null_parent_count(
             )));
         };
         match not_null_constraint_for_column(catalog, &parent_relation, column_name) {
+            Ok(Some(row)) if !row.connoinherit => count = count.saturating_add(1),
+            Ok(_) | Err(ExecError::Parse(ParseError::UnknownColumn(_))) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(count)
+}
+
+fn inherited_not_null_parent_count_with_shape(
+    catalog: &dyn CatalogLookup,
+    shape_catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    column_name: &str,
+) -> Result<i16, ExecError> {
+    let mut count = 0i16;
+    for parent in catalog.inheritance_parents(relation_oid) {
+        match not_null_constraint_for_column_with_shape(
+            catalog,
+            shape_catalog,
+            parent.inhparent,
+            column_name,
+        ) {
             Ok(Some(row)) if !row.connoinherit => count = count.saturating_add(1),
             Ok(_) | Err(ExecError::Parse(ParseError::UnknownColumn(_))) => {}
             Err(err) => return Err(err),
@@ -1020,6 +1069,19 @@ fn direct_inheritance_children(
                 .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(row.inhrelid.to_string())))
         })
         .collect()
+}
+
+fn collect_inheritance_descendant_oids(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    descendants: &mut Vec<u32>,
+) {
+    let mut children = catalog.inheritance_children(relation_oid);
+    children.sort_by_key(|row| (row.inhseqno, row.inhrelid));
+    for child in children.into_iter().filter(|row| !row.inhdetachpending) {
+        descendants.push(child.inhrelid);
+        collect_inheritance_descendant_oids(catalog, child.inhrelid, descendants);
+    }
 }
 
 impl Database {
@@ -1957,8 +2019,7 @@ impl Database {
                         action.constraint_name
                     ));
                     let conenforced = existing.conenforced || action.enforced;
-                    let convalidated = conenforced
-                        && (existing.convalidated || (action.enforced && !action.not_valid));
+                    let convalidated = conenforced && (existing.convalidated || action.enforced);
                     let effect = self
                         .catalog
                         .write()
@@ -2083,8 +2144,30 @@ impl Database {
                                 )
                                 .map_err(map_catalog_error)?;
                             let (not_null_oid, effect) = effect;
+                            self.apply_catalog_mutation_effect_immediate(&effect)?;
                             primary_key_owned_not_null_oids.push(not_null_oid);
                             catalog_effects.push(effect);
+                            if !alter_stmt.only {
+                                let not_null_action =
+                                    crate::backend::parser::NotNullConstraintAction {
+                                        constraint_name: not_null_name,
+                                        column: relation.desc.columns[column_index].name.clone(),
+                                        not_valid: false,
+                                        no_inherit: false,
+                                        primary_key_owned: true,
+                                        is_local: true,
+                                        inhcount: 0,
+                                    };
+                                self.propagate_not_null_constraint_to_inheritors(
+                                    client_id,
+                                    xid,
+                                    cid.saturating_add(1),
+                                    &relation,
+                                    &not_null_action,
+                                    configured_search_path,
+                                    catalog_effects,
+                                )?;
+                            }
                         } else if let Some(row) = not_null_constraint_for_attnum(
                             &existing_constraints,
                             (column_index + 1) as i16,
@@ -2094,6 +2177,27 @@ impl Database {
                                 &relation.desc.columns[column_index].name,
                                 &table_name,
                             )?;
+                            if !alter_stmt.only {
+                                let not_null_action =
+                                    crate::backend::parser::NotNullConstraintAction {
+                                        constraint_name: row.conname.clone(),
+                                        column: relation.desc.columns[column_index].name.clone(),
+                                        not_valid: !row.convalidated,
+                                        no_inherit: false,
+                                        primary_key_owned: false,
+                                        is_local: row.conislocal,
+                                        inhcount: row.coninhcount,
+                                    };
+                                self.propagate_not_null_constraint_to_inheritors(
+                                    client_id,
+                                    xid,
+                                    cid.saturating_add(1),
+                                    &relation,
+                                    &not_null_action,
+                                    configured_search_path,
+                                    catalog_effects,
+                                )?;
+                            }
                         }
                     }
                 }
@@ -2854,8 +2958,7 @@ impl Database {
                     action.constraint_name
                 ));
                 let conenforced = existing.conenforced || action.enforced;
-                let convalidated = conenforced
-                    && (existing.convalidated || (action.enforced && !action.not_valid));
+                let convalidated = conenforced && (existing.convalidated || action.enforced);
                 let effect = self
                     .catalog
                     .write()
@@ -2930,7 +3033,99 @@ impl Database {
             configured_search_path,
             catalog_effects,
             &mut visited,
+        )?;
+        self.recompute_not_null_inheritance_counts_for_descendants(
+            client_id,
+            xid,
+            cid.saturating_add(1),
+            parent_relation.relation_oid,
+            &action.column,
+            configured_search_path,
+            catalog_effects,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn recompute_not_null_inheritance_counts_for_descendants(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent_oid: u32,
+        column_name: &str,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let mut descendants = Vec::new();
+        let lookup_cid = cid.saturating_add(catalog_effects.len() as u32);
+        let catalog =
+            self.lazy_catalog_lookup(client_id, Some((xid, lookup_cid)), configured_search_path);
+        collect_inheritance_descendant_oids(&catalog, parent_oid, &mut descendants);
+        let shape_catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let mut seen = std::collections::BTreeSet::new();
+        for relation_oid in descendants {
+            if !seen.insert(relation_oid) {
+                continue;
+            }
+            let lookup_cid = cid
+                .saturating_add(1)
+                .saturating_add(catalog_effects.len() as u32);
+            let catalog = self.lazy_catalog_lookup(
+                client_id,
+                Some((xid, lookup_cid)),
+                configured_search_path,
+            );
+            let Some(row) = not_null_constraint_for_column_with_shape(
+                &catalog,
+                &shape_catalog,
+                relation_oid,
+                column_name,
+            )?
+            else {
+                continue;
+            };
+            let Some(attnum) = row.conkey.as_ref().and_then(|keys| keys.first()).copied() else {
+                continue;
+            };
+            let inhcount = inherited_not_null_parent_count_with_shape(
+                &catalog,
+                &shape_catalog,
+                relation_oid,
+                column_name,
+            )?;
+            if row.coninhcount == inhcount && !row.connoinherit {
+                continue;
+            }
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: cid
+                    .saturating_add(1)
+                    .saturating_add(catalog_effects.len() as u32),
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .alter_not_null_constraint_state_by_attnum_mvcc(
+                    relation_oid,
+                    attnum,
+                    row.oid,
+                    &row.conname,
+                    None,
+                    Some(false),
+                    Some(row.conislocal),
+                    Some(inhcount),
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2945,11 +3140,22 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         visited: &mut std::collections::BTreeSet<u32>,
     ) -> Result<(), ExecError> {
-        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        for child_relation in direct_inheritance_children(&catalog, parent_relation.relation_oid)? {
+        let children = {
+            let catalog =
+                self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+            let shape_catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+            direct_inheritance_children(&catalog, parent_relation.relation_oid)?
+                .into_iter()
+                .map(|relation| relation_with_shape(&shape_catalog, relation))
+                .collect::<Vec<_>>()
+        };
+        for child_relation in children {
             if !visited.insert(child_relation.relation_oid) {
                 continue;
             }
+            let catalog =
+                self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+            let shape_catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
             let child_name = relation_basename(
                 &catalog
                     .class_row_by_oid(child_relation.relation_oid)
@@ -2979,9 +3185,23 @@ impl Database {
                 )?;
             }
 
-            let existing = not_null_constraint_for_column(&catalog, &child_relation, &column_name)?;
-            let child_inhcount =
-                inherited_not_null_parent_count(&catalog, &child_relation, &column_name)?.max(1);
+            let existing = match not_null_constraint_for_column_with_shape(
+                &catalog,
+                &shape_catalog,
+                child_relation.relation_oid,
+                &column_name,
+            ) {
+                Ok(existing) => existing,
+                Err(ExecError::Parse(ParseError::UnknownColumn(_))) => continue,
+                Err(err) => return Err(err),
+            };
+            let child_inhcount = inherited_not_null_parent_count_with_shape(
+                &catalog,
+                &shape_catalog,
+                child_relation.relation_oid,
+                &column_name,
+            )?
+            .max(1);
             let constraint_ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
@@ -3012,7 +3232,7 @@ impl Database {
                         (!action.not_valid).then_some(true),
                         Some(false),
                         Some(existing.conislocal),
-                        Some(existing.coninhcount.saturating_add(1).max(child_inhcount)),
+                        Some(child_inhcount),
                         &constraint_ctx,
                     )
                     .map_err(map_catalog_error)?;
@@ -3422,7 +3642,7 @@ impl Database {
                     .map_err(map_catalog_error)?;
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
-                if row.contype == CONSTRAINT_CHECK {
+                if row.contype == CONSTRAINT_CHECK && !row.connoinherit {
                     self.drop_check_constraint_from_inheritors(
                         client_id,
                         xid,
@@ -3480,15 +3700,17 @@ impl Database {
                     .map_err(map_catalog_error)?;
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
-                self.drop_not_null_constraint_from_inheritors(
-                    client_id,
-                    xid,
-                    cid.saturating_add(1),
-                    &relation,
-                    &row,
-                    configured_search_path,
-                    catalog_effects,
-                )?;
+                if !row.connoinherit {
+                    self.drop_not_null_constraint_from_inheritors(
+                        client_id,
+                        xid,
+                        cid.saturating_add(1),
+                        &relation,
+                        &row,
+                        configured_search_path,
+                        catalog_effects,
+                    )?;
+                }
             }
             CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE | CONSTRAINT_EXCLUSION => {
                 if row.conparentid != 0 || row.coninhcount > 0 {

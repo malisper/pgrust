@@ -359,11 +359,20 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        let parent = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.parent_name)?;
+        let parent_names = std::iter::once(&alter_stmt.parent_name)
+            .chain(alter_stmt.additional_parent_names.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let parents = parent_names
+            .iter()
+            .map(|parent_name| lookup_heap_relation_for_ddl(&catalog, parent_name))
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut requests = BTreeMap::new();
         add_lock_request(&mut requests, relation.rel, TableLockMode::AccessExclusive);
-        add_lock_request(&mut requests, parent.rel, TableLockMode::AccessShare);
+        for parent in &parents {
+            add_lock_request(&mut requests, parent.rel, TableLockMode::AccessShare);
+        }
         let requests = requests.into_iter().collect::<Vec<_>>();
         lock_table_requests_interruptible(
             &self.table_locks,
@@ -375,13 +384,25 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
-        let result = self.execute_alter_table_inherit_stmt_in_transaction_with_search_path(
-            client_id,
-            alter_stmt,
-            xid,
-            0,
-            configured_search_path,
-            &mut catalog_effects,
+        let result = parent_names.into_iter().try_fold(
+            StatementResult::AffectedRows(0),
+            |_, parent_name| {
+                let single_stmt = AlterTableInheritStatement {
+                    if_exists: alter_stmt.if_exists,
+                    only: alter_stmt.only,
+                    table_name: alter_stmt.table_name.clone(),
+                    parent_name,
+                    additional_parent_names: Vec::new(),
+                };
+                self.execute_alter_table_inherit_stmt_in_transaction_with_search_path(
+                    client_id,
+                    &single_stmt,
+                    xid,
+                    catalog_effects.len() as u32,
+                    configured_search_path,
+                    &mut catalog_effects,
+                )
+            },
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
@@ -440,8 +461,18 @@ impl Database {
             .write()
             .create_relation_inheritance_mvcc(relation.relation_oid, &parent_oids, &ctx)
             .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
-        for child_constraint in catalog
+        let update_catalog = self.lazy_catalog_lookup(
+            client_id,
+            Some((
+                xid,
+                cid.saturating_add(1)
+                    .saturating_add(catalog_effects.len() as u32),
+            )),
+            configured_search_path,
+        );
+        for child_constraint in update_catalog
             .constraint_rows_for_relation(relation.relation_oid)
             .into_iter()
             .filter(|row| row.contype == CONSTRAINT_NOTNULL)
@@ -458,7 +489,7 @@ impl Database {
                 continue;
             };
             let inherited_count =
-                inherited_not_null_match_count(&catalog, &parent_oids, column_name)?;
+                inherited_not_null_match_count(&update_catalog, &parent_oids, column_name)?;
             if inherited_count == 0 {
                 continue;
             }
@@ -509,11 +540,20 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        let parent = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.parent_name)?;
+        let parent_names = std::iter::once(&alter_stmt.parent_name)
+            .chain(alter_stmt.additional_parent_names.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let parents = parent_names
+            .iter()
+            .map(|parent_name| lookup_heap_relation_for_ddl(&catalog, parent_name))
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut requests = BTreeMap::new();
         add_lock_request(&mut requests, relation.rel, TableLockMode::AccessExclusive);
-        add_lock_request(&mut requests, parent.rel, TableLockMode::AccessShare);
+        for parent in &parents {
+            add_lock_request(&mut requests, parent.rel, TableLockMode::AccessShare);
+        }
         let requests = requests.into_iter().collect::<Vec<_>>();
         lock_table_requests_interruptible(
             &self.table_locks,
@@ -525,13 +565,25 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
-        let result = self.execute_alter_table_no_inherit_stmt_in_transaction_with_search_path(
-            client_id,
-            alter_stmt,
-            xid,
-            0,
-            configured_search_path,
-            &mut catalog_effects,
+        let result = parent_names.into_iter().try_fold(
+            StatementResult::AffectedRows(0),
+            |_, parent_name| {
+                let single_stmt = AlterTableNoInheritStatement {
+                    if_exists: alter_stmt.if_exists,
+                    only: alter_stmt.only,
+                    table_name: alter_stmt.table_name.clone(),
+                    parent_name,
+                    additional_parent_names: Vec::new(),
+                };
+                self.execute_alter_table_no_inherit_stmt_in_transaction_with_search_path(
+                    client_id,
+                    &single_stmt,
+                    xid,
+                    catalog_effects.len() as u32,
+                    configured_search_path,
+                    &mut catalog_effects,
+                )
+            },
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
@@ -596,6 +648,7 @@ impl Database {
             .write()
             .drop_relation_inheritance_parent_mvcc(relation.relation_oid, parent.relation_oid, &ctx)
             .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
         if relation.relpersistence == 't' {
             self.replace_temp_entry_desc(client_id, relation.relation_oid, new_child_entry.desc)?;
         }

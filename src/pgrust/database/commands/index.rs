@@ -1429,6 +1429,7 @@ impl Database {
                         indimmediate: true,
                         btree_options: None,
                         brin_options: None,
+                        gist_options: Some(GistOptions::default()),
                         gin_options: None,
                         hash_options: None,
                     },

@@ -27262,6 +27262,232 @@ fn not_null_inheritance_metadata_and_alter_constraint_inheritability() {
 }
 
 #[test]
+fn not_null_inheritability_recomputes_multi_parent_counts() {
+    let base = temp_dir("not_null_inheritability_multiparent_counts");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table inh_nn1 (f1 int not null no inherit)")
+        .unwrap();
+    db.execute(1, "create table inh_nn2 (f2 text, f3 int, f1 int)")
+        .unwrap();
+    db.execute(1, "alter table inh_nn2 inherit inh_nn1")
+        .unwrap();
+    db.execute(1, "create table inh_nn3 (f4 float) inherits (inh_nn2)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table inh_nn4 (f5 int, f4 float, f2 text, f3 int, f1 int)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table inh_nn4 inherit inh_nn2, inherit inh_nn1, inherit inh_nn3",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "alter table inh_nn1 alter constraint inh_nn1_f1_not_null inherit",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, coninhcount::int4, conislocal
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where contype = 'n'
+                and c.relname in ('inh_nn2', 'inh_nn3', 'inh_nn4')
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("inh_nn2".into()),
+                Value::Int32(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("inh_nn3".into()),
+                Value::Int32(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("inh_nn4".into()),
+                Value::Int32(3),
+                Value::Bool(false),
+            ],
+        ]
+    );
+
+    db.execute(
+        1,
+        "alter table inh_nn1 alter constraint inh_nn1_f1_not_null no inherit",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, coninhcount::int4, conislocal
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where contype = 'n'
+                and c.relname in ('inh_nn2', 'inh_nn3', 'inh_nn4')
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("inh_nn2".into()),
+                Value::Int32(0),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("inh_nn3".into()),
+                Value::Int32(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("inh_nn4".into()),
+                Value::Int32(2),
+                Value::Bool(true),
+            ],
+        ]
+    );
+
+    db.execute(1, "alter table inh_nn1 drop constraint inh_nn1_f1_not_null")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, coninhcount::int4, conislocal
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where contype = 'n'
+                and c.relname in ('inh_nn2', 'inh_nn3', 'inh_nn4')
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("inh_nn2".into()),
+                Value::Int32(0),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("inh_nn3".into()),
+                Value::Int32(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("inh_nn4".into()),
+                Value::Int32(2),
+                Value::Bool(true),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn inherited_table_level_not_null_remains_local() {
+    let base = temp_dir("inherited_table_level_not_null_local");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table inh_nn1 (f1 int not null no inherit)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table inh_nn2 (f2 text, f3 int) inherits (inh_nn1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table inh_nn3 (f4 float, constraint nn3_f1 not null f1 no inherit) inherits (inh_nn1, inh_nn2)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, conname, coninhcount::int4, conislocal, connoinherit
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where contype = 'n'
+                and c.relname in ('inh_nn1', 'inh_nn2', 'inh_nn3')
+              order by c.relname, conname",
+        ),
+        vec![
+            vec![
+                Value::Text("inh_nn1".into()),
+                Value::Text("inh_nn1_f1_not_null".into()),
+                Value::Int32(0),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("inh_nn3".into()),
+                Value::Text("nn3_f1".into()),
+                Value::Int32(0),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn inherited_check_merge_validates_enforced_child_rows() {
+    let base = temp_dir("inherited_check_merge_validates_enforced_child_rows");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table p1(f1 int)").unwrap();
+    db.execute(1, "create table p1_c1() inherits(p1)").unwrap();
+    db.execute(
+        1,
+        "alter table p1 add constraint c_check check (f1 < 10) not enforced",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table p1_c1 add constraint c_check check (f1 < 10) not valid enforced",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, conenforced, convalidated
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where conname = 'c_check'
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("p1".into()),
+                Value::Bool(false),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("p1_c1".into()),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+        ]
+    );
+
+    db.execute(1, "create table p1_c2() inherits(p1, p1_c1)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conenforced, convalidated
+               from pg_constraint
+              where conname = 'c_check'
+                and conrelid = (select oid from pg_class where relname = 'p1_c2')",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn alter_not_null_inherit_creates_missing_child_constraints() {
     let base = temp_dir("not_null_inherit_creates_children");
     let db = Database::open(&base, 16).unwrap();
