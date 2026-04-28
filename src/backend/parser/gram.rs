@@ -3161,7 +3161,7 @@ fn build_create_statistics_statement(sql: &str) -> Result<CreateStatisticsStatem
         rest = next;
     }
     let mut statistics_name = None;
-    if !keyword_at_start(rest, "on") {
+    if !keyword_at_start(rest, "on") && !rest.starts_with('(') {
         let (parts, next) = parse_qualified_identifier_parts(rest)?;
         let parsed_name = match parts.as_slice() {
             [name] => name.clone(),

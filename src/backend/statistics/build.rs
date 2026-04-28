@@ -85,7 +85,7 @@ fn build_dependencies_payload(
     }
     for size in 2..=target_ids.len() {
         for combination in combinations(target_ids.len(), size) {
-            for implied_pos in 0..combination.len() {
+            for implied_pos in (0..combination.len()).rev() {
                 let implied = combination[implied_pos];
                 let from = combination
                     .iter()
@@ -104,13 +104,6 @@ fn build_dependencies_payload(
             }
         }
     }
-    items.sort_by(|left, right| {
-        left.from
-            .len()
-            .cmp(&right.from.len())
-            .then_with(|| left.from.cmp(&right.from))
-            .then_with(|| left.to.cmp(&right.to))
-    });
     encode_pg_dependencies_payload(&PgDependenciesPayload { items })
 }
 

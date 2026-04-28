@@ -43,7 +43,10 @@ use crate::backend::utils::sql_deparse::{
     normalize_index_expression_sql, normalize_index_predicate_sql,
 };
 use crate::include::access::htup::TupleError;
-use crate::include::catalog::{ANYELEMENTOID, PG_CLASS_RELATION_OID, RECORD_TYPE_OID};
+use crate::include::catalog::{
+    ANYELEMENTOID, PG_CLASS_RELATION_OID, PG_DEPENDENCIES_TYPE_OID, PG_MCV_LIST_TYPE_OID,
+    PG_NDISTINCT_TYPE_OID, RECORD_TYPE_OID,
+};
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
@@ -4770,6 +4773,11 @@ fn execute_psql_describe_query(
     {
         return Some((vec![QueryColumn::text("Policies")], Vec::new()));
     }
+    if lower.contains("from pg_catalog.pg_statistic_ext es")
+        && lower.contains("pg_catalog.pg_get_statisticsobjdef_columns(es.oid)")
+    {
+        return Some(psql_list_statistics_query(db, session, sql));
+    }
     if lower.contains("pg_catalog.pg_statistic_ext")
         && lower.contains("stxrelid")
         && lower.contains("stxname")
@@ -5313,6 +5321,120 @@ fn quote_sql_literal_for_describe(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+fn psql_statistics_regex_filter(sql: &str, marker: &str) -> Option<regex::Regex> {
+    extract_single_quoted_literal_after(sql, marker)
+        .and_then(|pattern| regex::Regex::new(&pattern).ok())
+}
+
+fn psql_statistics_search_path(session: &Session) -> Vec<String> {
+    session
+        .configured_search_path()
+        .unwrap_or_else(|| vec!["$user".into(), "public".into()])
+}
+
+fn psql_statistics_object_is_visible(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgStatisticExtRow,
+    search_path: &[String],
+) -> bool {
+    for schema_name in search_path {
+        if schema_name == "$user" || schema_name.is_empty() {
+            continue;
+        }
+        let Some(namespace) = catalog
+            .namespace_rows()
+            .into_iter()
+            .find(|namespace| namespace.nspname.eq_ignore_ascii_case(schema_name))
+        else {
+            continue;
+        };
+        if let Some(visible) =
+            catalog.statistic_ext_row_by_name_namespace(&row.stxname, namespace.oid)
+        {
+            return visible.oid == row.oid;
+        }
+    }
+    false
+}
+
+fn psql_list_statistics_query(
+    db: &Database,
+    session: &Session,
+    sql: &str,
+) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
+    let catalog = session.catalog_lookup(db);
+    let search_path = psql_statistics_search_path(session);
+    let schema_filter = psql_statistics_regex_filter(
+        sql,
+        "es.stxnamespace::pg_catalog.regnamespace::pg_catalog.text operator(pg_catalog.~)",
+    );
+    let name_filter = psql_statistics_regex_filter(sql, "es.stxname operator(pg_catalog.~)");
+    let txn_ctx = session.catalog_txn_ctx();
+    let configured_search_path = session.configured_search_path();
+    let mut rows = catalog
+        .statistic_ext_rows()
+        .into_iter()
+        .filter_map(|row| {
+            let schema_name = catalog.namespace_row_by_oid(row.stxnamespace)?.nspname;
+            if let Some(filter) = &schema_filter {
+                if !filter.is_match(&schema_name) {
+                    return None;
+                }
+            } else if !psql_statistics_object_is_visible(&catalog, &row, &search_path) {
+                return None;
+            }
+            if let Some(filter) = &name_filter
+                && !filter.is_match(&row.stxname)
+            {
+                return None;
+            }
+            let relation_name = db.relation_display_name(
+                session.client_id,
+                txn_ctx,
+                configured_search_path.as_deref(),
+                row.stxrelid,
+            )?;
+            let columns = statistics_row_columns_text(&catalog, &row)?;
+            Some(vec![
+                Value::Text(schema_name.into()),
+                Value::Text(row.stxname.clone().into()),
+                Value::Text(format!("{columns} FROM {relation_name}").into()),
+                if statistics_row_kind_enabled(&row, b'd') {
+                    Value::Text("defined".into())
+                } else {
+                    Value::Null
+                },
+                if statistics_row_kind_enabled(&row, b'f') {
+                    Value::Text("defined".into())
+                } else {
+                    Value::Null
+                },
+                if statistics_row_kind_enabled(&row, b'm') {
+                    Value::Text("defined".into())
+                } else {
+                    Value::Null
+                },
+            ])
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        value_text_for_sort(&left[0])
+            .cmp(value_text_for_sort(&right[0]))
+            .then_with(|| value_text_for_sort(&left[1]).cmp(value_text_for_sort(&right[1])))
+    });
+    (
+        vec![
+            QueryColumn::text("Schema"),
+            QueryColumn::text("Name"),
+            QueryColumn::text("Definition"),
+            QueryColumn::text("Ndistinct"),
+            QueryColumn::text("Dependencies"),
+            QueryColumn::text("MCV"),
+        ],
+        rows,
+    )
+}
+
 fn psql_describe_statistics_query(
     db: &Database,
     session: &Session,
@@ -5437,19 +5559,6 @@ fn execute_statistics_catalog_query(
     {
         return Some(statistics_namespace_owner_query(session, db));
     }
-    if lower.contains("from pg_statistic_ext s, pg_statistic_ext_data d")
-        || lower.contains("from pg_statistic_ext s join pg_statistic_ext_data d")
-    {
-        return Some(statistics_catalog_empty_result(sql));
-    }
-    if lower.contains("from pg_statistic_ext ")
-        || lower.contains("from pg_statistic_ext s")
-        || lower.contains("from pg_statistic_ext_data ")
-        || lower.contains("from pg_statistic_ext_data d")
-    {
-        return Some(statistics_catalog_empty_result(sql));
-    }
-    let _ = session;
     None
 }
 
@@ -5518,47 +5627,67 @@ fn statistics_object_data_query(
 ) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
     let name = extract_single_quoted_literal_after(sql, "where s.stxname =")?;
     let catalog = session.catalog_lookup(db);
+    let data_rows = catalog.statistic_ext_data_rows();
     let rows = catalog
         .statistic_ext_rows()
         .into_iter()
         .filter(|row| row.stxname.eq_ignore_ascii_case(&name))
-        .map(|row| {
-            vec![
-                Value::Text(row.stxname.into()),
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-            ]
+        .flat_map(|row| {
+            let matching_data = data_rows
+                .iter()
+                .filter(|data| data.stxoid == row.oid)
+                .cloned()
+                .collect::<Vec<_>>();
+            if matching_data.is_empty() {
+                return vec![vec![
+                    Value::Text(row.stxname.into()),
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                ]];
+            }
+            matching_data
+                .into_iter()
+                .map(|data| {
+                    vec![
+                        Value::Text(row.stxname.clone().into()),
+                        data.stxdndistinct.map_or(Value::Null, Value::Bytea),
+                        data.stxddependencies.map_or(Value::Null, Value::Bytea),
+                        data.stxdmcv.map_or(Value::Null, Value::Bytea),
+                        Value::Bool(data.stxdinherit),
+                    ]
+                })
+                .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
     Some((
         vec![
             QueryColumn::text("stxname"),
-            QueryColumn::text("stxdndistinct"),
-            QueryColumn::text("stxddependencies"),
-            QueryColumn::text("stxdmcv"),
-            QueryColumn::text("stxdinherit"),
+            QueryColumn {
+                name: "stxdndistinct".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bytea).with_identity(PG_NDISTINCT_TYPE_OID, 0),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "stxddependencies".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bytea)
+                    .with_identity(PG_DEPENDENCIES_TYPE_OID, 0),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "stxdmcv".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bytea).with_identity(PG_MCV_LIST_TYPE_OID, 0),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "stxdinherit".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
+            },
         ],
         rows,
     ))
-}
-
-fn statistics_catalog_empty_result(sql: &str) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
-    let lower = sql.to_ascii_lowercase();
-    if lower.contains("select stxname, stxdndistinct, stxddependencies, stxdmcv, stxdinherit") {
-        return (
-            vec![
-                QueryColumn::text("stxname"),
-                QueryColumn::text("stxdndistinct"),
-                QueryColumn::text("stxddependencies"),
-                QueryColumn::text("stxdmcv"),
-                QueryColumn::text("stxdinherit"),
-            ],
-            Vec::new(),
-        );
-    }
-    (vec![QueryColumn::text("?column?")], Vec::new())
 }
 
 fn split_qualified_statistics_name(name: &str) -> (&str, &str) {
@@ -5583,9 +5712,64 @@ fn statistics_row_columns_text(
         items.push(column.name.to_string());
     }
     if let Some(exprs) = row.stxexprs.as_deref() {
-        items.extend(serde_json::from_str::<Vec<String>>(exprs).ok()?);
+        items.extend(
+            serde_json::from_str::<Vec<String>>(exprs)
+                .ok()?
+                .into_iter()
+                .map(|expr| {
+                    if statistics_expr_looks_like_function_call(&expr) {
+                        expr
+                    } else {
+                        format!("({})", format_statistics_expr_text(&expr))
+                    }
+                }),
+        );
     }
     Some(items.join(", "))
+}
+
+fn statistics_expr_looks_like_function_call(expr: &str) -> bool {
+    let trimmed = expr.trim();
+    let Some(open_paren) = trimmed.find('(') else {
+        return false;
+    };
+    trimmed.ends_with(')')
+        && trimmed[..open_paren].chars().enumerate().all(|(idx, ch)| {
+            if idx == 0 {
+                ch == '_' || ch.is_ascii_alphabetic()
+            } else {
+                ch == '_' || ch.is_ascii_alphanumeric()
+            }
+        })
+}
+
+fn format_statistics_expr_text(expr: &str) -> String {
+    let mut out = String::with_capacity(expr.len() + 8);
+    let mut chars = expr.chars().peekable();
+    let mut prev_non_space: Option<char> = None;
+    while let Some(ch) = chars.next() {
+        if matches!(ch, '+' | '*' | '/')
+            || (ch == '-' && statistics_minus_is_binary(prev_non_space))
+        {
+            if !out.ends_with(' ') {
+                out.push(' ');
+            }
+            out.push(ch);
+            if chars.peek().is_some_and(|next| !next.is_whitespace()) {
+                out.push(' ');
+            }
+        } else {
+            out.push(ch);
+        }
+        if !ch.is_whitespace() {
+            prev_non_space = Some(ch);
+        }
+    }
+    out
+}
+
+fn statistics_minus_is_binary(prev_non_space: Option<char>) -> bool {
+    prev_non_space.is_some_and(|ch| !matches!(ch, '(' | '+' | '-' | '*' | '/'))
 }
 
 fn extract_single_quoted_literal_after<'a>(sql: &'a str, needle: &str) -> Option<String> {
@@ -12400,6 +12584,58 @@ ORDER BY 1, 2;";
         assert_eq!(rows[0][6], Value::Bool(true));
         assert_eq!(rows[0][7], Value::Bool(true));
         assert_eq!(rows[0][8], Value::Int16(0));
+    }
+
+    #[test]
+    fn psql_list_statistics_query_formats_relation_names() {
+        let db = Database::open(temp_dir("list_statistics_objects"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table widgets (a int4, b int4)")
+            .unwrap();
+        db.execute(
+            1,
+            "create statistics widgets_stats (mcv) on a, b from widgets",
+        )
+        .unwrap();
+
+        let sql = "SELECT
+                 es.stxnamespace::pg_catalog.regnamespace::pg_catalog.text AS \"Schema\",
+                 es.stxname AS \"Name\",
+                 pg_catalog.format('%s FROM %s',
+                   pg_catalog.pg_get_statisticsobjdef_columns(es.oid),
+                   es.stxrelid::pg_catalog.regclass) AS \"Definition\",
+                 CASE WHEN 'd' = any(es.stxkind) THEN 'defined' END AS \"Ndistinct\",
+                 CASE WHEN 'f' = any(es.stxkind) THEN 'defined' END AS \"Dependencies\",
+                 CASE WHEN 'm' = any(es.stxkind) THEN 'defined' END AS \"MCV\"
+             FROM pg_catalog.pg_statistic_ext es
+             WHERE pg_catalog.pg_statistics_obj_is_visible(es.oid)
+             ORDER BY 1, 2";
+        let (columns, rows) = execute_psql_describe_query(&db, &session, sql).unwrap();
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Schema",
+                "Name",
+                "Definition",
+                "Ndistinct",
+                "Dependencies",
+                "MCV"
+            ]
+        );
+        assert_eq!(
+            rows,
+            vec![vec![
+                Value::Text("public".into()),
+                Value::Text("widgets_stats".into()),
+                Value::Text("a, b FROM widgets".into()),
+                Value::Null,
+                Value::Null,
+                Value::Text("defined".into()),
+            ]]
+        );
     }
 
     #[test]

@@ -7165,6 +7165,71 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_index_for_column_type_mvcc(
+        &mut self,
+        relation_oid: u32,
+        new_desc: RelationDesc,
+        new_indclass: Vec<u32>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, new_entry, _, mut kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, _control| {
+                if !matches!(entry.relkind, 'i' | 'I') {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                entry.desc = new_desc;
+                let index_meta = entry.index_meta.as_mut().ok_or(CatalogError::Corrupt(
+                    "index relation missing index metadata",
+                ))?;
+                index_meta.indclass = new_indclass;
+                Ok(((), vec![BootstrapCatalogKind::PgAttribute]))
+            })?;
+        let old_index = index_row_by_index_oid_mvcc(self, ctx, relation_oid)?.ok_or(
+            CatalogError::Corrupt("index relation missing index metadata"),
+        )?;
+        let mut new_index = old_index.clone();
+        new_index.indclass = new_entry
+            .index_meta
+            .as_ref()
+            .ok_or(CatalogError::Corrupt(
+                "index relation missing index metadata",
+            ))?
+            .indclass
+            .clone();
+
+        let control = self.control_state()?;
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+        let index_kinds = vec![BootstrapCatalogKind::PgIndex];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                indexes: vec![old_index],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &index_kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                indexes: vec![new_index],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &index_kinds,
+        )?;
+        self.control = control;
+        kinds.extend(index_kinds);
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        if let Some(index_meta) = new_entry.index_meta {
+            effect_record_oid(&mut effect.relation_oids, index_meta.indrelid);
+        }
+        Ok(effect)
+    }
+
     pub fn alter_table_rename_column_mvcc(
         &mut self,
         relation_oid: u32,

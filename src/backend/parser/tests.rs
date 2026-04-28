@@ -2606,6 +2606,21 @@ fn parse_create_statistics_without_explicit_name() {
 }
 
 #[test]
+fn parse_create_statistics_without_explicit_name_with_kinds() {
+    let stmt = parse_statement("create statistics (ndistinct, mcv) on a, b from items").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateStatistics(CreateStatisticsStatement {
+            if_not_exists: false,
+            statistics_name: None,
+            kinds: vec!["ndistinct".into(), "mcv".into()],
+            targets: vec!["a".into(), "b".into()],
+            from_clause: "items".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_create_statistics_function_call_targets() {
     let stmt = parse_statement(
         "create statistics s on date_trunc('day', d), public.upper(b), (a + b) from items",

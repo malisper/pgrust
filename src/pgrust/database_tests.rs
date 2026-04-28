@@ -18739,20 +18739,23 @@ fn alter_table_alter_column_type_allows_foreign_key_columns() {
 }
 
 #[test]
-fn alter_table_alter_column_type_rejects_indexed_target_column() {
-    let base = temp_dir("alter_table_alter_column_type_index_guard");
+fn alter_table_alter_column_type_rebuilds_plain_indexed_target_column() {
+    let base = temp_dir("alter_table_alter_column_type_plain_index");
     let db = Database::open(&base, 16).unwrap();
 
     db.execute(1, "create table items (id int4, note int4)")
         .unwrap();
+    db.execute(1, "insert into items values (1, 10), (2, 20)")
+        .unwrap();
     db.execute(1, "create index items_note_idx on items (note)")
         .unwrap();
 
-    match db.execute(1, "alter table items alter column note type int8") {
-        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
-            if feature == "ALTER TABLE ALTER COLUMN TYPE with dependent indexes" => {}
-        other => panic!("expected dependent-index rejection, got {other:?}"),
-    }
+    db.execute(1, "alter table items alter column note type int8")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id from items where note = 20 order by id"),
+        vec![vec![Value::Int32(2)]]
+    );
 }
 
 #[test]
@@ -19864,6 +19867,99 @@ fn create_statistics_rejects_xid_column_with_postgres_message() {
             assert_eq!(sqlstate, "0A000");
         }
         other => panic!("expected xid CREATE STATISTICS rejection, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_statistics_rejects_virtual_generated_and_system_column_expressions() {
+    let base = temp_dir("create_statistics_generated_system_columns");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table ext_stats_test1 (x int, y int, z int generated always as (x + y) virtual)",
+    )
+    .unwrap();
+
+    for sql in [
+        "create statistics tst on z from ext_stats_test1",
+        "create statistics tst on (z + 1) from ext_stats_test1",
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::DetailedError { message, .. }) => assert_eq!(
+                message,
+                "statistics creation on virtual generated columns is not supported"
+            ),
+            other => panic!("expected generated-column CREATE STATISTICS rejection, got {other:?}"),
+        }
+    }
+
+    match db.execute(
+        1,
+        "create statistics tst on (tableoid::int + 1) from ext_stats_test1",
+    ) {
+        Err(ExecError::DetailedError { message, .. }) => assert_eq!(
+            message,
+            "statistics creation on system columns is not supported"
+        ),
+        other => panic!("expected system-column CREATE STATISTICS rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_statistics_reports_postgres_relation_kind_errors() {
+    let base = temp_dir("create_statistics_relation_kind_errors");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create schema tststats").unwrap();
+    db.execute(1, "create table tststats.t (a int, b int)")
+        .unwrap();
+    db.execute(1, "create index ti on tststats.t (a, b)")
+        .unwrap();
+    db.execute(1, "create sequence tststats.s").unwrap();
+    db.execute(1, "create view tststats.v as select * from tststats.t")
+        .unwrap();
+    db.execute(1, "create type tststats.ty as (a int, b int)")
+        .unwrap();
+
+    for (sql, relation, detail) in [
+        (
+            "create statistics tststats.s2 on a, b from tststats.ti",
+            "ti",
+            "This operation is not supported for indexes.",
+        ),
+        (
+            "create statistics tststats.s3 on a, b from tststats.s",
+            "s",
+            "This operation is not supported for sequences.",
+        ),
+        (
+            "create statistics tststats.s4 on a, b from tststats.v",
+            "v",
+            "This operation is not supported for views.",
+        ),
+        (
+            "create statistics tststats.s6 on a, b from tststats.ty",
+            "ty",
+            "This operation is not supported for composite types.",
+        ),
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::DetailedError {
+                message,
+                detail: actual_detail,
+                sqlstate,
+                ..
+            }) => {
+                assert_eq!(
+                    message,
+                    format!("cannot define statistics for relation \"{relation}\"")
+                );
+                assert_eq!(actual_detail.as_deref(), Some(detail));
+                assert_eq!(sqlstate, "42809");
+            }
+            other => panic!("expected relation-kind CREATE STATISTICS rejection, got {other:?}"),
+        }
     }
 }
 
@@ -21525,6 +21621,56 @@ fn pg_stats_ext_views_exist_and_bind_columns() {
              where statistics_name = 'stats_ext_view_stat'",
         ),
         Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
+fn pg_mcv_list_items_decodes_extended_statistics_payload() {
+    let base = temp_dir("pg_mcv_list_items_statistics");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table stats_mcv_items (a int4, b int4, c int4)")
+        .unwrap();
+    db.execute(1, "insert into stats_mcv_items values (1, 2, 3), (1, 2, 3)")
+        .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_mcv_items_stat (mcv) on a, b, c from stats_mcv_items",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_mcv_items").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select m.index, m.values, m.nulls, m.frequency, m.base_frequency \
+             from pg_statistic_ext s \
+             join pg_statistic_ext_data d on d.stxoid = s.oid, \
+                  pg_mcv_list_items(d.stxdmcv) m \
+             where s.stxname = 'stats_mcv_items_stat'",
+        ),
+        vec![vec![
+            Value::Int32(0),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::Text("1".into()),
+                    Value::Text("2".into()),
+                    Value::Text("3".into()),
+                ])
+                .with_element_type_oid(TEXT_TYPE_OID),
+            ),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::Bool(false),
+                    Value::Bool(false),
+                    Value::Bool(false)
+                ])
+                .with_element_type_oid(crate::include::catalog::BOOL_TYPE_OID),
+            ),
+            Value::Float64(1.0),
+            Value::Float64(1.0),
+        ]]
     );
 }
 

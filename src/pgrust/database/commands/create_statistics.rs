@@ -8,9 +8,10 @@ use crate::backend::parser::{
 };
 use crate::backend::utils::misc::notices::{push_notice, push_warning};
 use crate::include::catalog::{BTREE_AM_OID, PG_CATALOG_NAMESPACE_OID, PgStatisticExtRow};
+use crate::include::nodes::parsenodes::ColumnGeneratedKind;
 use crate::pgrust::database::ddl::{
     ensure_can_set_role, ensure_relation_owner, format_sql_type_name, is_system_column_name,
-    normalize_statistics_target, relation_kind_name,
+    normalize_statistics_target,
 };
 
 #[derive(Debug, Clone)]
@@ -58,12 +59,12 @@ impl Database {
         let relation_name = normalize_statistics_from_clause(&create_stmt.from_clause)?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation = match catalog.lookup_any_relation(&relation_name) {
-            Some(entry) if crate::include::catalog::relkind_is_analyzable(entry.relkind) => entry,
+            Some(entry) if statistics_relation_kind_supported(entry.relkind) => entry,
             Some(entry) => {
-                return Err(ExecError::Parse(ParseError::WrongObjectType {
-                    name: relation_name.clone(),
-                    expected: relation_kind_name(entry.relkind),
-                }));
+                return Err(unsupported_statistics_relation_error(
+                    &relation_name,
+                    entry.relkind,
+                ));
             }
             None => return Err(ExecError::Parse(ParseError::UnknownTable(relation_name))),
         };
@@ -218,6 +219,8 @@ impl Database {
             waiter: None,
             interrupts: Arc::clone(&self.interrupt_state(client_id)),
         };
+        let statistics_oid = statistics.oid;
+        let mut clear_statistics_data = false;
         let effect = match &stmt.action {
             AlterStatisticsAction::Rename { new_name } => {
                 if new_name.contains('.') {
@@ -252,6 +255,7 @@ impl Database {
                 if let Some(warning) = normalized.warning {
                     push_warning(warning);
                 }
+                clear_statistics_data = normalized.value == 0;
                 self.catalog
                     .write()
                     .replace_statistics_row_mvcc(
@@ -315,6 +319,15 @@ impl Database {
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         self.plan_cache.invalidate_all();
         catalog_effects.push(effect);
+        if clear_statistics_data {
+            let effect = self
+                .catalog
+                .write()
+                .replace_statistics_data_rows_mvcc(statistics_oid, Vec::new(), &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -613,8 +626,9 @@ impl Database {
         let base_addition = stmt
             .targets
             .iter()
-            .find_map(|target| simple_statistics_column(target))
-            .unwrap_or("expr");
+            .map(|target| statistics_name_target_fragment(target))
+            .collect::<Vec<_>>()
+            .join("_");
         let mut candidate = format!("{relation_name}_{base_addition}_stat");
         let namespace_oid = relation.namespace_oid;
         let mut suffix = 1usize;
@@ -700,6 +714,35 @@ fn normalize_statistics_from_clause(from_clause: &str) -> Result<String, ExecErr
     Ok(input.trim_matches('"').to_ascii_lowercase())
 }
 
+fn statistics_relation_kind_supported(relkind: char) -> bool {
+    matches!(relkind, 'r' | 'm' | 'p' | 'f')
+}
+
+fn unsupported_statistics_relation_error(relation_name: &str, relkind: char) -> ExecError {
+    let base_name = relation_name
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(relation_name)
+        .trim_matches('"');
+    let detail_kind = match relkind {
+        'c' => "composite types",
+        'f' => "foreign tables",
+        'i' | 'I' => "indexes",
+        'S' => "sequences",
+        't' => "TOAST tables",
+        'v' => "views",
+        _ => "relations of this kind",
+    };
+    ExecError::DetailedError {
+        message: format!("cannot define statistics for relation \"{base_name}\""),
+        detail: Some(format!(
+            "This operation is not supported for {detail_kind}."
+        )),
+        hint: None,
+        sqlstate: "42809",
+    }
+}
+
 fn resolve_statistics_targets(
     db: &Database,
     client_id: ClientId,
@@ -727,12 +770,7 @@ fn resolve_statistics_targets(
         let trimmed = target.trim();
         if let Some(column_name) = simple_statistics_column(trimmed) {
             if is_system_column_name(column_name) {
-                return Err(ExecError::DetailedError {
-                    message: "statistics creation on system columns is not supported".into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "0A000",
-                });
+                return Err(statistics_system_column_error());
             }
             let (index, column) = relation
                 .desc
@@ -743,6 +781,9 @@ fn resolve_statistics_targets(
                 .ok_or_else(|| {
                     ExecError::Parse(ParseError::UnknownColumn(column_name.to_string()))
                 })?;
+            if column.generated == Some(ColumnGeneratedKind::Virtual) {
+                return Err(statistics_virtual_generated_column_error());
+            }
             if !seen_columns.insert(column_name.to_ascii_lowercase()) {
                 return Err(ExecError::DetailedError {
                     message: "duplicate column name in statistics definition".into(),
@@ -762,6 +803,12 @@ fn resolve_statistics_targets(
             column_keys.push(index.saturating_add(1) as i16);
         } else {
             let expr_text = strip_statistics_expression_parens(trimmed).to_string();
+            if statistics_expression_references_system_column(&expr_text) {
+                return Err(statistics_system_column_error());
+            }
+            if statistics_expression_references_virtual_generated_column(&expr_text, relation) {
+                return Err(statistics_virtual_generated_column_error());
+            }
             let normalized = expr_text.to_ascii_lowercase();
             if !seen_exprs.insert(normalized) {
                 return Err(ExecError::DetailedError {
@@ -918,6 +965,115 @@ fn simple_statistics_column(target: &str) -> Option<&str> {
         Some(inner)
     } else {
         None
+    }
+}
+
+fn statistics_name_target_fragment(target: &str) -> String {
+    simple_statistics_column(target)
+        .map(|column| column.to_ascii_lowercase())
+        .unwrap_or_else(|| "expr".into())
+}
+
+fn statistics_system_column_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "statistics creation on system columns is not supported".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn statistics_virtual_generated_column_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "statistics creation on virtual generated columns is not supported".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn statistics_expression_references_system_column(expr: &str) -> bool {
+    statistics_identifier_tokens(expr).any(|token| is_system_column_name(&token))
+}
+
+fn statistics_expression_references_virtual_generated_column(
+    expr: &str,
+    relation: &crate::backend::parser::BoundRelation,
+) -> bool {
+    relation
+        .desc
+        .columns
+        .iter()
+        .filter(|column| column.generated == Some(ColumnGeneratedKind::Virtual))
+        .any(|column| statistics_expression_references_identifier(expr, &column.name))
+}
+
+fn statistics_expression_references_identifier(expr: &str, identifier: &str) -> bool {
+    statistics_identifier_tokens(expr).any(|token| token.eq_ignore_ascii_case(identifier))
+}
+
+fn statistics_identifier_tokens(expr: &str) -> impl Iterator<Item = String> + '_ {
+    struct IdentifierTokens<'a> {
+        chars: std::iter::Peekable<std::str::CharIndices<'a>>,
+        expr: &'a str,
+    }
+
+    impl<'a> Iterator for IdentifierTokens<'a> {
+        type Item = String;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            while let Some((idx, ch)) = self.chars.next() {
+                if ch == '\'' {
+                    while let Some((_, quoted)) = self.chars.next() {
+                        if quoted == '\'' {
+                            if self.chars.peek().is_some_and(|(_, next)| *next == '\'') {
+                                self.chars.next();
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if ch == '"' {
+                    let mut out = String::new();
+                    while let Some((_, quoted)) = self.chars.next() {
+                        if quoted == '"' {
+                            if self.chars.peek().is_some_and(|(_, next)| *next == '"') {
+                                self.chars.next();
+                                out.push('"');
+                                continue;
+                            }
+                            break;
+                        }
+                        out.push(quoted);
+                    }
+                    if !out.is_empty() {
+                        return Some(out);
+                    }
+                    continue;
+                }
+                if ch == '_' || ch.is_ascii_alphabetic() {
+                    let start = idx;
+                    let mut end = idx + ch.len_utf8();
+                    while let Some((next_idx, next)) = self.chars.peek().copied() {
+                        if next == '_' || next.is_ascii_alphanumeric() {
+                            self.chars.next();
+                            end = next_idx + next.len_utf8();
+                        } else {
+                            break;
+                        }
+                    }
+                    return Some(self.expr[start..end].to_string());
+                }
+            }
+            None
+        }
+    }
+
+    IdentifierTokens {
+        chars: expr.char_indices().peekable(),
+        expr,
     }
 }
 

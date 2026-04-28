@@ -2897,6 +2897,38 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             's',
         ),
+        PgProcRow {
+            prorows: 1000.0,
+            proallargtypes: Some(vec![
+                PG_MCV_LIST_TYPE_OID,
+                INT4_TYPE_OID,
+                TEXT_ARRAY_TYPE_OID,
+                BOOL_ARRAY_TYPE_OID,
+                FLOAT8_TYPE_OID,
+                FLOAT8_TYPE_OID,
+            ]),
+            proargmodes: Some(vec![b'i', b'o', b'o', b'o', b'o', b'o']),
+            proargnames: Some(vec![
+                "mcv_list".into(),
+                "index".into(),
+                "values".into(),
+                "nulls".into(),
+                "frequency".into(),
+                "base_frequency".into(),
+            ]),
+            ..proc_row(
+                3427,
+                "pg_mcv_list_items",
+                RECORD_TYPE_OID,
+                &oid_argtypes(&[PG_MCV_LIST_TYPE_OID]),
+                "pg_stats_ext_mcvlist_items",
+                1,
+                true,
+                true,
+                'f',
+                's',
+            )
+        },
         proc_row(
             2092,
             "array_upper",

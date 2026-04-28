@@ -1332,6 +1332,35 @@ fn looks_like_function_call(expr: &str) -> bool {
         })
 }
 
+fn format_statistics_expression_text(expr: &str) -> String {
+    let mut out = String::with_capacity(expr.len() + 8);
+    let mut chars = expr.chars().peekable();
+    let mut prev_non_space: Option<char> = None;
+    while let Some(ch) = chars.next() {
+        if matches!(ch, '+' | '*' | '/')
+            || (ch == '-' && statistics_minus_is_binary(prev_non_space))
+        {
+            if !out.ends_with(' ') {
+                out.push(' ');
+            }
+            out.push(ch);
+            if chars.peek().is_some_and(|next| !next.is_whitespace()) {
+                out.push(' ');
+            }
+        } else {
+            out.push(ch);
+        }
+        if !ch.is_whitespace() {
+            prev_non_space = Some(ch);
+        }
+    }
+    out
+}
+
+fn statistics_minus_is_binary(prev_non_space: Option<char>) -> bool {
+    prev_non_space.is_some_and(|ch| !matches!(ch, '(' | '+' | '-' | '*' | '/'))
+}
+
 fn statistics_expression_texts(
     statistics: &crate::include::catalog::PgStatisticExtRow,
 ) -> Vec<String> {
@@ -1378,7 +1407,7 @@ fn statistics_columns_text(
         if looks_like_function_call(&expr) {
             items.push(expr);
         } else {
-            items.push(format!("({expr})"));
+            items.push(format!("({})", format_statistics_expression_text(&expr)));
         }
     }
     Some(items.join(", "))
