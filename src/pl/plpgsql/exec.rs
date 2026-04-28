@@ -39,6 +39,10 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::{RecordDescriptor, RecordValue};
 use crate::include::nodes::execnodes::{MaterializedCteTable, MaterializedRow};
 use crate::include::nodes::primnodes::{QueryColumn, expr_sql_type_hint};
+use crate::pgrust::portal::{
+    CursorOptions, Portal, PortalExecution, PortalFetchDirection, PortalFetchLimit, PortalStatus,
+    PortalStrategy,
+};
 use crate::pgrust::session::{ByteaOutputFormat, resolve_thread_prepared_statement};
 
 use super::ast::{CursorDirection, ExceptionCondition, RaiseLevel};
@@ -183,7 +187,7 @@ struct PlpgsqlExceptionData {
     sqlstate: &'static str,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct FunctionCursor {
     columns: Vec<QueryColumn>,
     rows: Vec<Vec<Value>>,
@@ -1402,6 +1406,8 @@ fn execute_compiled_function(
         restore_function_gucs(ctx, saved_gucs, restore_names);
     }
 
+    export_open_cursors_as_portals(&state, ctx);
+
     match &compiled.return_contract {
         FunctionReturnContract::Scalar {
             ty,
@@ -2254,7 +2260,7 @@ fn exec_function_stmt(
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::MoveCursor { slot, direction } => {
-            exec_function_move_cursor(*slot, *direction, compiled, state)?;
+            exec_function_move_cursor(*slot, *direction, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::CloseCursor { slot } => {
@@ -3885,6 +3891,41 @@ fn cursor_name_for_slot(slot: usize, fallback: &str, state: &FunctionState) -> S
         .unwrap_or_else(|| fallback.to_string())
 }
 
+fn export_open_cursors_as_portals(state: &FunctionState, ctx: &mut ExecutorContext) {
+    for (name, cursor) in &state.cursors {
+        ctx.pending_portals.retain(|portal| portal.name != *name);
+        let column_names = cursor
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        let pos = (cursor.current + 1).clamp(0, cursor.rows.len() as isize) as usize;
+        ctx.pending_portals.push(Portal {
+            name: name.clone(),
+            prep_stmt_name: None,
+            source_text: String::new(),
+            command_tag: "SELECT".into(),
+            status: PortalStatus::Ready,
+            strategy: PortalStrategy::OneSelect,
+            options: CursorOptions {
+                holdable: false,
+                binary: false,
+                scroll: cursor.scrollable,
+                no_scroll: !cursor.scrollable,
+                visible: true,
+            },
+            result_formats: Vec::new(),
+            created_in_transaction: true,
+            execution: PortalExecution::Materialized {
+                columns: cursor.columns.clone(),
+                column_names,
+                rows: cursor.rows.clone(),
+                pos,
+            },
+        });
+    }
+}
+
 fn exec_function_open_cursor(
     slot: usize,
     name: &str,
@@ -3987,17 +4028,10 @@ fn exec_function_fetch_cursor(
     targets: &[CompiledSelectIntoTarget],
     compiled: &CompiledFunction,
     state: &mut FunctionState,
-    ctx: &ExecutorContext,
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let portal_name = cursor_name_for_slot(slot, "", state);
-    let (rows, columns) = {
-        let cursor = state.cursors.get_mut(&portal_name).ok_or_else(|| {
-            function_runtime_error(
-                &format!("cursor \"{portal_name}\" does not exist"),
-                None,
-                "34000",
-            )
-        })?;
+    let (rows, columns) = if let Some(cursor) = state.cursors.get_mut(&portal_name) {
         if !cursor_direction_is_forward_only(direction) && !cursor.scrollable {
             return Err(function_runtime_error_with_hint(
                 "cursor can only scan forward",
@@ -4008,6 +4042,19 @@ fn exec_function_fetch_cursor(
         }
         let row = cursor_fetch(cursor, direction);
         (row.into_iter().collect::<Vec<_>>(), cursor.columns.clone())
+    } else if let Some(portal) = ctx
+        .pending_portals
+        .iter_mut()
+        .find(|portal| portal.name == portal_name)
+    {
+        let result = portal.fetch_direction(portal_direction_from_plpgsql(direction), false)?;
+        (result.rows, result.columns)
+    } else {
+        return Err(function_runtime_error(
+            &format!("cursor \"{portal_name}\" does not exist"),
+            None,
+            "34000",
+        ));
     };
     assign_query_rows_into_targets(
         &rows, &columns, targets, false, None, false, true, compiled, state, ctx,
@@ -4019,16 +4066,10 @@ fn exec_function_move_cursor(
     direction: CursorDirection,
     compiled: &CompiledFunction,
     state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let portal_name = cursor_name_for_slot(slot, "", state);
-    let moved = {
-        let cursor = state.cursors.get_mut(&portal_name).ok_or_else(|| {
-            function_runtime_error(
-                &format!("cursor \"{portal_name}\" does not exist"),
-                None,
-                "34000",
-            )
-        })?;
+    let moved = if let Some(cursor) = state.cursors.get_mut(&portal_name) {
         if !cursor_direction_is_forward_only(direction) && !cursor.scrollable {
             return Err(function_runtime_error_with_hint(
                 "cursor can only scan forward",
@@ -4038,9 +4079,43 @@ fn exec_function_move_cursor(
             ));
         }
         cursor_move(cursor, direction)
+    } else if let Some(portal) = ctx
+        .pending_portals
+        .iter_mut()
+        .find(|portal| portal.name == portal_name)
+    {
+        portal
+            .fetch_direction(portal_direction_from_plpgsql(direction), true)?
+            .processed
+            > 0
+    } else {
+        return Err(function_runtime_error(
+            &format!("cursor \"{portal_name}\" does not exist"),
+            None,
+            "34000",
+        ));
     };
     state.values[compiled.found_slot] = Value::Bool(moved);
     Ok(())
+}
+
+fn portal_direction_from_plpgsql(direction: CursorDirection) -> PortalFetchDirection {
+    match direction {
+        CursorDirection::Next => PortalFetchDirection::Next,
+        CursorDirection::Prior => PortalFetchDirection::Prior,
+        CursorDirection::First => PortalFetchDirection::First,
+        CursorDirection::Last => PortalFetchDirection::Last,
+        CursorDirection::Forward(count) => {
+            PortalFetchDirection::Forward(PortalFetchLimit::Count(count as usize))
+        }
+        CursorDirection::Backward(count) => {
+            PortalFetchDirection::Backward(PortalFetchLimit::Count(count as usize))
+        }
+        CursorDirection::ForwardAll => PortalFetchDirection::Forward(PortalFetchLimit::All),
+        CursorDirection::BackwardAll => PortalFetchDirection::Backward(PortalFetchLimit::All),
+        CursorDirection::Absolute(index) => PortalFetchDirection::Absolute(index as i64),
+        CursorDirection::Relative(count) => PortalFetchDirection::Relative(count as i64),
+    }
 }
 
 fn cursor_direction_is_forward_only(direction: CursorDirection) -> bool {

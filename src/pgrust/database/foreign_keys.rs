@@ -297,6 +297,7 @@ fn build_constraint_validation_context(
         database: None,
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
+        pending_portals: Vec::new(),
         catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
         scalar_function_cache: std::collections::HashMap::new(),
         srf_rows_cache: std::collections::HashMap::new(),

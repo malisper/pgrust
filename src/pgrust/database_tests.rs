@@ -229,6 +229,7 @@ fn analyze_executor_context(
         database: None,
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
+        pending_portals: Vec::new(),
         catalog: visible_catalog.map(crate::backend::executor::executor_catalog),
         scalar_function_cache: std::collections::HashMap::new(),
         srf_rows_cache: std::collections::HashMap::new(),
@@ -48096,6 +48097,85 @@ fn plpgsql_constant_refcursor_requires_portal_name() {
     assert_eq!(
         query_rows(&db, 1, "select constant_refcursor_with_name()"),
         vec![vec![Value::Text("my_cursor_name".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_returned_refcursor_is_fetchable() {
+    let dir = temp_dir("plpgsql_returned_refcursor");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table pl_returned_cursor_items (id int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into pl_returned_cursor_items values (5), (50), (500)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function pl_return_unnamed_refcursor() returns refcursor language plpgsql as $$
+            declare
+                rc refcursor;
+            begin
+                open rc for select id from pl_returned_cursor_items order by id;
+                return rc;
+            end
+        $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function pl_use_returned_refcursor() returns int4 language plpgsql as $$
+            declare
+                rc refcursor;
+                x record;
+            begin
+                rc := pl_return_unnamed_refcursor();
+                fetch next from rc into x;
+                return x.id;
+            end
+        $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select pl_use_returned_refcursor()"),
+        vec![vec![Value::Int32(5)]]
+    );
+
+    db.execute(
+        1,
+        "create function pl_return_named_refcursor(rc refcursor) returns refcursor language plpgsql as $$
+            begin
+                open rc for select id from pl_returned_cursor_items order by id;
+                return rc;
+            end
+        $$",
+    )
+    .unwrap();
+    let mut session = Session::new(1);
+    session.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pl_return_named_refcursor('test1')"
+        ),
+        vec![vec![Value::Text("test1".into())]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch next in test1"),
+        vec![vec![Value::Int32(5)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch all from test1"),
+        vec![vec![Value::Int32(50)], vec![Value::Int32(500)]]
+    );
+    session.execute(&db, "commit").unwrap();
+    assert_sqlstate(
+        session.execute(&db, "fetch next from test1").unwrap_err(),
+        "34000",
+        "cursor \"test1\" does not exist",
     );
 }
 

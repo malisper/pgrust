@@ -3155,6 +3155,7 @@ impl Session {
             database: Some(db.clone()),
             pending_catalog_effects: Vec::new(),
             pending_table_locks: Vec::new(),
+            pending_portals: Vec::new(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -4377,6 +4378,7 @@ impl Session {
         let temp_effects = mem::take(&mut ctx.temp_effects);
         catalog_effects.extend(mem::take(&mut ctx.pending_catalog_effects));
         let pending_table_locks = mem::take(&mut ctx.pending_table_locks);
+        let pending_portals = mem::take(&mut ctx.pending_portals);
         if let Some(txn) = self.active_txn.as_mut() {
             txn.catalog_effects.extend(catalog_effects);
             txn.temp_effects.extend(temp_effects);
@@ -4397,6 +4399,11 @@ impl Session {
         if !succeeded {
             ctx.pending_async_notifications.clear();
             return;
+        }
+        if self.active_txn.is_some() {
+            for portal in pending_portals {
+                self.portals.put(portal);
+            }
         }
         let Some(txn) = self.active_txn.as_mut() else {
             ctx.pending_async_notifications.clear();

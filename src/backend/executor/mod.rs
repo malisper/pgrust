@@ -173,6 +173,7 @@ use crate::pgrust::database::{
     AsyncNotifyRuntime, Database, DatabaseStatsStore, LargeObjectRuntime, PendingNotification,
     SequenceRuntime, SessionStatsState, TempMutationEffect, TransactionWaiter,
 };
+use crate::pgrust::portal::Portal;
 use crate::pl::plpgsql::PlpgsqlFunctionCache;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
@@ -565,6 +566,7 @@ pub struct ExecutorContext {
     pub database: Option<Database>,
     pub pending_catalog_effects: Vec<CatalogMutationEffect>,
     pub pending_table_locks: Vec<RelFileLocator>,
+    pub pending_portals: Vec<Portal>,
     pub catalog: Option<ExecutorCatalog>,
     pub scalar_function_cache: HashMap<u32, ScalarFunctionCallInfo>,
     pub srf_rows_cache: HashMap<String, Vec<TupleSlot>>,
