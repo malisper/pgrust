@@ -7767,7 +7767,7 @@ fn domain_not_null_violation(domain_name: &str) -> ExecError {
     }
 }
 
-fn enforce_domain_constraint_for_value(
+pub(crate) fn enforce_domain_constraint_for_value(
     value: &Value,
     ty: SqlType,
     ctx: &mut ExecutorContext,

@@ -1912,6 +1912,7 @@ fn exec_function_block(
             None => Value::Null,
         };
         ensure_not_null_assignment(Some(&local.name), local.not_null, &value)?;
+        enforce_plpgsql_domain_constraints(&value, local.ty, ctx)?;
         state.values[local.slot] = value;
     }
     for stmt in &block.statements {
@@ -2042,6 +2043,7 @@ fn exec_function_stmt(
             let value = eval_function_expr(expr, &state.values, ctx)?;
             let value = cast_function_value(value, compiled_expr_sql_type_hint(expr), *ty, ctx)?;
             ensure_not_null_assignment(name.as_deref(), *not_null, &value)?;
+            enforce_plpgsql_domain_constraints(&value, *ty, ctx)?;
             state.values[*slot] = value;
             Ok(FunctionControl::Continue)
         }
@@ -2051,7 +2053,9 @@ fn exec_function_stmt(
             let indirection = eval_assign_indirection_function(target, &state.values, ctx)?;
             let updated =
                 assign_indirect_value(current, target.ty, &indirection, replacement, Some(&*ctx))?;
-            state.values[target.slot] = cast_function_value(updated, None, target.ty, ctx)?;
+            let updated = cast_function_value(updated, None, target.ty, ctx)?;
+            enforce_plpgsql_domain_constraints(&updated, target.ty, ctx)?;
+            state.values[target.slot] = updated;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::Null => Ok(FunctionControl::Continue),
@@ -4561,6 +4565,18 @@ fn cast_function_value(
         target_type,
         ctx.catalog.as_deref(),
         &ctx.datetime_config,
+    )
+}
+
+fn enforce_plpgsql_domain_constraints(
+    value: &Value,
+    target_type: SqlType,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    crate::backend::commands::tablecmds::enforce_domain_constraint_for_value(
+        value,
+        target_type,
+        ctx,
     )
 }
 

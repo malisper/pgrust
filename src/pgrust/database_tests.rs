@@ -47583,6 +47583,72 @@ fn plpgsql_orderedarray_domain_cast_enforces_array_subscript_check() {
 }
 
 #[test]
+fn plpgsql_do_assignment_enforces_function_domain_checks() {
+    let dir = temp_dir("plpgsql_do_domain_checks");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+        "create function plpgsql_domain_check_test(val int4) returns boolean language plpgsql immutable as $$ begin return val > 0; end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create domain plpgsql_domain_test as int4 check(plpgsql_domain_check_test(value))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "do $$ declare v_test plpgsql_domain_test; begin v_test := 1; end $$",
+        )
+        .unwrap();
+
+    let err = session
+        .execute(
+            &db,
+            "do $$ declare v_test plpgsql_domain_test := 1; begin v_test := 0; end $$",
+        )
+        .unwrap_err();
+    let (message, sqlstate) = exec_error_detailed_message_sqlstate(&err)
+        .unwrap_or_else(|| panic!("expected scalar domain check failure, got {err:?}"));
+    assert_eq!(
+        message,
+        "value for domain plpgsql_domain_test violates check constraint \"plpgsql_domain_test_check\""
+    );
+    assert_eq!(sqlstate, "23514");
+
+    session
+        .execute(
+            &db,
+        "create function plpgsql_arr_domain_check_test(val int4[]) returns boolean language plpgsql immutable as $$ begin return val[1] > 0; end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+        "create domain plpgsql_arr_domain_test as int4[] check(plpgsql_arr_domain_check_test(value))",
+        )
+        .unwrap();
+    let err = session
+        .execute(
+            &db,
+            "do $$ declare v_test plpgsql_arr_domain_test := array[1]; begin v_test := array[0]; end $$",
+        )
+        .unwrap_err();
+    let (message, sqlstate) = exec_error_detailed_message_sqlstate(&err)
+        .unwrap_or_else(|| panic!("expected array domain check failure, got {err:?}"));
+    assert_eq!(
+        message,
+        "value for domain plpgsql_arr_domain_test violates check constraint \"plpgsql_arr_domain_test_check\""
+    );
+    assert_eq!(sqlstate, "23514");
+}
+
+#[test]
 fn create_function_supports_void_returns_and_regprocedure_oid_lookup() {
     let dir = temp_dir("create_function_void_regprocedure");
     let db = Database::open(&dir, 64).unwrap();
