@@ -8,9 +8,11 @@
 
 ## **Status: V1 / experimental**
 
-**This is not production-ready. Core systems exist and the wire protocol is compatible enough that `psql` connects and most basic SQL works. Many features are still missing, performance is unoptimized, and there are rough edges everywhere.**
+**This is not production-ready. pgrust is now matching about 67% of the 54,000+ query blocks in PostgreSQL's regression suite. Core systems exist, `psql` connects, and the browser demo runs the same engine compiled to WebAssembly. Many features are still missing, performance is uneven, and correctness work is ongoing.**
 
-[**The full launch write-up is here.**](https://malisper.me/pgrust-rebuilding-postgres-in-rust-with-ai)
+[**Original launch write-up.**](https://malisper.me/pgrust-rebuilding-postgres-in-rust-with-ai)
+
+[**Latest update: 67% Postgres compatibility and accelerating.**](TBD_BLOG_URL)
 
 ## **Why?**
 
@@ -28,15 +30,25 @@
 - **Buffer cache**
 - **Storage engine**
 - **B-tree indexes**
-- **Wire protocol compatibility (psql connects)**
-- **Basic SQL: SELECT / INSERT / UPDATE / DELETE / CREATE TABLE / CREATE INDEX / transactions / JSON and JSONB / basic aggregates / joins**
-- **~45% of PostgreSQL regression queries match expected output**
+- **Wire protocol compatibility (`psql` connects)**
+- **JSON and JSONB**
+- **Window functions**
+- **Foreign keys**
+- **EXPLAIN / EXPLAIN ANALYZE**
+- **Regex support**
+- **PL/pgSQL pieces**
+- **Basic SQL: SELECT / INSERT / UPDATE / DELETE / CREATE TABLE / CREATE INDEX / transactions / aggregates / joins**
+- **~67% of PostgreSQL regression query blocks match expected output**
+
+## **Current snapshot**
+
+The public `main` branch moves forward with intentionally published updates. The 2026-04-27 regression snapshot that matched about 67% of PostgreSQL's regression query blocks is tagged separately so it remains easy to find even as `main` advances.
 
 ## **Quick start**
 
 ### **In-browser (no install)**
 
-[pgrust.com](https://pgrust.com/) runs pgrust compiled to WebAssembly in your browser. Paste in queries and watch them run. Same engine as the native build.**
+[pgrust.com](https://pgrust.com/) runs pgrust compiled to WebAssembly in your browser, with examples for window functions, JSONB, foreign keys, EXPLAIN ANALYZE, regex, and a recursive-CTE Lisp interpreter.
 
 ### **Native (clone and run)**
 
