@@ -2267,13 +2267,8 @@ fn compile_exec_sql_stmt(
     if let Some((target_name, select_sql)) =
         split_cte_prefixed_select_into_target(sql).or_else(|| split_select_into_target(sql))
     {
-        return compile_select_into_stmt(
-            &select_sql,
-            &[AssignTarget::Name(target_name)],
-            false,
-            catalog,
-            env,
-        );
+        let targets = parse_select_into_assign_targets(&target_name)?;
+        return compile_select_into_stmt(&select_sql, &targets, false, catalog, env);
     }
 
     if let Some((target_names, select_sql, strict)) = split_select_with_into_targets(sql) {
@@ -3054,6 +3049,17 @@ fn parse_select_into_assign_target(target: &str) -> Result<AssignTarget, ParseEr
             actual: trimmed.into(),
         }),
     }
+}
+
+fn parse_select_into_assign_targets(targets_sql: &str) -> Result<Vec<AssignTarget>, ParseError> {
+    split_top_level_csv(targets_sql)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "PL/pgSQL SELECT INTO target [, ...]",
+            actual: targets_sql.into(),
+        })?
+        .iter()
+        .map(|target| parse_select_into_assign_target(target))
+        .collect()
 }
 
 fn compile_select_into_stmt(

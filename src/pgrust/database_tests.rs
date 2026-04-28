@@ -35776,6 +35776,31 @@ fn plpgsql_labeled_scalar_references_include_function_parameters() {
 }
 
 #[test]
+fn plpgsql_select_into_leading_form_splits_tight_targets() {
+    let base = temp_dir("plpgsql_select_into_tight_targets");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_select_into_tight_targets(p1 int) returns bool language plpgsql as $$
+         declare
+           x int;
+           y int;
+         begin
+           select into x,y p1, $1;
+           return x = y;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_select_into_tight_targets(42)"),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn plpgsql_assignment_query_expr_from_clause_uses_sql_scope() {
     let base = temp_dir("plpgsql_assignment_query_expr_from");
     let db = Database::open(&base, 16).unwrap();
