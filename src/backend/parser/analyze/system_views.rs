@@ -878,6 +878,26 @@ fn view_definition_and_check_option(
     catalog: &dyn CatalogLookup,
     relation_oid: u32,
 ) -> (String, &'static str) {
+    if let Some(relation) = catalog.relation_by_oid(relation_oid)
+        && let Ok(definition) =
+            crate::backend::rewrite::format_view_definition(relation_oid, &relation.desc, catalog)
+    {
+        let sql = catalog
+            .rewrite_rows_for_relation(relation_oid)
+            .into_iter()
+            .find(|row| row.rulename == "_RETURN")
+            .map(|row| row.ev_action)
+            .unwrap_or_default();
+        let (_, check_option) = crate::backend::rewrite::split_stored_view_definition_sql(&sql);
+        return (
+            definition,
+            match check_option {
+                crate::include::nodes::parsenodes::ViewCheckOption::None => "NONE",
+                crate::include::nodes::parsenodes::ViewCheckOption::Local => "LOCAL",
+                crate::include::nodes::parsenodes::ViewCheckOption::Cascaded => "CASCADED",
+            },
+        );
+    }
     let sql = catalog
         .rewrite_rows_for_relation(relation_oid)
         .into_iter()
@@ -887,13 +907,57 @@ fn view_definition_and_check_option(
     let (definition, check_option) =
         crate::backend::rewrite::split_stored_view_definition_sql(&sql);
     (
-        definition.to_string(),
+        normalize_stored_view_definition_for_information_schema(definition),
         match check_option {
             crate::include::nodes::parsenodes::ViewCheckOption::None => "NONE",
             crate::include::nodes::parsenodes::ViewCheckOption::Local => "LOCAL",
             crate::include::nodes::parsenodes::ViewCheckOption::Cascaded => "CASCADED",
         },
     )
+}
+
+fn normalize_stored_view_definition_for_information_schema(definition: &str) -> String {
+    let trimmed = definition.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let mut rendered = if lower.starts_with("select ") {
+        format!(" SELECT {}", &trimmed["select ".len()..])
+    } else {
+        trimmed.to_string()
+    };
+    rendered = replace_keyword_outside_single_quotes(&rendered, " as ", " AS ");
+    if !rendered.ends_with(';') {
+        rendered.push(';');
+    }
+    rendered
+}
+
+fn replace_keyword_outside_single_quotes(sql: &str, needle: &str, replacement: &str) -> String {
+    let mut rendered = String::with_capacity(sql.len());
+    let mut index = 0usize;
+    let mut in_string = false;
+    while index < sql.len() {
+        let rest = &sql[index..];
+        if rest.starts_with('\'') {
+            rendered.push('\'');
+            index += 1;
+            if in_string && sql[index..].starts_with('\'') {
+                rendered.push('\'');
+                index += 1;
+            } else {
+                in_string = !in_string;
+            }
+            continue;
+        }
+        if !in_string && rest.to_ascii_lowercase().starts_with(needle) {
+            rendered.push_str(replacement);
+            index += needle.len();
+            continue;
+        }
+        let ch = rest.chars().next().expect("nonempty SQL slice");
+        rendered.push(ch);
+        index += ch.len_utf8();
+    }
+    rendered
 }
 
 fn describe_view_updatability(

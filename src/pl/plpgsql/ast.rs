@@ -48,6 +48,7 @@ pub enum RaiseLevel {
     Info,
     Notice,
     Warning,
+    Log,
     Exception,
 }
 

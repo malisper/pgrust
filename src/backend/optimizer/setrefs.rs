@@ -17,7 +17,7 @@ use crate::include::nodes::plannodes::{
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, OUTER_VAR, OpExpr,
     OrderByEntry, Param, ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry, Var,
-    WindowClause, WindowFuncExpr, WindowFuncKind, attrno_index, is_executor_special_varno,
+    WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index, is_executor_special_varno,
     is_system_attr, set_returning_call_exprs, user_attrno,
 };
 use std::collections::BTreeSet;
@@ -1589,6 +1589,19 @@ fn inline_exec_params(expr: Expr, params: &[ExecParamSource], consumed: &mut Vec
                 .collect(),
             ..*func
         })),
+        Expr::Xml(xml) => Expr::Xml(Box::new(XmlExpr {
+            named_args: xml
+                .named_args
+                .into_iter()
+                .map(|arg| inline_exec_params(arg, params, consumed))
+                .collect(),
+            args: xml
+                .args
+                .into_iter()
+                .map(|arg| inline_exec_params(arg, params, consumed))
+                .collect(),
+            ..*xml
+        })),
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
             args: aggref
                 .args
@@ -1717,6 +1730,19 @@ fn decrement_outer_expr_levels(expr: Expr) -> Expr {
                 .map(decrement_outer_expr_levels)
                 .collect(),
             ..*func
+        })),
+        Expr::Xml(xml) => Expr::Xml(Box::new(XmlExpr {
+            named_args: xml
+                .named_args
+                .into_iter()
+                .map(decrement_outer_expr_levels)
+                .collect(),
+            args: xml
+                .args
+                .into_iter()
+                .map(decrement_outer_expr_levels)
+                .collect(),
+            ..*xml
         })),
         Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(WindowFuncExpr {
             kind: match window_func.kind {
@@ -2453,6 +2479,19 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
                 .map(|arg| lower_expr(ctx, arg, mode))
                 .collect(),
             ..*func
+        })),
+        Expr::Xml(xml) => Expr::Xml(Box::new(XmlExpr {
+            named_args: xml
+                .named_args
+                .into_iter()
+                .map(|arg| lower_expr(ctx, arg, mode))
+                .collect(),
+            args: xml
+                .args
+                .into_iter()
+                .map(|arg| lower_expr(ctx, arg, mode))
+                .collect(),
+            ..*xml
         })),
         Expr::SubLink(sublink) => lower_sublink(ctx, *sublink, mode),
         Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(SubPlan {

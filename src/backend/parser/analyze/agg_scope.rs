@@ -710,7 +710,8 @@ fn analyze_expr_internal(
                 Err(err) => return Err(err),
             }
         }
-        SqlExpr::Default
+        SqlExpr::Parameter(_)
+        | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)
         | SqlExpr::NumericLiteral(_)

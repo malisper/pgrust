@@ -153,47 +153,15 @@ pub(crate) fn format_verbose_explain_plan_json_with_catalog(
     subplans: &[Plan],
     catalog: &dyn CatalogLookup,
 ) -> Option<String> {
+    if !subplans.is_empty() {
+        return None;
+    }
     let ctx = VerboseExplainContext {
         type_names: collect_explain_type_names(plan, subplans, catalog),
         ..VerboseExplainContext::default()
     };
-    let plan = explain_passthrough_plan_child(plan).unwrap_or(plan);
-    let Plan::FunctionScan {
-        call, table_alias, ..
-    } = plan
-    else {
-        return None;
-    };
-    let table_function_name = match call {
-        SetReturningCall::SqlJsonTable(_) => "json_table",
-        SetReturningCall::SqlXmlTable(_) => "xmltable",
-        _ => return None,
-    };
-
-    let output = verbose_function_scan_output_exprs(call, table_alias.as_deref());
-    let output_json = output
-        .iter()
-        .map(|value| json_string_literal(value))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut lines = vec![
-        "[".into(),
-        "  {".into(),
-        "    \"Plan\": {".into(),
-        "      \"Node Type\": \"Table Function Scan\",".into(),
-        "      \"Parallel Aware\": false,".into(),
-        "      \"Async Capable\": false,".into(),
-        format!("      \"Table Function Name\": \"{table_function_name}\","),
-    ];
-    if let Some(alias) = table_alias {
-        lines.push(format!("      \"Alias\": {},", json_string_literal(alias)));
-    }
-    lines.push("      \"Disabled\": false,".into());
-    lines.push(format!("      \"Output\": [{output_json}],"));
-    lines.push(format!(
-        "      \"Table Function Call\": {}",
-        json_string_literal(&render_verbose_set_returning_call(call, &ctx))
-    ));
+    let mut lines = vec!["[".into(), "  {".into(), "    \"Plan\": {".into()];
+    push_verbose_json_plan(plan, None, 6, &ctx, &mut lines)?;
     lines.push("    }".into());
     lines.push("  }".into());
     lines.push("]".into());
@@ -202,6 +170,207 @@ pub(crate) fn format_verbose_explain_plan_json_with_catalog(
 
 fn json_string_literal(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into())
+}
+
+fn push_verbose_json_plan(
+    plan: &Plan,
+    parent_relationship: Option<&str>,
+    indent: usize,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) -> Option<()> {
+    if let Some((input, output)) = projected_join_for_explain(plan, ctx) {
+        return push_verbose_json_plan_with_output(
+            input,
+            parent_relationship,
+            indent,
+            ctx,
+            output,
+            lines,
+        );
+    }
+    let plan = explain_passthrough_plan_child(plan).unwrap_or(plan);
+    let output = verbose_display_output_exprs(plan, ctx, true);
+    push_verbose_json_plan_with_output(plan, parent_relationship, indent, ctx, output, lines)
+}
+
+fn push_verbose_json_plan_with_output(
+    plan: &Plan,
+    parent_relationship: Option<&str>,
+    indent: usize,
+    ctx: &VerboseExplainContext,
+    output: Vec<String>,
+    lines: &mut Vec<String>,
+) -> Option<()> {
+    let pad = " ".repeat(indent);
+    match plan {
+        Plan::NestedLoopJoin {
+            left,
+            right,
+            nest_params,
+            ..
+        } => {
+            lines.push(format!("{pad}\"Node Type\": \"Nested Loop\","));
+            push_json_parent_relationship(parent_relationship, indent, lines);
+            lines.push(format!("{pad}\"Parallel Aware\": false,"));
+            lines.push(format!("{pad}\"Async Capable\": false,"));
+            lines.push(format!("{pad}\"Join Type\": \"Inner\","));
+            lines.push(format!("{pad}\"Disabled\": false,"));
+            lines.push(format!("{pad}\"Output\": {},", json_string_array(&output)));
+            lines.push(format!("{pad}\"Inner Unique\": false,"));
+            lines.push(format!("{pad}\"Plans\": ["));
+            lines.push(format!("{pad}  {{"));
+            push_verbose_json_plan(left, Some("Outer"), indent + 4, ctx, lines)?;
+            lines.push(format!("{pad}  }},"));
+            let mut right_ctx = ctx.clone();
+            let left_names = verbose_plan_output_exprs(left, ctx, true);
+            right_ctx
+                .exec_params
+                .extend(nest_params.iter().map(|source| VerboseExecParam {
+                    paramid: source.paramid,
+                    expr: source.expr.clone(),
+                    column_names: left_names.clone(),
+                }));
+            lines.push(format!("{pad}  {{"));
+            push_verbose_json_plan(right, Some("Inner"), indent + 4, &right_ctx, lines)?;
+            lines.push(format!("{pad}  }}"));
+            lines.push(format!("{pad}]"));
+            Some(())
+        }
+        Plan::SeqScan { relation_name, .. } => {
+            let (relation, alias) = explain_relation_and_alias(relation_name);
+            lines.push(format!("{pad}\"Node Type\": \"Seq Scan\","));
+            push_json_parent_relationship(parent_relationship, indent, lines);
+            lines.push(format!("{pad}\"Parallel Aware\": false,"));
+            lines.push(format!("{pad}\"Async Capable\": false,"));
+            lines.push(format!(
+                "{pad}\"Relation Name\": {},",
+                json_string_literal(relation)
+            ));
+            lines.push(format!("{pad}\"Schema\": \"public\","));
+            lines.push(format!("{pad}\"Alias\": {},", json_string_literal(alias)));
+            lines.push(format!("{pad}\"Disabled\": false,"));
+            lines.push(format!("{pad}\"Output\": {}", json_string_array(&output)));
+            Some(())
+        }
+        Plan::FunctionScan {
+            call, table_alias, ..
+        } if matches!(
+            call,
+            SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)
+        ) =>
+        {
+            push_verbose_json_function_scan(
+                call,
+                table_alias.as_deref(),
+                parent_relationship,
+                indent,
+                ctx,
+                output,
+                None,
+                lines,
+            )
+        }
+        Plan::Filter {
+            input, predicate, ..
+        } if matches!(
+            input.as_ref(),
+            Plan::FunctionScan {
+                call: SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_),
+                ..
+            }
+        ) =>
+        {
+            let Plan::FunctionScan {
+                call, table_alias, ..
+            } = input.as_ref()
+            else {
+                return None;
+            };
+            let input_names = verbose_plan_output_exprs(input, ctx, true);
+            let filter = render_verbose_expr(predicate, &input_names, ctx);
+            push_verbose_json_function_scan(
+                call,
+                table_alias.as_deref(),
+                parent_relationship,
+                indent,
+                ctx,
+                input_names,
+                Some(filter),
+                lines,
+            )
+        }
+        _ => None,
+    }
+}
+
+fn push_verbose_json_function_scan(
+    call: &SetReturningCall,
+    table_alias: Option<&str>,
+    parent_relationship: Option<&str>,
+    indent: usize,
+    ctx: &VerboseExplainContext,
+    output: Vec<String>,
+    filter: Option<String>,
+    lines: &mut Vec<String>,
+) -> Option<()> {
+    let table_function_name = match call {
+        SetReturningCall::SqlJsonTable(_) => "json_table",
+        SetReturningCall::SqlXmlTable(_) => "xmltable",
+        _ => return None,
+    };
+    let pad = " ".repeat(indent);
+    lines.push(format!("{pad}\"Node Type\": \"Table Function Scan\","));
+    push_json_parent_relationship(parent_relationship, indent, lines);
+    lines.push(format!("{pad}\"Parallel Aware\": false,"));
+    lines.push(format!("{pad}\"Async Capable\": false,"));
+    lines.push(format!(
+        "{pad}\"Table Function Name\": \"{table_function_name}\","
+    ));
+    if let Some(alias) = table_alias {
+        lines.push(format!("{pad}\"Alias\": {},", json_string_literal(alias)));
+    }
+    lines.push(format!("{pad}\"Disabled\": false,"));
+    lines.push(format!("{pad}\"Output\": {},", json_string_array(&output)));
+    lines.push(format!(
+        "{pad}\"Table Function Call\": {}{}",
+        json_string_literal(&render_verbose_set_returning_call(call, ctx)),
+        if filter.is_some() { "," } else { "" }
+    ));
+    if let Some(filter) = filter {
+        lines.push(format!("{pad}\"Filter\": {}", json_string_literal(&filter)));
+    }
+    Some(())
+}
+
+fn push_json_parent_relationship(
+    parent_relationship: Option<&str>,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
+    if let Some(parent_relationship) = parent_relationship {
+        let pad = " ".repeat(indent);
+        lines.push(format!(
+            "{pad}\"Parent Relationship\": {},",
+            json_string_literal(parent_relationship)
+        ));
+    }
+}
+
+fn json_string_array(values: &[String]) -> String {
+    let rendered = values
+        .iter()
+        .map(|value| json_string_literal(value))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{rendered}]")
+}
+
+fn explain_relation_and_alias(relation_name: &str) -> (&str, &str) {
+    relation_name
+        .split_once(' ')
+        .map(|(relation, alias)| (relation, alias.trim()))
+        .unwrap_or((relation_name, relation_name))
 }
 
 fn format_verbose_explain_plan_with_context(
@@ -249,6 +418,20 @@ fn format_explain_plan_with_subplans_inner(
             ctx,
             lines,
         );
+        return;
+    }
+
+    if verbose
+        && push_verbose_projected_join_plan(
+            plan, subplans, indent, show_costs, is_child, ctx, lines,
+        )
+    {
+        return;
+    }
+
+    if verbose
+        && push_verbose_filtered_function_scan_plan(plan, indent, show_costs, is_child, ctx, lines)
+    {
         return;
     }
 
@@ -1352,6 +1535,17 @@ fn nonverbose_plan_label(
             call,
             table_alias: None,
             ..
+        } if matches!(
+            call,
+            SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)
+        ) =>
+        {
+            Some(verbose_function_scan_label(call, None))
+        }
+        Plan::FunctionScan {
+            call,
+            table_alias: None,
+            ..
         } => ctx.function_scan_alias.as_ref().map(|alias| {
             format!(
                 "Function Scan on {} {alias}",
@@ -1487,7 +1681,7 @@ fn verbose_function_scan_output_exprs(
             .output_columns()
             .iter()
             .map(|column| match table_alias {
-                Some(_) => quote_explain_identifier(&column.name),
+                Some(alias) => format!("{alias}.{}", quote_explain_identifier(&column.name)),
                 None => format!("\"{name}\".{}", quote_explain_identifier(&column.name)),
             })
             .collect();
@@ -1556,6 +1750,208 @@ fn push_verbose_projected_scan_plan(
     }
     push_verbose_scan_details(input, indent, &input_names, lines);
     push_direct_plan_subplans(plan, subplans, indent, show_costs, true, ctx, lines);
+    true
+}
+
+fn push_verbose_projected_join_plan(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    is_child: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) -> bool {
+    let Some((input, output)) = projected_join_for_explain(plan, ctx) else {
+        return false;
+    };
+
+    let state = executor_start((*input).clone());
+    push_explain_plan_line(input, state.as_ref(), indent, is_child, show_costs, lines);
+    if !output.is_empty() {
+        lines.push(format!(
+            "{}Output: {}",
+            explain_detail_prefix(indent),
+            output.join(", ")
+        ));
+    }
+    push_verbose_join_filter_details(input, indent, ctx, lines);
+    push_direct_plan_subplans(plan, subplans, indent, show_costs, true, ctx, lines);
+    explain_plan_children_with_context(input, subplans, indent, show_costs, true, ctx, lines);
+    true
+}
+
+fn projected_join_for_explain<'a>(
+    plan: &'a Plan,
+    ctx: &VerboseExplainContext,
+) -> Option<(&'a Plan, Vec<String>)> {
+    let Plan::Projection { input, targets, .. } = plan else {
+        return None;
+    };
+    if !matches!(
+        input.as_ref(),
+        Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. }
+    ) || !plan_contains_sql_table_function(input)
+        || targets.iter().any(|target| target.resjunk)
+    {
+        return None;
+    }
+    let input_names = plan_join_output_exprs(input, ctx, true);
+    let output = targets
+        .iter()
+        .map(|target| render_verbose_expr(&target.expr, &input_names, ctx))
+        .collect();
+    Some((input.as_ref(), output))
+}
+
+fn plan_contains_sql_table_function(plan: &Plan) -> bool {
+    match plan {
+        Plan::FunctionScan { call, .. } => matches!(
+            call,
+            SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)
+        ),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            plan_contains_sql_table_function(left) || plan_contains_sql_table_function(right)
+        }
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. } => plan_contains_sql_table_function(input),
+        _ => false,
+    }
+}
+
+fn push_verbose_join_filter_details(
+    plan: &Plan,
+    indent: usize,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) {
+    let prefix = explain_detail_prefix(indent);
+    match plan {
+        Plan::NestedLoopJoin {
+            left,
+            right,
+            nest_params,
+            join_qual,
+            qual,
+            ..
+        } => {
+            let left_names = plan_join_output_exprs(left, ctx, true);
+            let mut right_ctx = ctx.clone();
+            right_ctx
+                .exec_params
+                .extend(nest_params.iter().map(|source| VerboseExecParam {
+                    paramid: source.paramid,
+                    expr: source.expr.clone(),
+                    column_names: left_names.clone(),
+                }));
+            let right_names = plan_join_output_exprs(right, &right_ctx, true);
+            push_verbose_join_qual_details(
+                join_qual,
+                qual,
+                &left_names,
+                &right_names,
+                &prefix,
+                ctx,
+                lines,
+            );
+        }
+        Plan::HashJoin {
+            left,
+            right,
+            join_qual,
+            qual,
+            ..
+        }
+        | Plan::MergeJoin {
+            left,
+            right,
+            join_qual,
+            qual,
+            ..
+        } => {
+            let left_names = plan_join_output_exprs(left, ctx, true);
+            let right_names = plan_join_output_exprs(right, ctx, true);
+            push_verbose_join_qual_details(
+                join_qual,
+                qual,
+                &left_names,
+                &right_names,
+                &prefix,
+                ctx,
+                lines,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn push_verbose_join_qual_details(
+    join_qual: &[Expr],
+    qual: &[Expr],
+    left_names: &[String],
+    right_names: &[String],
+    prefix: &str,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) {
+    if !join_qual.is_empty() {
+        let rendered = join_qual
+            .iter()
+            .map(|expr| render_verbose_join_expr(expr, left_names, right_names, ctx))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        lines.push(format!("{prefix}Join Filter: {rendered}"));
+    }
+    if !qual.is_empty() {
+        let rendered = qual
+            .iter()
+            .map(|expr| render_verbose_join_expr(expr, left_names, right_names, ctx))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        lines.push(format!("{prefix}Filter: {rendered}"));
+    }
+}
+
+fn push_verbose_filtered_function_scan_plan(
+    plan: &Plan,
+    indent: usize,
+    show_costs: bool,
+    is_child: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) -> bool {
+    let Plan::Filter {
+        input, predicate, ..
+    } = plan
+    else {
+        return false;
+    };
+    let Plan::FunctionScan { call, .. } = input.as_ref() else {
+        return false;
+    };
+    if !matches!(
+        call,
+        SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)
+    ) {
+        return false;
+    }
+
+    let state = executor_start((**input).clone());
+    push_explain_plan_line(input, state.as_ref(), indent, is_child, show_costs, lines);
+    push_verbose_plan_details(input, indent, ctx, lines);
+    let input_names = verbose_plan_output_exprs(input, ctx, true);
+    lines.push(format!(
+        "{}Filter: {}",
+        explain_detail_prefix(indent),
+        render_verbose_expr(predicate, &input_names, ctx)
+    ));
     true
 }
 
@@ -2573,6 +2969,12 @@ fn plan_join_output_exprs(
         Plan::FunctionScan {
             call, table_alias, ..
         } => {
+            if matches!(
+                call,
+                SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)
+            ) {
+                return verbose_function_scan_output_exprs(call, table_alias.as_deref());
+            }
             let qualifier = table_alias
                 .as_deref()
                 .or(ctx.function_scan_alias.as_deref());
@@ -2863,9 +3265,15 @@ fn render_verbose_sql_xml_table_call(table: &SqlXmlTable, ctx: &VerboseExplainCo
         );
         rendered.push_str("), ");
     }
-    rendered.push_str(&render_verbose_sql_json_table_expr(&table.row_path, ctx));
+    rendered.push_str(&render_parenthesized_verbose_xmltable_expr(
+        &table.row_path,
+        ctx,
+    ));
     rendered.push_str(" PASSING ");
-    rendered.push_str(&render_verbose_sql_json_table_expr(&table.document, ctx));
+    rendered.push_str(&render_parenthesized_verbose_xmltable_expr(
+        &table.document,
+        ctx,
+    ));
     rendered.push_str(" COLUMNS ");
     rendered.push_str(
         &table
@@ -2882,13 +3290,15 @@ fn render_verbose_sql_xml_table_call(table: &SqlXmlTable, ctx: &VerboseExplainCo
                     } => {
                         let mut column =
                             format!("{name} {}", render_type_name(column.sql_type, ctx));
-                        if let Some(path) = path {
-                            column.push_str(" PATH ");
-                            column.push_str(&render_verbose_sql_json_table_expr(path, ctx));
-                        }
                         if let Some(default) = default {
                             column.push_str(" DEFAULT ");
-                            column.push_str(&render_verbose_sql_json_table_expr(default, ctx));
+                            column.push_str(&render_parenthesized_verbose_xmltable_expr(
+                                default, ctx,
+                            ));
+                        }
+                        if let Some(path) = path {
+                            column.push_str(" PATH ");
+                            column.push_str(&render_parenthesized_verbose_xmltable_expr(path, ctx));
                         }
                         if *not_null {
                             column.push_str(" NOT NULL");
@@ -2902,6 +3312,10 @@ fn render_verbose_sql_xml_table_call(table: &SqlXmlTable, ctx: &VerboseExplainCo
     );
     rendered.push(')');
     rendered
+}
+
+fn render_parenthesized_verbose_xmltable_expr(expr: &Expr, ctx: &VerboseExplainContext) -> String {
+    format!("({})", render_verbose_sql_json_table_expr(expr, ctx))
 }
 
 fn render_verbose_sql_json_table_call(table: &SqlJsonTable, ctx: &VerboseExplainContext) -> String {
@@ -3256,6 +3670,16 @@ fn render_verbose_join_expr(
         Expr::Var(var) if var.varno == crate::include::nodes::primnodes::INNER_VAR => {
             render_var_name(var.varattno, right_names).unwrap_or_else(|| format!("{expr:?}"))
         }
+        Expr::FieldSelect {
+            expr: inner, field, ..
+        } => {
+            if let Expr::Row { fields, .. } = inner.as_ref()
+                && let Some((_, value)) = fields.iter().find(|(name, _)| name == field)
+            {
+                return render_verbose_join_expr(value, left_names, right_names, ctx);
+            }
+            format!("{expr:?}")
+        }
         Expr::Var(var) => {
             let combined = combined_names();
             render_var_name(var.varattno, &combined).unwrap_or_else(|| format!("{expr:?}"))
@@ -3368,6 +3792,16 @@ fn render_verbose_expr(
                 .map(|index| format!("column{}", index + 1))
                 .unwrap_or_else(|| strip_outer_parens(&render_explain_expr(expr, column_names)))
         }),
+        Expr::FieldSelect {
+            expr: inner, field, ..
+        } => {
+            if let Expr::Row { fields, .. } = inner.as_ref()
+                && let Some((_, value)) = fields.iter().find(|(name, _)| name == field)
+            {
+                return render_verbose_expr(value, column_names, ctx);
+            }
+            strip_outer_parens(&render_explain_expr(expr, column_names))
+        }
         Expr::Param(param) if param.paramkind == ParamKind::Exec => ctx
             .exec_params
             .iter()

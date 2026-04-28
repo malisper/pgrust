@@ -134,6 +134,7 @@ pub(super) fn normalize_aggregate_call(
 pub(super) fn expr_contains_agg(catalog: &dyn CatalogLookup, expr: &SqlExpr) -> bool {
     match expr {
         SqlExpr::Column(_)
+        | SqlExpr::Parameter(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)
@@ -319,6 +320,7 @@ pub(super) fn targets_contain_agg(catalog: &dyn CatalogLookup, targets: &[Select
 pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
     match expr {
         SqlExpr::Column(_) => true,
+        SqlExpr::Parameter(_) => false,
         SqlExpr::Default => false,
         SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)
@@ -492,6 +494,7 @@ pub(super) fn collect_aggs(
 ) {
     match expr {
         SqlExpr::Column(_)
+        | SqlExpr::Parameter(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)

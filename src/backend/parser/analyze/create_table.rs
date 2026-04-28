@@ -835,6 +835,7 @@ fn raw_expr_any(expr: &SqlExpr, predicate: &impl Fn(&SqlExpr) -> bool) -> bool {
     }
     match expr {
         SqlExpr::Column(_)
+        | SqlExpr::Parameter(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)

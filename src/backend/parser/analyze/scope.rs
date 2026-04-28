@@ -1665,6 +1665,7 @@ fn sql_expr_contains_set_returning_call(
 ) -> bool {
     match expr {
         SqlExpr::Column(_)
+        | SqlExpr::Parameter(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)

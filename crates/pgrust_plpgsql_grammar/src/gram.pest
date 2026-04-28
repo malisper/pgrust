@@ -52,7 +52,7 @@ return_query_sql = @{ expr_chunk+ }
 exec_sql_text = @{ expr_chunk+ }
 positional_param = @{ "$" ~ ASCII_DIGIT+ }
 alias_target = { positional_param | ident }
-raise_level = { kw_info | kw_notice | kw_warning | kw_exception }
+raise_level = { kw_info | kw_notice | kw_warning | kw_log | kw_exception }
 stmt_keyword_start = _{
     kw_begin
     | kw_end
@@ -180,6 +180,7 @@ kw_sqlstate = _{ kw_sqlstate_atom }
 kw_info = _{ kw_info_atom }
 kw_notice = _{ kw_notice_atom }
 kw_warning = _{ kw_warning_atom }
+kw_log = _{ kw_log_atom }
 kw_exception = _{ kw_exception_atom }
 kw_values = _{ kw_values_atom }
 kw_select = _{ kw_select_atom }
@@ -223,6 +224,7 @@ kw_sqlstate_atom = @{ ^"sqlstate" ~ keyword_end }
 kw_info_atom = @{ ^"info" ~ keyword_end }
 kw_notice_atom = @{ ^"notice" ~ keyword_end }
 kw_warning_atom = @{ ^"warning" ~ keyword_end }
+kw_log_atom = @{ ^"log" ~ keyword_end }
 kw_exception_atom = @{ ^"exception" ~ keyword_end }
 kw_values_atom = @{ ^"values" ~ keyword_end }
 kw_select_atom = @{ ^"select" ~ keyword_end }

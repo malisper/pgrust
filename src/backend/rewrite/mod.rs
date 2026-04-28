@@ -1015,6 +1015,7 @@ fn rewrite_semantic_expr(
                 indent,
                 target_type,
                 standalone,
+                root_version,
             } = *xml_expr;
             Expr::Xml(Box::new(crate::include::nodes::primnodes::XmlExpr {
                 op,
@@ -1036,6 +1037,7 @@ fn rewrite_semantic_expr(
                 indent,
                 target_type,
                 standalone,
+                root_version,
             }))
         }
         Expr::Cast(inner, ty) => Expr::Cast(

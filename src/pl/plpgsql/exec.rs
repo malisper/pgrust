@@ -3385,7 +3385,7 @@ fn finish_raise(
                 sqlstate,
             }),
         },
-        RaiseLevel::Info | RaiseLevel::Notice | RaiseLevel::Warning => {
+        RaiseLevel::Info | RaiseLevel::Notice | RaiseLevel::Warning | RaiseLevel::Log => {
             NOTICE_QUEUE.with(|queue| {
                 queue.borrow_mut().push(PlpgsqlNotice {
                     level: level.clone(),

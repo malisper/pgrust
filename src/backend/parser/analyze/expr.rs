@@ -518,6 +518,7 @@ fn raw_sql_expr_any(expr: &SqlExpr, predicate: &impl Fn(&SqlExpr) -> bool) -> bo
     }
     match expr {
         SqlExpr::Column(_)
+        | SqlExpr::Parameter(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)
@@ -1571,6 +1572,7 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
             indent: xml.indent,
             target_type: xml.target_type,
             standalone: xml.standalone,
+            root_version: xml.root_version,
         })),
         Expr::Cast(inner, ty) => Expr::Cast(Box::new(raise_expr_varlevels(*inner, levels)), ty),
         Expr::Collate {
@@ -2549,6 +2551,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     Err(err) => return Err(err),
                 }
             }
+        }
+        SqlExpr::Parameter(index) => {
+            return Err(ParseError::DetailedError {
+                message: format!("there is no parameter ${index}"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P02",
+            });
         }
         SqlExpr::Default => {
             return Err(ParseError::UnexpectedToken {
@@ -5119,6 +5129,23 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                             grouped_outer,
                             ctes,
                         );
+                        let literal_like = matches!(
+                            &arg.value,
+                            SqlExpr::Const(Value::Text(_))
+                                | SqlExpr::Const(Value::TextRef(_, _))
+                                | SqlExpr::Const(Value::Null)
+                        );
+                        if source.kind != SqlTypeKind::Xml && !literal_like {
+                            return Err(ParseError::DetailedError {
+                                message: format!(
+                                    "argument of XMLCONCAT must be type xml, not type {}",
+                                    sql_type_name(source)
+                                ),
+                                detail: None,
+                                hint: None,
+                                sqlstate: "42804",
+                            });
+                        }
                         Ok(coerce_bound_expr(
                             bind_expr_with_outer_and_ctes(
                                 &arg.value,
@@ -5144,6 +5171,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                         indent: None,
                         target_type: None,
                         standalone: None,
+                        root_version: crate::include::nodes::parsenodes::XmlRootVersion::Omitted,
                     },
                 )));
             }
@@ -6222,9 +6250,12 @@ fn bind_xml_expr(
                             column.clone()
                         }
                         _ => {
-                            return Err(ParseError::UnexpectedToken {
-                                expected: "attribute alias for non-column XMLATTRIBUTES expression",
-                                actual: "XMLATTRIBUTES expression".into(),
+                            return Err(ParseError::DetailedError {
+                                message: "unnamed XML attribute value must be a column reference"
+                                    .into(),
+                                detail: None,
+                                hint: None,
+                                sqlstate: "42601",
                             });
                         }
                     }
@@ -6232,9 +6263,13 @@ fn bind_xml_expr(
                     raw_name.clone()
                 };
                 if !seen_names.insert(inferred_name.clone()) {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "distinct XML attribute names",
-                        actual: inferred_name,
+                    return Err(ParseError::DetailedError {
+                        message: format!(
+                            "XML attribute name \"{inferred_name}\" appears more than once"
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42601",
                     });
                 }
                 named_args.push(bind_child(raw_expr)?);
@@ -6274,7 +6309,34 @@ fn bind_xml_expr(
             args = xml
                 .args
                 .iter()
-                .map(|arg| bind_as(arg, xml_type))
+                .map(|arg| {
+                    let source = infer_sql_expr_type_with_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                    let literal_like = matches!(
+                        arg,
+                        SqlExpr::Const(Value::Text(_))
+                            | SqlExpr::Const(Value::TextRef(_, _))
+                            | SqlExpr::Const(Value::Null)
+                    );
+                    if source.kind != SqlTypeKind::Xml && !literal_like {
+                        return Err(ParseError::DetailedError {
+                            message: format!(
+                                "argument of XMLCONCAT must be type xml, not type {}",
+                                sql_type_name(source)
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42804",
+                        });
+                    }
+                    Ok(coerce_bound_expr(bind_child(arg)?, source, xml_type))
+                })
                 .collect::<Result<Vec<_>, _>>()?;
         }
     }
@@ -6315,6 +6377,7 @@ fn bind_xml_expr(
             indent: xml.indent,
             target_type,
             standalone: xml.standalone,
+            root_version: xml.root_version,
         },
     )))
 }

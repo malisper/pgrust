@@ -391,6 +391,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             }
         }
         SqlExpr::Default => SqlType::new(SqlTypeKind::Text),
+        SqlExpr::Parameter(_) => SqlType::new(SqlTypeKind::Text),
         SqlExpr::Const(Value::Int16(_)) => SqlType::new(SqlTypeKind::Int2),
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
         SqlExpr::Const(Value::Int64(_)) => SqlType::new(SqlTypeKind::Int8),
@@ -1707,6 +1708,14 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::LocalTimestamp { precision } => precision
             .map(|precision| SqlType::with_time_precision(SqlTypeKind::Timestamp, precision))
             .unwrap_or_else(|| SqlType::new(SqlTypeKind::Timestamp)),
+        SqlExpr::Xml(xml)
+            if xml.op == crate::include::nodes::parsenodes::RawXmlExprOp::Serialize =>
+        {
+            xml.target_type
+                .as_ref()
+                .and_then(|ty| resolve_raw_type_name(ty, catalog).ok())
+                .unwrap_or_else(|| SqlType::new(SqlTypeKind::Text))
+        }
         SqlExpr::Xml(_) => SqlType::new(SqlTypeKind::Xml),
     }
 }

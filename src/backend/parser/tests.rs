@@ -15562,8 +15562,32 @@ fn parse_prepare_and_execute_statements() {
     let stmt = parse_statement("execute foo").unwrap();
     assert_eq!(
         stmt,
-        Statement::Execute(ExecuteStatement { name: "foo".into() })
+        Statement::Execute(ExecuteStatement {
+            name: "foo".into(),
+            args: Vec::new(),
+        })
     );
+
+    let stmt = parse_statement("prepare foo (xml, text) as select $1").unwrap();
+    match stmt {
+        Statement::Prepare(PrepareStatement {
+            parameter_types,
+            query,
+            ..
+        }) => {
+            assert_eq!(parameter_types.len(), 2);
+            assert!(matches!(query.targets[0].expr, SqlExpr::Parameter(1)));
+        }
+        other => panic!("expected PREPARE statement, got {other:?}"),
+    }
+
+    let stmt = parse_statement("execute foo(xml '<a/>')").unwrap();
+    match stmt {
+        Statement::Execute(ExecuteStatement { args, .. }) => {
+            assert_eq!(args.len(), 1);
+        }
+        other => panic!("expected EXECUTE statement, got {other:?}"),
+    }
 }
 
 #[test]

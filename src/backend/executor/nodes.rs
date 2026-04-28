@@ -57,7 +57,8 @@ use crate::include::nodes::execnodes::{
 use crate::include::nodes::plannodes::{AggregateStrategy, IndexScanKey, IndexScanKeyArgument};
 use crate::include::nodes::primnodes::{
     BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, OrderByEntry,
-    ParamKind, RelationDesc, ScalarFunctionImpl, Var, attrno_index, is_special_varno,
+    ParamKind, RelationDesc, ScalarFunctionImpl, SetReturningCall, Var, attrno_index,
+    is_special_varno,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -7081,6 +7082,20 @@ impl PlanNode for FunctionScanState {
         self.plan_info
     }
     fn node_label(&self) -> String {
+        if matches!(
+            self.call,
+            SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)
+        ) {
+            let name = if matches!(self.call, SetReturningCall::SqlJsonTable(_)) {
+                "json_table"
+            } else {
+                "xmltable"
+            };
+            return match &self.table_alias {
+                Some(alias) => format!("Table Function Scan on \"{name}\" {alias}"),
+                None => format!("Table Function Scan on \"{name}\""),
+            };
+        }
         match &self.table_alias {
             Some(alias) => format!(
                 "Function Scan on {} {alias}",

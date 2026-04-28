@@ -5,9 +5,9 @@ use crate::backend::utils::misc::guc_xml::XmlBinaryFormat;
 use crate::backend::utils::misc::guc_xml::XmlOptionSetting;
 use crate::backend::utils::misc::notices::push_warning;
 use crate::include::catalog::XML_TYPE_OID;
-use crate::include::nodes::datetime::{DateADT, TimestampADT, TimestampTzADT};
+use crate::include::nodes::datetime::{DateADT, TimestampADT, TimestampTzADT, USECS_PER_SEC};
 use crate::include::nodes::datum::{ArrayValue, Value};
-use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
+use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind, XmlRootVersion};
 use crate::include::nodes::primnodes::{SqlXmlTable, SqlXmlTableColumnKind, XmlExpr, XmlExprOp};
 use crate::pgrust::compact_string::CompactString;
 use base64::Engine as _;
@@ -23,10 +23,110 @@ fn xml_input_error(
     ExecError::XmlInput {
         raw_input: raw_input.to_string(),
         message: message.to_string(),
-        detail,
+        detail: detail.map(|detail| xml_detail_with_input_context(raw_input, detail)),
         context: None,
         sqlstate,
     }
+}
+
+fn xml_error_without_sql_position(err: ExecError) -> ExecError {
+    match err {
+        ExecError::XmlInput {
+            message,
+            detail,
+            context,
+            sqlstate,
+            ..
+        } => ExecError::XmlInput {
+            raw_input: String::new(),
+            message,
+            detail,
+            context,
+            sqlstate,
+        },
+        other => other,
+    }
+}
+
+fn xml_detail_with_input_context(text: &str, detail: String) -> String {
+    if !detail.starts_with("line 1:") {
+        return detail;
+    }
+    let mut out = detail;
+    if let Some(caret_detail) = xml_input_caret_detail(text, &out) {
+        out.push('\n');
+        out.push_str(&caret_detail);
+    }
+    if let Some(mismatch) = xml_mismatched_tag_detail(text)
+        && !out.contains(&mismatch)
+    {
+        out.push('\n');
+        out.push_str(&mismatch);
+    }
+    out
+}
+
+fn xml_input_caret_detail(text: &str, detail: &str) -> Option<String> {
+    if text.is_empty() || text.trim().is_empty() {
+        return None;
+    }
+    let offset = if detail.contains("xmlParseEntityRef: no name") {
+        text.find('&')?
+    } else if let Some(name) = xml_detail_entity_name(detail) {
+        text.find(&format!("&{name};")).or_else(|| text.find('&'))?
+    } else if detail.contains("Extra content at the end of the document") {
+        xml_extra_content_offset(text).unwrap_or_else(|| text.len().saturating_sub(1))
+    } else if detail.contains("StartTag: invalid element name") {
+        if text == "<>" {
+            1
+        } else {
+            text.find("<!DOCTYPE")
+                .or_else(|| text.find('<'))
+                .unwrap_or_default()
+        }
+    } else if detail.contains("Start tag expected, '<' not found") {
+        text.find(|ch: char| !ch.is_whitespace())
+            .unwrap_or_default()
+    } else {
+        return None;
+    };
+    Some(format!("{text}\n{}^", " ".repeat(offset)))
+}
+
+fn xml_detail_entity_name(detail: &str) -> Option<&str> {
+    detail
+        .strip_prefix("line 1: Entity '")
+        .and_then(|rest| rest.split_once("' not defined"))
+        .map(|(name, _)| name)
+}
+
+fn xml_mismatched_tag_detail(text: &str) -> Option<String> {
+    let (opened, closed) = xml_mismatched_tag_names(text)?;
+    Some(format!(
+        "line 1: Opening and ending tag mismatch: {opened} line 1 and {closed}"
+    ))
+}
+
+fn xml_mismatched_tag_names(text: &str) -> Option<(&str, &str)> {
+    let opened = first_start_tag_name(text)?;
+    let close_start = text.rfind("</")?;
+    let close_rest = &text[close_start + 2..];
+    let close_end = close_rest.find('>')?;
+    let closed = &close_rest[..close_end];
+    (!closed.is_empty() && opened != closed).then_some((opened, closed))
+}
+
+fn xml_extra_content_offset(text: &str) -> Option<usize> {
+    let first_end = text.find("/>").map(|index| index + 2).or_else(|| {
+        let first_close = text.find('>')?;
+        let name = first_start_tag_name(text)?;
+        text.find(&format!("</{name}>"))
+            .map(|index| index + name.len() + 3)
+            .or(Some(first_close + 1))
+    })?;
+    text[first_end..]
+        .char_indices()
+        .find_map(|(offset, ch)| (!ch.is_whitespace()).then_some(first_end + offset))
 }
 
 pub(crate) fn unsupported_xml_feature_error() -> ExecError {
@@ -293,14 +393,10 @@ pub(crate) fn validate_xml_input(text: &str, option: XmlOptionSetting) -> Result
             Ok(Event::Text(text_event)) => {
                 if depth == 0 && !is_xml_whitespace(text_event.as_ref()) {
                     if matches!(option, XmlOptionSetting::Document) {
-                        return Err(xml_input_error(
+                        return Err(xml_validation_error_for_option(
                             text,
-                            "invalid XML document",
-                            Some(
-                                "non-whitespace text is not allowed outside the document element"
-                                    .into(),
-                            ),
-                            "2200M",
+                            option,
+                            "line 1: Start tag expected, '<' not found".into(),
                         ));
                     }
                     if seen_doctype {
@@ -361,11 +457,10 @@ pub(crate) fn validate_xml_input(text: &str, option: XmlOptionSetting) -> Result
     }
 
     if matches!(option, XmlOptionSetting::Document) && !seen_document_element {
-        return Err(xml_input_error(
+        return Err(xml_validation_error_for_option(
             text,
-            "invalid XML document",
-            Some("XML document must have a top-level element".into()),
-            "2200M",
+            option,
+            "line 1: Start tag expected, '<' not found".into(),
         ));
     }
 
@@ -407,7 +502,6 @@ fn xml_escape(text: &str, attribute: bool) -> String {
             '>' => out.push_str("&gt;"),
             '\r' => out.push_str("&#x0d;"),
             '"' if attribute => out.push_str("&quot;"),
-            '\'' if attribute => out.push_str("&apos;"),
             _ => out.push(ch),
         }
     }
@@ -444,6 +538,7 @@ enum XmlNode {
 fn find_xml_declaration(text: &str) -> Option<(&str, &str)> {
     let trimmed = text.trim_start();
     if let Some(rest) = trimmed.strip_prefix("<?xml")
+        && rest.as_bytes().first().is_some_and(u8::is_ascii_whitespace)
         && let Some(end) = rest.find("?>")
     {
         let decl_len = 5 + end + 2;
@@ -465,8 +560,21 @@ fn split_xml_declaration(text: &str) -> (Option<XmlDecl>, &str) {
     (None, text)
 }
 
-fn strip_xml_declaration(text: &str) -> &str {
+pub(crate) fn strip_xml_declaration(text: &str) -> &str {
     find_xml_declaration(text).map_or(text, |(_, body)| body)
+}
+
+pub(crate) fn render_xml_output_text(text: &str) -> &str {
+    let Some((decl_text, body)) = find_xml_declaration(text) else {
+        return text;
+    };
+    let version = extract_decl_attr(decl_text, "version");
+    let standalone = extract_decl_attr(decl_text, "standalone");
+    if version.as_deref().is_none_or(|version| version == "1.0") && standalone.is_none() {
+        body
+    } else {
+        text
+    }
 }
 
 fn extract_decl_attr(text: &str, attr: &str) -> Option<String> {
@@ -575,6 +683,18 @@ fn is_valid_xml_name_char(ch: char) -> bool {
 }
 
 fn map_sql_identifier_to_xml_name(ident: &str, escape_period: bool) -> String {
+    map_sql_identifier_to_xml_name_with_prefix_rule(ident, escape_period, true)
+}
+
+fn map_sql_identifier_to_xml_pi_name(ident: &str) -> String {
+    map_sql_identifier_to_xml_name_with_prefix_rule(ident, false, false)
+}
+
+fn map_sql_identifier_to_xml_name_with_prefix_rule(
+    ident: &str,
+    escape_period: bool,
+    escape_xml_prefix: bool,
+) -> String {
     let mut out = String::new();
     let chars: Vec<char> = ident.chars().collect();
     let mut i = 0usize;
@@ -584,7 +704,11 @@ fn map_sql_identifier_to_xml_name(ident: &str, escape_period: bool) -> String {
             out.push_str("_x003A_");
         } else if ch == '_' && chars.get(i + 1) == Some(&'x') {
             out.push_str("_x005F_");
-        } else if i == 0 && ident.len() >= 3 && ident[..3].eq_ignore_ascii_case("xml") {
+        } else if escape_xml_prefix
+            && i == 0
+            && ident.len() >= 3
+            && ident[..3].eq_ignore_ascii_case("xml")
+        {
             let encoded = if ch == 'x' { "_x0078_" } else { "_x0058_" };
             out.push_str(encoded);
         } else if escape_period && ch == '.' {
@@ -674,7 +798,7 @@ fn render_xml_date_text(value: DateADT) -> Result<String, ExecError> {
 
 fn render_xml_timestamp_text(
     value: TimestampADT,
-    ctx: &ExecutorContext,
+    _ctx: &ExecutorContext,
 ) -> Result<String, ExecError> {
     if !value.is_finite() {
         return Err(xml_detail_error(
@@ -683,7 +807,7 @@ fn render_xml_timestamp_text(
             "22008",
         ));
     }
-    Ok(crate::backend::utils::time::timestamp::format_timestamp_text(value, &ctx.datetime_config))
+    Ok(format_xml_timestamp_usecs(value.0, None))
 }
 
 fn render_xml_timestamptz_text(
@@ -697,12 +821,42 @@ fn render_xml_timestamptz_text(
             "22008",
         ));
     }
-    Ok(
-        crate::backend::utils::time::timestamp::format_timestamptz_text(
-            value,
-            &ctx.datetime_config,
-        ),
-    )
+    let offset = crate::backend::utils::time::datetime::timezone_offset_seconds_at_utc(
+        &ctx.datetime_config,
+        value.0,
+    );
+    Ok(format_xml_timestamp_usecs(
+        value.0 + i64::from(offset) * USECS_PER_SEC,
+        Some(offset),
+    ))
+}
+
+fn format_xml_timestamp_usecs(usecs: i64, offset_seconds: Option<i32>) -> String {
+    let (days, time_usecs) =
+        crate::backend::utils::time::datetime::timestamp_parts_from_usecs(usecs);
+    let (mut year, month, day) = crate::backend::utils::time::datetime::ymd_from_days(days);
+    let bc = year <= 0;
+    if bc {
+        year = 1 - year;
+    }
+    let mut rendered = format!(
+        "{year:04}-{month:02}-{day:02}T{}",
+        crate::backend::utils::time::datetime::format_time_usecs(time_usecs)
+    );
+    if let Some(offset) = offset_seconds {
+        if offset == 0 {
+            rendered.push('Z');
+        } else {
+            let sign = if offset < 0 { '-' } else { '+' };
+            let abs = offset.unsigned_abs();
+            rendered.push(sign);
+            rendered.push_str(&format!("{:02}:{:02}", abs / 3600, (abs % 3600) / 60));
+        }
+    }
+    if bc {
+        rendered.push_str(" BC");
+    }
+    rendered
 }
 
 fn render_sql_value_to_xml_value(
@@ -749,9 +903,12 @@ fn render_xml_attribute_value(
 ) -> Result<Option<String>, ExecError> {
     match value {
         Value::Null => Ok(None),
-        Value::Xml(text) => Ok(Some(text.to_string())),
-        Value::Array(values) => Ok(Some(render_array_xml(ArrayValue::from_1d(values), ctx)?)),
-        Value::PgArray(array) => Ok(Some(render_array_xml(array, ctx)?)),
+        Value::Xml(text) => Ok(Some(xml_escape(&text, true))),
+        Value::Array(values) => Ok(Some(xml_escape(
+            &render_array_xml(ArrayValue::from_1d(values), ctx)?,
+            true,
+        ))),
+        Value::PgArray(array) => Ok(Some(xml_escape(&render_array_xml(array, ctx)?, true))),
         other => Ok(Some(xml_escape(&render_scalar_text(other, ctx)?, true))),
     }
 }
@@ -838,7 +995,8 @@ fn eval_xml_parse(
     validate_xml_input(
         &text,
         xml_option_to_setting(xml.xml_option.expect("XMLPARSE option")),
-    )?;
+    )
+    .map_err(xml_error_without_sql_position)?;
     Ok(Value::Xml(CompactString::from_owned(text)))
 }
 
@@ -853,6 +1011,19 @@ pub(crate) fn eval_xml_comment_function(
     Ok(Value::Xml(CompactString::from_owned(xml_comment(
         &render_xml_builtin_text(value, ctx)?,
     )?)))
+}
+
+pub(crate) fn eval_xml_text_function(
+    values: &[Value],
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let value = values.first().cloned().unwrap_or(Value::Null);
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let mut rendered = xml_escape(&render_xml_builtin_text(value, ctx)?, false);
+    rendered = rendered.replace('"', "&quot;");
+    Ok(Value::Xml(CompactString::from_owned(rendered)))
 }
 
 pub(crate) fn eval_xml_is_well_formed_function(
@@ -881,29 +1052,30 @@ fn eval_xml_pi(
         .ok_or_else(|| xml_detail_error("malformed XMLPI expression", None, "XX000"))?;
     if name.eq_ignore_ascii_case("xml") {
         return Err(xml_detail_error(
-            "invalid processing instruction name",
-            Some("processing instruction target name cannot be \"xml\"".into()),
+            "invalid XML processing instruction",
+            Some("XML processing instruction target name cannot be \"xml\".".into()),
             "2200T",
         ));
     }
-    let target = map_sql_identifier_to_xml_name(name, false);
+    let target = map_sql_identifier_to_xml_pi_name(name);
     let mut rendered = String::from("<?");
     rendered.push_str(&target);
     if let Some(arg) = xml.args.first() {
         let value = eval_expr(arg, slot, ctx)?;
-        if !matches!(value, Value::Null) {
-            let text = render_scalar_text(value, ctx)?;
-            if text.contains("?>") {
-                return Err(xml_detail_error(
-                    "invalid XML processing instruction",
-                    Some("processing instruction content cannot contain ?>".into()),
-                    "2200T",
-                ));
-            }
-            if !text.is_empty() {
-                rendered.push(' ');
-                rendered.push_str(text.trim_start());
-            }
+        if matches!(value, Value::Null) {
+            return Ok(Value::Null);
+        }
+        let text = render_scalar_text(value, ctx)?;
+        if text.contains("?>") {
+            return Err(xml_detail_error(
+                "invalid XML processing instruction",
+                Some("XML processing instruction cannot contain \"?>\".".into()),
+                "2200T",
+            ));
+        }
+        if !text.is_empty() {
+            rendered.push(' ');
+            rendered.push_str(text.trim_start());
         }
     }
     rendered.push_str("?>");
@@ -924,17 +1096,22 @@ fn eval_xml_root(
         other => render_scalar_text(other, ctx)?,
     };
     let (decl, body) = split_xml_declaration(&text);
-    let version = if let Some(version_expr) = xml.args.get(1) {
-        let version = eval_expr(version_expr, slot, ctx)?;
-        if matches!(version, Value::Null) {
-            None
-        } else {
-            Some(render_scalar_text(version, ctx)?)
+    let version = match xml.root_version {
+        XmlRootVersion::Value => {
+            let version_expr = xml
+                .args
+                .get(1)
+                .ok_or_else(|| xml_detail_error("malformed XMLROOT expression", None, "XX000"))?;
+            let version = eval_expr(version_expr, slot, ctx)?;
+            if matches!(version, Value::Null) {
+                None
+            } else {
+                Some(render_scalar_text(version, ctx)?)
+            }
         }
-    } else {
-        None
+        XmlRootVersion::NoValue => None,
+        XmlRootVersion::Omitted => decl.as_ref().and_then(|decl| decl.version.clone()),
     };
-    let version = version.or_else(|| decl.as_ref().and_then(|decl| decl.version.clone()));
     let standalone = match xml.standalone {
         Some(crate::backend::parser::XmlStandalone::Yes) => Some(true),
         Some(crate::backend::parser::XmlStandalone::No) => Some(false),
@@ -945,7 +1122,7 @@ fn eval_xml_root(
     if let Some(decl_text) = print_xml_decl(version.as_deref(), standalone) {
         rendered.push_str(&decl_text);
     }
-    rendered.push_str(body.trim_start());
+    rendered.push_str(body);
     Ok(Value::Xml(CompactString::from_owned(rendered)))
 }
 
@@ -1305,12 +1482,7 @@ pub(crate) fn eval_xml_expr(
 ) -> Result<Value, ExecError> {
     match xml.op {
         XmlExprOp::Element => eval_xml_element(xml, slot, ctx),
-        XmlExprOp::Forest => {
-            // :HACK: PostgreSQL's no-libxml build rejects XMLFOREST through
-            // NO_XML_SUPPORT(). Keep pgrust aligned with that regression
-            // profile until XML construction is gated by a real libxml mode.
-            Err(unsupported_xml_feature_error())
-        }
+        XmlExprOp::Forest => eval_xml_forest(xml, slot, ctx),
         XmlExprOp::Parse => eval_xml_parse(xml, slot, ctx),
         XmlExprOp::Pi => eval_xml_pi(xml, slot, ctx),
         XmlExprOp::Root => eval_xml_root(xml, slot, ctx),
@@ -1370,7 +1542,7 @@ pub(crate) fn eval_xpath_function(values: &[Value]) -> Result<Value, ExecError> 
             right: Value::Xml("".into()),
         })?;
     let namespaces = xpath_namespaces(values.get(2))?;
-    let results = eval_xpath(document, path, &namespaces)?;
+    let results = eval_xpath(document, path, &namespaces).map_err(with_xpath_context)?;
     let values = results
         .into_iter()
         .map(|result| Value::Xml(CompactString::from_owned(result.into_xml_text())))
@@ -1458,6 +1630,7 @@ pub(crate) fn eval_sql_xml_table(
                     let value = eval_xml_table_column_value(
                         &matches,
                         column.sql_type,
+                        &path_text,
                         default.as_ref(),
                         *not_null,
                         &column.name,
@@ -1513,6 +1686,7 @@ enum XmlTablePathValue<'a> {
 fn eval_xml_table_column_value(
     matches: &[XmlTablePathValue<'_>],
     target_type: SqlType,
+    path: &str,
     default: Option<&crate::include::nodes::primnodes::Expr>,
     not_null: bool,
     column_name: &str,
@@ -1543,9 +1717,11 @@ fn eval_xml_table_column_value(
             &ctx.datetime_config,
         )?
     } else {
-        Value::Xml(CompactString::from_owned(xml_table_path_values_xml(
-            matches,
-        )))
+        let mut xml = xml_table_path_values_xml(matches);
+        if path.trim() == "/" && !xml.ends_with('\n') {
+            xml.push('\n');
+        }
+        Value::Xml(CompactString::from_owned(xml))
     };
     if not_null && matches!(value, Value::Null) {
         return Err(ExecError::DetailedError {
@@ -1640,7 +1816,12 @@ fn eval_xml_table_path<'a>(
         .filter(|step| !step.is_empty())
         .enumerate()
     {
-        values = eval_xml_table_path_step(values, step, namespaces, index == 0 && absolute);
+        values = eval_xml_table_path_step(
+            values,
+            step,
+            namespaces,
+            index == 0 && (absolute || current.is_none()),
+        );
         if values.is_empty() {
             break;
         }
@@ -1926,6 +2107,13 @@ fn xpath_parse_error(detail: Option<String>) -> ExecError {
         detail,
         hint: None,
         sqlstate: "2200M",
+    }
+}
+
+fn with_xpath_context(err: ExecError) -> ExecError {
+    ExecError::WithContext {
+        source: Box::new(err),
+        context: "SQL function \"xpath\" statement 1".into(),
     }
 }
 

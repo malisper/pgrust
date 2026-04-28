@@ -840,6 +840,7 @@ fn collect_direct_relation_oids_from_sql_expr(
 ) {
     match expr {
         SqlExpr::Column(_)
+        | SqlExpr::Parameter(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)

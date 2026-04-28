@@ -3950,6 +3950,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
     ) -> Result<(), ParseError> {
         match expr {
             SqlExpr::Column(_)
+            | SqlExpr::Parameter(_)
             | SqlExpr::Default
             | SqlExpr::Const(_)
             | SqlExpr::IntegerLiteral(_)
@@ -4335,6 +4336,7 @@ fn xml_table_column_references_table(column: &XmlTableColumn, table_name: &str) 
 fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
     match expr {
         SqlExpr::Column(_)
+        | SqlExpr::Parameter(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)

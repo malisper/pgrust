@@ -1,6 +1,6 @@
 use crate::RelFileLocator;
 use crate::backend::parser::{
-    SqlType, SqlTypeKind, SubqueryComparisonOp, XmlOption, XmlStandalone,
+    SqlType, SqlTypeKind, SubqueryComparisonOp, XmlOption, XmlRootVersion, XmlStandalone,
 };
 use crate::include::access::htup::AttributeDesc;
 use crate::include::catalog::{
@@ -593,6 +593,7 @@ pub enum BuiltinScalarFunction {
     CashWords,
     UnsupportedXmlFeature,
     XmlComment,
+    XmlText,
     XmlIsWellFormed,
     XmlIsWellFormedDocument,
     XmlIsWellFormedContent,
@@ -725,6 +726,7 @@ pub enum BuiltinScalarFunction {
     Decode,
     Convert,
     ConvertFrom,
+    ConvertTo,
     Md5,
     Sha224,
     Sha256,
@@ -2360,6 +2362,7 @@ pub struct XmlExpr {
     pub indent: Option<bool>,
     pub target_type: Option<SqlType>,
     pub standalone: Option<XmlStandalone>,
+    pub root_version: XmlRootVersion,
 }
 
 impl XmlExpr {

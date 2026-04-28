@@ -9,7 +9,7 @@ use crate::include::nodes::plannodes::{AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr,
     ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SubLinkType, TargetEntry, Var, WindowClause,
-    user_attrno,
+    XmlExpr, user_attrno,
 };
 
 use super::inherit::{append_translation, translate_append_rel_expr};
@@ -843,6 +843,23 @@ pub(super) fn lower_agg_output_expr(
                 })
                 .collect(),
             ..*func
+        })),
+        Expr::Xml(xml) => Expr::Xml(Box::new(XmlExpr {
+            named_args: xml
+                .named_args
+                .into_iter()
+                .map(|arg| {
+                    lower_agg_output_expr(arg, group_by, passthrough_exprs, agg_output_layout)
+                })
+                .collect(),
+            args: xml
+                .args
+                .into_iter()
+                .map(|arg| {
+                    lower_agg_output_expr(arg, group_by, passthrough_exprs, agg_output_layout)
+                })
+                .collect(),
+            ..*xml
         })),
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
             left: Box::new(lower_agg_output_expr(

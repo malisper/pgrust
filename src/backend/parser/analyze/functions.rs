@@ -1739,6 +1739,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::CashWords => args.len() == 1,
             BuiltinScalarFunction::UnsupportedXmlFeature => true,
             BuiltinScalarFunction::XmlComment
+            | BuiltinScalarFunction::XmlText
             | BuiltinScalarFunction::XmlIsWellFormed
             | BuiltinScalarFunction::XmlIsWellFormedDocument
             | BuiltinScalarFunction::XmlIsWellFormedContent => args.len() == 1,
@@ -2153,6 +2154,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Position
             | BuiltinScalarFunction::Strpos
             | BuiltinScalarFunction::ConvertFrom
+            | BuiltinScalarFunction::ConvertTo
             | BuiltinScalarFunction::Left
             | BuiltinScalarFunction::Right
             | BuiltinScalarFunction::Repeat
@@ -4237,6 +4239,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("convert", BuiltinScalarFunction::Convert),
         ("pg_convert", BuiltinScalarFunction::Convert),
         ("convert_from", BuiltinScalarFunction::ConvertFrom),
+        ("convert_to", BuiltinScalarFunction::ConvertTo),
         ("md5", BuiltinScalarFunction::Md5),
         ("sha224", BuiltinScalarFunction::Sha224),
         ("sha256", BuiltinScalarFunction::Sha256),
@@ -4431,6 +4434,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::BitcastBigintToFloat8,
         ),
         ("xmlcomment", BuiltinScalarFunction::XmlComment),
+        ("xmltext", BuiltinScalarFunction::XmlText),
         ("xml_is_well_formed", BuiltinScalarFunction::XmlIsWellFormed),
         (
             "xml_is_well_formed_document",
@@ -4822,6 +4826,15 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
                 SqlType::new(SqlTypeKind::Xml),
             ));
         }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::XmlText)
+        {
+            by_func.push((
+                BuiltinScalarFunction::XmlText,
+                SqlType::new(SqlTypeKind::Xml),
+            ));
+        }
         for func in [
             BuiltinScalarFunction::XmlIsWellFormed,
             BuiltinScalarFunction::XmlIsWellFormedDocument,
@@ -5030,6 +5043,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Reverse
             | BuiltinScalarFunction::Convert
             | BuiltinScalarFunction::ConvertFrom
+            | BuiltinScalarFunction::ConvertTo
             | BuiltinScalarFunction::Encode
             | BuiltinScalarFunction::Decode
             | BuiltinScalarFunction::Md5
@@ -5075,6 +5089,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::BitcastIntegerToFloat4
             | BuiltinScalarFunction::BitcastBigintToFloat8
             | BuiltinScalarFunction::XmlComment
+            | BuiltinScalarFunction::XmlText
             | BuiltinScalarFunction::XmlIsWellFormed
             | BuiltinScalarFunction::XmlIsWellFormedDocument
             | BuiltinScalarFunction::XmlIsWellFormedContent

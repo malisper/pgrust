@@ -517,6 +517,8 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
                     RaiseLevel::Notice
                 } else if token.eq_ignore_ascii_case("warning") {
                     RaiseLevel::Warning
+                } else if token.eq_ignore_ascii_case("log") {
+                    RaiseLevel::Log
                 } else {
                     RaiseLevel::Exception
                 };

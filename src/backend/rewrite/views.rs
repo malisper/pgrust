@@ -1502,6 +1502,7 @@ fn render_expr(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
         Expr::SubLink(sublink) => render_sublink(sublink, ctx),
         Expr::ScalarArrayOp(saop) => render_scalar_array_op(saop, ctx),
         Expr::Func(func) => render_function(func, ctx),
+        Expr::Xml(xml) => render_xml_expr(xml, ctx),
         Expr::SqlJsonQueryFunction(func) => render_sql_json_query_function(func, ctx),
         Expr::WindowFunc(window_func) => render_window_function(window_func, ctx),
         Expr::IsNull(inner) => format!("{} IS NULL", render_wrapped_expr(inner, ctx)),
@@ -1739,6 +1740,126 @@ fn render_window_function(func: &WindowFuncExpr, ctx: &ViewDeparseContext<'_>) -
     format!("{call} OVER ({over})")
 }
 
+fn render_xml_expr(
+    xml: &crate::include::nodes::primnodes::XmlExpr,
+    ctx: &ViewDeparseContext<'_>,
+) -> String {
+    match xml.op {
+        crate::include::nodes::primnodes::XmlExprOp::Concat => format!(
+            "XMLCONCAT({})",
+            xml.args
+                .iter()
+                .map(|arg| render_expr(arg, ctx))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        crate::include::nodes::primnodes::XmlExprOp::Element => {
+            let mut parts = Vec::new();
+            if !xml.named_args.is_empty() {
+                let attrs = xml
+                    .named_args
+                    .iter()
+                    .zip(xml.arg_names.iter())
+                    .map(|(arg, name)| {
+                        format!(
+                            "{} AS {}",
+                            render_expr(arg, ctx),
+                            quote_identifier_if_needed(name)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                parts.push(format!("XMLATTRIBUTES({attrs})"));
+            }
+            parts.extend(xml.args.iter().map(|arg| render_expr(arg, ctx)));
+            format!(
+                "XMLELEMENT(NAME {}, {})",
+                quote_identifier_if_needed(xml.name.as_deref().unwrap_or_default()),
+                parts.join(", ")
+            )
+        }
+        crate::include::nodes::primnodes::XmlExprOp::Forest => format!(
+            "XMLFOREST({})",
+            xml.args
+                .iter()
+                .zip(xml.arg_names.iter())
+                .map(|(arg, name)| {
+                    format!(
+                        "{} AS {}",
+                        render_expr(arg, ctx),
+                        quote_identifier_if_needed(name)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        crate::include::nodes::primnodes::XmlExprOp::Parse => format!(
+            "XMLPARSE({} {} STRIP WHITESPACE)",
+            render_xml_option(xml.xml_option),
+            render_xml_text_arg(&xml.args[0], ctx)
+        ),
+        crate::include::nodes::primnodes::XmlExprOp::Pi => {
+            let mut rendered = format!(
+                "XMLPI(NAME {}",
+                quote_identifier_if_needed(xml.name.as_deref().unwrap_or_default())
+            );
+            if let Some(arg) = xml.args.first() {
+                rendered.push_str(", ");
+                rendered.push_str(&render_xml_text_arg(arg, ctx));
+            }
+            rendered.push(')');
+            rendered
+        }
+        crate::include::nodes::primnodes::XmlExprOp::Root => {
+            let version = match xml.root_version {
+                crate::backend::parser::XmlRootVersion::Value => xml
+                    .args
+                    .get(1)
+                    .map(|arg| format!("VERSION {}", render_expr(arg, ctx)))
+                    .unwrap_or_else(|| "VERSION NO VALUE".into()),
+                crate::backend::parser::XmlRootVersion::NoValue
+                | crate::backend::parser::XmlRootVersion::Omitted => "VERSION NO VALUE".into(),
+            };
+            let standalone = match xml.standalone {
+                Some(crate::backend::parser::XmlStandalone::Yes) => ", STANDALONE YES",
+                Some(crate::backend::parser::XmlStandalone::No) => ", STANDALONE NO",
+                Some(crate::backend::parser::XmlStandalone::NoValue) => ", STANDALONE NO VALUE",
+                None => "",
+            };
+            format!(
+                "XMLROOT({}, {version}{standalone})",
+                render_expr(&xml.args[0], ctx)
+            )
+        }
+        crate::include::nodes::primnodes::XmlExprOp::Serialize => {
+            let indent = if xml.indent == Some(true) {
+                " INDENT"
+            } else {
+                " NO INDENT"
+            };
+            format!(
+                "XMLSERIALIZE({} {} AS {}{indent})",
+                render_xml_option(xml.xml_option),
+                render_expr(&xml.args[0], ctx),
+                render_sql_type_with_catalog(
+                    xml.target_type.unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                    ctx.catalog,
+                )
+            )
+        }
+        crate::include::nodes::primnodes::XmlExprOp::IsDocument => {
+            format!("{} IS DOCUMENT", render_wrapped_expr(&xml.args[0], ctx))
+        }
+    }
+}
+
+fn render_xml_option(option: Option<crate::backend::parser::XmlOption>) -> &'static str {
+    match option {
+        Some(crate::backend::parser::XmlOption::Document) => "DOCUMENT",
+        Some(crate::backend::parser::XmlOption::Content) | None => "CONTENT",
+    }
+}
+
 fn render_window_clause(clause: &WindowClause, ctx: &ViewDeparseContext<'_>) -> String {
     let mut parts = Vec::new();
     if !clause.spec.partition_by.is_empty() {
@@ -1902,10 +2023,31 @@ fn render_function(func: &FuncExpr, ctx: &ViewDeparseContext<'_>) -> String {
         name,
         func.args
             .iter()
-            .map(|arg| render_expr(arg, ctx))
+            .map(|arg| {
+                if matches!(
+                    func.implementation,
+                    ScalarFunctionImpl::Builtin(
+                        BuiltinScalarFunction::XmlComment | BuiltinScalarFunction::XmlText
+                    )
+                ) {
+                    render_xml_text_arg(arg, ctx)
+                } else {
+                    render_expr(arg, ctx)
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+fn render_xml_text_arg(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {
+    match expr {
+        Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)) => {
+            format!("{}::text", render_expr(expr, ctx))
+        }
+        Expr::Cast(_, ty) if matches!(ty.kind, SqlTypeKind::Text) => render_expr(expr, ctx),
+        _ => render_expr(expr, ctx),
+    }
 }
 
 fn render_sql_json_query_function(
@@ -2312,6 +2454,7 @@ fn render_literal(value: &Value) -> String {
             )
         }
         Value::Json(json) => format!("'{}'::json", json.replace('\'', "''")),
+        Value::Xml(xml) => format!("'{}'::xml", xml.replace('\'', "''")),
         Value::JsonPath(jsonpath) => format!("'{}'::jsonpath", jsonpath.replace('\'', "''")),
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes)
             .map(|text| format!("'{}'::jsonb", text.replace('\'', "''")))
@@ -2370,6 +2513,7 @@ fn render_sql_type_name(ty: SqlType, catalog: Option<&dyn CatalogLookup>) -> Str
         SqlTypeKind::Interval => "interval",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
+        SqlTypeKind::Xml => "xml",
         SqlTypeKind::Char => {
             return ty
                 .char_len()
@@ -2649,6 +2793,8 @@ fn join_using_var_needs_cast(var: &Var, sql_type: SqlType, query: &Query) -> boo
 fn render_builtin_function_name(func: BuiltinScalarFunction) -> &'static str {
     match func {
         BuiltinScalarFunction::CurrentDatabase => "current_database",
+        BuiltinScalarFunction::XmlComment => "xmlcomment",
+        BuiltinScalarFunction::XmlText => "xmltext",
         BuiltinScalarFunction::PgGetUserById => "pg_get_userbyid",
         BuiltinScalarFunction::SatisfiesHashPartition => "satisfies_hash_partition",
         BuiltinScalarFunction::PgGetExpr => "pg_get_expr",
