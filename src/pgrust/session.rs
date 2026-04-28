@@ -90,7 +90,7 @@ use crate::pgrust::database::{
 };
 use crate::pgrust::portal::{
     CursorOptions, CursorViewRow, Portal, PortalFetchDirection, PortalFetchLimit, PortalManager,
-    PortalRunResult,
+    PortalRunResult, PositionedCursorRow,
 };
 use crate::pl::plpgsql::{
     EventTriggerDdlCommandRow, EventTriggerDroppedObjectRow, PlpgsqlFunctionCache,
@@ -2099,6 +2099,41 @@ fn undefined_cursor(name: &str) -> ExecError {
         hint: None,
         sqlstate: "34000",
     })
+}
+
+fn cursor_not_positioned(name: &str) -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: format!("cursor \"{name}\" is not positioned on a row"),
+        detail: None,
+        hint: None,
+        sqlstate: "24000",
+    })
+}
+
+fn locate_current_of_clause(sql: &str) -> Option<(usize, usize, String)> {
+    let lower = sql.to_ascii_lowercase();
+    let marker = "current of";
+    let start = lower.find(marker)?;
+    let mut cursor_start = start + marker.len();
+    let bytes = sql.as_bytes();
+    while bytes
+        .get(cursor_start)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        cursor_start += 1;
+    }
+    let first = *bytes.get(cursor_start)?;
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+    }
+    let mut cursor_end = cursor_start + 1;
+    while bytes
+        .get(cursor_end)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'$'))
+    {
+        cursor_end += 1;
+    }
+    Some((start, cursor_end, sql[cursor_start..cursor_end].to_string()))
 }
 
 fn cursor_options_from_declare(
@@ -4606,6 +4641,8 @@ impl Session {
                 CopyExecutionResult::Output { rows, .. } => Ok(StatementResult::AffectedRows(rows)),
             };
         }
+        let rewritten_current_of_sql = self.rewrite_current_of_sql(sql)?;
+        let sql = rewritten_current_of_sql.as_deref().unwrap_or(sql);
         let mut stmt = self.parse_session_statement(db, sql)?;
 
         if let Statement::AlterTableMulti(ref statements) = stmt {
@@ -7097,6 +7134,39 @@ impl Session {
         }
     }
 
+    fn rewrite_current_of_sql(&self, sql: &str) -> Result<Option<String>, ExecError> {
+        let Some((start, end, cursor_name)) = locate_current_of_clause(sql) else {
+            return Ok(None);
+        };
+        let row = self.positioned_cursor_row(&cursor_name)?;
+        // :HACK: Lower positioned UPDATE/DELETE to the equivalent physical
+        // tuple predicate. A native plan node can later render `TID Cond:
+        // CURRENT OF ...` for exact EXPLAIN parity.
+        let predicate = format!(
+            "ctid = '({},{})'::tid",
+            row.tid.block_number, row.tid.offset_number
+        );
+        let mut rewritten = String::with_capacity(sql.len() + predicate.len());
+        rewritten.push_str(&sql[..start]);
+        rewritten.push_str(&predicate);
+        rewritten.push_str(&sql[end..]);
+        Ok(Some(rewritten))
+    }
+
+    fn positioned_cursor_row(&self, name: &str) -> Result<PositionedCursorRow, ExecError> {
+        let portal = self
+            .portals
+            .get(name)
+            .or_else(|| self.portals.get(&name.to_ascii_lowercase()))
+            .ok_or_else(|| undefined_cursor(name))?;
+        if !portal.options.visible {
+            return Err(undefined_cursor(name));
+        }
+        portal
+            .current_positioned_row()
+            .ok_or_else(|| cursor_not_positioned(name))
+    }
+
     fn apply_prepare_statement(
         &mut self,
         prepare_stmt: &PrepareStatement,
@@ -7737,6 +7807,7 @@ impl Session {
                     portal.execution = crate::pgrust::portal::PortalExecution::Materialized {
                         columns,
                         column_names,
+                        row_positions: vec![None; rows.len()],
                         rows,
                         pos: 0,
                     };
@@ -7753,6 +7824,7 @@ impl Session {
                         processed: n,
                         completed: true,
                         command_tag: Some(tag),
+                        current_row: None,
                     }
                 }
             }

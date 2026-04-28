@@ -3165,7 +3165,7 @@ pub(crate) fn collect_matching_rows_heap(
         drop(pin);
 
         for (tid, values) in page_rows {
-            let mut slot = TupleSlot::virtual_row(values.clone());
+            let mut slot = TupleSlot::virtual_row_with_metadata(values.clone(), Some(tid), None);
             if let Some(q) = &qual {
                 if !q(&mut slot, ctx)? {
                     continue;

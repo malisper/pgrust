@@ -381,3 +381,23 @@ Policy `ctid` bucket:
 - Latest rowsecurity regression result with a 300s file timeout:
   `689/774` matched, `85` mismatches, `1493` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+Positioned DML bucket:
+- Cursor portals now remember the physical tuple identity for the current row
+  when executor nodes expose exactly one positioned base-row binding.
+- Session SQL lowers `WHERE CURRENT OF cursor` to a `ctid = '(block,offset)'`
+  predicate, and heap DML predicate evaluation now preserves tuple ids for
+  `ctid` expressions.
+- Added focused UPDATE and DELETE `WHERE CURRENT OF` tests.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  update_where_current_of_uses_cursor_tuple` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  delete_where_current_of_uses_cursor_tuple` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `689/774` matched, `85` mismatches, `1445` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.
+- Remaining positioned-DML gaps: EXPLAIN renders a lowered seq-scan ctid filter
+  instead of PostgreSQL's `Tid Scan ... TID Cond: CURRENT OF ...`, and a cursor
+  row updated before a later positioned DELETE still points at the old ctid.

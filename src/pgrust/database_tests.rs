@@ -3370,6 +3370,94 @@ fn sql_cursor_fetch_move_close_and_cleanup() {
 }
 
 #[test]
+fn update_where_current_of_uses_cursor_tuple() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table current_of_items (id int4, label text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into current_of_items values (1, 'one'), (2, 'two')",
+        )
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "declare c cursor for select * from current_of_items order by id",
+        )
+        .unwrap();
+    session.execute(&db, "fetch next from c").unwrap();
+
+    match session
+        .execute(
+            &db,
+            "update current_of_items set label = 'uno' where current of c returning id, label",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1), Value::Text("uno".into())]]);
+        }
+        other => panic!("expected returning rows, got {other:?}"),
+    }
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id, label from current_of_items order by id",
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Text("uno".into())],
+            vec![Value::Int32(2), Value::Text("two".into())],
+        ]
+    );
+}
+
+#[test]
+fn delete_where_current_of_uses_cursor_tuple() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table delete_current_of_items (id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into delete_current_of_items values (1), (2)")
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "declare c cursor for select * from delete_current_of_items order by id",
+        )
+        .unwrap();
+    session.execute(&db, "fetch next from c").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "delete from delete_current_of_items where current of c returning id",
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id from delete_current_of_items order by id",
+        ),
+        vec![vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
 fn holdable_cursor_survives_commit_but_normal_cursor_does_not() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
