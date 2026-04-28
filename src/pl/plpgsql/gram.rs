@@ -9,7 +9,8 @@ use crate::include::catalog::RECORD_TYPE_OID;
 
 use super::ast::{
     AliasDecl, AliasTarget, AssignTarget, Block, CursorDecl, Decl, ExceptionCondition,
-    ExceptionHandler, ForQuerySource, ForTarget, RaiseLevel, ReturnQueryKind, Stmt, VarDecl,
+    ExceptionHandler, ForQuerySource, ForTarget, RaiseCondition, RaiseLevel, RaiseUsingOption,
+    ReturnQueryKind, Stmt, VarDecl,
 };
 
 pub fn parse_block(sql: &str) -> Result<Block, ParseError> {
@@ -297,8 +298,10 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         Rule::assign_stmt => build_assign_stmt(inner),
         Rule::if_stmt => build_if_stmt(inner),
         Rule::while_stmt => build_while_stmt(inner),
-        Rule::for_stmt => build_for_stmt(inner),
+        Rule::loop_stmt => build_loop_stmt(inner),
         Rule::exit_stmt => build_exit_stmt(inner),
+        Rule::for_stmt => build_for_stmt(inner),
+        Rule::foreach_stmt => build_foreach_stmt(inner),
         Rule::raise_stmt => build_raise_stmt(inner),
         Rule::assert_stmt => build_assert_stmt(inner),
         Rule::continue_stmt => Ok(Stmt::Continue),
@@ -503,23 +506,75 @@ fn build_while_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     })
 }
 
+fn build_loop_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let body = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::stmt)
+        .map(build_stmt)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Stmt::Loop { body })
+}
+
 fn build_exit_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
-    let mut condition = None;
+    let condition = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::expr_until_semi)
+        .map(|part| part.as_str().trim().to_string())
+        .filter(|text| !text.is_empty());
+    Ok(Stmt::Exit { condition })
+}
+
+fn build_foreach_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let mut targets = Vec::new();
+    let mut slice = 0usize;
+    let mut array_expr = None;
+    let mut body = Vec::new();
     for part in pair.into_inner() {
-        if part.as_rule() == Rule::expr_until_semi {
-            condition = Some(part.as_str().trim().to_string());
+        match part.as_rule() {
+            Rule::for_target_list => {
+                targets.extend(
+                    part.into_inner()
+                        .filter(|inner| inner.as_rule() == Rule::assign_target)
+                        .map(build_assign_target)
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+            Rule::foreach_slice => {
+                let raw = part
+                    .as_str()
+                    .split_whitespace()
+                    .last()
+                    .ok_or(ParseError::UnexpectedEof)?;
+                slice = raw
+                    .parse::<usize>()
+                    .map_err(|_| ParseError::UnexpectedToken {
+                        expected: "FOREACH SLICE integer literal",
+                        actual: part.as_str().into(),
+                    })?;
+            }
+            Rule::expr_until_loop if array_expr.is_none() => {
+                array_expr = Some(part.as_str().trim().to_string());
+            }
+            Rule::stmt => body.push(build_stmt(part)?),
+            _ => {}
         }
     }
-    Ok(Stmt::ExitWhen { condition })
+    Ok(Stmt::ForEach {
+        target: build_for_target(targets)?,
+        slice,
+        array_expr: array_expr.ok_or(ParseError::UnexpectedEof)?,
+        body,
+    })
 }
 
 fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     let line = pair.as_span().start_pos().line_col().0;
     let raw = pair.as_str().to_string();
     let mut level = RaiseLevel::Exception;
-    let mut message = None;
+    let mut message = None::<String>;
     let mut message_sql = None::<String>;
-    let mut sqlstate = None;
+    let mut condition = None::<RaiseCondition>;
+    let mut using_options = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::raise_level => {
@@ -540,9 +595,15 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
             }
             Rule::raise_message_clause => {
                 for inner in part.into_inner() {
-                    if inner.as_rule() == Rule::sql_string {
-                        message_sql = Some(inner.as_str().to_string());
-                        message = Some(raise_string_literal_text(inner.as_str())?);
+                    match inner.as_rule() {
+                        Rule::sql_string => {
+                            message_sql = Some(inner.as_str().to_string());
+                            message = Some(raise_string_literal_text(inner.as_str())?);
+                        }
+                        Rule::raise_using_clause => {
+                            using_options.extend(build_raise_using_clause(inner)?);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -556,57 +617,82 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
                             explicit_sqlstate = Some(sqlstate_condition_literal(inner)?);
                         }
                         Rule::raise_using_clause => {
-                            for item in inner.into_inner() {
-                                let mut item_name = None;
-                                let mut item_value = None;
-                                for item_part in item.into_inner() {
-                                    match item_part.as_rule() {
-                                        Rule::ident => item_name = Some(build_ident(item_part)),
-                                        Rule::expr_until_comma_or_semi => {
-                                            item_value = Some(item_part.as_str().trim().to_string())
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                if item_name
-                                    .as_deref()
-                                    .is_some_and(|name| name.eq_ignore_ascii_case("message"))
-                                {
-                                    let value = item_value.ok_or(ParseError::UnexpectedEof)?;
-                                    message = Some(raise_string_literal_text(&value)?);
-                                }
-                            }
+                            using_options.extend(build_raise_using_clause(inner)?);
                         }
                         _ => {}
                     }
                 }
                 if let Some(value) = explicit_sqlstate {
-                    if message.is_none() {
-                        message = Some(value.clone());
-                    }
-                    sqlstate = Some(value);
+                    condition = Some(RaiseCondition::SqlState(value));
                 } else {
                     let condition_name = condition_name.ok_or(ParseError::UnexpectedEof)?;
-                    sqlstate = Some(
-                        exception_condition_name_sqlstate(&condition_name)
-                            .unwrap_or("P0001")
-                            .to_string(),
-                    );
-                    if message.is_none() {
-                        message = Some(condition_name);
-                    }
+                    condition = Some(RaiseCondition::ConditionName(condition_name));
                 }
             }
+            Rule::raise_using_clause => using_options.extend(build_raise_using_clause(part)?),
             _ => {}
         }
     }
     let params = raise_params_from_raw_sql(&raw, message_sql.as_deref())?;
     Ok(Stmt::Raise {
         level,
-        sqlstate,
-        message: message.ok_or(ParseError::UnexpectedEof)?,
+        condition,
+        message,
         params,
-        line,
+        using_options,
+    })
+}
+
+fn build_raise_using_clause(pair: Pair<'_, Rule>) -> Result<Vec<RaiseUsingOption>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::raise_using_item)
+        .map(|item| {
+            let mut name = None;
+            let mut expr = None;
+            for part in item.into_inner() {
+                match part.as_rule() {
+                    Rule::ident => name = Some(build_ident(part)),
+                    Rule::expr_until_comma_or_semi => {
+                        expr = Some(part.as_str().trim().to_string());
+                    }
+                    _ => {}
+                }
+            }
+            Ok(RaiseUsingOption {
+                name: name.ok_or(ParseError::UnexpectedEof)?,
+                expr: expr.ok_or(ParseError::UnexpectedEof)?,
+            })
+        })
+        .collect()
+}
+
+fn raise_params_from_raw_sql(
+    raw: &str,
+    message_sql: Option<&str>,
+) -> Result<Vec<String>, ParseError> {
+    let Some(message_sql) = message_sql else {
+        return Ok(Vec::new());
+    };
+    let Some(message_start) = raw.find(message_sql) else {
+        return Ok(Vec::new());
+    };
+    let mut rest = raw[message_start + message_sql.len()..].trim();
+    if let Some(stripped) = rest.strip_suffix(';') {
+        rest = stripped.trim_end();
+    }
+    let Some(stripped) = rest.strip_prefix(',') else {
+        return Ok(Vec::new());
+    };
+    rest = stripped.trim();
+    if let Some(using_idx) = find_next_top_level_keyword(rest, &["using"]) {
+        rest = rest[..using_idx].trim_end();
+    }
+    if rest.is_empty() {
+        return Ok(Vec::new());
+    }
+    split_top_level_csv(rest).ok_or_else(|| ParseError::UnexpectedToken {
+        expected: "RAISE parameter list",
+        actual: rest.to_string(),
     })
 }
 
@@ -663,33 +749,6 @@ fn build_assert_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
             .filter(|text| !text.is_empty())
             .ok_or(ParseError::UnexpectedEof)?,
         message: message.filter(|text| !text.is_empty()),
-    })
-}
-
-fn raise_params_from_raw_sql(
-    raw: &str,
-    message_sql: Option<&str>,
-) -> Result<Vec<String>, ParseError> {
-    let Some(message_sql) = message_sql else {
-        return Ok(Vec::new());
-    };
-    let Some(message_start) = raw.find(message_sql) else {
-        return Ok(Vec::new());
-    };
-    let mut rest = raw[message_start + message_sql.len()..].trim();
-    if let Some(stripped) = rest.strip_suffix(';') {
-        rest = stripped.trim_end();
-    }
-    let Some(stripped) = rest.strip_prefix(',') else {
-        return Ok(Vec::new());
-    };
-    let rest = stripped.trim();
-    if rest.is_empty() {
-        return Ok(Vec::new());
-    }
-    split_top_level_csv(rest).ok_or_else(|| ParseError::UnexpectedToken {
-        expected: "RAISE parameter list",
-        actual: rest.to_string(),
     })
 }
 
@@ -1399,7 +1458,7 @@ mod tests {
         else {
             panic!("expected raise statement");
         };
-        assert_eq!(message, "trigger = %, new table = %");
+        assert_eq!(message.as_deref(), Some("trigger = %, new table = %"));
         assert_eq!(
             params,
             &vec![
@@ -1431,7 +1490,7 @@ mod tests {
             panic!("expected first RAISE statement");
         };
         assert!(matches!(level, RaiseLevel::Exception));
-        assert_eq!(message, "Patchfield \"%\" does not exist");
+        assert_eq!(message.as_deref(), Some("Patchfield \"%\" does not exist"));
         assert_eq!(params, &vec!["ps.pfname".to_string()]);
 
         let Stmt::Raise {
@@ -1440,7 +1499,7 @@ mod tests {
         else {
             panic!("expected second RAISE statement");
         };
-        assert_eq!(message, "system \"%\" does not exist");
+        assert_eq!(message.as_deref(), Some("system \"%\" does not exist"));
         assert_eq!(params, &vec!["new.sysname".to_string()]);
     }
 
@@ -1465,8 +1524,89 @@ mod tests {
             panic!("expected RAISE statement");
         };
         assert!(matches!(level, RaiseLevel::Info));
-        assert_eq!(message, "r = %");
+        assert_eq!(message.as_deref(), Some("r = %"));
         assert_eq!(params, &vec!["true".to_string()]);
+    }
+
+    #[test]
+    fn parse_raise_using_forms_and_reraise() {
+        let block = parse_block(
+            r#"
+            begin
+                raise 'check me'
+                    using errcode = '1234F', detail = 'some detail';
+                raise notice 'value %', v using hint = 'look here';
+                raise using message = 'custom' || ' message', errcode = '22012';
+                raise exception using
+                    column = 'c',
+                    constraint = 'k',
+                    datatype = 't',
+                    table = 'r',
+                    schema = 's';
+                raise;
+            end
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &block.statements[0],
+            Stmt::Raise {
+                message: Some(message),
+                using_options,
+                ..
+            } if message == "check me" && using_options.len() == 2
+        ));
+        assert!(matches!(
+            &block.statements[1],
+            Stmt::Raise {
+                message: Some(message),
+                params,
+                using_options,
+                ..
+            } if message == "value %" && params == &vec!["v".to_string()] && using_options.len() == 1
+        ));
+        assert!(matches!(
+            &block.statements[2],
+            Stmt::Raise {
+                message: None,
+                using_options,
+                ..
+            } if using_options.len() == 2
+        ));
+        assert!(matches!(
+            &block.statements[3],
+            Stmt::Raise {
+                using_options, ..
+            } if using_options.len() == 5
+        ));
+        assert!(matches!(
+            &block.statements[4],
+            Stmt::Raise {
+                message: None,
+                using_options,
+                params,
+                ..
+            } if using_options.is_empty() && params.is_empty()
+        ));
+    }
+
+    #[test]
+    fn parse_compiler_directives_before_block() {
+        let block = parse_block(
+            "
+            #variable_conflict use_variable
+            declare
+                x int := 1;
+            begin
+                null;
+            end
+            ",
+        )
+        .unwrap();
+
+        assert_eq!(block.declarations.len(), 1);
+        assert!(matches!(block.statements[0], Stmt::Null));
     }
 
     #[test]
@@ -1487,6 +1627,37 @@ mod tests {
         };
         assert_eq!(condition, "current_value is not null");
         assert_eq!(body.len(), 1);
+    }
+
+    #[test]
+    fn parse_loop_exit_and_foreach() {
+        let block = parse_block(
+            "
+            begin
+                loop
+                    exit when not found;
+                end loop;
+                foreach x, y slice 1 in array vals loop
+                    null;
+                end loop;
+            end
+            ",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &block.statements[0],
+            Stmt::Loop { body } if matches!(body.as_slice(), [Stmt::Exit { condition: Some(condition) }] if condition == "not found")
+        ));
+        assert!(matches!(
+            &block.statements[1],
+            Stmt::ForEach {
+                target: ForTarget::List(targets),
+                slice: 1,
+                array_expr,
+                body,
+            } if targets.len() == 2 && array_expr == "vals" && body.len() == 1
+        ));
     }
 
     #[test]

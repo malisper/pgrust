@@ -18,7 +18,7 @@ use crate::backend::executor::{
     eval_plpgsql_expr, execute_planned_stmt, execute_readonly_statement, render_interval_text,
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
-use crate::backend::libpq::pqformat::format_exec_error;
+use crate::backend::libpq::pqformat::{format_exec_error, format_exec_error_hint};
 use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::parser::{
     Catalog, CatalogLookup, ParseError, PreparedExternalParam, SqlType, SqlTypeKind, Statement,
@@ -127,8 +127,8 @@ pub enum TriggerFunctionResult {
 enum FunctionControl {
     Continue,
     LoopContinue,
-    Break,
     Return,
+    ExitLoop,
 }
 
 #[derive(Debug)]
@@ -146,6 +146,15 @@ struct FunctionState {
     cursors: HashMap<String, FunctionCursor>,
     local_guc_writes: HashSet<String>,
     session_guc_writes: HashSet<String>,
+    current_exception: Option<PlpgsqlExceptionData>,
+}
+
+#[derive(Debug, Clone)]
+struct PlpgsqlExceptionData {
+    message: String,
+    detail: Option<String>,
+    hint: Option<String>,
+    sqlstate: &'static str,
 }
 
 #[derive(Debug)]
@@ -547,8 +556,10 @@ pub fn execute_user_defined_trigger_function(
         cursors: HashMap::new(),
         local_guc_writes: HashSet::new(),
         session_guc_writes: HashSet::new(),
+        current_exception: None,
     };
     state.values[compiled.found_slot] = Value::Bool(false);
+    state.values[compiled.sqlstate_slot] = Value::Text(String::new().into());
     seed_trigger_state(bindings, call, &mut state);
     let saved_pinned_cte_tables = ctx.pinned_cte_tables.clone();
     let saved_cte_tables = ctx.cte_tables.clone();
@@ -1290,8 +1301,10 @@ fn execute_compiled_function(
         cursors: HashMap::new(),
         local_guc_writes: HashSet::new(),
         session_guc_writes: HashSet::new(),
+        current_exception: None,
     };
     state.values[compiled.found_slot] = Value::Bool(false);
+    state.values[compiled.sqlstate_slot] = Value::Text(String::new().into());
     for (slot_def, arg_value) in compiled.parameter_slots.iter().zip(arg_values.iter()) {
         state.values[slot_def.slot] = cast_value(arg_value.clone(), slot_def.ty)?;
     }
@@ -1331,7 +1344,7 @@ fn execute_compiled_function(
                 "2D000",
             ));
         }
-        Ok(FunctionControl::Break) => {
+        Ok(FunctionControl::ExitLoop) => {
             ctx.gucs = saved_gucs;
             return Err(function_runtime_error(
                 "EXIT cannot be used outside a loop",
@@ -1548,12 +1561,16 @@ fn exec_do_stmt(
             }
             Ok(DoControl::Continue)
         }
-        CompiledStmt::ExitWhen { .. } => Ok(DoControl::Continue),
+        CompiledStmt::Exit { .. } => Ok(DoControl::Continue),
         CompiledStmt::Continue => Ok(DoControl::LoopContinue),
         CompiledStmt::Raise {
             level,
             sqlstate,
             message,
+            message_expr,
+            detail_expr,
+            hint_expr,
+            errcode_expr,
             params,
             ..
         } => {
@@ -1561,9 +1578,38 @@ fn exec_do_stmt(
                 .iter()
                 .map(|expr| eval_do_expr(expr, values))
                 .collect::<Result<Vec<_>, _>>()?;
-            finish_raise(level, sqlstate.as_deref(), message, &param_values)?;
+            let message = match message_expr {
+                Some(expr) => Some(render_raise_option_value(eval_do_expr(expr, values)?)),
+                None => message.clone(),
+            };
+            let detail = detail_expr
+                .as_ref()
+                .map(|expr| eval_do_expr(expr, values).map(render_raise_option_value))
+                .transpose()?;
+            let hint = hint_expr
+                .as_ref()
+                .map(|expr| eval_do_expr(expr, values).map(render_raise_option_value))
+                .transpose()?;
+            let dynamic_sqlstate = errcode_expr
+                .as_ref()
+                .map(|expr| eval_do_expr(expr, values).map(render_raise_option_value))
+                .transpose()?;
+            finish_raise(
+                level,
+                dynamic_sqlstate.as_deref().or(sqlstate.as_deref()),
+                message.as_deref().unwrap_or("P0001"),
+                &param_values,
+                detail,
+                hint,
+            )?;
             Ok(DoControl::Continue)
         }
+        CompiledStmt::Reraise => Err(ExecError::DetailedError {
+            message: "RAISE without parameters cannot be used outside an exception handler".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0Z002",
+        }),
         CompiledStmt::Assert { condition, message } => {
             if !plpgsql_check_asserts_enabled_from_gucs(Some(gucs)) {
                 return Ok(DoControl::Continue);
@@ -1606,7 +1652,10 @@ fn exec_do_stmt(
         | CompiledStmt::ReturnTriggerRow { .. }
         | CompiledStmt::ReturnTriggerNull
         | CompiledStmt::ReturnTriggerNoValue
+        | CompiledStmt::Loop { .. }
+        | CompiledStmt::Exit { .. }
         | CompiledStmt::ForQuery { .. }
+        | CompiledStmt::ForEach { .. }
         | CompiledStmt::ReturnQuery { .. }
         | CompiledStmt::Perform { .. }
         | CompiledStmt::OpenCursor { .. }
@@ -1736,9 +1785,9 @@ fn exec_function_block(
                 finish_function_block_subxact(ctx, subxact, true)?;
                 return Ok(FunctionControl::LoopContinue);
             }
-            Ok(FunctionControl::Break) => {
+            Ok(FunctionControl::ExitLoop) => {
                 finish_function_block_subxact(ctx, subxact, true)?;
-                return Ok(FunctionControl::Break);
+                return Ok(FunctionControl::ExitLoop);
             }
             Ok(FunctionControl::Return) => {
                 finish_function_block_subxact(ctx, subxact, true)?;
@@ -1810,15 +1859,21 @@ fn exec_function_exception_handlers(
     else {
         return Ok(None);
     };
-    state.values[compiled.sqlerrm_slot] = Value::Text(format_exec_error(err).into());
-    exec_function_stmt_list(
+    let saved_exception = state.current_exception.clone();
+    let current = exception_data_from_error(err);
+    state.values[compiled.sqlstate_slot] = Value::Text(current.sqlstate.into());
+    state.values[compiled.sqlerrm_slot] = Value::Text(current.message.clone().into());
+    state.current_exception = Some(current);
+    let result = exec_function_stmt_list(
         &handler.statements,
         compiled,
         expected_record_shape,
         state,
         ctx,
     )
-    .map(Some)
+    .map(Some);
+    state.current_exception = saved_exception;
+    result
 }
 
 fn exec_function_stmt(
@@ -1864,11 +1919,34 @@ fn exec_function_stmt(
             while eval_plpgsql_condition(&eval_function_expr(condition, &state.values, ctx)?)? {
                 match exec_function_stmt_list(body, compiled, expected_record_shape, state, ctx)? {
                     FunctionControl::Continue | FunctionControl::LoopContinue => {}
-                    FunctionControl::Break => break,
+                    FunctionControl::ExitLoop => break,
                     FunctionControl::Return => return Ok(FunctionControl::Return),
                 }
             }
             Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::Loop { body } => {
+            loop {
+                match exec_function_stmt_list(body, compiled, expected_record_shape, state, ctx)? {
+                    FunctionControl::Continue | FunctionControl::LoopContinue => {}
+                    FunctionControl::ExitLoop => break,
+                    FunctionControl::Return => return Ok(FunctionControl::Return),
+                }
+            }
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::Exit { condition } => {
+            let should_exit = match condition {
+                Some(condition) => {
+                    eval_plpgsql_condition(&eval_function_expr(condition, &state.values, ctx)?)?
+                }
+                None => true,
+            };
+            if should_exit {
+                Ok(FunctionControl::ExitLoop)
+            } else {
+                Ok(FunctionControl::Continue)
+            }
         }
         CompiledStmt::ForInt {
             slot,
@@ -1908,7 +1986,7 @@ fn exec_function_stmt(
                 state.values[*slot] = Value::Int32(current);
                 match exec_function_stmt_list(body, compiled, expected_record_shape, state, ctx)? {
                     FunctionControl::Continue | FunctionControl::LoopContinue => {}
-                    FunctionControl::Break => break,
+                    FunctionControl::ExitLoop => break,
                     FunctionControl::Return => return Ok(FunctionControl::Return),
                 }
             }
@@ -1929,10 +2007,29 @@ fn exec_function_stmt(
             state,
             ctx,
         ),
+        CompiledStmt::ForEach {
+            target,
+            slice,
+            array_expr,
+            body,
+        } => exec_function_foreach(
+            target,
+            *slice,
+            array_expr,
+            body,
+            compiled,
+            expected_record_shape,
+            state,
+            ctx,
+        ),
         CompiledStmt::Raise {
             level,
             sqlstate,
             message,
+            message_expr,
+            detail_expr,
+            hint_expr,
+            errcode_expr,
             params,
             ..
         } => {
@@ -1940,22 +2037,52 @@ fn exec_function_stmt(
                 .iter()
                 .map(|expr| eval_function_expr(expr, &state.values, ctx))
                 .collect::<Result<Vec<_>, _>>()?;
-            finish_raise(level, sqlstate.as_deref(), message, &param_values)?;
+            let message = match message_expr {
+                Some(expr) => Some(render_raise_option_value(eval_function_expr(
+                    expr,
+                    &state.values,
+                    ctx,
+                )?)),
+                None => message.clone(),
+            };
+            let detail = detail_expr
+                .as_ref()
+                .map(|expr| {
+                    eval_function_expr(expr, &state.values, ctx).map(render_raise_option_value)
+                })
+                .transpose()?;
+            let hint = hint_expr
+                .as_ref()
+                .map(|expr| {
+                    eval_function_expr(expr, &state.values, ctx).map(render_raise_option_value)
+                })
+                .transpose()?;
+            let dynamic_sqlstate = errcode_expr
+                .as_ref()
+                .map(|expr| {
+                    eval_function_expr(expr, &state.values, ctx).map(render_raise_option_value)
+                })
+                .transpose()?;
+            finish_raise(
+                level,
+                dynamic_sqlstate.as_deref().or(sqlstate.as_deref()),
+                message.as_deref().unwrap_or("P0001"),
+                &param_values,
+                detail,
+                hint,
+            )?;
             Ok(FunctionControl::Continue)
         }
-        CompiledStmt::ExitWhen { condition } => {
-            let should_exit = match condition {
-                Some(condition) => {
-                    eval_plpgsql_condition(&eval_function_expr(condition, &state.values, ctx)?)?
-                }
-                None => true,
-            };
-            Ok(if should_exit {
-                FunctionControl::Break
-            } else {
-                FunctionControl::Continue
-            })
-        }
+        CompiledStmt::Reraise => match &state.current_exception {
+            Some(err) => Err(exception_data_to_error(err.clone())),
+            None => Err(ExecError::DetailedError {
+                message: "RAISE without parameters cannot be used outside an exception handler"
+                    .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0Z002",
+            }),
+        },
         CompiledStmt::Assert { condition, message } => {
             if !plpgsql_check_asserts_enabled_from_values(Some(ctx)) {
                 return Ok(FunctionControl::Continue);
@@ -2098,10 +2225,11 @@ fn exec_function_stmt_list(
     ctx: &mut ExecutorContext,
 ) -> Result<FunctionControl, ExecError> {
     for stmt in statements {
-        let control = exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx)
-            .map_err(|err| with_plpgsql_stmt_context_if_missing(err, compiled, stmt))?;
-        if !matches!(control, FunctionControl::Continue) {
-            return Ok(control);
+        match exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx)
+            .map_err(|err| with_plpgsql_stmt_context_if_missing(err, compiled, stmt))?
+        {
+            FunctionControl::Continue => {}
+            control => return Ok(control),
         }
     }
     Ok(FunctionControl::Continue)
@@ -2395,13 +2523,141 @@ fn exec_function_for_query(
         assign_query_row_to_targets(row, &result.columns, &target.targets, state, ctx, true)?;
         match exec_function_stmt_list(body, compiled, expected_record_shape, state, ctx)? {
             FunctionControl::Continue | FunctionControl::LoopContinue => {}
-            FunctionControl::Break => break,
+            FunctionControl::ExitLoop => break,
             FunctionControl::Return => return Ok(FunctionControl::Return),
         }
     }
 
     state.values[compiled.found_slot] = Value::Bool(true);
     Ok(FunctionControl::Continue)
+}
+
+fn exec_function_foreach(
+    target: &CompiledForQueryTarget,
+    slice: usize,
+    array_expr: &CompiledExpr,
+    body: &[CompiledStmt],
+    compiled: &CompiledFunction,
+    expected_record_shape: Option<&[QueryColumn]>,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<FunctionControl, ExecError> {
+    let value = eval_function_expr(array_expr, &state.values, ctx)?;
+    let Some(array) = value.as_array_value() else {
+        state.values[compiled.found_slot] = Value::Bool(false);
+        return Ok(FunctionControl::Continue);
+    };
+    validate_foreach_target(target, slice)?;
+    let values = foreach_iteration_values(&array, slice)?;
+    if values.is_empty() {
+        state.values[compiled.found_slot] = Value::Bool(false);
+        return Ok(FunctionControl::Continue);
+    }
+    for value in values {
+        assign_foreach_value_to_targets(value, target, state, ctx)?;
+        match exec_function_stmt_list(body, compiled, expected_record_shape, state, ctx)? {
+            FunctionControl::Continue => {}
+            FunctionControl::ExitLoop => break,
+            FunctionControl::Return => return Ok(FunctionControl::Return),
+        }
+    }
+    state.values[compiled.found_slot] = Value::Bool(true);
+    Ok(FunctionControl::Continue)
+}
+
+fn validate_foreach_target(target: &CompiledForQueryTarget, slice: usize) -> Result<(), ExecError> {
+    if slice == 0 {
+        return Ok(());
+    }
+    if target
+        .targets
+        .iter()
+        .any(|target| !target.ty.is_array && target.ty.kind != SqlTypeKind::Record)
+    {
+        return Err(function_runtime_error(
+            "FOREACH ... SLICE loop variable must be of an array type",
+            None,
+            "42804",
+        ));
+    }
+    Ok(())
+}
+
+fn foreach_iteration_values(array: &ArrayValue, slice: usize) -> Result<Vec<Value>, ExecError> {
+    if array.is_empty() {
+        return Ok(Vec::new());
+    }
+    if slice == 0 {
+        return Ok(array.elements.clone());
+    }
+    let ndim = array.ndim();
+    if slice > ndim {
+        return Err(function_runtime_error(
+            &format!(
+                "slice dimension ({slice}) is out of the valid range 0..{}",
+                ndim
+            ),
+            None,
+            "2202E",
+        ));
+    }
+    let slice_dims = array.dimensions[ndim - slice..].to_vec();
+    let slice_len = slice_dims
+        .iter()
+        .try_fold(1usize, |acc, dim| acc.checked_mul(dim.length))
+        .ok_or_else(|| {
+            function_runtime_error("array size exceeds the maximum allowed", None, "54000")
+        })?;
+    if slice_len == 0 {
+        return Ok(Vec::new());
+    }
+    Ok(array
+        .elements
+        .chunks(slice_len)
+        .map(|chunk| {
+            Value::PgArray(ArrayValue {
+                element_type_oid: array.element_type_oid,
+                dimensions: slice_dims.clone(),
+                elements: chunk.to_vec(),
+            })
+        })
+        .collect())
+}
+
+fn assign_foreach_value_to_targets(
+    value: Value,
+    target: &CompiledForQueryTarget,
+    state: &mut FunctionState,
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    if let [target] = target.targets.as_slice() {
+        if target.ty.kind == SqlTypeKind::Record {
+            state.values[target.slot] = value;
+        } else {
+            state.values[target.slot] =
+                cast_value_with_config(value, target.ty, &ctx.datetime_config)?;
+        }
+        return Ok(());
+    }
+
+    let Value::Record(record) = value else {
+        return Err(function_runtime_error(
+            "FOREACH loop source element is not composite",
+            None,
+            "42804",
+        ));
+    };
+    if record.fields.len() != target.targets.len() {
+        return Err(function_runtime_error(
+            "number of source and target fields in assignment does not match",
+            None,
+            "42804",
+        ));
+    }
+    for (target, value) in target.targets.iter().zip(record.fields) {
+        state.values[target.slot] = cast_value_with_config(value, target.ty, &ctx.datetime_config)?;
+    }
+    Ok(())
 }
 
 fn exec_function_insert(
@@ -4185,6 +4441,43 @@ fn exec_error_sqlstate(err: &ExecError) -> &'static str {
     }
 }
 
+fn exception_data_from_error(err: &ExecError) -> PlpgsqlExceptionData {
+    PlpgsqlExceptionData {
+        message: format_exec_error(err),
+        detail: exec_error_detail_owned(err),
+        hint: format_exec_error_hint(err),
+        sqlstate: exec_error_sqlstate(err),
+    }
+}
+
+fn exec_error_detail_owned(err: &ExecError) -> Option<String> {
+    match err {
+        ExecError::WithContext { source, .. } => exec_error_detail_owned(source),
+        ExecError::DetailedError { detail, .. } => detail.clone(),
+        ExecError::Parse(ParseError::DetailedError { detail, .. }) => detail.clone(),
+        ExecError::JsonInput { detail, .. }
+        | ExecError::XmlInput { detail, .. }
+        | ExecError::ArrayInput { detail, .. } => detail.clone(),
+        ExecError::UniqueViolation { detail, .. }
+        | ExecError::NotNullViolation { detail, .. }
+        | ExecError::ForeignKeyViolation { detail, .. } => detail.clone(),
+        _ => None,
+    }
+}
+
+fn exception_data_to_error(err: PlpgsqlExceptionData) -> ExecError {
+    if err.sqlstate == "P0001" && err.detail.is_none() && err.hint.is_none() {
+        ExecError::RaiseException(err.message)
+    } else {
+        ExecError::DetailedError {
+            message: err.message,
+            detail: err.detail,
+            hint: err.hint,
+            sqlstate: err.sqlstate,
+        }
+    }
+}
+
 fn assert_failure(message: String) -> ExecError {
     ExecError::DetailedError {
         message,
@@ -4208,18 +4501,24 @@ fn finish_raise(
     sqlstate: Option<&str>,
     message: &str,
     params: &[Value],
+    detail: Option<String>,
+    hint: Option<String>,
 ) -> Result<(), ExecError> {
     let rendered = render_raise_message(message, params)?;
     match level {
-        RaiseLevel::Exception => match sqlstate.and_then(static_sqlstate) {
-            Some("P0001") | None => Err(ExecError::RaiseException(rendered)),
-            Some(sqlstate) => Err(ExecError::DetailedError {
-                message: rendered,
-                detail: None,
-                hint: None,
-                sqlstate,
-            }),
-        },
+        RaiseLevel::Exception => {
+            let sqlstate = sqlstate.and_then(static_sqlstate).unwrap_or("P0001");
+            if sqlstate == "P0001" && detail.is_none() && hint.is_none() {
+                Err(ExecError::RaiseException(rendered))
+            } else {
+                Err(ExecError::DetailedError {
+                    message: rendered,
+                    detail,
+                    hint,
+                    sqlstate,
+                })
+            }
+        }
         RaiseLevel::Log => Ok(()),
         RaiseLevel::Info | RaiseLevel::Notice | RaiseLevel::Warning => {
             NOTICE_QUEUE.with(|queue| {
@@ -4237,8 +4536,19 @@ fn static_sqlstate(sqlstate: &str) -> Option<&'static str> {
     match sqlstate {
         "0A000" => Some("0A000"),
         "22012" => Some("22012"),
+        "22004" => Some("22004"),
+        "22023" => Some("22023"),
+        "23502" => Some("23502"),
+        "23503" => Some("23503"),
+        "23505" => Some("23505"),
+        "23514" => Some("23514"),
+        "1234F" => Some("1234F"),
         "2F003" => Some("2F003"),
+        "42601" => Some("42601"),
+        "42804" => Some("42804"),
         "P0001" => Some("P0001"),
+        "P0002" => Some("P0002"),
+        "P0003" => Some("P0003"),
         "P0004" => Some("P0004"),
         "U9999" => Some("U9999"),
         "XX001" => Some("XX001"),
@@ -4249,8 +4559,14 @@ fn static_sqlstate(sqlstate: &str) -> Option<&'static str> {
 fn render_raise_message(message: &str, params: &[Value]) -> Result<String, ExecError> {
     let mut rendered = String::with_capacity(message.len());
     let mut params = params.iter();
-    for ch in message.chars() {
+    let mut chars = message.chars().peekable();
+    while let Some(ch) = chars.next() {
         if ch == '%' {
+            if chars.peek() == Some(&'%') {
+                chars.next();
+                rendered.push('%');
+                continue;
+            }
             let value = params.next().ok_or_else(|| {
                 ExecError::Parse(ParseError::UnexpectedToken {
                     expected: "RAISE parameter",
@@ -4263,6 +4579,13 @@ fn render_raise_message(message: &str, params: &[Value]) -> Result<String, ExecE
         }
     }
     Ok(rendered)
+}
+
+fn render_raise_option_value(value: Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        other => render_raise_value(&other),
+    }
 }
 
 fn render_raise_value(value: &Value) -> String {
@@ -4454,10 +4777,13 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
         CompiledStmt::Null => "NULL",
         CompiledStmt::If { .. } => "IF",
         CompiledStmt::While { .. } => "WHILE",
+        CompiledStmt::Loop { .. } => "LOOP",
+        CompiledStmt::Exit { .. } => "EXIT",
         CompiledStmt::ForInt { .. } => "FOR with integer loop variable",
         CompiledStmt::ForQuery { .. } => "FOR over SELECT rows",
-        CompiledStmt::ExitWhen { .. } => "EXIT",
+        CompiledStmt::ForEach { .. } => "FOREACH over array",
         CompiledStmt::Raise { .. } => "RAISE",
+        CompiledStmt::Reraise => "RAISE",
         CompiledStmt::Assert { .. } => "ASSERT",
         CompiledStmt::Continue => "CONTINUE",
         CompiledStmt::Return { .. } => "RETURN",
@@ -4638,6 +4964,7 @@ mod tests {
             cursors: HashMap::new(),
             local_guc_writes: HashSet::new(),
             session_guc_writes: HashSet::new(),
+            current_exception: None,
         };
 
         seed_trigger_state(&bindings, &call, &mut state);
@@ -4701,6 +5028,7 @@ mod tests {
             cursors: HashMap::new(),
             local_guc_writes: HashSet::new(),
             session_guc_writes: HashSet::new(),
+            current_exception: None,
         };
 
         seed_trigger_state(&bindings, &call, &mut state);

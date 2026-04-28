@@ -52,6 +52,18 @@ pub enum RaiseLevel {
     Exception,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RaiseCondition {
+    SqlState(String),
+    ConditionName(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaiseUsingOption {
+    pub name: String,
+    pub expr: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReturnQueryKind {
     Select,
@@ -108,6 +120,12 @@ pub enum Stmt {
         condition: String,
         body: Vec<Stmt>,
     },
+    Loop {
+        body: Vec<Stmt>,
+    },
+    Exit {
+        condition: Option<String>,
+    },
     ForInt {
         var_name: String,
         start_expr: String,
@@ -119,15 +137,18 @@ pub enum Stmt {
         source: ForQuerySource,
         body: Vec<Stmt>,
     },
-    ExitWhen {
-        condition: Option<String>,
+    ForEach {
+        target: ForTarget,
+        slice: usize,
+        array_expr: String,
+        body: Vec<Stmt>,
     },
     Raise {
         level: RaiseLevel,
-        sqlstate: Option<String>,
-        message: String,
+        condition: Option<RaiseCondition>,
+        message: Option<String>,
         params: Vec<String>,
-        line: usize,
+        using_options: Vec<RaiseUsingOption>,
     },
     Assert {
         condition: String,

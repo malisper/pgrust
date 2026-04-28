@@ -500,6 +500,46 @@ mod tests {
     }
 
     #[test]
+    fn execute_do_raise_treats_double_percent_as_literal() {
+        run_plpgsql_test("execute_do_raise_treats_double_percent_as_literal", || {
+            let stmt = DoStatement {
+                language: None,
+                code: "begin raise notice 'done %%'; end".into(),
+            };
+
+            assert_eq!(execute_do(&stmt).unwrap(), StatementResult::AffectedRows(0));
+            assert_eq!(
+                take_notices(),
+                vec![PlpgsqlNotice {
+                    level: RaiseLevel::Notice,
+                    message: "done %".into(),
+                }]
+            );
+        });
+    }
+
+    #[test]
+    fn execute_do_raise_using_message_detail_and_errcode() {
+        run_plpgsql_test("execute_do_raise_using_message_detail_and_errcode", || {
+            let stmt = DoStatement {
+                language: None,
+                code: "begin raise using message = 'custom' || ' message', detail = 'extra', errcode = '22012'; end".into(),
+            };
+
+            let err = execute_do(&stmt).unwrap_err();
+            assert!(matches!(
+                err,
+                ExecError::DetailedError {
+                    message,
+                    detail: Some(detail),
+                    sqlstate: "22012",
+                    ..
+                } if message == "custom message" && detail == "extra"
+            ));
+        });
+    }
+
+    #[test]
     fn execute_do_runs_while_loop() {
         run_plpgsql_test("execute_do_runs_while_loop", || {
             let stmt = DoStatement {

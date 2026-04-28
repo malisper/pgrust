@@ -5,7 +5,8 @@ line_comment = _{ "--" ~ (!"\n" ~ ANY)* }
 block_comment = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
 
 pl_block = { SOI ~ block ~ semi? ~ EOI }
-block = { block_label? ~ declare_section? ~ kw_begin ~ stmt* ~ exception_section? ~ kw_end ~ ident? }
+block = { compiler_option* ~ block_label? ~ compiler_option* ~ declare_section? ~ kw_begin ~ stmt* ~ exception_section? ~ kw_end ~ ident? }
+compiler_option = @{ "#" ~ (!("\n" | "\r") ~ ANY)* }
 block_label = { "<<" ~ ident ~ ">>" }
 declare_section = { kw_declare ~ (!kw_begin ~ decl_stmt)* }
 decl_stmt = { alias_decl | cursor_decl | var_decl }
@@ -20,20 +21,23 @@ exception_condition = { others_condition | sqlstate_condition | ident }
 others_condition = { kw_others }
 sqlstate_condition = { kw_sqlstate ~ sql_string }
 
-stmt = { nested_block_stmt | null_stmt | if_stmt | while_stmt | for_stmt | exit_stmt | raise_stmt | assert_stmt | continue_stmt | return_query_stmt | return_next_stmt | return_stmt | perform_stmt | dynamic_execute_stmt | get_diagnostics_stmt | open_cursor_stmt | fetch_cursor_stmt | close_cursor_stmt | assign_stmt | exec_sql_stmt }
+stmt = { nested_block_stmt | null_stmt | if_stmt | while_stmt | loop_stmt | foreach_stmt | for_stmt | exit_stmt | raise_stmt | assert_stmt | continue_stmt | return_query_stmt | return_next_stmt | return_stmt | perform_stmt | dynamic_execute_stmt | get_diagnostics_stmt | open_cursor_stmt | fetch_cursor_stmt | close_cursor_stmt | assign_stmt | exec_sql_stmt }
 nested_block_stmt = { block ~ semi }
 null_stmt = { kw_null ~ semi }
 assign_stmt = { assign_target ~ assign_op ~ expr_until_semi ~ semi }
 assign_target = { ident ~ ("." ~ ident)? }
 if_stmt = { kw_if ~ expr_until_then ~ kw_then ~ stmt* ~ elsif_clause* ~ else_clause? ~ kw_end ~ kw_if ~ semi }
 while_stmt = { kw_while ~ expr_until_loop ~ kw_loop ~ stmt* ~ kw_end ~ kw_loop ~ semi }
+loop_stmt = { kw_loop ~ stmt* ~ kw_end ~ kw_loop ~ semi }
+exit_stmt = { kw_exit ~ (kw_when ~ expr_until_semi)? ~ semi }
 elsif_clause = { kw_elsif ~ expr_until_then ~ kw_then ~ stmt* }
 else_clause = { kw_else ~ stmt* }
 for_stmt = { kw_for ~ for_target_list ~ kw_in ~ expr_until_loop ~ kw_loop ~ stmt* ~ kw_end ~ kw_loop ~ semi }
+foreach_stmt = { kw_foreach ~ for_target_list ~ foreach_slice? ~ kw_in ~ kw_array ~ expr_until_loop ~ kw_loop ~ stmt* ~ kw_end ~ kw_loop ~ semi }
+foreach_slice = { kw_slice ~ ASCII_DIGIT+ }
 for_target_list = { assign_target ~ (comma ~ assign_target)* }
-exit_stmt = { kw_exit ~ (kw_when ~ expr_until_semi)? ~ semi }
-raise_stmt = { kw_raise ~ raise_level? ~ (raise_message_clause | raise_condition_clause) ~ semi }
-raise_message_clause = { sql_string ~ (comma ~ expr_until_comma_or_semi)* }
+raise_stmt = { kw_raise ~ raise_level? ~ (raise_using_clause | raise_message_clause | raise_condition_clause)? ~ semi }
+raise_message_clause = { sql_string ~ (comma ~ expr_until_comma_or_using_or_semi)* ~ raise_using_clause? }
 raise_condition_clause = { (sqlstate_condition | ident) ~ raise_using_clause? }
 raise_using_clause = { kw_using ~ raise_using_item ~ (comma ~ raise_using_item)* }
 raise_using_item = { ident ~ assign_op ~ expr_until_comma_or_semi }
@@ -61,6 +65,7 @@ stmt_keyword_start = _{
     | kw_null
     | kw_if
     | kw_while
+    | kw_foreach
     | kw_elsif
     | kw_else
     | kw_for
@@ -101,6 +106,7 @@ expr_until_then = @{ expr_then_chunk+ }
 expr_until_range = @{ expr_range_chunk+ }
 expr_until_loop = @{ expr_loop_chunk+ }
 expr_until_comma_or_semi = @{ expr_param_chunk+ }
+expr_until_comma_or_using_or_semi = @{ expr_raise_param_chunk+ }
 
 type_name_chunk = _{
     sql_string
@@ -146,17 +152,28 @@ expr_param_chunk = _{
     | !comma ~ !semi ~ ANY
 }
 
+expr_raise_param_chunk = _{
+    sql_string
+    | quoted_ident
+    | "(" ~ expr_until_comma_or_using_or_semi? ~ ")"
+    | "[" ~ expr_until_comma_or_using_or_semi? ~ "]"
+    | !comma ~ !semi ~ !kw_using ~ ANY
+}
+
 kw_begin = _{ kw_begin_atom }
 kw_declare = _{ kw_declare_atom }
 kw_end = _{ kw_end_atom }
 kw_null = _{ kw_null_atom }
 kw_if = _{ kw_if_atom }
 kw_while = _{ kw_while_atom }
+kw_foreach = _{ kw_foreach_atom }
 kw_then = _{ kw_then_atom }
 kw_elsif = _{ kw_elsif_atom }
 kw_else = _{ kw_else_atom }
 kw_for = _{ kw_for_atom }
 kw_in = _{ kw_in_atom }
+kw_array = _{ kw_array_atom }
+kw_slice = _{ kw_slice_atom }
 kw_alias = _{ kw_alias_atom }
 kw_loop = _{ kw_loop_atom }
 kw_exit = _{ kw_exit_atom }
@@ -198,11 +215,14 @@ kw_end_atom = @{ ^"end" ~ keyword_end }
 kw_null_atom = @{ ^"null" ~ keyword_end }
 kw_if_atom = @{ ^"if" ~ keyword_end }
 kw_while_atom = @{ ^"while" ~ keyword_end }
+kw_foreach_atom = @{ ^"foreach" ~ keyword_end }
 kw_then_atom = @{ ^"then" ~ keyword_end }
 kw_elsif_atom = @{ ^"elsif" ~ keyword_end }
 kw_else_atom = @{ ^"else" ~ keyword_end }
 kw_for_atom = @{ ^"for" ~ keyword_end }
 kw_in_atom = @{ ^"in" ~ keyword_end }
+kw_array_atom = @{ ^"array" ~ keyword_end }
+kw_slice_atom = @{ ^"slice" ~ keyword_end }
 kw_alias_atom = @{ ^"alias" ~ keyword_end }
 kw_loop_atom = @{ ^"loop" ~ keyword_end }
 kw_exit_atom = @{ ^"exit" ~ keyword_end }

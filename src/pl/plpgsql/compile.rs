@@ -26,7 +26,7 @@ use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, Var, user_attrn
 
 use super::ast::{
     AliasTarget, AssignTarget, Block, CursorDecl, Decl, ExceptionCondition, ForQuerySource,
-    ForTarget, RaiseLevel, ReturnQueryKind, Stmt, VarDecl,
+    ForTarget, RaiseCondition, RaiseLevel, RaiseUsingOption, ReturnQueryKind, Stmt, VarDecl,
 };
 use super::gram::parse_block;
 
@@ -48,6 +48,7 @@ pub struct CompiledFunction {
     pub(crate) body: CompiledBlock,
     pub(crate) return_contract: FunctionReturnContract,
     pub(crate) found_slot: usize,
+    pub(crate) sqlstate_slot: usize,
     pub(crate) sqlerrm_slot: usize,
     pub(crate) local_ctes: Vec<BoundCte>,
     pub(crate) trigger_transition_ctes: Vec<CompiledTriggerTransitionCte>,
@@ -213,6 +214,12 @@ pub(crate) enum CompiledStmt {
         condition: CompiledExpr,
         body: Vec<CompiledStmt>,
     },
+    Loop {
+        body: Vec<CompiledStmt>,
+    },
+    Exit {
+        condition: Option<CompiledExpr>,
+    },
     ForInt {
         slot: usize,
         start_expr: CompiledExpr,
@@ -224,16 +231,24 @@ pub(crate) enum CompiledStmt {
         source: CompiledForQuerySource,
         body: Vec<CompiledStmt>,
     },
-    ExitWhen {
-        condition: Option<CompiledExpr>,
+    ForEach {
+        target: CompiledForQueryTarget,
+        slice: usize,
+        array_expr: CompiledExpr,
+        body: Vec<CompiledStmt>,
     },
     Raise {
         level: RaiseLevel,
         sqlstate: Option<String>,
-        message: String,
+        message: Option<String>,
+        message_expr: Option<CompiledExpr>,
+        detail_expr: Option<CompiledExpr>,
+        hint_expr: Option<CompiledExpr>,
+        errcode_expr: Option<CompiledExpr>,
         params: Vec<CompiledExpr>,
         line: usize,
     },
+    Reraise,
     Assert {
         condition: CompiledExpr,
         message: Option<CompiledExpr>,
@@ -629,6 +644,8 @@ pub(crate) fn compile_do_block(
 ) -> Result<CompiledBlock, ParseError> {
     let mut env = CompileEnv::default();
     let _ = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
+    let _ = env.define_var("sqlstate", SqlType::new(SqlTypeKind::Text));
+    let _ = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
     compile_block(block, catalog, &mut env, None)
 }
 
@@ -638,6 +655,7 @@ pub(crate) fn compile_do_function(
 ) -> Result<CompiledFunction, ParseError> {
     let mut env = CompileEnv::default();
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
+    let sqlstate_slot = env.define_var("sqlstate", SqlType::new(SqlTypeKind::Text));
     let sqlerrm_slot = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
     let return_contract = FunctionReturnContract::Scalar {
         ty: SqlType::new(SqlTypeKind::Void),
@@ -654,6 +672,7 @@ pub(crate) fn compile_do_function(
         body,
         return_contract,
         found_slot,
+        sqlstate_slot,
         sqlerrm_slot,
         local_ctes: Vec::new(),
         trigger_transition_ctes: Vec::new(),
@@ -763,6 +782,7 @@ pub(crate) fn compile_function_from_proc(
     }
 
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
+    let sqlstate_slot = env.define_var("sqlstate", SqlType::new(SqlTypeKind::Text));
     let sqlerrm_slot = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
 
     let return_contract = function_return_contract(row, catalog, &output_slots)?;
@@ -780,6 +800,7 @@ pub(crate) fn compile_function_from_proc(
         body,
         return_contract,
         found_slot,
+        sqlstate_slot,
         sqlerrm_slot,
         local_ctes: Vec::new(),
         trigger_transition_ctes: Vec::new(),
@@ -812,6 +833,7 @@ pub(crate) fn compile_trigger_function_from_proc(
         .collect();
     let bindings = seed_trigger_env(&mut env, relation_desc);
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
+    let sqlstate_slot = env.define_var("sqlstate", SqlType::new(SqlTypeKind::Text));
     let sqlerrm_slot = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
     let return_contract = FunctionReturnContract::Trigger { bindings };
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
@@ -824,6 +846,7 @@ pub(crate) fn compile_trigger_function_from_proc(
         body,
         return_contract,
         found_slot,
+        sqlstate_slot,
         sqlerrm_slot,
         local_ctes: env.local_ctes.clone(),
         trigger_transition_ctes,
@@ -1172,6 +1195,15 @@ fn compile_stmt(
             condition: compile_condition_text(condition, catalog, env)?,
             body: compile_stmt_list(body, catalog, env, return_contract)?,
         },
+        Stmt::Loop { body } => CompiledStmt::Loop {
+            body: compile_stmt_list(body, catalog, env, return_contract)?,
+        },
+        Stmt::Exit { condition } => CompiledStmt::Exit {
+            condition: condition
+                .as_deref()
+                .map(|condition| compile_condition_text(condition, catalog, env))
+                .transpose()?,
+        },
         Stmt::ForInt {
             var_name,
             start_expr,
@@ -1194,40 +1226,35 @@ fn compile_stmt(
             source,
             body,
         } => compile_for_query_stmt(target, source, body, catalog, env, return_contract)?,
-        Stmt::ExitWhen { condition } => CompiledStmt::ExitWhen {
-            condition: condition
-                .as_deref()
-                .map(|condition| compile_condition_text(condition, catalog, env))
-                .transpose()?,
-        },
+        Stmt::ForEach {
+            target,
+            slice,
+            array_expr,
+            body,
+        } => compile_foreach_stmt(
+            target,
+            *slice,
+            array_expr,
+            body,
+            catalog,
+            env,
+            return_contract,
+        )?,
         Stmt::Raise {
             level,
-            sqlstate,
+            condition,
             message,
             params,
-            line,
-        } => {
-            let placeholder_count = message.matches('%').count();
-            if placeholder_count != params.len() {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "RAISE placeholder count matching argument count",
-                    actual: format!(
-                        "message has {placeholder_count} placeholders but {} arguments were provided",
-                        params.len()
-                    ),
-                });
-            }
-            CompiledStmt::Raise {
-                level: level.clone(),
-                sqlstate: sqlstate.clone(),
-                message: message.clone(),
-                params: params
-                    .iter()
-                    .map(|expr| compile_expr_text(expr, catalog, env))
-                    .collect::<Result<_, _>>()?,
-                line: *line,
-            }
-        }
+            using_options,
+        } => compile_raise_stmt(
+            level,
+            condition,
+            message,
+            params,
+            using_options,
+            catalog,
+            env,
+        )?,
         Stmt::Assert { condition, message } => CompiledStmt::Assert {
             condition: compile_condition_text(condition, catalog, env)?,
             message: message
@@ -1287,6 +1314,168 @@ fn compile_stmt(
         }
         Stmt::ExecSql { sql } => compile_exec_sql_stmt(sql, catalog, env)?,
     })
+}
+
+fn compile_raise_stmt(
+    level: &RaiseLevel,
+    condition: &Option<RaiseCondition>,
+    message: &Option<String>,
+    params: &[String],
+    using_options: &[RaiseUsingOption],
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<CompiledStmt, ParseError> {
+    if condition.is_none() && message.is_none() && params.is_empty() && using_options.is_empty() {
+        return Ok(CompiledStmt::Reraise);
+    }
+
+    let mut sqlstate = None::<String>;
+    let mut default_message = None::<String>;
+    let condition_sets_errcode = condition.is_some();
+    match condition {
+        Some(RaiseCondition::SqlState(value)) => {
+            sqlstate = Some(value.clone());
+            default_message = Some(value.clone());
+        }
+        Some(RaiseCondition::ConditionName(name)) => {
+            sqlstate = Some(
+                exception_condition_name_sqlstate(name)
+                    .unwrap_or("P0001")
+                    .to_string(),
+            );
+            default_message = Some(name.clone());
+        }
+        None => {}
+    }
+
+    let mut message_expr = None::<String>;
+    let mut detail_expr = None::<String>;
+    let mut hint_expr = None::<String>;
+    let mut errcode_expr = None::<String>;
+    for option in using_options {
+        match option.name.to_ascii_lowercase().as_str() {
+            "message" => {
+                if message.is_some() || message_expr.is_some() {
+                    return duplicate_raise_option("MESSAGE");
+                }
+                message_expr = Some(option.expr.clone());
+            }
+            "detail" => {
+                if detail_expr.is_some() {
+                    return duplicate_raise_option("DETAIL");
+                }
+                detail_expr = Some(option.expr.clone());
+            }
+            "hint" => {
+                if hint_expr.is_some() {
+                    return duplicate_raise_option("HINT");
+                }
+                hint_expr = Some(option.expr.clone());
+            }
+            "errcode" => {
+                if condition_sets_errcode || errcode_expr.is_some() {
+                    return duplicate_raise_option("ERRCODE");
+                }
+                errcode_expr = Some(option.expr.clone());
+            }
+            _ => {}
+        }
+    }
+
+    let message = message.clone().or(default_message).or_else(|| {
+        if message_expr.is_none() {
+            Some(sqlstate.clone().unwrap_or_else(|| "P0001".into()))
+        } else {
+            None
+        }
+    });
+
+    if let Some(message) = &message {
+        let placeholder_count = count_raise_placeholders(message);
+        if placeholder_count != params.len() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "RAISE placeholder count matching argument count",
+                actual: format!(
+                    "message has {placeholder_count} placeholders but {} arguments were provided",
+                    params.len()
+                ),
+            });
+        }
+    } else if !params.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "RAISE format string before parameter list",
+            actual: format!("{params:?}"),
+        });
+    }
+
+    Ok(CompiledStmt::Raise {
+        level: level.clone(),
+        sqlstate,
+        message,
+        message_expr: message_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        detail_expr: detail_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        hint_expr: hint_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        errcode_expr: errcode_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        params: params
+            .iter()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+fn duplicate_raise_option<T>(name: &str) -> Result<T, ParseError> {
+    Err(ParseError::UnexpectedToken {
+        expected: "RAISE option specified once",
+        actual: format!("RAISE option already specified: {name}"),
+    })
+}
+
+fn count_raise_placeholders(message: &str) -> usize {
+    let mut count = 0usize;
+    let mut chars = message.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            if chars.peek() == Some(&'%') {
+                chars.next();
+            } else {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "assert_failure" => Some("P0004"),
+        "data_corrupted" => Some("XX001"),
+        "division_by_zero" => Some("22012"),
+        "feature_not_supported" => Some("0A000"),
+        "raise_exception" => Some("P0001"),
+        "reading_sql_data_not_permitted" => Some("2F003"),
+        "syntax_error" => Some("42601"),
+        "no_data_found" => Some("P0002"),
+        "too_many_rows" => Some("P0003"),
+        "unique_violation" => Some("23505"),
+        "not_null_violation" => Some("23502"),
+        "check_violation" => Some("23514"),
+        "foreign_key_violation" => Some("23503"),
+        "invalid_parameter_value" => Some("22023"),
+        "null_value_not_allowed" => Some("22004"),
+        _ => None,
+    }
 }
 
 fn compile_return_stmt(
@@ -2361,6 +2550,23 @@ fn compile_for_query_stmt(
         target,
         source,
         body,
+    })
+}
+
+fn compile_foreach_stmt(
+    target: &ForTarget,
+    slice: usize,
+    array_expr: &str,
+    body: &[Stmt],
+    catalog: &dyn CatalogLookup,
+    env: &mut CompileEnv,
+    return_contract: Option<&FunctionReturnContract>,
+) -> Result<CompiledStmt, ParseError> {
+    Ok(CompiledStmt::ForEach {
+        target: compile_for_query_target(target, env, None)?,
+        slice,
+        array_expr: compile_expr_text(array_expr, catalog, env)?,
+        body: compile_stmt_list(body, catalog, env, return_contract)?,
     })
 }
 
