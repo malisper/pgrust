@@ -190,10 +190,11 @@ pub(crate) use constraints::{enforce_relation_constraints, enforce_row_security_
 pub(crate) use expr_ops::compare_order_values;
 use expr_ops::parse_numeric_text;
 pub(crate) use foreign_keys::{
-    InsertForeignKeyCheckPhase, enforce_inbound_foreign_key_reference,
-    enforce_inbound_foreign_keys_on_delete, enforce_inbound_foreign_keys_on_update,
-    enforce_outbound_foreign_keys, enforce_outbound_foreign_keys_for_insert,
-    foreign_key_action_trigger_enabled_on_delete, foreign_key_action_trigger_enabled_on_update,
+    InsertForeignKeyCheckPhase, enforce_deferred_inbound_foreign_key_check,
+    enforce_inbound_foreign_key_reference, enforce_inbound_foreign_keys_on_delete,
+    enforce_inbound_foreign_keys_on_update, enforce_outbound_foreign_keys,
+    enforce_outbound_foreign_keys_for_insert, foreign_key_action_trigger_enabled_on_delete,
+    foreign_key_action_trigger_enabled_on_update,
 };
 pub(crate) use permissions::relation_values_visible_for_error_detail;
 
@@ -220,11 +221,20 @@ pub struct PendingUniqueCheck {
     pub key_values: Vec<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingParentForeignKeyCheck {
+    pub constraint_oid: u32,
+    pub relation_name: String,
+    pub old_parent_values: Vec<Value>,
+    pub replacement_parent_values: Option<Vec<Value>>,
+}
+
 #[derive(Debug, Default)]
 struct DeferredConstraintState {
     all_override: Option<ConstraintTiming>,
     named_overrides: BTreeMap<u32, ConstraintTiming>,
     affected_constraint_oids: BTreeSet<u32>,
+    pending_parent_foreign_key_checks: Vec<PendingParentForeignKeyCheck>,
     pending_unique_checks: HashMap<u32, HashSet<PendingUniqueCheck>>,
 }
 
@@ -244,6 +254,31 @@ impl DeferredConstraintTracker {
             .lock()
             .affected_constraint_oids
             .insert(constraint_oid);
+    }
+
+    pub fn record_parent_foreign_key_check(
+        &self,
+        constraint_oid: u32,
+        relation_name: String,
+        mut old_parent_values: Vec<Value>,
+        mut replacement_parent_values: Option<Vec<Value>>,
+    ) {
+        if constraint_oid == 0 {
+            return;
+        }
+        Value::materialize_all(&mut old_parent_values);
+        if let Some(values) = replacement_parent_values.as_mut() {
+            Value::materialize_all(values);
+        }
+        self.state
+            .lock()
+            .pending_parent_foreign_key_checks
+            .push(PendingParentForeignKeyCheck {
+                constraint_oid,
+                relation_name,
+                old_parent_values,
+                replacement_parent_values,
+            });
     }
 
     pub fn record_unique(
@@ -285,6 +320,10 @@ impl DeferredConstraintTracker {
             .collect()
     }
 
+    pub fn pending_parent_foreign_key_checks(&self) -> Vec<PendingParentForeignKeyCheck> {
+        self.state.lock().pending_parent_foreign_key_checks.clone()
+    }
+
     pub fn pending_unique_checks(&self, constraint_oid: u32) -> Vec<PendingUniqueCheck> {
         self.state
             .lock()
@@ -299,6 +338,13 @@ impl DeferredConstraintTracker {
         for constraint_oid in constraint_oids {
             state.affected_constraint_oids.remove(constraint_oid);
         }
+    }
+
+    pub fn clear_parent_foreign_key_checks(&self, constraint_oids: &BTreeSet<u32>) {
+        self.state
+            .lock()
+            .pending_parent_foreign_key_checks
+            .retain(|check| !constraint_oids.contains(&check.constraint_oid));
     }
 
     pub fn clear_unique_constraints(&self, constraint_oids: &BTreeSet<u32>) {
@@ -348,7 +394,9 @@ impl DeferredConstraintTracker {
 
     pub fn is_empty(&self) -> bool {
         let state = self.state.lock();
-        state.affected_constraint_oids.is_empty() && state.pending_unique_checks.is_empty()
+        state.affected_constraint_oids.is_empty()
+            && state.pending_parent_foreign_key_checks.is_empty()
+            && state.pending_unique_checks.is_empty()
     }
 }
 

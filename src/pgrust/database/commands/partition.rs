@@ -1135,15 +1135,28 @@ mod tests {
             other => panic!("expected partition constraint error, got {other:?}"),
         }
 
-        match session.execute(&db, "update routed set a = 2 where a = 1") {
-            Err(ExecError::Parse(ParseError::FeatureNotSupported(message))) => {
-                assert_eq!(
-                    message,
-                    "updating partition key columns on partitioned tables"
-                );
-            }
-            other => panic!("expected partition-key update rejection, got {other:?}"),
-        }
+        assert_eq!(
+            session
+                .execute(&db, "update routed set a = 2 where a = 1")
+                .unwrap(),
+            StatementResult::AffectedRows(1)
+        );
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select tableoid::regclass::text, a, b from routed order by 1, 2",
+            ),
+            vec![vec![
+                Value::Text("routed2".into()),
+                Value::Int32(2),
+                Value::Text("uno".into()),
+            ]]
+        );
+        assert_eq!(
+            query_rows(&mut session, &db, "select * from only routed"),
+            Vec::<Vec<Value>>::new()
+        );
     }
 
     #[test]

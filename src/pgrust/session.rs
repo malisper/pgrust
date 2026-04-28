@@ -81,7 +81,7 @@ use crate::pgrust::database::{
     alter_table_validate_constraint_lock_requests, delete_foreign_key_lock_requests,
     execute_set_constraints, insert_foreign_key_lock_requests, merge_pending_notifications,
     merge_table_lock_requests, prepared_insert_foreign_key_lock_requests,
-    queue_pending_notification, reject_relation_with_referencing_foreign_keys,
+    queue_pending_notification, reject_relation_with_referencing_foreign_keys_except,
     relation_foreign_key_lock_requests, update_foreign_key_lock_requests,
     validate_deferred_constraints, validate_immediate_constraints,
 };
@@ -94,6 +94,76 @@ use crate::pl::plpgsql::{
 };
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
+
+fn validate_alter_table_add_constraint_temporal_fk_actions(
+    stmt: &crate::backend::parser::AlterTableAddConstraintStatement,
+) -> Result<(), ExecError> {
+    let crate::include::nodes::parsenodes::TableConstraint::ForeignKey {
+        period,
+        referenced_period,
+        on_delete,
+        on_update,
+        ..
+    } = &stmt.constraint
+    else {
+        return Ok(());
+    };
+    if period.is_none() && referenced_period.is_none() {
+        return Ok(());
+    }
+    if *on_update != crate::include::nodes::parsenodes::ForeignKeyAction::NoAction {
+        return Err(ExecError::DetailedError {
+            message: "unsupported ON UPDATE action for foreign key constraint using PERIOD".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    if *on_delete != crate::include::nodes::parsenodes::ForeignKeyAction::NoAction {
+        return Err(ExecError::DetailedError {
+            message: "unsupported ON DELETE action for foreign key constraint using PERIOD".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    Ok(())
+}
+
+fn validate_statement_temporal_fk_actions(stmt: &Statement) -> Result<(), ExecError> {
+    match stmt {
+        Statement::AlterTableAddConstraint(add) => {
+            validate_alter_table_add_constraint_temporal_fk_actions(add)
+        }
+        Statement::AlterTableCompound(compound) => {
+            validate_compound_alter_table_temporal_fk_actions(compound)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_compound_alter_table_temporal_fk_actions(
+    stmt: &crate::backend::parser::AlterTableCompoundStatement,
+) -> Result<(), ExecError> {
+    for action in &stmt.actions {
+        validate_statement_temporal_fk_actions(action)?;
+    }
+    Ok(())
+}
+
+fn validate_multi_alter_table_temporal_fk_actions(
+    statements: &[String],
+    options: ParseOptions,
+) -> Result<(), ExecError> {
+    for sql in statements {
+        let stmt = crate::backend::parser::parse_statement_with_options(sql, options)?;
+        validate_statement_temporal_fk_actions(&stmt)?;
+        if let Statement::AlterTableMulti(nested) = stmt {
+            validate_multi_alter_table_temporal_fk_actions(&nested, options)?;
+        }
+    }
+    Ok(())
+}
 
 pub struct SelectGuard {
     pub state: crate::include::nodes::execnodes::PlanState,
@@ -1386,10 +1456,35 @@ impl Session {
     }
 
     fn apply_alter_table_set(
-        &self,
+        &mut self,
         db: &Database,
         stmt: &crate::backend::parser::AlterTableSetStatement,
     ) -> Result<StatementResult, ExecError> {
+        let catalog = self.catalog_lookup(db);
+        if let Some(relation) = catalog.lookup_any_relation(&stmt.table_name)
+            && relation.relkind == 'v'
+        {
+            drop(catalog);
+            if let Some((xid, cid)) = self.catalog_txn_ctx() {
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                return db.execute_alter_view_set_options_stmt_in_transaction_with_search_path(
+                    self.client_id,
+                    stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                );
+            }
+            let search_path = self.configured_search_path();
+            return db.execute_alter_view_set_options_stmt_with_search_path(
+                self.client_id,
+                stmt,
+                search_path.as_deref(),
+            );
+        }
         for option in &stmt.options {
             if option.name.eq_ignore_ascii_case("toast_tuple_target") {
                 let target = option.value.parse::<usize>().map_err(|_| {
@@ -1398,7 +1493,6 @@ impl Session {
                         actual: option.value.clone(),
                     })
                 })?;
-                let catalog = self.catalog_lookup(db);
                 let relation = catalog
                     .lookup_any_relation(&stmt.table_name)
                     .ok_or_else(|| {
@@ -1801,6 +1895,7 @@ impl Session {
         stmt: &crate::backend::parser::AlterTableCompoundStatement,
         statement_lock_scope_id: Option<u64>,
     ) -> Result<StatementResult, ExecError> {
+        validate_compound_alter_table_temporal_fk_actions(stmt)?;
         self.active_txn = Some(self.active_transaction_without_xid(db));
         self.stats_state.write().begin_top_level_xact();
         let result = stmt.actions.iter().try_for_each(|action| {
@@ -2662,6 +2757,13 @@ impl Session {
         };
 
         if let Statement::AlterTableMulti(ref statements) = stmt {
+            validate_multi_alter_table_temporal_fk_actions(
+                statements,
+                ParseOptions {
+                    standard_conforming_strings: self.standard_conforming_strings(),
+                    max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
+                },
+            )?;
             for sql in statements {
                 self.execute_internal(db, sql, statement_lock_scope_id)?;
             }
@@ -3043,6 +3145,14 @@ impl Session {
                 db.execute_create_domain_stmt_with_search_path(
                     self.client_id,
                     create_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::AlterDomain(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_alter_domain_stmt_with_search_path(
+                    self.client_id,
+                    alter_stmt,
                     search_path.as_deref(),
                 )
             }
@@ -4972,6 +5082,13 @@ impl Session {
         Ok(StatementResult::AffectedRows(0))
     }
 
+    pub(crate) fn prepared_statement_rows(&self) -> Vec<(String, String)> {
+        self.prepared_selects
+            .iter()
+            .map(|(name, prepared)| (name.clone(), prepared.query_sql.clone()))
+            .collect()
+    }
+
     fn resolve_prepared_select(
         &self,
         execute_stmt: &ExecuteStatement,
@@ -5595,6 +5712,13 @@ impl Session {
 
         let result = match stmt {
             Statement::AlterTableMulti(ref statements) => {
+                validate_multi_alter_table_temporal_fk_actions(
+                    statements,
+                    ParseOptions {
+                        standard_conforming_strings: self.standard_conforming_strings(),
+                        max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
+                    },
+                )?;
                 for sql in statements {
                     self.execute_internal(db, sql, _statement_lock_scope_id)?;
                 }
@@ -5639,6 +5763,7 @@ impl Session {
             Statement::Reset(ref reset_stmt) => self.apply_reset(db, reset_stmt),
             Statement::Checkpoint(_) => self.apply_checkpoint(db),
             Statement::AlterTableCompound(ref compound_stmt) => {
+                validate_compound_alter_table_temporal_fk_actions(compound_stmt)?;
                 compound_stmt.actions.iter().try_for_each(|action| {
                     self.execute_in_transaction(db, action.clone(), _statement_lock_scope_id)
                         .map(|_| ())
@@ -5712,6 +5837,14 @@ impl Session {
                 db.execute_create_domain_stmt_with_search_path(
                     client_id,
                     create_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::AlterDomain(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_alter_domain_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
                     search_path.as_deref(),
                 )
             }
@@ -6359,6 +6492,7 @@ impl Session {
                     xid,
                     cid,
                     search_path.as_deref(),
+                    &mut txn.catalog_effects,
                     &mut txn.sequence_effects,
                 )
             }
@@ -8508,10 +8642,15 @@ impl Session {
                     }
                     relations
                 };
+                let target_relation_oids = relations
+                    .iter()
+                    .map(|relation| relation.relation_oid)
+                    .collect::<Vec<_>>();
                 for relation in &relations {
-                    reject_relation_with_referencing_foreign_keys(
+                    reject_relation_with_referencing_foreign_keys_except(
                         &catalog,
                         relation.relation_oid,
+                        &target_relation_oids,
                         "TRUNCATE on table without referencing foreign keys",
                     )?;
                 }
@@ -8885,6 +9024,7 @@ impl Session {
             }
             DiscardTarget::All => {
                 self.close_all_cursors();
+                self.prepared_selects.clear();
                 db.cleanup_client_temp_relations(self.client_id)?;
                 db.async_notify_runtime.disconnect(self.client_id);
                 db.advisory_locks.unlock_all_session(self.client_id);
@@ -12333,6 +12473,51 @@ mod tests {
             crate::backend::executor::render_tsvector_text(vector),
             "'book':3 'sky':1"
         );
+    }
+
+    #[test]
+    fn sql_prepare_execute_and_deallocate_use_session_state() {
+        let db = Database::open_ephemeral(32).expect("open ephemeral database");
+        let mut session = Session::new(1);
+
+        assert!(matches!(
+            session.execute(&db, "prepare q as select 1 as x").unwrap(),
+            StatementResult::AffectedRows(0)
+        ));
+
+        match session.execute(&db, "execute q").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+
+        assert!(matches!(
+            session.execute(&db, "deallocate q").unwrap(),
+            StatementResult::AffectedRows(0)
+        ));
+
+        let err = session.execute(&db, "execute q").unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::Parse(ParseError::DetailedError {
+                message,
+                sqlstate,
+                ..
+            }) if message == "prepared statement \"q\" does not exist" && sqlstate == "26000"
+        ));
+
+        session.execute(&db, "prepare q as select 2 as x").unwrap();
+        session.execute(&db, "discard all").unwrap();
+        let err = session.execute(&db, "execute q").unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::Parse(ParseError::DetailedError {
+                message,
+                sqlstate,
+                ..
+            }) if message == "prepared statement \"q\" does not exist" && sqlstate == "26000"
+        ));
     }
 
     #[test]

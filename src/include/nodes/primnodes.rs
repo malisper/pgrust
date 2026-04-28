@@ -88,6 +88,90 @@ pub struct RelationDesc {
     pub columns: Vec<ColumnDesc>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RelationPrivilegeMask {
+    pub select: bool,
+    pub insert: bool,
+    pub update: bool,
+    pub delete: bool,
+}
+
+impl RelationPrivilegeMask {
+    pub fn select() -> Self {
+        Self {
+            select: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn insert() -> Self {
+        Self {
+            insert: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn update() -> Self {
+        Self {
+            update: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn delete() -> Self {
+        Self {
+            delete: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn merge_actions(insert: bool, update: bool, delete: bool) -> Self {
+        Self {
+            select: true,
+            insert,
+            update,
+            delete,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationPrivilegeRequirement {
+    pub relation_oid: u32,
+    pub relation_name: String,
+    pub relkind: char,
+    pub check_as_user_oid: Option<u32>,
+    pub required: RelationPrivilegeMask,
+    pub selected_columns: Vec<usize>,
+    pub inserted_columns: Vec<usize>,
+    pub updated_columns: Vec<usize>,
+}
+
+impl RelationPrivilegeRequirement {
+    pub fn new(
+        relation_oid: u32,
+        relation_name: impl Into<String>,
+        relkind: char,
+        required: RelationPrivilegeMask,
+    ) -> Self {
+        Self {
+            relation_oid,
+            relation_name: relation_name.into(),
+            relkind,
+            check_as_user_oid: None,
+            required,
+            selected_columns: Vec::new(),
+            inserted_columns: Vec::new(),
+            updated_columns: Vec::new(),
+        }
+    }
+
+    pub fn checked_as(mut self, role_oid: Option<u32>) -> Self {
+        self.check_as_user_oid = role_oid;
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryColumn {
     pub name: String,
@@ -381,6 +465,15 @@ pub enum BuiltinScalarFunction {
     PgPartitionRoot,
     PgGetPartKeyDef,
     PgTableIsVisible,
+    PgTypeIsVisible,
+    PgOperatorIsVisible,
+    PgOpclassIsVisible,
+    PgOpfamilyIsVisible,
+    PgConversionIsVisible,
+    PgTsParserIsVisible,
+    PgTsDictIsVisible,
+    PgTsTemplateIsVisible,
+    PgTsConfigIsVisible,
     GetDatabaseEncoding,
     UnicodeVersion,
     UnicodeAssigned,
@@ -410,6 +503,8 @@ pub enum BuiltinScalarFunction {
     PgRelationFilenode,
     PgFilenodeRelation,
     PgRelationSize,
+    PgTableSize,
+    PgTablespaceLocation,
     NumNulls,
     NumNonNulls,
     PgLogBackendMemoryContexts,
@@ -500,6 +595,8 @@ pub enum BuiltinScalarFunction {
     XmlIsWellFormed,
     XmlIsWellFormedDocument,
     XmlIsWellFormedContent,
+    XPath,
+    XPathExists,
     ToJson,
     ToJsonb,
     SqlJsonConstructor,

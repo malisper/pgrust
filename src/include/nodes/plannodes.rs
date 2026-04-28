@@ -7,7 +7,7 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{SelectLockingClause, SetOperator};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
-    SetReturningCall, TargetEntry, ToastRelationRef, WindowClause,
+    RelationPrivilegeRequirement, SetReturningCall, TargetEntry, ToastRelationRef, WindowClause,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -133,6 +133,7 @@ pub struct PlanRowMark {
 pub struct PlannedStmt {
     pub command_type: CommandType,
     pub depends_on_row_security: bool,
+    pub relation_privileges: Vec<RelationPrivilegeRequirement>,
     pub plan_tree: Plan,
     pub subplans: Vec<Plan>,
     pub ext_params: Vec<ExecParamSource>,

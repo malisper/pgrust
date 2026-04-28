@@ -5,7 +5,7 @@ use super::super::*;
 use super::typed_table::reject_typed_table_ddl;
 use crate::backend::parser::BoundRelation;
 use crate::backend::storage::lmgr::{TableLockMode, lock_table_requests_interruptible};
-use crate::include::catalog::CONSTRAINT_CHECK;
+use crate::include::catalog::{CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, PgConstraintRow};
 use crate::include::nodes::parsenodes::{AlterTableInheritStatement, AlterTableNoInheritStatement};
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_heap_relation_for_alter_table, lookup_heap_relation_for_ddl,
@@ -38,6 +38,55 @@ fn inherited_check_constraints(
         .into_iter()
         .filter(|row| row.contype == CONSTRAINT_CHECK && !row.connoinherit)
         .collect()
+}
+
+fn inherited_not_null_constraints(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> Vec<PgConstraintRow> {
+    catalog
+        .constraint_rows_for_relation(relation_oid)
+        .into_iter()
+        .filter(|row| row.contype == CONSTRAINT_NOTNULL && !row.connoinherit)
+        .collect()
+}
+
+fn column_name_for_attnum(relation: &BoundRelation, attnum: i16) -> Option<&str> {
+    relation
+        .desc
+        .columns
+        .get(attnum.saturating_sub(1) as usize)
+        .filter(|column| !column.dropped)
+        .map(|column| column.name.as_str())
+}
+
+fn column_attnum_by_name(relation: &BoundRelation, column_name: &str) -> Option<i16> {
+    relation
+        .desc
+        .columns
+        .iter()
+        .enumerate()
+        .find_map(|(index, column)| {
+            (!column.dropped && column.name.eq_ignore_ascii_case(column_name))
+                .then_some(index.saturating_add(1) as i16)
+        })
+}
+
+fn not_null_constraint_for_attnum(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    attnum: i16,
+) -> Option<PgConstraintRow> {
+    catalog
+        .constraint_rows_for_relation(relation_oid)
+        .into_iter()
+        .find(|row| {
+            row.contype == CONSTRAINT_NOTNULL
+                && row
+                    .conkey
+                    .as_ref()
+                    .is_some_and(|keys| keys.contains(&attnum))
+        })
 }
 
 fn validate_inherit_duplicate_or_cycle(
@@ -187,7 +236,86 @@ fn validate_inherit_constraints(
             });
         }
     }
+    for parent_constraint in inherited_not_null_constraints(catalog, parent.relation_oid) {
+        let Some(parent_attnum) = parent_constraint
+            .conkey
+            .as_ref()
+            .and_then(|keys| keys.first())
+            .copied()
+        else {
+            continue;
+        };
+        let Some(column_name) = column_name_for_attnum(parent, parent_attnum) else {
+            continue;
+        };
+        let Some(child_attnum) = column_attnum_by_name(relation, column_name) else {
+            continue;
+        };
+        let Some(child_constraint) =
+            not_null_constraint_for_attnum(catalog, relation.relation_oid, child_attnum)
+        else {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "column \"{}\" in child table \"{}\" must be marked NOT NULL",
+                    column_name,
+                    relation_name_for_oid(catalog, relation.relation_oid),
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        };
+        if child_constraint.connoinherit {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "constraint \"{}\" conflicts with non-inherited constraint on child table \"{}\"",
+                    child_constraint.conname,
+                    relation_name_for_oid(catalog, relation.relation_oid),
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P17",
+            });
+        }
+        if parent_constraint.convalidated && !child_constraint.convalidated {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "constraint \"{}\" conflicts with NOT VALID constraint on child table \"{}\"",
+                    child_constraint.conname,
+                    relation_name_for_oid(catalog, relation.relation_oid),
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P17",
+            });
+        }
+    }
     Ok(())
+}
+
+fn inherited_not_null_match_count(
+    catalog: &dyn CatalogLookup,
+    parent_oids: &[u32],
+    column_name: &str,
+) -> Result<i16, ExecError> {
+    let mut count = 0i16;
+    for parent_oid in parent_oids {
+        let Some(parent) = catalog.lookup_relation_by_oid(*parent_oid) else {
+            return Err(ExecError::Parse(ParseError::UnknownTable(
+                parent_oid.to_string(),
+            )));
+        };
+        let Some(parent_attnum) = column_attnum_by_name(&parent, column_name) else {
+            continue;
+        };
+        if let Some(row) =
+            not_null_constraint_for_attnum(catalog, parent.relation_oid, parent_attnum)
+            && !row.connoinherit
+        {
+            count = count.saturating_add(1);
+        }
+    }
+    Ok(count)
 }
 
 impl Database {
@@ -289,6 +417,53 @@ impl Database {
             .create_relation_inheritance_mvcc(relation.relation_oid, &parent_oids, &ctx)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
+        for child_constraint in catalog
+            .constraint_rows_for_relation(relation.relation_oid)
+            .into_iter()
+            .filter(|row| row.contype == CONSTRAINT_NOTNULL)
+        {
+            let Some(attnum) = child_constraint
+                .conkey
+                .as_ref()
+                .and_then(|keys| keys.first())
+                .copied()
+            else {
+                continue;
+            };
+            let Some(column_name) = column_name_for_attnum(&relation, attnum) else {
+                continue;
+            };
+            let inherited_count =
+                inherited_not_null_match_count(&catalog, &parent_oids, column_name)?;
+            if inherited_count == 0 {
+                continue;
+            }
+            let update_ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: cid
+                    .saturating_add(1)
+                    .saturating_add(catalog_effects.len() as u32),
+                client_id,
+                waiter: None,
+                interrupts: Arc::clone(&interrupts),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .alter_not_null_constraint_state_mvcc(
+                    relation.relation_oid,
+                    &child_constraint.conname,
+                    None,
+                    Some(false),
+                    Some(child_constraint.conislocal),
+                    Some(inherited_count),
+                    &update_ctx,
+                )
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 

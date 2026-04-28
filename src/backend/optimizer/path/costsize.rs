@@ -1,12 +1,17 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::RelFileLocator;
 use crate::backend::executor::{
     Value, cast_value, compare_order_values, network_btree_upper_bound, network_prefix,
 };
 use crate::backend::parser::analyze::predicate_implies_index_predicate;
-use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
+use crate::backend::parser::analyze::{bind_expr_with_outer_and_ctes, scope_for_relation};
+use crate::backend::parser::{BoundIndexRelation, CatalogLookup, ParseError, SqlType, SqlTypeKind};
+use crate::backend::statistics::types::{
+    PgDependencyItem, PgMcvItem, PgMcvListPayload, decode_pg_dependencies_payload,
+    decode_pg_mcv_list_payload, decode_pg_ndistinct_payload, statistics_value_key,
+};
 use crate::backend::storage::page::bufpage::{ITEM_ID_SIZE, MAXALIGN, SIZE_OF_PAGE_HEADER_DATA};
 use crate::backend::storage::smgr::BLCKSZ;
 use crate::backend::utils::cache::catcache::sql_type_oid;
@@ -42,10 +47,10 @@ use crate::include::nodes::primnodes::{
 use super::super::pathnodes::{expr_sql_type, slot_output_target};
 use super::super::{
     AccessCandidate, CPU_INDEX_TUPLE_COST, CPU_OPERATOR_COST, CPU_TUPLE_COST, DEFAULT_BOOL_SEL,
-    DEFAULT_EQ_SEL, DEFAULT_INEQ_SEL, DEFAULT_NUM_PAGES, DEFAULT_NUM_ROWS, HashJoinClauses,
-    IndexPathSpec, IndexableQual, MergeJoinClauses, RANDOM_PAGE_COST, RelationStats, SEQ_PAGE_COST,
-    STATISTIC_KIND_CORRELATION, STATISTIC_KIND_HISTOGRAM, STATISTIC_KIND_MCV, path_relids,
-    relids_subset,
+    DEFAULT_EQ_SEL, DEFAULT_INEQ_SEL, DEFAULT_NUM_PAGES, DEFAULT_NUM_ROWS, ExtendedStatistic,
+    HashJoinClauses, IndexPathSpec, IndexableQual, MergeJoinClauses, RANDOM_PAGE_COST,
+    RelationStats, SEQ_PAGE_COST, STATISTIC_KIND_CORRELATION, STATISTIC_KIND_HISTOGRAM,
+    STATISTIC_KIND_MCV, path_relids, relids_subset,
 };
 use super::gistcost::estimate_gist_scan_cost;
 use super::regex_prefix::{RegexFixedPrefix, regex_fixed_prefix, regex_prefix_upper_bound};
@@ -658,7 +663,7 @@ pub(super) fn optimize_path_with_config(
                 let rows = if group_by.is_empty() {
                     1.0
                 } else {
-                    clamp_rows((input_info.plan_rows.as_f64() * 0.1).max(1.0))
+                    estimate_group_rows(&input, &group_by, catalog, input_info.plan_rows.as_f64())
                 };
                 let width = output_columns
                     .iter()
@@ -1258,10 +1263,19 @@ pub(super) fn relation_stats(
     relation_oid: u32,
     desc: &RelationDesc,
 ) -> RelationStats {
+    relation_stats_with_inherit(catalog, relation_oid, desc, false)
+}
+
+fn relation_stats_with_inherit(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    desc: &RelationDesc,
+    stxdinherit: bool,
+) -> RelationStats {
     let stats = catalog
         .statistic_rows_for_relation(relation_oid)
         .into_iter()
-        .filter(|row| !row.stainherit)
+        .filter(|row| row.stainherit == stxdinherit)
         .map(|row| (row.staattnum, row))
         .collect::<HashMap<_, _>>();
     let width = estimate_relation_width(desc, &stats);
@@ -1272,6 +1286,7 @@ pub(super) fn relation_stats(
             reltuples: 1.0,
             width,
             stats_by_attnum: stats,
+            extended_stats: Vec::new(),
         };
     }
 
@@ -1306,7 +1321,81 @@ pub(super) fn relation_stats(
         reltuples,
         width,
         stats_by_attnum: stats,
+        extended_stats: load_extended_statistics(catalog, relation_oid, desc, stxdinherit),
     }
+}
+
+fn load_extended_statistics(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    desc: &RelationDesc,
+    stxdinherit: bool,
+) -> Vec<ExtendedStatistic> {
+    let relation_name = catalog
+        .class_row_by_oid(relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation_oid.to_string());
+    let scope = scope_for_relation(Some(&relation_name), desc);
+    catalog
+        .statistic_ext_rows_for_relation(relation_oid)
+        .into_iter()
+        .filter_map(|row| {
+            let data = catalog.statistic_ext_data_row(row.oid, stxdinherit)?;
+            let ndistinct = data
+                .stxdndistinct
+                .as_deref()
+                .and_then(|bytes| decode_pg_ndistinct_payload(bytes).ok());
+            let dependencies = data
+                .stxddependencies
+                .as_deref()
+                .and_then(|bytes| decode_pg_dependencies_payload(bytes).ok());
+            let mcv = data
+                .stxdmcv
+                .as_deref()
+                .and_then(|bytes| decode_pg_mcv_list_payload(bytes).ok());
+            let expression_texts = statistics_expression_texts(row.stxexprs.as_deref()).ok()?;
+            let expressions = expression_texts
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, expr_text)| {
+                    let parsed = crate::backend::parser::parse_expr(expr_text).ok()?;
+                    let expr =
+                        bind_expr_with_outer_and_ctes(&parsed, &scope, catalog, &[], None, &[])
+                            .ok()?;
+                    Some((-((idx as i16) + 1), expr))
+                })
+                .collect::<Vec<_>>();
+            if expressions.len() != expression_texts.len() {
+                return None;
+            }
+            let mut target_ids = row.stxkeys.clone();
+            target_ids.extend(expressions.iter().map(|(target_id, _)| *target_id));
+            let expression_stats = data
+                .stxdexpr
+                .unwrap_or_default()
+                .into_iter()
+                .map(|row| (row.staattnum, row))
+                .collect();
+            Some(ExtendedStatistic {
+                target_ids,
+                expressions,
+                expression_stats,
+                ndistinct,
+                dependencies,
+                mcv,
+            })
+        })
+        .collect()
+}
+
+fn statistics_expression_texts(raw: Option<&str>) -> Result<Vec<String>, ParseError> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(raw).map_err(|err| ParseError::UnexpectedToken {
+        expected: "statistics expression list",
+        actual: err.to_string(),
+    })
 }
 
 fn metadata_only_relation_stats(relpages: i32, reltuples: f64) -> (f64, f64) {
@@ -1938,18 +2027,8 @@ pub(super) fn estimate_index_candidate(
         .map(|row| row.relpages.max(1) as f64)
         .unwrap_or(DEFAULT_NUM_PAGES);
 
-    let scan_sel = spec
-        .scan_quals
-        .iter()
-        .map(|expr| clause_selectivity(expr, Some(stats), stats.reltuples))
-        .product::<f64>()
-        .clamp(0.0, 1.0);
-    let used_sel = spec
-        .used_quals
-        .iter()
-        .map(|expr| clause_selectivity(expr, Some(stats), stats.reltuples))
-        .product::<f64>()
-        .clamp(0.0, 1.0);
+    let scan_sel = clauses_selectivity(&spec.scan_quals, Some(stats), stats.reltuples);
+    let used_sel = clauses_selectivity(&spec.used_quals, Some(stats), stats.reltuples);
     let index_scan_rows = clamp_rows(stats.reltuples * scan_sel);
     let index_rows = clamp_rows(stats.reltuples * used_sel);
     let unordered_probe = order_items.is_none();
@@ -3825,33 +3904,93 @@ fn clause_selectivity(expr: &Expr, stats: Option<&RelationStats>, reltuples: f64
     clause_selectivity_with_catalog(expr, stats, reltuples, None)
 }
 
+fn clauses_selectivity(clauses: &[Expr], stats: Option<&RelationStats>, reltuples: f64) -> f64 {
+    match clauses {
+        [] => 1.0,
+        [clause] => clause_selectivity(clause, stats, reltuples),
+        clauses => clause_selectivity(
+            &Expr::bool_expr(BoolExprType::And, clauses.to_vec()),
+            stats,
+            reltuples,
+        ),
+    }
+}
+
 fn clause_selectivity_with_catalog(
     expr: &Expr,
     stats: Option<&RelationStats>,
     reltuples: f64,
     catalog: Option<&dyn CatalogLookup>,
 ) -> f64 {
+    clause_selectivity_internal(expr, stats, reltuples, catalog, true)
+}
+
+fn clause_selectivity_simple(
+    expr: &Expr,
+    stats: Option<&RelationStats>,
+    reltuples: f64,
+    catalog: Option<&dyn CatalogLookup>,
+) -> f64 {
+    clause_selectivity_internal(expr, stats, reltuples, catalog, false)
+}
+
+fn clause_selectivity_internal(
+    expr: &Expr,
+    stats: Option<&RelationStats>,
+    reltuples: f64,
+    catalog: Option<&dyn CatalogLookup>,
+    use_extended: bool,
+) -> f64 {
     match expr {
-        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => bool_expr
-            .args
-            .iter()
-            .fold(1.0, |acc, arg| {
-                acc * clause_selectivity_with_catalog(arg, stats, reltuples, catalog)
-            })
-            .clamp(0.0, 1.0),
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => {
+            let clauses = bool_expr
+                .args
+                .iter()
+                .flat_map(flatten_and_conjuncts)
+                .collect::<Vec<_>>();
+            if use_extended
+                && let Some(stats) = stats
+                && !stats.extended_stats.is_empty()
+            {
+                return extended_and_selectivity(&clauses, stats, reltuples, catalog);
+            }
+            clauses
+                .iter()
+                .fold(1.0, |acc, arg| {
+                    acc * clause_selectivity_internal(arg, stats, reltuples, catalog, use_extended)
+                })
+                .clamp(0.0, 1.0)
+        }
         Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => {
+            if use_extended
+                && let Some(stats) = stats
+                && let Some(selectivity) =
+                    extended_mcv_selectivity_for_expr(expr, stats, reltuples, catalog)
+            {
+                return selectivity;
+            }
             let mut result = 0.0;
             for arg in &bool_expr.args {
-                let selectivity = clause_selectivity_with_catalog(arg, stats, reltuples, catalog);
+                let selectivity =
+                    clause_selectivity_internal(arg, stats, reltuples, catalog, use_extended);
                 result = result + selectivity - result * selectivity;
             }
             result.clamp(0.0, 1.0)
+        }
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Not => {
+            match bool_expr.args.as_slice() {
+                [arg] => (1.0
+                    - clause_selectivity_internal(arg, stats, reltuples, catalog, use_extended))
+                .clamp(0.0, 1.0),
+                _ => DEFAULT_BOOL_SEL,
+            }
         }
         Expr::IsNull(inner) => {
             column_selectivity(inner, stats, |row, _| row.stanullfrac).unwrap_or(DEFAULT_EQ_SEL)
         }
         Expr::IsNotNull(inner) => column_selectivity(inner, stats, |row, _| 1.0 - row.stanullfrac)
             .unwrap_or(1.0 - DEFAULT_EQ_SEL),
+        Expr::Var(_) => bool_target_selectivity(expr, stats).unwrap_or(DEFAULT_BOOL_SEL),
         Expr::Op(op) if matches!(op.op, OpExprKind::Eq) && op.args.len() == 2 => {
             eq_selectivity(&op.args[0], &op.args[1], stats, reltuples)
         }
@@ -3891,6 +4030,26 @@ fn clause_selectivity_with_catalog(
         {
             scalar_array_eq_selectivity(&saop.left, &saop.right, stats, reltuples)
         }
+        Expr::ScalarArrayOp(saop)
+            if !saop.use_or
+                && matches!(
+                    saop.op,
+                    crate::include::nodes::parsenodes::SubqueryComparisonOp::Eq
+                ) =>
+        {
+            scalar_array_all_eq_selectivity(&saop.left, &saop.right, stats, reltuples)
+        }
+        Expr::ScalarArrayOp(saop)
+            if matches!(
+                saop.op,
+                crate::include::nodes::parsenodes::SubqueryComparisonOp::Lt
+                    | crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq
+                    | crate::include::nodes::parsenodes::SubqueryComparisonOp::Gt
+                    | crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq
+            ) =>
+        {
+            scalar_array_ineq_selectivity(saop, stats, reltuples).unwrap_or(DEFAULT_BOOL_SEL)
+        }
         Expr::Op(op)
             if matches!(
                 op.op,
@@ -3920,6 +4079,871 @@ fn clause_selectivity_with_catalog(
         _ => DEFAULT_BOOL_SEL,
     }
     .clamp(0.0, 1.0)
+}
+
+fn extended_and_selectivity(
+    clauses: &[Expr],
+    stats: &RelationStats,
+    reltuples: f64,
+    catalog: Option<&dyn CatalogLookup>,
+) -> f64 {
+    let (mcv_selectivity, covered) =
+        extended_mcv_selectivity_for_clauses(clauses, stats, reltuples, catalog)
+            .unwrap_or((1.0, HashSet::new()));
+    let remaining = clauses
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, clause)| (!covered.contains(&idx)).then_some(clause))
+        .collect::<Vec<_>>();
+    let remaining_selectivity = dependency_adjusted_selectivity(
+        &remaining, stats, reltuples, catalog,
+    )
+    .unwrap_or_else(|| {
+        remaining.iter().fold(1.0, |acc, clause| {
+            acc * clause_selectivity_simple(clause, Some(stats), reltuples, catalog)
+        })
+    });
+    (mcv_selectivity * remaining_selectivity).clamp(0.0, 1.0)
+}
+
+fn extended_mcv_selectivity_for_clauses(
+    clauses: &[Expr],
+    stats: &RelationStats,
+    reltuples: f64,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Option<(f64, HashSet<usize>)> {
+    let mut best: Option<(
+        &ExtendedStatistic,
+        &PgMcvListPayload,
+        Vec<usize>,
+        BTreeSet<i16>,
+    )> = None;
+    for ext in &stats.extended_stats {
+        let Some(mcv) = ext.mcv.as_ref() else {
+            continue;
+        };
+        let ext_targets = ext.target_ids.iter().copied().collect::<BTreeSet<_>>();
+        let mut covered_indices = Vec::new();
+        let mut covered_targets = BTreeSet::new();
+        for (idx, clause) in clauses.iter().enumerate() {
+            let mut refs = BTreeSet::new();
+            if !mcv_supported_target_ids(clause, ext, &mut refs) || refs.is_empty() {
+                continue;
+            }
+            if refs.iter().all(|target| ext_targets.contains(target)) {
+                covered_indices.push(idx);
+                covered_targets.extend(refs);
+            }
+        }
+        if covered_targets.len() < 2 {
+            continue;
+        }
+        let replace = best
+            .as_ref()
+            .is_none_or(|(_, _, best_indices, best_targets)| {
+                covered_targets
+                    .len()
+                    .cmp(&best_targets.len())
+                    .then_with(|| covered_indices.len().cmp(&best_indices.len()))
+                    .is_gt()
+            });
+        if replace {
+            best = Some((ext, mcv, covered_indices, covered_targets));
+        }
+    }
+    let (ext, mcv, covered_indices, _) = best?;
+    let selected = covered_indices
+        .iter()
+        .map(|idx| clauses[*idx].clone())
+        .collect::<Vec<_>>();
+    let selectivity = mcv_selectivity_for_exprs(&selected, ext, mcv, stats, reltuples, catalog)?;
+    Some((selectivity, covered_indices.into_iter().collect()))
+}
+
+fn extended_mcv_selectivity_for_expr(
+    expr: &Expr,
+    stats: &RelationStats,
+    reltuples: f64,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Option<f64> {
+    stats
+        .extended_stats
+        .iter()
+        .filter_map(|ext| {
+            let mcv = ext.mcv.as_ref()?;
+            let mut refs = BTreeSet::new();
+            if !mcv_supported_target_ids(expr, ext, &mut refs) || refs.len() < 2 {
+                return None;
+            }
+            let ext_targets = ext.target_ids.iter().copied().collect::<BTreeSet<_>>();
+            if !refs.iter().all(|target| ext_targets.contains(target)) {
+                return None;
+            }
+            let selectivity =
+                mcv_selectivity_for_exprs(&[expr.clone()], ext, mcv, stats, reltuples, catalog)?;
+            Some((refs.len(), selectivity))
+        })
+        .max_by_key(|(covered_targets, _)| *covered_targets)
+        .map(|(_, selectivity)| selectivity)
+}
+
+fn mcv_selectivity_for_exprs(
+    exprs: &[Expr],
+    ext: &ExtendedStatistic,
+    mcv: &PgMcvListPayload,
+    stats: &RelationStats,
+    reltuples: f64,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Option<f64> {
+    let expr = if exprs.len() == 1 {
+        exprs[0].clone()
+    } else {
+        Expr::bool_expr(BoolExprType::And, exprs.to_vec())
+    };
+    let simple_selectivity = exprs.iter().fold(1.0, |acc, clause| {
+        acc * clause_selectivity_simple(clause, Some(stats), reltuples, catalog)
+    });
+    let mut mcv_selectivity = 0.0;
+    let mut mcv_base_selectivity = 0.0;
+    let mut mcv_total_selectivity = 0.0;
+    for item in &mcv.items {
+        mcv_total_selectivity += item.frequency;
+        if mcv_expr_matches(&expr, ext, item)? {
+            mcv_selectivity += item.frequency;
+            mcv_base_selectivity += item.base_frequency;
+        }
+    }
+    let non_mcv_selectivity =
+        (simple_selectivity - mcv_base_selectivity).min(1.0 - mcv_total_selectivity);
+    Some((mcv_selectivity + non_mcv_selectivity.max(0.0)).clamp(0.0, 1.0))
+}
+
+fn dependency_adjusted_selectivity(
+    clauses: &[&Expr],
+    stats: &RelationStats,
+    reltuples: f64,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Option<f64> {
+    if clauses.is_empty() {
+        return Some(1.0);
+    }
+    let mut selectivity = clauses.iter().fold(1.0, |acc, clause| {
+        acc * clause_selectivity_simple(clause, Some(stats), reltuples, catalog)
+    });
+    let mut candidates = Vec::new();
+    for ext in &stats.extended_stats {
+        let Some(dependencies) = ext.dependencies.as_ref() else {
+            continue;
+        };
+        let mut clause_selectivities = HashMap::<i16, f64>::new();
+        for clause in clauses {
+            if let Some(target_id) = dependency_clause_target_id(clause, ext) {
+                let clause_sel = clause_selectivity_simple(clause, Some(stats), reltuples, catalog);
+                clause_selectivities
+                    .entry(target_id)
+                    .and_modify(|existing| *existing = existing.min(clause_sel))
+                    .or_insert(clause_sel);
+            }
+        }
+        for item in &dependencies.items {
+            let Some(implied_target) = dependency_implied_target(item) else {
+                continue;
+            };
+            if !item
+                .from
+                .iter()
+                .all(|target| clause_selectivities.contains_key(target))
+            {
+                continue;
+            }
+            let Some(implied_selectivity) = clause_selectivities.get(&implied_target).copied()
+            else {
+                continue;
+            };
+            candidates.push((
+                item.degree,
+                item.from.len(),
+                item.from.clone(),
+                implied_target,
+                implied_selectivity,
+            ));
+        }
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .0
+            .partial_cmp(&left.0)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| right.1.cmp(&left.1))
+    });
+    let mut applied = HashSet::new();
+    let mut changed = false;
+    for (degree, _, determinant_targets, implied_target, implied_selectivity) in candidates {
+        if determinant_targets
+            .iter()
+            .any(|target| applied.contains(target))
+            || !applied.insert(implied_target)
+            || implied_selectivity <= 0.0
+        {
+            continue;
+        }
+        let conditional = degree + (1.0 - degree) * implied_selectivity;
+        selectivity = selectivity / implied_selectivity * conditional.clamp(0.0, 1.0);
+        changed = true;
+    }
+    changed.then_some(selectivity.clamp(0.0, 1.0))
+}
+
+fn dependency_implied_target(item: &PgDependencyItem) -> Option<i16> {
+    match item.to.as_slice() {
+        [target] => Some(*target),
+        _ => None,
+    }
+}
+
+fn dependency_clause_target_id(expr: &Expr, ext: &ExtendedStatistic) -> Option<i16> {
+    match expr {
+        Expr::IsNull(inner) => target_id_for_expr(inner, ext),
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => {
+            let mut target = None;
+            for arg in &bool_expr.args {
+                let arg_target = dependency_clause_target_id(arg, ext)?;
+                if target.is_some_and(|target| target != arg_target) {
+                    return None;
+                }
+                target = Some(arg_target);
+            }
+            target
+        }
+        Expr::Op(op) if matches!(op.op, OpExprKind::Eq) && op.args.len() == 2 => {
+            let (target_id, constant) = target_const_key_pair(&op.args[0], &op.args[1], ext)?;
+            constant.is_some().then_some(target_id)
+        }
+        Expr::ScalarArrayOp(saop)
+            if saop.use_or
+                && matches!(
+                    saop.op,
+                    crate::include::nodes::parsenodes::SubqueryComparisonOp::Eq
+                ) =>
+        {
+            let target_id = target_id_for_expr(&saop.left, ext)?;
+            let keys = const_array_keys(&saop.right)?;
+            keys.iter().any(|key| key.is_some()).then_some(target_id)
+        }
+        _ => None,
+    }
+}
+
+fn mcv_supported_target_ids(expr: &Expr, ext: &ExtendedStatistic, out: &mut BTreeSet<i16>) -> bool {
+    match expr {
+        Expr::Bool(bool_expr)
+            if matches!(bool_expr.boolop, BoolExprType::And | BoolExprType::Or) =>
+        {
+            bool_expr
+                .args
+                .iter()
+                .all(|arg| mcv_supported_target_ids(arg, ext, out))
+        }
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Not => {
+            match bool_expr.args.as_slice() {
+                [arg] => mcv_supported_target_ids(arg, ext, out),
+                _ => false,
+            }
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            let Some(target_id) = target_id_for_expr(inner, ext) else {
+                return false;
+            };
+            out.insert(target_id);
+            true
+        }
+        expr if target_id_for_expr(expr, ext).is_some() => {
+            out.insert(target_id_for_expr(expr, ext).expect("target id checked above"));
+            true
+        }
+        Expr::Op(op)
+            if matches!(
+                op.op,
+                OpExprKind::Eq
+                    | OpExprKind::NotEq
+                    | OpExprKind::Lt
+                    | OpExprKind::LtEq
+                    | OpExprKind::Gt
+                    | OpExprKind::GtEq
+            ) && op.args.len() == 2 =>
+        {
+            let Some((target_id, _)) = target_const_key_pair(&op.args[0], &op.args[1], ext) else {
+                return false;
+            };
+            out.insert(target_id);
+            true
+        }
+        Expr::ScalarArrayOp(saop)
+            if matches!(
+                saop.op,
+                crate::include::nodes::parsenodes::SubqueryComparisonOp::Eq
+                    | crate::include::nodes::parsenodes::SubqueryComparisonOp::Lt
+                    | crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq
+                    | crate::include::nodes::parsenodes::SubqueryComparisonOp::Gt
+                    | crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq
+            ) =>
+        {
+            let Some(target_id) = target_id_for_expr(&saop.left, ext) else {
+                return false;
+            };
+            if const_array_keys(&saop.right).is_none() {
+                return false;
+            }
+            out.insert(target_id);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn mcv_expr_matches(expr: &Expr, ext: &ExtendedStatistic, item: &PgMcvItem) -> Option<bool> {
+    match expr {
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => {
+            for arg in &bool_expr.args {
+                if !mcv_expr_matches(arg, ext, item)? {
+                    return Some(false);
+                }
+            }
+            Some(true)
+        }
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => {
+            for arg in &bool_expr.args {
+                if mcv_expr_matches(arg, ext, item)? {
+                    return Some(true);
+                }
+            }
+            Some(false)
+        }
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Not => {
+            match bool_expr.args.as_slice() {
+                [arg] => Some(!mcv_expr_matches(arg, ext, item)?),
+                _ => None,
+            }
+        }
+        Expr::IsNull(inner) => {
+            let target_id = target_id_for_expr(inner, ext)?;
+            Some(mcv_item_value(ext, item, target_id)?.is_none())
+        }
+        Expr::IsNotNull(inner) => {
+            let target_id = target_id_for_expr(inner, ext)?;
+            Some(mcv_item_value(ext, item, target_id)?.is_some())
+        }
+        expr if target_id_for_expr(expr, ext).is_some() => {
+            let target_id = target_id_for_expr(expr, ext)?;
+            Some(mcv_item_value(ext, item, target_id)? == Some("true"))
+        }
+        Expr::Op(op)
+            if matches!(
+                op.op,
+                OpExprKind::Eq
+                    | OpExprKind::NotEq
+                    | OpExprKind::Lt
+                    | OpExprKind::LtEq
+                    | OpExprKind::Gt
+                    | OpExprKind::GtEq
+            ) && op.args.len() == 2 =>
+        {
+            let (target_id, constant, flipped) =
+                target_const_key_pair_with_flip(&op.args[0], &op.args[1], ext)?;
+            let Some(actual) = mcv_item_value(ext, item, target_id)? else {
+                return Some(false);
+            };
+            let Some(constant) = constant.as_deref() else {
+                return Some(false);
+            };
+            let ordering = compare_stat_keys(actual, constant);
+            Some(match (op.op, flipped) {
+                (OpExprKind::Eq, _) => ordering == Ordering::Equal,
+                (OpExprKind::NotEq, _) => ordering != Ordering::Equal,
+                (OpExprKind::Lt, false) | (OpExprKind::Gt, true) => ordering == Ordering::Less,
+                (OpExprKind::LtEq, false) | (OpExprKind::GtEq, true) => {
+                    matches!(ordering, Ordering::Less | Ordering::Equal)
+                }
+                (OpExprKind::Gt, false) | (OpExprKind::Lt, true) => ordering == Ordering::Greater,
+                (OpExprKind::GtEq, false) | (OpExprKind::LtEq, true) => {
+                    matches!(ordering, Ordering::Greater | Ordering::Equal)
+                }
+                _ => false,
+            })
+        }
+        Expr::ScalarArrayOp(saop)
+            if matches!(
+                saop.op,
+                crate::include::nodes::parsenodes::SubqueryComparisonOp::Eq
+                    | crate::include::nodes::parsenodes::SubqueryComparisonOp::Lt
+                    | crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq
+                    | crate::include::nodes::parsenodes::SubqueryComparisonOp::Gt
+                    | crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq
+            ) =>
+        {
+            let target_id = target_id_for_expr(&saop.left, ext)?;
+            let Some(actual) = mcv_item_value(ext, item, target_id)? else {
+                return Some(false);
+            };
+            let keys = const_array_keys(&saop.right)?;
+            let matches = keys
+                .iter()
+                .filter_map(|key| key.as_deref())
+                .map(|key| scalar_array_key_matches(saop.op, actual, key));
+            Some(if saop.use_or {
+                matches.into_iter().any(|matches| matches)
+            } else {
+                matches.into_iter().all(|matches| matches)
+            })
+        }
+        _ => None,
+    }
+}
+
+fn target_const_key_pair(
+    left: &Expr,
+    right: &Expr,
+    ext: &ExtendedStatistic,
+) -> Option<(i16, Option<String>)> {
+    target_const_key_pair_with_flip(left, right, ext).map(|(target_id, key, _)| (target_id, key))
+}
+
+fn target_const_key_pair_with_flip(
+    left: &Expr,
+    right: &Expr,
+    ext: &ExtendedStatistic,
+) -> Option<(i16, Option<String>, bool)> {
+    if let Some(target_id) = target_id_for_expr(left, ext)
+        && let Some(key) = const_key(right)
+    {
+        return Some((target_id, key, false));
+    }
+    if let Some(target_id) = target_id_for_expr(right, ext)
+        && let Some(key) = const_key(left)
+    {
+        return Some((target_id, key, true));
+    }
+    None
+}
+
+fn target_id_for_expr(expr: &Expr, ext: &ExtendedStatistic) -> Option<i16> {
+    let stripped = strip_casts(expr);
+    if let Expr::Var(var) = stripped
+        && var.varlevelsup == 0
+        && var.varattno > 0
+    {
+        return i16::try_from(var.varattno).ok();
+    }
+    ext.expressions
+        .iter()
+        .find_map(|(target_id, stored)| statistics_expr_eq(stripped, stored).then_some(*target_id))
+}
+
+fn statistics_expr_eq(left: &Expr, right: &Expr) -> bool {
+    let left = strip_casts(left);
+    let right = strip_casts(right);
+    match (left, right) {
+        (Expr::Var(left), Expr::Var(right)) => {
+            left.varattno == right.varattno
+                && left.varlevelsup == right.varlevelsup
+                && left.vartype == right.vartype
+        }
+        (Expr::Const(left), Expr::Const(right)) => {
+            statistics_value_key(left) == statistics_value_key(right)
+        }
+        (Expr::Op(left), Expr::Op(right)) => {
+            left.op == right.op
+                && left.opno == right.opno
+                && left.args.len() == right.args.len()
+                && left
+                    .args
+                    .iter()
+                    .zip(right.args.iter())
+                    .all(|(left, right)| statistics_expr_eq(left, right))
+        }
+        (Expr::Func(left), Expr::Func(right)) => {
+            left.funcid == right.funcid
+                && left.implementation == right.implementation
+                && left.args.len() == right.args.len()
+                && left
+                    .args
+                    .iter()
+                    .zip(right.args.iter())
+                    .all(|(left, right)| statistics_expr_eq(left, right))
+        }
+        (Expr::ScalarArrayOp(left), Expr::ScalarArrayOp(right)) => {
+            left.op == right.op
+                && left.use_or == right.use_or
+                && statistics_expr_eq(&left.left, &right.left)
+                && statistics_expr_eq(&left.right, &right.right)
+        }
+        (Expr::Bool(left), Expr::Bool(right)) => {
+            left.boolop == right.boolop
+                && left.args.len() == right.args.len()
+                && left
+                    .args
+                    .iter()
+                    .zip(right.args.iter())
+                    .all(|(left, right)| statistics_expr_eq(left, right))
+        }
+        (Expr::IsNull(left), Expr::IsNull(right))
+        | (Expr::IsNotNull(left), Expr::IsNotNull(right)) => statistics_expr_eq(left, right),
+        _ => left == right,
+    }
+}
+
+fn const_key(expr: &Expr) -> Option<Option<String>> {
+    match strip_casts(expr) {
+        Expr::Const(value) => Some(statistics_value_key(value)),
+        _ => None,
+    }
+}
+
+fn const_array_keys(expr: &Expr) -> Option<Vec<Option<String>>> {
+    match strip_casts(expr) {
+        Expr::Const(value) => value.as_array_value().map(|array| {
+            array
+                .elements
+                .iter()
+                .map(statistics_value_key)
+                .collect::<Vec<_>>()
+        }),
+        Expr::ArrayLiteral { elements, .. } => elements.iter().map(const_key).collect(),
+        _ => None,
+    }
+}
+
+fn mcv_item_value<'a>(
+    ext: &ExtendedStatistic,
+    item: &'a PgMcvItem,
+    target_id: i16,
+) -> Option<Option<&'a str>> {
+    let position = ext.target_ids.iter().position(|id| *id == target_id)?;
+    item.values.get(position).map(|value| value.as_deref())
+}
+
+fn compare_stat_keys(left: &str, right: &str) -> Ordering {
+    match (left.parse::<f64>(), right.parse::<f64>()) {
+        (Ok(left), Ok(right)) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
+        _ => left.cmp(right),
+    }
+}
+
+fn estimate_group_rows(
+    input: &Path,
+    group_by: &[Expr],
+    catalog: &dyn CatalogLookup,
+    input_rows: f64,
+) -> f64 {
+    let fallback = || clamp_rows((input_rows * 0.1).max(1.0));
+    let Some(stats) = relation_stats_for_group_estimate(input, catalog) else {
+        return fallback();
+    };
+    let mut remaining = (0..group_by.len()).collect::<BTreeSet<_>>();
+    let mut estimate = 1.0;
+    let mut max_component = 1.0;
+    while let Some(component) =
+        best_group_ndistinct_component(&stats, group_by, &remaining, input_rows)
+    {
+        estimate *= component.estimate;
+        max_component = f64::max(max_component, component.estimate);
+        for index in component.covered_indices {
+            remaining.remove(&index);
+        }
+    }
+
+    for index in remaining {
+        let distinct = simple_distinct_for_group_expr(&stats, &group_by[index], input_rows);
+        estimate *= distinct;
+        max_component = f64::max(max_component, distinct);
+    }
+
+    // PostgreSQL's estimate_num_groups applies same-relation damping instead of
+    // blindly multiplying every per-column estimate.  This captures the local
+    // behavior needed by the extended-statistics regressions while still letting
+    // a strong multivariate component dominate the cap.
+    let same_relation_cap = f64::max(fallback(), max_component);
+    estimate
+        .min(same_relation_cap)
+        .clamp(1.0, input_rows.max(1.0))
+}
+
+fn relation_stats_for_group_estimate(
+    path: &Path,
+    catalog: &dyn CatalogLookup,
+) -> Option<RelationStats> {
+    match path {
+        Path::SeqScan {
+            relation_oid, desc, ..
+        }
+        | Path::IndexOnlyScan {
+            relation_oid, desc, ..
+        }
+        | Path::IndexScan {
+            relation_oid, desc, ..
+        }
+        | Path::BitmapHeapScan {
+            relation_oid, desc, ..
+        } => Some(relation_stats(catalog, *relation_oid, desc)),
+        Path::Append { desc, children, .. } | Path::MergeAppend { desc, children, .. } => {
+            for child in children {
+                if let Some((relation_oid, _)) = base_relation_for_group_estimate(child) {
+                    let stats = relation_stats_with_inherit(catalog, relation_oid, desc, true);
+                    if !stats.extended_stats.is_empty() {
+                        return Some(stats);
+                    }
+                }
+            }
+            inherited_relation_stats_by_desc(catalog, desc)
+        }
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => relation_stats_for_group_estimate(input, catalog),
+        _ => None,
+    }
+}
+
+fn inherited_relation_stats_by_desc(
+    catalog: &dyn CatalogLookup,
+    desc: &RelationDesc,
+) -> Option<RelationStats> {
+    for stat in catalog.statistic_ext_rows() {
+        if catalog.statistic_ext_data_row(stat.oid, true).is_none() {
+            continue;
+        }
+        let Some(relation) = catalog.relation_by_oid(stat.stxrelid) else {
+            continue;
+        };
+        if relation_desc_matches_for_stats(&relation.desc, desc) {
+            let stats = relation_stats_with_inherit(catalog, stat.stxrelid, &relation.desc, true);
+            if !stats.extended_stats.is_empty() {
+                return Some(stats);
+            }
+        }
+    }
+    None
+}
+
+fn relation_desc_matches_for_stats(left: &RelationDesc, right: &RelationDesc) -> bool {
+    left.columns.len() == right.columns.len()
+        && left
+            .columns
+            .iter()
+            .zip(right.columns.iter())
+            .all(|(left, right)| left.name == right.name && left.sql_type == right.sql_type)
+}
+
+#[derive(Debug)]
+struct GroupNdistinctComponent {
+    covered_indices: Vec<usize>,
+    estimate: f64,
+}
+
+fn best_group_ndistinct_component(
+    stats: &RelationStats,
+    group_by: &[Expr],
+    remaining: &BTreeSet<usize>,
+    input_rows: f64,
+) -> Option<GroupNdistinctComponent> {
+    let mut best: Option<(usize, usize, f64, Vec<usize>)> = None;
+    for ext in &stats.extended_stats {
+        let Some(ndistinct) = ext.ndistinct.as_ref() else {
+            continue;
+        };
+        let group_target_ids = group_by
+            .iter()
+            .map(|expr| group_target_id_for_expr(expr, ext))
+            .collect::<Vec<_>>();
+        let remaining_id_set = remaining
+            .iter()
+            .filter_map(|index| group_target_ids[*index])
+            .collect::<BTreeSet<_>>();
+        if remaining_id_set.len() < 2 {
+            continue;
+        }
+        for item in &ndistinct.items {
+            if item.dimensions.len() < 2
+                || !item
+                    .dimensions
+                    .iter()
+                    .all(|target| remaining_id_set.contains(target))
+            {
+                continue;
+            }
+            let item_targets = item.dimensions.iter().copied().collect::<BTreeSet<_>>();
+            let covered_indices = remaining
+                .iter()
+                .filter(|index| {
+                    group_target_ids[**index].is_some_and(|target| item_targets.contains(&target))
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            let covered_targets = covered_indices
+                .iter()
+                .filter_map(|index| group_target_ids[*index])
+                .collect::<BTreeSet<_>>();
+            if covered_targets.len() < 2 {
+                continue;
+            }
+            let estimate = item.ndistinct.clamp(1.0, input_rows.max(1.0));
+            let replace = best.as_ref().is_none_or(
+                |(best_target_count, best_index_count, best_estimate, _)| {
+                    covered_targets
+                        .len()
+                        .cmp(best_target_count)
+                        .then_with(|| covered_indices.len().cmp(best_index_count))
+                        .then_with(|| {
+                            estimate
+                                .partial_cmp(best_estimate)
+                                .unwrap_or(Ordering::Equal)
+                        })
+                        .is_gt()
+                },
+            );
+            if replace {
+                best = Some((
+                    covered_targets.len(),
+                    covered_indices.len(),
+                    estimate,
+                    covered_indices,
+                ));
+            }
+        }
+    }
+    best.map(
+        |(_, _, estimate, covered_indices)| GroupNdistinctComponent {
+            covered_indices,
+            estimate,
+        },
+    )
+}
+
+fn base_relation_for_group_estimate(path: &Path) -> Option<(u32, &RelationDesc)> {
+    match path {
+        Path::SeqScan {
+            relation_oid, desc, ..
+        }
+        | Path::IndexOnlyScan {
+            relation_oid, desc, ..
+        }
+        | Path::IndexScan {
+            relation_oid, desc, ..
+        }
+        | Path::BitmapHeapScan {
+            relation_oid, desc, ..
+        } => Some((*relation_oid, desc)),
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => base_relation_for_group_estimate(input),
+        _ => None,
+    }
+}
+
+fn simple_distinct_for_target(stats: &RelationStats, target_id: i16, input_rows: f64) -> f64 {
+    if target_id > 0
+        && let Some(row) = stats.stats_by_attnum.get(&target_id)
+    {
+        return effective_ndistinct(row, stats.reltuples)
+            .unwrap_or(200.0)
+            .clamp(1.0, input_rows.max(1.0));
+    }
+    (input_rows * 0.1).clamp(1.0, input_rows.max(1.0))
+}
+
+fn simple_distinct_for_group_expr(stats: &RelationStats, expr: &Expr, input_rows: f64) -> f64 {
+    if group_expr_contains_system_var(expr) {
+        return input_rows.max(1.0);
+    }
+    if let Some(column) = expr_column_index(expr) {
+        return simple_distinct_for_target(stats, (column + 1) as i16, input_rows);
+    }
+    if let Some(distinct) = simple_distinct_for_expression(stats, expr, input_rows) {
+        return distinct;
+    }
+    if let Some(target_id) = single_group_var_target_id(expr) {
+        return simple_distinct_for_target(stats, target_id, input_rows);
+    }
+    200.0_f64.min(input_rows.max(1.0))
+}
+
+fn group_target_id_for_expr(expr: &Expr, ext: &ExtendedStatistic) -> Option<i16> {
+    if let Some(target_id) = target_id_for_expr(expr, ext)
+        && ext.target_ids.contains(&target_id)
+    {
+        return Some(target_id);
+    }
+    single_group_var_target_id(expr).filter(|target_id| ext.target_ids.contains(target_id))
+}
+
+fn single_group_var_target_id(expr: &Expr) -> Option<i16> {
+    let mut vars = BTreeSet::new();
+    let mut saw_system = false;
+    collect_group_expr_var_targets(expr, &mut vars, &mut saw_system);
+    if saw_system {
+        return None;
+    }
+    match vars.iter().copied().collect::<Vec<_>>().as_slice() {
+        [target_id] => Some(*target_id),
+        _ => None,
+    }
+}
+
+fn group_expr_contains_system_var(expr: &Expr) -> bool {
+    let mut vars = BTreeSet::new();
+    let mut saw_system = false;
+    collect_group_expr_var_targets(expr, &mut vars, &mut saw_system);
+    saw_system
+}
+
+fn collect_group_expr_var_targets(expr: &Expr, vars: &mut BTreeSet<i16>, saw_system: &mut bool) {
+    match strip_casts(expr) {
+        Expr::Var(var) if var.varlevelsup == 0 && var.varattno > 0 => {
+            if let Ok(attno) = i16::try_from(var.varattno) {
+                vars.insert(attno);
+            }
+        }
+        Expr::Var(var) if var.varlevelsup == 0 => *saw_system = true,
+        Expr::Op(op) => {
+            for arg in &op.args {
+                collect_group_expr_var_targets(arg, vars, saw_system);
+            }
+        }
+        Expr::Func(func) => {
+            for arg in &func.args {
+                collect_group_expr_var_targets(arg, vars, saw_system);
+            }
+        }
+        Expr::Collate { expr, .. } => collect_group_expr_var_targets(expr, vars, saw_system),
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_group_expr_var_targets(array, vars, saw_system);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_group_expr_var_targets(lower, vars, saw_system);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_group_expr_var_targets(upper, vars, saw_system);
+                }
+            }
+        }
+        Expr::FieldSelect { expr, .. } => collect_group_expr_var_targets(expr, vars, saw_system),
+        _ => {}
+    }
+}
+
+fn simple_distinct_for_expression(
+    stats: &RelationStats,
+    expr: &Expr,
+    input_rows: f64,
+) -> Option<f64> {
+    let row = expression_stats_row(expr, stats)?;
+    effective_ndistinct(row, stats.reltuples)
+        .map(|distinct| distinct.clamp(1.0, input_rows.max(1.0)))
 }
 
 fn support_function_selectivity(
@@ -3961,12 +4985,165 @@ fn scalar_array_eq_selectivity(
     let Some(array) = const_argument(right).and_then(|value| value.as_array_value()) else {
         return DEFAULT_BOOL_SEL;
     };
-    let mut result = 0.0;
-    for element in &array.elements {
-        let selectivity = eq_selectivity(left, &Expr::Const(element.clone()), stats, reltuples);
-        result = result + selectivity - result * selectivity;
+    array
+        .elements
+        .iter()
+        .filter(|element| !matches!(element, Value::Null))
+        .map(|element| eq_selectivity(left, &Expr::Const(element.clone()), stats, reltuples))
+        .sum::<f64>()
+        .clamp(0.0, 1.0)
+}
+
+fn scalar_array_ineq_selectivity(
+    saop: &crate::include::nodes::primnodes::ScalarArrayOpExpr,
+    stats: Option<&RelationStats>,
+    reltuples: f64,
+) -> Option<f64> {
+    let bound = scalar_array_ineq_bound(saop)?;
+    let wanted = match saop.op {
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::Lt
+        | crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq => Ordering::Less,
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::Gt
+        | crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq => Ordering::Greater,
+        _ => return None,
+    };
+    let strict = ineq_selectivity(
+        &saop.left,
+        &Expr::Const(bound.clone()),
+        stats,
+        reltuples,
+        wanted,
+    );
+    if matches!(
+        saop.op,
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq
+            | crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq
+    ) {
+        Some(
+            strict
+                .max(eq_selectivity(
+                    &saop.left,
+                    &Expr::Const(bound),
+                    stats,
+                    reltuples,
+                ))
+                .clamp(0.0, 1.0),
+        )
+    } else {
+        Some(strict)
     }
-    result.clamp(0.0, 1.0)
+}
+
+fn scalar_array_ineq_bound(
+    saop: &crate::include::nodes::primnodes::ScalarArrayOpExpr,
+) -> Option<Value> {
+    let array = const_argument(&saop.right)?.as_array_value()?;
+    let mut values = array
+        .elements
+        .iter()
+        .filter(|value| !matches!(value, Value::Null));
+    let first = values.next()?.clone();
+    let want_max = match (saop.use_or, saop.op) {
+        (
+            true,
+            crate::include::nodes::parsenodes::SubqueryComparisonOp::Lt
+            | crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq,
+        )
+        | (
+            false,
+            crate::include::nodes::parsenodes::SubqueryComparisonOp::Gt
+            | crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq,
+        ) => true,
+        (
+            true,
+            crate::include::nodes::parsenodes::SubqueryComparisonOp::Gt
+            | crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq,
+        )
+        | (
+            false,
+            crate::include::nodes::parsenodes::SubqueryComparisonOp::Lt
+            | crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq,
+        ) => false,
+        _ => return None,
+    };
+    Some(values.fold(first, |best, value| {
+        let Some(best_key) = statistics_value_key(&best) else {
+            return value.clone();
+        };
+        let Some(value_key) = statistics_value_key(value) else {
+            return best;
+        };
+        let ordering = compare_stat_keys(&best_key, &value_key);
+        if (want_max && ordering == Ordering::Less) || (!want_max && ordering == Ordering::Greater)
+        {
+            value.clone()
+        } else {
+            best
+        }
+    }))
+}
+
+fn scalar_array_key_matches(
+    op: crate::include::nodes::parsenodes::SubqueryComparisonOp,
+    actual: &str,
+    key: &str,
+) -> bool {
+    let ordering = compare_stat_keys(actual, key);
+    match op {
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::Eq => ordering == Ordering::Equal,
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::Lt => ordering == Ordering::Less,
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq => {
+            matches!(ordering, Ordering::Less | Ordering::Equal)
+        }
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::Gt => {
+            ordering == Ordering::Greater
+        }
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq => {
+            matches!(ordering, Ordering::Greater | Ordering::Equal)
+        }
+        _ => false,
+    }
+}
+
+fn scalar_array_all_eq_selectivity(
+    left: &Expr,
+    right: &Expr,
+    stats: Option<&RelationStats>,
+    reltuples: f64,
+) -> f64 {
+    let Some(array) = const_argument(right).and_then(|value| value.as_array_value()) else {
+        return DEFAULT_BOOL_SEL;
+    };
+    let non_null = array
+        .elements
+        .iter()
+        .filter(|value| !matches!(value, Value::Null))
+        .collect::<Vec<_>>();
+    if non_null.is_empty() {
+        return DEFAULT_BOOL_SEL;
+    }
+    let first = non_null[0];
+    if non_null.iter().any(|value| !values_equal(value, first)) {
+        return 0.0;
+    }
+    eq_selectivity(left, &Expr::Const(first.clone()), stats, reltuples)
+}
+
+fn bool_target_selectivity(expr: &Expr, stats: Option<&RelationStats>) -> Option<f64> {
+    let stats = stats?;
+    let row = if let Some(column) = expr_column_index(expr) {
+        stats.stats_by_attnum.get(&((column + 1) as i16))?
+    } else {
+        expression_stats_row(expr, stats)?
+    };
+    if let Some((values, freqs)) = slot_values_and_numbers(row, STATISTIC_KIND_MCV) {
+        for (value, freq) in values.elements.iter().zip(freqs.elements.iter()) {
+            if matches!(value, Value::Bool(true)) {
+                return float_value(freq);
+            }
+        }
+    }
+    Some(((1.0 - row.stanullfrac) * DEFAULT_BOOL_SEL).clamp(0.0, 1.0))
 }
 
 fn builtin_index_qual_selectivity(funcid: u32) -> Option<f64> {
@@ -4000,18 +5177,27 @@ fn builtin_index_qual_selectivity(funcid: u32) -> Option<f64> {
 }
 
 fn eq_selectivity(left: &Expr, right: &Expr, stats: Option<&RelationStats>, reltuples: f64) -> f64 {
-    let Some((column, constant)) = column_const_pair(left, right) else {
-        return DEFAULT_EQ_SEL;
-    };
     let Some(stats) = stats else {
         return DEFAULT_EQ_SEL;
     };
-    let Some(row) = stats.stats_by_attnum.get(&((column + 1) as i16)) else {
-        return DEFAULT_EQ_SEL;
+    if let Some((column, constant)) = column_const_pair(left, right) {
+        if let Some(row) = stats.stats_by_attnum.get(&((column + 1) as i16)) {
+            return eq_selectivity_for_stats_row(row, &constant, reltuples);
+        }
+    }
+    if let Some((row, constant)) = expression_const_pair(left, right, stats) {
+        return eq_selectivity_for_stats_row(row, &constant, reltuples);
+    }
+    DEFAULT_EQ_SEL
+}
+
+fn eq_selectivity_for_stats_row(row: &PgStatisticRow, constant: &Value, reltuples: f64) -> f64 {
+    if matches!(constant, Value::Null) {
+        return 0.0;
     };
     if let Some((values, freqs)) = slot_values_and_numbers(row, STATISTIC_KIND_MCV) {
         for (value, freq) in values.elements.iter().zip(freqs.elements.iter()) {
-            if values_equal(value, &constant) {
+            if values_equal(value, constant) {
                 return float_value(freq).unwrap_or(DEFAULT_EQ_SEL).clamp(0.0, 1.0);
             }
         }
@@ -4033,22 +5219,37 @@ fn ineq_selectivity(
     left: &Expr,
     right: &Expr,
     stats: Option<&RelationStats>,
-    _reltuples: f64,
+    reltuples: f64,
     wanted: Ordering,
 ) -> f64 {
-    let Some((column, constant, flipped)) = ordered_column_const_pair(left, right) else {
-        return DEFAULT_INEQ_SEL;
-    };
     let Some(stats) = stats else {
         return DEFAULT_INEQ_SEL;
     };
-    let Some(row) = stats.stats_by_attnum.get(&((column + 1) as i16)) else {
-        return DEFAULT_INEQ_SEL;
+    if let Some((column, constant, flipped)) = ordered_column_const_pair(left, right) {
+        if let Some(row) = stats.stats_by_attnum.get(&((column + 1) as i16)) {
+            return ineq_selectivity_for_stats_row(row, &constant, wanted, flipped);
+        }
+    }
+    if let Some((row, constant, flipped)) = expression_const_pair_with_flip(left, right, stats) {
+        return ineq_selectivity_for_stats_row(row, &constant, wanted, flipped);
+    }
+    let _ = reltuples;
+    DEFAULT_INEQ_SEL
+}
+
+fn ineq_selectivity_for_stats_row(
+    row: &PgStatisticRow,
+    constant: &Value,
+    wanted: Ordering,
+    flipped: bool,
+) -> f64 {
+    if matches!(constant, Value::Null) {
+        return 0.0;
     };
     let Some(hist) = slot_values(row, STATISTIC_KIND_HISTOGRAM) else {
         return DEFAULT_INEQ_SEL;
     };
-    let fraction = histogram_fraction(&hist, &constant);
+    let fraction = histogram_fraction(&hist, constant);
     let lt_fraction = fraction * (1.0 - row.stanullfrac);
     let gt_fraction = (1.0 - fraction) * (1.0 - row.stanullfrac);
     match (wanted, flipped) {
@@ -4065,10 +5266,51 @@ fn column_selectivity(
     stats: Option<&RelationStats>,
     f: impl FnOnce(&PgStatisticRow, f64) -> f64,
 ) -> Option<f64> {
-    let column = expr_column_index(expr)?;
     let stats = stats?;
-    let row = stats.stats_by_attnum.get(&((column + 1) as i16))?;
+    let row = if let Some(column) = expr_column_index(expr) {
+        stats.stats_by_attnum.get(&((column + 1) as i16))?
+    } else {
+        expression_stats_row(expr, stats)?
+    };
     Some(f(row, stats.reltuples))
+}
+
+fn expression_const_pair<'a>(
+    left: &'a Expr,
+    right: &'a Expr,
+    stats: &'a RelationStats,
+) -> Option<(&'a PgStatisticRow, Value)> {
+    expression_const_pair_with_flip(left, right, stats).map(|(row, value, _)| (row, value))
+}
+
+fn expression_const_pair_with_flip<'a>(
+    left: &'a Expr,
+    right: &'a Expr,
+    stats: &'a RelationStats,
+) -> Option<(&'a PgStatisticRow, Value, bool)> {
+    match (left, right) {
+        (expr, Expr::Const(value)) => {
+            Some((expression_stats_row(expr, stats)?, value.clone(), false))
+        }
+        (Expr::Const(value), expr) => {
+            Some((expression_stats_row(expr, stats)?, value.clone(), true))
+        }
+        _ => None,
+    }
+}
+
+fn expression_stats_row<'a>(expr: &Expr, stats: &'a RelationStats) -> Option<&'a PgStatisticRow> {
+    for ext in &stats.extended_stats {
+        let Some(target_id) = target_id_for_expr(expr, ext) else {
+            continue;
+        };
+        if target_id < 0
+            && let Some(row) = ext.expression_stats.get(&target_id)
+        {
+            return Some(row);
+        }
+    }
+    None
 }
 
 fn column_const_pair<'a>(left: &'a Expr, right: &'a Expr) -> Option<(usize, Value)> {

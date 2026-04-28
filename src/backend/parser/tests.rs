@@ -12,7 +12,7 @@ use crate::include::catalog::{
 use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
     AliasColumnDef, AliasColumnSpec, AlterAggregateRenameStatement, AlterColumnExpressionAction,
-    AlterColumnIdentityAction, AlterGenericOptionAction, AlterTableTriggerMode,
+    AlterColumnIdentityAction, AlterDomainAction, AlterGenericOptionAction, AlterTableTriggerMode,
     AlterTableTriggerStateStatement, AlterTableTriggerTarget, AlterTriggerRenameStatement,
     AlterTypeSetOptionsStatement, CastContext, ColumnConstraint, ColumnGeneratedKind,
     ColumnIdentityKind, CommentOnAggregateStatement, CommentOnColumnStatement,
@@ -20,10 +20,10 @@ use crate::include::nodes::parsenodes::{
     CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
     CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement,
     CreateCompositeTypeStatement, CreateShellTypeStatement, CreateTriggerStatement,
-    CreateTypeStatement, DropAggregateStatement, DropCastStatement, DropTriggerStatement,
-    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege,
-    GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
-    OverridingKind, PartitionStrategy, PublicationObjectSpec, PublicationOption,
+    CreateTypeStatement, DomainConstraintSpecKind, DropAggregateStatement, DropCastStatement,
+    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType,
+    GrantObjectPrivilege, GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement,
+    JoinTreeNode, OverridingKind, PartitionStrategy, PublicationObjectSpec, PublicationOption,
     PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
     RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
     SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
@@ -1691,6 +1691,7 @@ fn visible_catalog_without_text_input_cast(
         base.inherit_rows(),
         base.index_rows(),
         base.rewrite_rows(),
+        base.sequence_rows(),
         base.trigger_rows(),
         base.policy_rows(),
         base.publication_rows(),
@@ -1755,6 +1756,7 @@ fn visible_catalog_without_operator(
         base.inherit_rows(),
         base.index_rows(),
         base.rewrite_rows(),
+        base.sequence_rows(),
         base.trigger_rows(),
         base.policy_rows(),
         base.publication_rows(),
@@ -1836,6 +1838,7 @@ fn visible_catalog_with_extra_opclasses(
         base.inherit_rows(),
         base.index_rows(),
         base.rewrite_rows(),
+        base.sequence_rows(),
         base.trigger_rows(),
         base.policy_rows(),
         base.publication_rows(),
@@ -2272,7 +2275,14 @@ fn parse_xmlelement_expression() {
     let Statement::Select(select) = stmt else {
         panic!("expected select");
     };
-    assert!(matches!(select.targets[0].expr, SqlExpr::Xml(_)));
+    let SqlExpr::Xml(xml) = &select.targets[0].expr else {
+        panic!("expected XML expression");
+    };
+    assert_eq!(xml.name.as_deref(), Some("employee"));
+    assert_eq!(xml.named_args.len(), 1);
+    assert_eq!(xml.arg_names, vec!["id"]);
+    assert_eq!(xml.args.len(), 1);
+    assert_eq!(select.targets[0].output_name, "xmlelement");
 }
 
 #[test]
@@ -3610,7 +3620,7 @@ fn parse_alter_table_constraint_statements() {
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
             not_valid: false,
-            no_inherit: false,
+            inheritability: None,
             deferrable: Some(true),
             initially_deferred: Some(true),
             enforced: None,
@@ -3629,7 +3639,7 @@ fn parse_alter_table_constraint_statements() {
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
             not_valid: false,
-            no_inherit: false,
+            inheritability: None,
             deferrable: Some(false),
             initially_deferred: None,
             enforced: Some(false),
@@ -3647,7 +3657,24 @@ fn parse_alter_table_constraint_statements() {
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
             not_valid: true,
-            no_inherit: true,
+            inheritability: Some(false),
+            deferrable: None,
+            initially_deferred: None,
+            enforced: None,
+        })
+    );
+
+    let stmt =
+        parse_statement("alter table items alter constraint items_id_check inherit").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterConstraint(AlterTableAlterConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            constraint_name: "items_id_check".into(),
+            not_valid: false,
+            inheritability: Some(true),
             deferrable: None,
             initially_deferred: None,
             enforced: None,
@@ -3906,6 +3933,20 @@ fn parse_alter_table_set_statement() {
             options: vec![RelOption {
                 name: "parallel_workers".into(),
                 value: "4".into(),
+            }],
+        })
+    );
+
+    let stmt = parse_statement("alter view rw_view1 set (security_invoker = true)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableSet(AlterTableSetStatement {
+            if_exists: false,
+            only: false,
+            table_name: "rw_view1".into(),
+            options: vec![RelOption {
+                name: "security_invoker".into(),
+                value: "true".into(),
             }],
         })
     );
@@ -6327,6 +6368,25 @@ fn parse_create_function_statement_with_variadic_arg() {
 }
 
 #[test]
+fn parse_create_function_statement_with_default_args() {
+    let stmt = parse_statement(
+        "create function dfunc(a int = 1, b text default ('x,y'), variadic rest int[] default array[]::int[]) returns int language sql as $$ select 1 $$",
+    )
+    .unwrap();
+    let Statement::CreateFunction(stmt) = stmt else {
+        panic!("expected CREATE FUNCTION");
+    };
+    assert_eq!(stmt.args.len(), 3);
+    assert_eq!(stmt.args[0].name.as_deref(), Some("a"));
+    assert_eq!(stmt.args[0].default_expr.as_deref(), Some("1"));
+    assert_eq!(stmt.args[1].name.as_deref(), Some("b"));
+    assert_eq!(stmt.args[1].default_expr.as_deref(), Some("('x,y')"));
+    assert_eq!(stmt.args[2].name.as_deref(), Some("rest"));
+    assert!(stmt.args[2].variadic);
+    assert_eq!(stmt.args[2].default_expr.as_deref(), Some("array[]::int[]"));
+}
+
+#[test]
 fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
     let stmt = parse_statement(
         "create function binary_coercible(oid, oid) returns bool as 'regress', 'binary_coercible' language c strict stable parallel safe",
@@ -6482,6 +6542,7 @@ fn parse_drop_function_statement_with_signature() {
             if_exists: false,
             schema_name: Some("public".into()),
             function_name: "p2text".into(),
+            arg_list_specified: true,
             arg_types: vec!["p2".into()],
             cascade: false,
         })
@@ -6497,6 +6558,7 @@ fn parse_drop_function_statement_without_signature() {
             if_exists: true,
             schema_name: Some("public".into()),
             function_name: "p2text".into(),
+            arg_list_specified: false,
             arg_types: vec![],
             cascade: true,
         })
@@ -13701,6 +13763,116 @@ fn parse_create_drop_and_comment_on_domain_statements() {
     };
     assert_eq!(comment.domain_name, "dom_int");
     assert_eq!(comment.comment.as_deref(), Some("hello"));
+}
+
+#[test]
+fn parse_alter_domain_statements() {
+    let cases = [
+        (
+            "alter domain public.dom set default 3 + 4",
+            AlterDomainAction::SetDefault {
+                default: Some("3 + 4".into()),
+            },
+        ),
+        (
+            "alter domain public.dom drop default",
+            AlterDomainAction::SetDefault { default: None },
+        ),
+        (
+            "alter domain dom set not null",
+            AlterDomainAction::SetNotNull,
+        ),
+        (
+            "alter domain dom drop not null",
+            AlterDomainAction::DropNotNull,
+        ),
+        (
+            "alter domain dom drop constraint if exists ck cascade",
+            AlterDomainAction::DropConstraint {
+                constraint_name: "ck".into(),
+                if_exists: true,
+                cascade: true,
+            },
+        ),
+        (
+            "alter domain dom validate constraint ck",
+            AlterDomainAction::ValidateConstraint {
+                constraint_name: "ck".into(),
+            },
+        ),
+        (
+            "alter domain dom rename to dom2",
+            AlterDomainAction::RenameDomain {
+                new_name: "dom2".into(),
+            },
+        ),
+        (
+            "alter domain dom rename constraint ck to ck2",
+            AlterDomainAction::RenameConstraint {
+                constraint_name: "ck".into(),
+                new_name: "ck2".into(),
+            },
+        ),
+        (
+            "alter domain dom set schema archive",
+            AlterDomainAction::SetSchema {
+                new_schema: "archive".into(),
+            },
+        ),
+        (
+            "alter domain dom owner to current_user",
+            AlterDomainAction::OwnerTo {
+                new_owner: "current_user".into(),
+            },
+        ),
+    ];
+
+    for (sql, expected) in cases {
+        let Statement::AlterDomain(stmt) = parse_statement(sql).unwrap() else {
+            panic!("expected ALTER DOMAIN for {sql}");
+        };
+        assert_eq!(stmt.action, expected);
+    }
+
+    let Statement::AlterDomain(stmt) =
+        parse_statement("alter domain \"Mixed\" add constraint \"Ck\" check (VALUE > 0) not valid")
+            .unwrap()
+    else {
+        panic!("expected ALTER DOMAIN ADD CONSTRAINT");
+    };
+    assert_eq!(stmt.domain_name, "Mixed");
+    let AlterDomainAction::AddConstraint(spec) = stmt.action else {
+        panic!("expected ADD CONSTRAINT");
+    };
+    assert_eq!(spec.name.as_deref(), Some("Ck"));
+    assert!(spec.not_valid);
+    assert!(matches!(
+        spec.kind,
+        DomainConstraintSpecKind::Check { ref expr } if expr == "VALUE > 0"
+    ));
+
+    let Statement::AlterDomain(stmt) =
+        parse_statement("alter domain dom add constraint nn not null").unwrap()
+    else {
+        panic!("expected ALTER DOMAIN ADD NOT NULL");
+    };
+    assert!(matches!(
+        stmt.action,
+        AlterDomainAction::AddConstraint(ref spec)
+            if spec.name.as_deref() == Some("nn")
+                && matches!(spec.kind, DomainConstraintSpecKind::NotNull)
+    ));
+
+    assert!(matches!(
+        parse_statement("alter domain dom add constraint ck check (value > 0) enforced"),
+        Err(ParseError::DetailedError { message, .. })
+            if message == "CHECK constraints cannot be marked ENFORCED"
+    ));
+    assert!(matches!(
+        parse_statement("alter domain dom add constraint ck check (value > 0) not enforced"),
+        Err(ParseError::DetailedError { message, .. })
+            if message == "CHECK constraints cannot be marked NOT ENFORCED"
+    ));
 }
 
 #[test]

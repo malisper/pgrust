@@ -2,8 +2,8 @@ use crate::include::catalog::PolicyCommand;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, JoinType, QueryColumn, RelationDesc, SetReturningCall, SortGroupClause,
-    TargetEntry, ToastRelationRef, WindowClause,
+    AggAccum, Expr, JoinType, QueryColumn, RelationDesc, RelationPrivilegeRequirement,
+    SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, WindowClause,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -332,6 +332,7 @@ pub enum Statement {
     CreateType(CreateTypeStatement),
     AlterType(AlterTypeStatement),
     AlterTypeOwner(AlterTypeOwnerStatement),
+    AlterDomain(AlterDomainStatement),
     CreateDatabase(CreateDatabaseStatement),
     AlterDatabase(AlterDatabaseStatement),
     CreateSchema(CreateSchemaStatement),
@@ -606,6 +607,7 @@ pub struct RangeTblEntry {
     pub desc: RelationDesc,
     pub inh: bool,
     pub security_quals: Vec<Expr>,
+    pub permission: Option<RelationPrivilegeRequirement>,
     pub kind: RangeTblEntryKind,
 }
 
@@ -2641,7 +2643,7 @@ pub struct AlterTableAlterConstraintStatement {
     pub table_name: String,
     pub constraint_name: String,
     pub not_valid: bool,
-    pub no_inherit: bool,
+    pub inheritability: Option<bool>,
     pub deferrable: Option<bool>,
     pub initially_deferred: Option<bool>,
     pub enforced: Option<bool>,
@@ -3362,6 +3364,7 @@ pub struct DropFunctionStatement {
     pub if_exists: bool,
     pub schema_name: Option<String>,
     pub function_name: String,
+    pub arg_list_specified: bool,
     pub arg_types: Vec<String>,
     pub cascade: bool,
 }
@@ -3884,6 +3887,7 @@ pub struct CreateDomainStatement {
     pub default: Option<String>,
     pub check: Option<String>,
     pub not_null: bool,
+    pub constraints: Vec<DomainConstraintSpec>,
     pub enum_check: Option<DomainCheckConstraint>,
 }
 
@@ -3891,6 +3895,56 @@ pub struct CreateDomainStatement {
 pub struct DomainCheckConstraint {
     pub name: Option<String>,
     pub allowed_values: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainConstraintSpec {
+    pub name: Option<String>,
+    pub kind: DomainConstraintSpecKind,
+    pub not_valid: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DomainConstraintSpecKind {
+    Check { expr: String },
+    NotNull,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterDomainStatement {
+    pub domain_name: String,
+    pub action: AlterDomainAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterDomainAction {
+    SetDefault {
+        default: Option<String>,
+    },
+    SetNotNull,
+    DropNotNull,
+    AddConstraint(DomainConstraintSpec),
+    DropConstraint {
+        constraint_name: String,
+        if_exists: bool,
+        cascade: bool,
+    },
+    ValidateConstraint {
+        constraint_name: String,
+    },
+    RenameDomain {
+        new_name: String,
+    },
+    RenameConstraint {
+        constraint_name: String,
+        new_name: String,
+    },
+    SetSchema {
+        new_schema: String,
+    },
+    OwnerTo {
+        new_owner: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

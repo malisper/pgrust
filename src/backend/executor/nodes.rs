@@ -1,5 +1,6 @@
 use super::{
-    AggGroup, ExecError, ExecutorContext, OrderedAggInput, build_aggregate_runtime, executor_start,
+    AggGroup, AggregateRuntime, ExecError, ExecutorContext, OrderedAggInput,
+    build_aggregate_runtime, executor_start,
 };
 use crate::backend::access::heap::heapam::{
     heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_end, heap_scan_next_visible,
@@ -14,7 +15,8 @@ use crate::backend::executor::expr_geometry::render_geometry_text;
 use crate::backend::executor::expr_ops::compare_order_values;
 use crate::backend::executor::pg_regex::explain_similar_pattern;
 use crate::backend::executor::srf::{
-    eval_project_set_returning_call, eval_set_returning_call, set_returning_call_label,
+    eval_project_set_returning_call, eval_set_returning_call,
+    eval_set_returning_call_simple_values, set_returning_call_label,
 };
 use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
 use crate::backend::executor::window::execute_window_clause;
@@ -36,25 +38,26 @@ use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::visibilitymap::visibilitymap_get_status;
 use crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_VISIBLE;
 use crate::include::catalog::{
-    BTREE_AM_OID, DATE_TYPE_OID, GIST_AM_OID, GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID,
-    PG_LARGEOBJECT_METADATA_RELATION_OID, PG_NAMESPACE_RELATION_OID, SPGIST_AM_OID, TEXT_TYPE_OID,
+    BTREE_AM_OID, C_COLLATION_OID, DATE_TYPE_OID, DEFAULT_COLLATION_OID, GIST_AM_OID,
+    GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, PG_LARGEOBJECT_METADATA_RELATION_OID,
+    PG_NAMESPACE_RELATION_OID, POSIX_COLLATION_OID, SPGIST_AM_OID, TEXT_TYPE_OID,
     TIMESTAMPTZ_TYPE_OID,
 };
 use crate::include::nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimestampTzADT};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, BitmapOrState,
-    BitmapQualState, CteScanState, FilterState, FunctionScanState, IncrementalSortState,
-    IndexOnlyScanState, IndexScanState, LimitState, LockRowsState, MaterializedRow,
-    MergeAppendState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState,
-    ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState,
-    SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, UniqueState,
-    ValuesState, WindowAggState, WorkTableScanState,
+    BitmapQualState, CteScanState, FilterState, FunctionScanRows, FunctionScanState,
+    IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
+    MaterializedRow, MergeAppendState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode,
+    PlanState, ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState,
+    SetOpState, SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot,
+    UniqueState, ValuesState, WindowAggState, WorkTableScanState,
 };
-use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument};
+use crate::include::nodes::plannodes::{AggregateStrategy, IndexScanKey, IndexScanKeyArgument};
 use crate::include::nodes::primnodes::{
     BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, OrderByEntry,
-    ParamKind, RelationDesc, ScalarFunctionImpl, Var, attrno_index,
+    ParamKind, RelationDesc, ScalarFunctionImpl, Var, attrno_index, is_special_varno,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -336,6 +339,23 @@ fn materialize_slot_values(slot: &mut TupleSlot) -> Result<Vec<Value>, ExecError
     let mut values = slot.values()?.to_vec();
     Value::materialize_all(&mut values);
     Ok(values)
+}
+
+fn store_single_virtual_value(slot: &mut TupleSlot, value: Value) {
+    slot.kind = SlotKind::Virtual;
+    slot.tts_values.clear();
+    slot.tts_values.push(value);
+    slot.tts_nvalid = 1;
+    slot.decode_offset = 0;
+    slot.toast = None;
+    slot.table_oid = None;
+    slot.virtual_tid = None;
+}
+
+fn function_scan_uses_simple_path(
+    call: &crate::include::nodes::primnodes::SetReturningCall,
+) -> bool {
+    !call.with_ordinality() && call.output_columns().len() == 1
 }
 
 fn sequence_scan_runtime(
@@ -3110,6 +3130,24 @@ pub(crate) fn render_explain_expr_with_qualifier(
     {
         return render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
     }
+    if matches!(expr, Expr::Var(_))
+        || matches!(
+            expr,
+            Expr::Bool(bool_expr)
+                if matches!(
+                    bool_expr.boolop,
+                    crate::include::nodes::primnodes::BoolExprType::Not
+                ) && bool_expr
+                    .args
+                    .first()
+                    .is_some_and(|inner| {
+                        render_explain_negated_bool_comparison(inner, qualifier, column_names)
+                            .is_some()
+                    })
+        )
+    {
+        return render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
+    }
     format!(
         "({})",
         render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
@@ -3163,6 +3201,10 @@ fn render_explain_expr_inner_with_qualifier(
         }
         Expr::Const(value) => render_explain_const(value),
         Expr::Cast(inner, ty) => render_explain_cast(inner, *ty, qualifier, column_names),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => render_explain_collate(expr, *collation_oid, qualifier, column_names),
         Expr::Op(op) => match op.op {
             crate::include::nodes::primnodes::OpExprKind::UnaryPlus
             | crate::include::nodes::primnodes::OpExprKind::Negate
@@ -3229,12 +3271,30 @@ fn render_explain_expr_inner_with_qualifier(
                 let [left, right] = op.args.as_slice() else {
                     return format!("{expr:?}");
                 };
+                if let Some(rendered) =
+                    render_explain_bool_comparison(op.op, left, right, qualifier, column_names)
+                {
+                    return rendered;
+                }
                 let op_text = infix_operator_text(op.opno, op.op).unwrap_or("~");
+                let display_type = comparison_display_type(left, right, op.collation_oid);
                 format!(
                     "{} {} {}",
-                    render_explain_infix_operand(left, qualifier, column_names),
+                    render_explain_infix_operand_with_display_type(
+                        left,
+                        display_type,
+                        None,
+                        qualifier,
+                        column_names
+                    ),
                     op_text,
-                    render_explain_infix_operand(right, qualifier, column_names)
+                    render_explain_infix_operand_with_display_type(
+                        right,
+                        display_type,
+                        op.collation_oid,
+                        qualifier,
+                        column_names
+                    )
                 )
             }
             _ => format!("{expr:?}"),
@@ -3280,6 +3340,11 @@ fn render_explain_expr_inner_with_qualifier(
                 let Some(inner) = bool_expr.args.first() else {
                     return format!("{expr:?}");
                 };
+                if let Some(rendered) =
+                    render_explain_negated_bool_comparison(inner, qualifier, column_names)
+                {
+                    return rendered;
+                }
                 let rendered =
                     render_explain_expr_inner_with_qualifier(inner, qualifier, column_names);
                 if explain_bool_arg_is_bare(inner) {
@@ -3295,16 +3360,20 @@ fn render_explain_expr_inner_with_qualifier(
             render_explain_expr_inner_with_qualifier(right, qualifier, column_names)
         ),
         Expr::IsNull(inner) => {
-            format!(
-                "{} IS NULL",
-                render_explain_expr_inner_with_qualifier(inner, qualifier, column_names)
-            )
+            let rendered = render_explain_expr_inner_with_qualifier(inner, qualifier, column_names);
+            if expr_sql_type_is_bool(inner) {
+                format!("{rendered} IS UNKNOWN")
+            } else {
+                format!("{rendered} IS NULL")
+            }
         }
         Expr::IsNotNull(inner) => {
-            format!(
-                "{} IS NOT NULL",
-                render_explain_expr_inner_with_qualifier(inner, qualifier, column_names)
-            )
+            let rendered = render_explain_expr_inner_with_qualifier(inner, qualifier, column_names);
+            if expr_sql_type_is_bool(inner) {
+                format!("{rendered} IS NOT UNKNOWN")
+            } else {
+                format!("{rendered} IS NOT NULL")
+            }
         }
         Expr::IsDistinctFrom(left, right) => {
             render_explain_distinctness_expr(left, right, true, qualifier, column_names)
@@ -3417,35 +3486,110 @@ fn bool_distinctness_operand<'a>(left: &'a Expr, right: &'a Expr) -> Option<(&'a
     }
 }
 
-fn explain_filter_conjunct_rank(expr: &Expr) -> u8 {
-    if is_simple_equality_filter_conjunct(expr) {
-        1
-    } else {
-        0
+fn render_explain_bool_comparison(
+    op: crate::include::nodes::primnodes::OpExprKind,
+    left: &Expr,
+    right: &Expr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> Option<String> {
+    let (expr, value) = bool_distinctness_operand(left, right)?;
+    if !expr_sql_type_is_bool(expr) {
+        return None;
+    }
+    let rendered = render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
+    match (op, value) {
+        (crate::include::nodes::primnodes::OpExprKind::Eq, true)
+        | (crate::include::nodes::primnodes::OpExprKind::NotEq, false) => Some(rendered),
+        (crate::include::nodes::primnodes::OpExprKind::Eq, false)
+        | (crate::include::nodes::primnodes::OpExprKind::NotEq, true) => {
+            if explain_bool_arg_is_bare(expr) {
+                Some(format!("NOT {rendered}"))
+            } else {
+                Some(format!("NOT ({rendered})"))
+            }
+        }
+        _ => None,
     }
 }
 
-fn is_simple_equality_filter_conjunct(expr: &Expr) -> bool {
+fn render_explain_negated_bool_comparison(
+    expr: &Expr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> Option<String> {
     let Expr::Op(op) = expr else {
-        return false;
+        return None;
     };
-    if op.op != crate::include::nodes::primnodes::OpExprKind::Eq || op.args.len() != 2 {
-        return false;
+    let [left, right] = op.args.as_slice() else {
+        return None;
+    };
+    let (expr, value) = bool_distinctness_operand(left, right)?;
+    if !expr_sql_type_is_bool(expr) {
+        return None;
     }
-    let left = strip_explain_filter_casts(&op.args[0]);
-    let right = strip_explain_filter_casts(&op.args[1]);
-    matches!(
-        (left, right),
-        (Expr::Var(_), Expr::Const(_)) | (Expr::Const(_), Expr::Var(_))
-    )
+    let rendered = render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
+    match (op.op, value) {
+        (crate::include::nodes::primnodes::OpExprKind::Eq, false)
+        | (crate::include::nodes::primnodes::OpExprKind::NotEq, true) => Some(rendered),
+        (crate::include::nodes::primnodes::OpExprKind::Eq, true)
+        | (crate::include::nodes::primnodes::OpExprKind::NotEq, false) => {
+            if explain_bool_arg_is_bare(expr) {
+                Some(format!("NOT {rendered}"))
+            } else {
+                Some(format!("NOT ({rendered})"))
+            }
+        }
+        _ => None,
+    }
 }
 
-fn strip_explain_filter_casts(expr: &Expr) -> &Expr {
+fn explain_filter_conjunct_rank(expr: &Expr) -> u8 {
+    use crate::include::nodes::primnodes::{BoolExprType, OpExprKind};
+
+    match expr {
+        Expr::IsNull(_) | Expr::IsNotNull(_) => 0,
+        Expr::Bool(bool_expr) if matches!(bool_expr.boolop, BoolExprType::Not) => 1,
+        Expr::ScalarArrayOp(saop)
+            if matches!(
+                saop.op,
+                SubqueryComparisonOp::Eq | SubqueryComparisonOp::NotEq
+            ) =>
+        {
+            2
+        }
+        Expr::Op(op) => match op.op {
+            OpExprKind::Eq => 2,
+            OpExprKind::NotEq
+            | OpExprKind::Lt
+            | OpExprKind::LtEq
+            | OpExprKind::Gt
+            | OpExprKind::GtEq
+                if op
+                    .args
+                    .iter()
+                    .any(|arg| explain_filter_arg_has_function(arg)) =>
+            {
+                3
+            }
+            OpExprKind::NotEq
+            | OpExprKind::Lt
+            | OpExprKind::LtEq
+            | OpExprKind::Gt
+            | OpExprKind::GtEq => 1,
+            _ => 1,
+        },
+        _ => 1,
+    }
+}
+
+fn explain_filter_arg_has_function(expr: &Expr) -> bool {
     match expr {
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
-            strip_explain_filter_casts(inner)
+            explain_filter_arg_has_function(inner)
         }
-        other => other,
+        Expr::Func(_) => true,
+        _ => false,
     }
 }
 
@@ -3515,10 +3659,31 @@ fn render_explain_scalar_array_op(
         _ => return format!("{saop:?}"),
     };
     let quantifier = if saop.use_or { "ANY" } else { "ALL" };
+    let display_type = if expr_has_bpchar_display_type(&saop.left) {
+        Some(SqlType::array_of(SqlType::new(SqlTypeKind::Char)))
+    } else if expr_sql_type_hint_is(&saop.left, SqlTypeKind::Varchar) {
+        Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)))
+    } else if matches!(saop.right.as_ref(), Expr::Const(Value::Null)) {
+        crate::include::nodes::primnodes::expr_sql_type_hint(&saop.left).map(SqlType::array_of)
+    } else {
+        None
+    };
     format!(
         "{} {op} {quantifier} ({})",
-        render_explain_infix_operand(&saop.left, qualifier, column_names),
-        render_explain_expr_inner_with_qualifier(&saop.right, qualifier, column_names)
+        render_explain_infix_operand_with_display_type(
+            &saop.left,
+            display_type.map(|ty| ty.element_type()),
+            None,
+            qualifier,
+            column_names
+        ),
+        render_explain_infix_operand_with_display_type(
+            &saop.right,
+            display_type,
+            saop.collation_oid,
+            qualifier,
+            column_names
+        )
     )
 }
 
@@ -4268,6 +4433,63 @@ fn render_explain_infix_operand(
     }
 }
 
+fn render_explain_infix_operand_with_display_type(
+    expr: &Expr,
+    display_type: Option<SqlType>,
+    collation_oid: Option<u32>,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    let expr = if display_type.is_some_and(|ty| matches!(ty.kind, SqlTypeKind::Int8)) {
+        strip_bigint_comparison_cast(expr)
+    } else if display_type.is_some_and(|ty| matches!(ty.kind, SqlTypeKind::Char)) {
+        strip_bpchar_to_text(expr)
+    } else {
+        expr
+    };
+    let rendered = match (display_type, expr) {
+        (Some(sql_type), Expr::Const(value)) => {
+            format!(
+                "{}::{}",
+                render_explain_typed_literal(value, sql_type),
+                render_explain_sql_type_name(sql_type.with_typmod(SqlType::NO_TYPEMOD))
+            )
+        }
+        (Some(sql_type), Expr::Cast(inner, _)) if matches!(inner.as_ref(), Expr::Const(_)) => {
+            render_explain_infix_operand_with_display_type(
+                inner,
+                Some(sql_type),
+                None,
+                qualifier,
+                column_names,
+            )
+        }
+        (Some(sql_type), Expr::ArrayLiteral { elements, .. }) if sql_type.is_array => {
+            render_explain_array_literal(elements, sql_type, qualifier, column_names)
+        }
+        (Some(sql_type), expr)
+            if matches!(sql_type.kind, SqlTypeKind::Text)
+                && expr_sql_type_hint_is(expr, SqlTypeKind::Varchar) =>
+        {
+            format!(
+                "({})::text",
+                render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
+            )
+        }
+        (Some(sql_type), expr)
+            if matches!(sql_type.kind, SqlTypeKind::Text)
+                && expr_sql_type_hint_is(expr, SqlTypeKind::Text) =>
+        {
+            format!(
+                "({})::text",
+                render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
+            )
+        }
+        _ => render_explain_infix_operand(expr, qualifier, column_names),
+    };
+    append_explain_collation(rendered, collation_oid)
+}
+
 fn explain_expr_needs_infix_operand_parens(expr: &Expr) -> bool {
     matches!(
         expr,
@@ -4277,6 +4499,110 @@ fn explain_expr_needs_infix_operand_parens(expr: &Expr) -> bool {
             | Expr::Like { .. }
             | Expr::Similar { .. }
     ) || matches!(expr, Expr::Func(func) if render_explain_func_expr_is_infix(func))
+}
+
+fn comparison_display_type(
+    left: &Expr,
+    right: &Expr,
+    collation_oid: Option<u32>,
+) -> Option<SqlType> {
+    if expr_has_bpchar_display_type(left) || expr_has_bpchar_display_type(right) {
+        Some(SqlType::new(SqlTypeKind::Char))
+    } else if collation_oid == Some(POSIX_COLLATION_OID)
+        && (expr_sql_type_hint_is(left, SqlTypeKind::Text)
+            || expr_sql_type_hint_is(right, SqlTypeKind::Text))
+    {
+        Some(SqlType::new(SqlTypeKind::Text))
+    } else if let Some(sql_type) = comparison_cast_literal_display_type(left, right) {
+        Some(sql_type)
+    } else {
+        None
+    }
+}
+
+fn comparison_cast_literal_display_type(left: &Expr, right: &Expr) -> Option<SqlType> {
+    let sql_type = match (left, right) {
+        (Expr::Cast(_, sql_type), Expr::Const(_)) | (Expr::Const(_), Expr::Cast(_, sql_type)) => {
+            *sql_type
+        }
+        _ => return None,
+    };
+    matches!(sql_type.kind, SqlTypeKind::Int8 | SqlTypeKind::Numeric).then_some(sql_type)
+}
+
+fn expr_has_bpchar_display_type(expr: &Expr) -> bool {
+    if expr_sql_type_hint_is(expr, SqlTypeKind::Char) {
+        return true;
+    }
+    matches!(
+        expr,
+        Expr::Func(func)
+            if matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(BuiltinScalarFunction::BpcharToText)
+            )
+    )
+}
+
+fn strip_bpchar_to_text(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Func(func)
+            if matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(BuiltinScalarFunction::BpcharToText)
+            ) && func.args.len() == 1 =>
+        {
+            &func.args[0]
+        }
+        _ => expr,
+    }
+}
+
+fn strip_bigint_comparison_cast(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Cast(inner, sql_type) if matches!(sql_type.kind, SqlTypeKind::Int8) => inner,
+        _ => expr,
+    }
+}
+
+fn expr_sql_type_is_bool(expr: &Expr) -> bool {
+    expr_sql_type_hint_is(expr, SqlTypeKind::Bool)
+}
+
+fn expr_sql_type_hint_is(expr: &Expr, kind: SqlTypeKind) -> bool {
+    crate::include::nodes::primnodes::expr_sql_type_hint(expr)
+        .is_some_and(|ty| !ty.is_array && ty.kind == kind)
+}
+
+fn append_explain_collation(rendered: String, collation_oid: Option<u32>) -> String {
+    let Some(collation_oid) = collation_oid else {
+        return rendered;
+    };
+    let Some(collation) = explain_collation_name(collation_oid) else {
+        return rendered;
+    };
+    format!("{rendered} COLLATE {collation}")
+}
+
+fn explain_collation_name(collation_oid: u32) -> Option<&'static str> {
+    match collation_oid {
+        DEFAULT_COLLATION_OID | 0 => None,
+        C_COLLATION_OID => Some("\"C\""),
+        POSIX_COLLATION_OID => Some("\"POSIX\""),
+        _ => None,
+    }
+}
+
+fn render_explain_collate(
+    expr: &Expr,
+    collation_oid: u32,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    append_explain_collation(
+        render_explain_expr_inner_with_qualifier(expr, qualifier, column_names),
+        Some(collation_oid),
+    )
 }
 
 pub(crate) fn render_explain_join_expr_inner(
@@ -4716,6 +5042,15 @@ fn render_explain_literal(value: &Value) -> String {
     }
 }
 
+fn render_explain_typed_literal(value: &Value, sql_type: SqlType) -> String {
+    match sql_type.kind {
+        SqlTypeKind::Int8 | SqlTypeKind::Numeric => {
+            format!("'{}'", render_explain_literal(value).trim_matches('\''))
+        }
+        _ => render_explain_literal(value),
+    }
+}
+
 fn render_explain_array_literal(
     elements: &[Expr],
     array_type: SqlType,
@@ -4762,6 +5097,13 @@ fn render_explain_array_literal_value(value: &Value, element_type: SqlType) -> S
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace(',', "\\,"),
+        Value::Bool(value) => {
+            if *value {
+                "t".into()
+            } else {
+                "f".into()
+            }
+        }
         Value::Float64(v) => format_float8_text(*v, FloatFormatOptions::default()),
         Value::Numeric(v) => v.render(),
         Value::Null => "NULL".into(),
@@ -6004,6 +6346,180 @@ fn projection_is_explain_passthrough(state: &ProjectionState) -> bool {
         .all(|target| !target.resjunk && matches!(target.expr, Expr::Var(_)))
 }
 
+fn aggregate_uses_plain_fast_path(state: &AggregateState) -> bool {
+    state.strategy == AggregateStrategy::Plain
+        && !state.disabled
+        && state.group_by.is_empty()
+        && state.passthrough_exprs.is_empty()
+        && state.having.is_none()
+        && state.accumulators.iter().all(|accum| {
+            !accum.distinct
+                && accum.direct_args.is_empty()
+                && accum.order_by.is_empty()
+                && accum.filter.is_none()
+                && accum.args.iter().all(expr_is_plain_aggregate_safe)
+        })
+}
+
+fn expr_is_plain_aggregate_safe(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup == 0 && !is_special_varno(var.varno),
+        Expr::Const(_) => true,
+        Expr::Op(op) => op.args.iter().all(expr_is_plain_aggregate_safe),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().all(expr_is_plain_aggregate_safe),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_none_or(expr_is_plain_aggregate_safe)
+                && case_expr.args.iter().all(|arm| {
+                    expr_is_plain_aggregate_safe(&arm.expr)
+                        && expr_is_plain_aggregate_safe(&arm.result)
+                })
+                && expr_is_plain_aggregate_safe(&case_expr.defresult)
+        }
+        Expr::Func(func) => func.args.iter().all(expr_is_plain_aggregate_safe),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .all(expr_is_plain_aggregate_safe),
+        Expr::ScalarArrayOp(op) => {
+            expr_is_plain_aggregate_safe(&op.left) && expr_is_plain_aggregate_safe(&op.right)
+        }
+        Expr::Xml(xml) => xml.child_exprs().all(expr_is_plain_aggregate_safe),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_is_plain_aggregate_safe(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_is_plain_aggregate_safe(expr)
+                && expr_is_plain_aggregate_safe(pattern)
+                && escape.as_deref().is_none_or(expr_is_plain_aggregate_safe)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_is_plain_aggregate_safe(left) && expr_is_plain_aggregate_safe(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().all(expr_is_plain_aggregate_safe),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .all(|(_, field)| expr_is_plain_aggregate_safe(field)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_is_plain_aggregate_safe(array)
+                && subscripts.iter().all(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_none_or(expr_is_plain_aggregate_safe)
+                        && subscript
+                            .upper
+                            .as_ref()
+                            .is_none_or(expr_is_plain_aggregate_safe)
+                })
+        }
+        Expr::Param(_)
+        | Expr::Aggref(_)
+        | Expr::WindowFunc(_)
+        | Expr::CaseTest(_)
+        | Expr::SetReturning(_)
+        | Expr::SubLink(_)
+        | Expr::SubPlan(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn execute_plain_aggregate_fast_path(
+    state: &mut AggregateState,
+    runtimes: &[AggregateRuntime],
+    ctx: &mut ExecutorContext,
+) -> Result<Option<Vec<MaterializedRow>>, ExecError> {
+    let mut accum_states = runtimes
+        .iter()
+        .zip(state.accumulators.iter())
+        .map(|(runtime, accum)| runtime.initialize_state(accum))
+        .collect::<Vec<_>>();
+    let const_arg_values = state
+        .accumulators
+        .iter()
+        .map(|accum| {
+            accum
+                .args
+                .iter()
+                .map(|arg| match arg {
+                    Expr::Const(value) => Some(value.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .collect::<Vec<_>>();
+
+    while let Some(slot) = state.input.exec_proc_node(ctx)? {
+        ctx.check_for_interrupts()?;
+        clear_inner_expr_bindings(ctx);
+        for (i, accum) in state.accumulators.iter().enumerate() {
+            if let Some(values) = const_arg_values[i].as_ref() {
+                runtimes[i].transition(&mut accum_states[i], values, ctx)?;
+                continue;
+            }
+            match accum.args.as_slice() {
+                [] => runtimes[i].transition(&mut accum_states[i], &[], ctx)?,
+                [arg] => {
+                    let value = eval_expr(arg, slot, ctx)?;
+                    runtimes[i].transition(
+                        &mut accum_states[i],
+                        std::slice::from_ref(&value),
+                        ctx,
+                    )?;
+                }
+                args => {
+                    let values = args
+                        .iter()
+                        .map(|arg| eval_expr(arg, slot, ctx))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    runtimes[i].transition(&mut accum_states[i], &values, ctx)?;
+                }
+            }
+        }
+    }
+
+    let mut row_values = Vec::with_capacity(state.accumulators.len());
+    for ((runtime, accum_state), accum) in runtimes
+        .iter()
+        .zip(accum_states.iter())
+        .zip(state.accumulators.iter())
+    {
+        row_values.push(runtime.finalize(accum, accum_state, &[], &[], ctx)?);
+    }
+
+    Ok(Some(vec![MaterializedRow::new(
+        TupleSlot::virtual_row(row_values),
+        Vec::new(),
+    )]))
+}
+
 impl PlanNode for AggregateState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -6027,6 +6543,23 @@ impl PlanNode for AggregateState {
                 .runtimes
                 .clone()
                 .expect("aggregate runtimes initialized above");
+            if aggregate_uses_plain_fast_path(self)
+                && let Some(result_rows) = execute_plain_aggregate_fast_path(self, &runtimes, ctx)?
+            {
+                self.result_rows = Some(result_rows);
+                let rows = self.result_rows.as_mut().unwrap();
+                if self.next_index >= rows.len() {
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                }
+
+                let idx = self.next_index;
+                self.next_index += 1;
+                self.current_bindings = rows[idx].system_bindings.clone();
+                set_active_system_bindings(ctx, &self.current_bindings);
+                finish_row(&mut self.stats, start);
+                return Ok(Some(&mut rows[idx].slot));
+            }
             let mut groups: Vec<AggGroup> = Vec::new();
 
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
@@ -6477,31 +7010,60 @@ impl PlanNode for FunctionScanState {
         };
         if self.rows.is_none() {
             let mut dummy = TupleSlot::empty(0);
-            self.rows = Some(
-                eval_set_returning_call(&self.call, &mut dummy, ctx)?
-                    .into_iter()
-                    .map(|slot| MaterializedRow::new(slot, Vec::new()))
-                    .collect(),
-            );
+            self.rows = Some(if function_scan_uses_simple_path(&self.call) {
+                FunctionScanRows::Simple(eval_set_returning_call_simple_values(
+                    &self.call, &mut dummy, ctx,
+                )?)
+            } else {
+                let rows = eval_set_returning_call(&self.call, &mut dummy, ctx)?;
+                FunctionScanRows::Materialized(
+                    rows.into_iter()
+                        .map(|slot| MaterializedRow::new(slot, Vec::new()))
+                        .collect(),
+                )
+            });
         }
 
         let rows = self.rows.as_mut().unwrap();
-        if self.next_index >= rows.len() {
-            finish_eof(&mut self.stats, start, ctx);
-            return Ok(None);
-        }
+        match rows {
+            FunctionScanRows::Simple(rows) => {
+                if self.next_index >= rows.len() {
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                }
 
-        let idx = self.next_index;
-        self.next_index += 1;
-        self.current_bindings = rows[idx].system_bindings.clone();
-        set_active_system_bindings(ctx, &self.current_bindings);
-        finish_row(&mut self.stats, start);
-        Ok(Some(&mut rows[idx].slot))
+                let idx = self.next_index;
+                self.next_index += 1;
+                let value = std::mem::replace(&mut rows[idx], Value::Null);
+                store_single_virtual_value(&mut self.slot, value);
+                self.current_bindings.clear();
+                set_active_system_bindings(ctx, &self.current_bindings);
+                finish_row(&mut self.stats, start);
+                Ok(Some(&mut self.slot))
+            }
+            FunctionScanRows::Materialized(rows) => {
+                if self.next_index >= rows.len() {
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                }
+
+                let idx = self.next_index;
+                self.next_index += 1;
+                self.current_bindings = rows[idx].system_bindings.clone();
+                set_active_system_bindings(ctx, &self.current_bindings);
+                finish_row(&mut self.stats, start);
+                Ok(Some(&mut rows[idx].slot))
+            }
+        }
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
-        let rows = self.rows.as_mut()?;
-        let idx = self.next_index.checked_sub(1)?;
-        rows.get_mut(idx).map(|row| &mut row.slot)
+        match self.rows.as_mut()? {
+            FunctionScanRows::Simple(_) => self.next_index.checked_sub(1).map(|_| &mut self.slot),
+            FunctionScanRows::Materialized(rows) => {
+                let idx = self.next_index.checked_sub(1)?;
+                rows.get_mut(idx).map(|row| &mut row.slot)
+            }
+        }
     }
     fn current_system_bindings(&self) -> &[SystemVarBinding] {
         &self.current_bindings

@@ -348,6 +348,14 @@ fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
         Plan::Projection { input, targets, .. } => {
             projection_targets_are_explain_passthrough(input, targets).then_some(input.as_ref())
         }
+        Plan::Filter { input, .. }
+            if matches!(
+                input.as_ref(),
+                Plan::Append { .. } | Plan::MergeAppend { .. }
+            ) =>
+        {
+            Some(input.as_ref())
+        }
         Plan::Append { children, .. } if children.len() == 1 => children.first(),
         _ => None,
     }
@@ -1319,6 +1327,17 @@ fn nonverbose_plan_label(
     is_child: bool,
 ) -> Option<String> {
     match plan {
+        Plan::Filter { input, .. }
+            if matches!(
+                input.as_ref(),
+                Plan::SeqScan { .. }
+                    | Plan::IndexOnlyScan { .. }
+                    | Plan::IndexScan { .. }
+                    | Plan::BitmapHeapScan { .. }
+            ) =>
+        {
+            nonverbose_plan_label(input, ctx, is_child)
+        }
         Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
             Some("Result".into())
         }
@@ -1386,6 +1405,10 @@ fn nonverbose_relation_scan_label(
     is_child: bool,
 ) -> Option<String> {
     if let Some(alias) = alias {
+        let relation_name = relation_name
+            .rsplit_once(' ')
+            .map(|(name, _)| name)
+            .unwrap_or(relation_name);
         return Some(format!("{scan_name} on {relation_name} {alias}"));
     }
     if !is_child
@@ -2177,11 +2200,15 @@ fn context_for_sibling_scan(
                 *seen += 1;
             }
         }
-        Some(LeafScanSource::Relation(relation_name)) => {
+        Some(LeafScanSource::Relation {
+            key,
+            inherited_alias_base,
+        }) => {
             if child_ctx.relation_scan_alias.is_none() {
-                let seen = relations_seen.entry(relation_name.clone()).or_default();
-                child_ctx.relation_scan_alias =
-                    (*seen > 0).then(|| format!("{relation_name}_{seen}"));
+                let seen = relations_seen.entry(key.clone()).or_default();
+                child_ctx.relation_scan_alias = inherited_alias_base
+                    .map(|alias_base| format!("{alias_base}_{}", *seen + 1))
+                    .or_else(|| (*seen > 0).then(|| format!("{key}_{seen}")));
                 *seen += 1;
             }
         }
@@ -2193,7 +2220,10 @@ fn context_for_sibling_scan(
 enum LeafScanSource {
     Values,
     Function(String),
-    Relation(String),
+    Relation {
+        key: String,
+        inherited_alias_base: Option<String>,
+    },
 }
 
 fn child_leaf_scan_source(plan: &Plan) -> Option<LeafScanSource> {
@@ -2209,8 +2239,7 @@ fn child_leaf_scan_source(plan: &Plan) -> Option<LeafScanSource> {
         Plan::SeqScan { relation_name, .. }
         | Plan::IndexOnlyScan { relation_name, .. }
         | Plan::IndexScan { relation_name, .. }
-        | Plan::BitmapHeapScan { relation_name, .. } => unaliased_relation_name(relation_name)
-            .map(|name| LeafScanSource::Relation(name.to_string())),
+        | Plan::BitmapHeapScan { relation_name, .. } => relation_leaf_scan_source(relation_name),
         Plan::Hash { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
@@ -2221,6 +2250,21 @@ fn child_leaf_scan_source(plan: &Plan) -> Option<LeafScanSource> {
         | Plan::SubqueryScan { input, .. } => child_leaf_scan_source(input),
         _ => None,
     }
+}
+
+fn relation_leaf_scan_source(relation_name: &str) -> Option<LeafScanSource> {
+    if let Some((_, alias)) = relation_name.rsplit_once(' ')
+        && let Some(root_alias) = inherited_root_alias(alias)
+    {
+        return Some(LeafScanSource::Relation {
+            key: root_alias.to_string(),
+            inherited_alias_base: Some(root_alias.to_string()),
+        });
+    }
+    unaliased_relation_name(relation_name).map(|name| LeafScanSource::Relation {
+        key: name.to_string(),
+        inherited_alias_base: None,
+    })
 }
 
 fn explain_node_prefix(indent: usize, is_child: bool) -> String {
@@ -3493,9 +3537,10 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         | Plan::Values { .. } => Vec::new(),
         Plan::BitmapOr { children, .. } => children.iter().collect(),
         Plan::BitmapHeapScan { bitmapqual, .. } => vec![bitmapqual.as_ref()],
-        Plan::Append { children, .. }
-        | Plan::MergeAppend { children, .. }
-        | Plan::SetOp { children, .. } => children.iter().collect(),
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+            flattened_append_children(children)
+        }
+        Plan::SetOp { children, .. } => children.iter().collect(),
         Plan::Filter { input, .. }
             if matches!(
                 input.as_ref(),
@@ -3530,6 +3575,32 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
             recursive: right,
             ..
         } => vec![left.as_ref(), right.as_ref()],
+    }
+}
+
+fn flattened_append_children(children: &[Plan]) -> Vec<&Plan> {
+    let mut flattened = Vec::new();
+    for child in children {
+        if let Some(nested) = passthrough_append_children(child) {
+            flattened.extend(flattened_append_children(nested));
+        } else {
+            flattened.push(child);
+        }
+    }
+    flattened
+}
+
+fn passthrough_append_children(mut plan: &Plan) -> Option<&[Plan]> {
+    loop {
+        match plan {
+            Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+                return Some(children);
+            }
+            _ => {
+                let child = explain_passthrough_plan_child(plan)?;
+                plan = child;
+            }
+        }
     }
 }
 

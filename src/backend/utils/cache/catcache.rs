@@ -61,11 +61,11 @@ use crate::include::catalog::{
     PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow,
     PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
     PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
-    PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow, PgUserMappingRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
-    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
+    PgPublicationRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow, REGCONFIG_ARRAY_TYPE_OID,
+    REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID,
+    TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
     TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
     UUID_ARRAY_TYPE_OID, UUID_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
     VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID,
@@ -79,6 +79,7 @@ use crate::include::catalog::{
     bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows,
     bootstrap_pg_user_mapping_rows, builtin_type_rows, composite_array_type_row,
     composite_type_row, range_type_ref_for_sql_type, sort_pg_conversion_rows, sort_pg_rewrite_rows,
+    sort_pg_sequence_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -98,6 +99,7 @@ pub struct CatCache {
     partitioned_tables_by_relid: BTreeMap<u32, PgPartitionedTableRow>,
     index_rows: Vec<PgIndexRow>,
     rewrite_rows: Vec<PgRewriteRow>,
+    sequence_rows: Vec<PgSequenceRow>,
     trigger_rows: Vec<PgTriggerRow>,
     policy_rows: Vec<PgPolicyRow>,
     publication_rows: Vec<PgPublicationRow>,
@@ -522,6 +524,7 @@ impl CatCache {
             rows.inherits,
             rows.indexes,
             rows.rewrites,
+            rows.sequences,
             rows.triggers,
             rows.policies,
             rows.publications,
@@ -570,6 +573,7 @@ impl CatCache {
         inherit_rows: Vec<PgInheritsRow>,
         index_rows: Vec<PgIndexRow>,
         rewrite_rows: Vec<PgRewriteRow>,
+        sequence_rows: Vec<PgSequenceRow>,
         trigger_rows: Vec<PgTriggerRow>,
         policy_rows: Vec<PgPolicyRow>,
         publication_rows: Vec<PgPublicationRow>,
@@ -644,6 +648,8 @@ impl CatCache {
         sort_pg_index_rows(&mut cache.index_rows);
         cache.rewrite_rows = rewrite_rows;
         sort_pg_rewrite_rows(&mut cache.rewrite_rows);
+        cache.sequence_rows = sequence_rows;
+        sort_pg_sequence_rows(&mut cache.sequence_rows);
         cache.trigger_rows = trigger_rows;
         sort_pg_trigger_rows(&mut cache.trigger_rows);
         cache.policy_rows = policy_rows;
@@ -881,6 +887,10 @@ impl CatCache {
 
     pub fn rewrite_rows(&self) -> Vec<PgRewriteRow> {
         self.rewrite_rows.clone()
+    }
+
+    pub fn sequence_rows(&self) -> Vec<PgSequenceRow> {
+        self.sequence_rows.clone()
     }
 
     pub fn trigger_rows(&self) -> Vec<PgTriggerRow> {

@@ -25,10 +25,10 @@ use crate::backend::parser::{
     BoundInsertStatement, BoundMergeAction, BoundMergeStatement, BoundMergeWhenClause,
     BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey, BoundRelation,
     BoundRelationConstraints, BoundTemporalConstraint, BoundUpdateStatement, BoundUpdateTarget,
-    Catalog, CatalogLookup, CreateTableAsStatement, DropTableStatement, ExplainFormat,
-    ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement, OverridingKind,
-    ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TableAsObjectType,
-    TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table,
+    Catalog, CatalogLookup, CreateTableAsStatement, DomainConstraintLookupKind, DropTableStatement,
+    ExplainFormat, ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement,
+    OverridingKind, ParseError, SelectStatement, SqlType, SqlTypeKind, Statement,
+    TableAsObjectType, TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table,
     bind_expr_with_outer_and_ctes, bind_generated_expr, bind_referenced_by_foreign_keys,
     bind_relation_constraints, bind_scalar_expr_in_scope, bind_update, parse_expr,
     scope_for_relation,
@@ -49,7 +49,9 @@ use super::explain::{
     format_explain_plan_with_subplans, format_verbose_explain_plan_json_with_catalog,
     format_verbose_explain_plan_with_catalog, push_explain_line,
 };
-use super::partition::{exec_find_partition, exec_setup_partition_tuple_routing};
+use super::partition::{
+    exec_find_partition, exec_setup_partition_tuple_routing, partition_root_oid,
+};
 use super::trigger::RuntimeTriggers;
 use super::upsert::execute_insert_on_conflict_rows;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
@@ -85,7 +87,10 @@ use crate::include::nodes::execnodes::*;
 use crate::include::nodes::parsenodes::{IndexColumnDef, RelOption};
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
-use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, expr_sql_type_hint};
+use crate::include::nodes::primnodes::{
+    QueryColumn, RelationPrivilegeMask, RelationPrivilegeRequirement, TargetEntry,
+    expr_sql_type_hint,
+};
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::database::commands::privilege::{
     acl_grants_privilege, effective_acl_grantee_names,
@@ -557,6 +562,9 @@ pub(crate) fn execute_explain(
         let execution_buffer_stats = ctx.pool.usage_stats();
         let (state, row_count, elapsed) = exec_result?;
         format_explain_lines_with_options(state.as_ref(), 0, true, costs, timing, &mut lines);
+        if !buffers {
+            lines.retain(|line| !line.trim_start().starts_with("Buffers:"));
+        }
         if buffers {
             lines.push("Planning:".into());
             lines.push(format!("  {}", format_buffer_usage(planning_buffer_stats)));
@@ -970,9 +978,23 @@ fn validate_maintenance_targets(
 
 #[derive(Debug, Clone)]
 pub(crate) enum WriteUpdatedRowResult {
-    Updated(ItemPointerData, Vec<PendingNoActionForeignKeyCheck>),
+    Updated(
+        ItemPointerData,
+        UpdatedRowWriteInfo,
+        Vec<PendingNoActionForeignKeyCheck>,
+        Vec<PendingOutboundForeignKeyCheck>,
+    ),
     TupleUpdated(ItemPointerData),
     AlreadyModified,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct UpdatedRowWriteInfo {
+    relation_oid: u32,
+    relation_name: String,
+    desc: RelationDesc,
+    constraints: BoundRelationConstraints,
+    values: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1855,6 +1877,213 @@ pub(crate) fn rollback_inserted_row(
     Ok(())
 }
 
+struct PartitionUpdateDestination {
+    relation_info: PartitionResultRelInfo,
+    values: Vec<Value>,
+}
+
+fn route_updated_partition_row(
+    catalog: &dyn CatalogLookup,
+    relation_name: &str,
+    relation_oid: u32,
+    relation_constraints: &BoundRelationConstraints,
+    indexes: &[BoundIndexRelation],
+    toast_index: Option<&BoundIndexRelation>,
+    current_values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Option<PartitionUpdateDestination>, ExecError> {
+    let Some(current_relation) = catalog.relation_by_oid(relation_oid) else {
+        return Ok(None);
+    };
+    if !current_relation.relispartition {
+        return Ok(None);
+    }
+    let root_oid = partition_root_oid(catalog, relation_oid)?.unwrap_or(relation_oid);
+    let Some(root_relation) = catalog.relation_by_oid(root_oid) else {
+        return Ok(None);
+    };
+    let Some(root_values) =
+        remap_child_row_to_parent(current_values, &current_relation.desc, &root_relation.desc)
+    else {
+        return Ok(None);
+    };
+    let mut proute = exec_setup_partition_tuple_routing(catalog, &root_relation)?;
+    let routed = exec_find_partition(catalog, &mut proute, &root_relation, &root_values, ctx)?;
+    if routed.relation_oid == relation_oid {
+        return Ok(None);
+    }
+    let routed_values = remap_partition_row(&root_values, &root_relation.desc, &routed.desc)?;
+    let relation_info = PartitionResultRelInfo::new(
+        catalog,
+        relation_name,
+        relation_oid,
+        relation_constraints,
+        indexes,
+        toast_index,
+        routed,
+    )?;
+    Ok(Some(PartitionUpdateDestination {
+        relation_info,
+        values: routed_values,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn move_updated_row_to_partition(
+    relation_name: &str,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    desc: &RelationDesc,
+    referenced_by_foreign_keys: &[BoundReferencedByForeignKey],
+    destination: PartitionUpdateDestination,
+    current_tid: ItemPointerData,
+    current_old_values: &[Value],
+    current_values: &[Value],
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+) -> Result<WriteUpdatedRowResult, ExecError> {
+    apply_inbound_foreign_key_actions_on_update(
+        relation_name,
+        referenced_by_foreign_keys,
+        current_old_values,
+        current_values,
+        ForeignKeyActionPhase::BeforeParentWrite,
+        ctx,
+        xid,
+        cid,
+        waiter,
+    )?;
+
+    let destination = destination;
+    let inserted_tid = write_insert_heap_row(
+        &destination.relation_info.relation_name,
+        destination.relation_info.relation.rel,
+        destination.relation_info.relation.toast,
+        destination.relation_info.toast_index.as_ref(),
+        &destination.relation_info.relation.desc,
+        &destination.relation_info.relation_constraints,
+        &[],
+        &destination.values,
+        ctx,
+        xid,
+        cid,
+    )?;
+    maintain_indexes_for_row(
+        destination.relation_info.relation.rel,
+        &destination.relation_info.relation.desc,
+        &destination.relation_info.indexes,
+        &destination.values,
+        inserted_tid,
+        ctx,
+    )?;
+    crate::backend::executor::enforce_outbound_foreign_keys_for_insert(
+        &destination.relation_info.relation_name,
+        destination.relation_info.relation.rel,
+        &destination.relation_info.relation_constraints.foreign_keys,
+        &destination.values,
+        crate::backend::executor::InsertForeignKeyCheckPhase::AfterIndexInsert,
+        ctx,
+    )?;
+
+    let old_tuple = if toast.is_some() {
+        Some(heap_fetch(&*ctx.pool, ctx.client_id, rel, current_tid)?)
+    } else {
+        None
+    };
+    let delete_snapshot = ctx.snapshot.clone();
+    match heap_delete_with_waiter(
+        &*ctx.pool,
+        ctx.client_id,
+        rel,
+        &ctx.txns,
+        xid,
+        current_tid,
+        &delete_snapshot,
+        waiter,
+    ) {
+        Ok(()) => {}
+        Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+            let _ = rollback_inserted_row(
+                destination.relation_info.relation.rel,
+                destination.relation_info.relation.toast,
+                &destination.relation_info.relation.desc,
+                inserted_tid,
+                ctx,
+                xid,
+            );
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_update());
+            }
+            return Ok(WriteUpdatedRowResult::TupleUpdated(new_ctid));
+        }
+        Err(HeapError::TupleAlreadyModified(_)) => {
+            let _ = rollback_inserted_row(
+                destination.relation_info.relation.rel,
+                destination.relation_info.relation.toast,
+                &destination.relation_info.relation.desc,
+                inserted_tid,
+                ctx,
+                xid,
+            );
+            if ctx.uses_transaction_snapshot() {
+                return Err(serialization_failure_due_to_concurrent_update());
+            }
+            return Ok(WriteUpdatedRowResult::AlreadyModified);
+        }
+        Err(err) => {
+            let _ = rollback_inserted_row(
+                destination.relation_info.relation.rel,
+                destination.relation_info.relation.toast,
+                &destination.relation_info.relation.desc,
+                inserted_tid,
+                ctx,
+                xid,
+            );
+            return Err(err.into());
+        }
+    }
+    if let (Some(toast), Some(old_tuple)) = (toast, old_tuple.as_ref()) {
+        delete_external_from_tuple(ctx, toast, desc, old_tuple, xid)?;
+    }
+    let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
+        relation_name,
+        referenced_by_foreign_keys,
+        current_old_values,
+        current_values,
+        ForeignKeyActionPhase::AfterParentWrite,
+        ctx,
+        xid,
+        cid,
+        waiter,
+    )?;
+    validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
+    let pending_no_action_checks = collect_no_action_checks_on_update(
+        relation_name,
+        referenced_by_foreign_keys,
+        current_old_values,
+        current_values,
+        ctx,
+    )?;
+    Ok(WriteUpdatedRowResult::Updated(
+        inserted_tid,
+        UpdatedRowWriteInfo {
+            relation_oid: destination.relation_info.relation.relation_oid,
+            relation_name: destination.relation_info.relation_name,
+            desc: destination.relation_info.relation.desc,
+            constraints: destination.relation_info.relation_constraints,
+            values: destination.values,
+        },
+        pending_no_action_checks,
+        Vec::new(),
+    ))
+}
+
 pub(crate) fn write_updated_row(
     relation_name: &str,
     rel: crate::backend::storage::smgr::RelFileLocator,
@@ -1908,6 +2137,34 @@ pub(crate) fn write_updated_row(
         &current_values,
         ctx,
     )?;
+    if let Some(catalog) = ctx.catalog.clone()
+        && let Some(destination) = route_updated_partition_row(
+            catalog.as_ref(),
+            relation_name,
+            relation_oid,
+            relation_constraints,
+            indexes,
+            toast_index,
+            &current_values,
+            ctx,
+        )?
+    {
+        return move_updated_row_to_partition(
+            relation_name,
+            rel,
+            toast,
+            desc,
+            referenced_by_foreign_keys,
+            destination,
+            current_tid,
+            current_old_values,
+            &current_values,
+            ctx,
+            xid,
+            cid,
+            waiter,
+        );
+    }
     crate::backend::executor::enforce_relation_constraints(
         relation_name,
         desc,
@@ -1935,9 +2192,15 @@ pub(crate) fn write_updated_row(
         Some(current_tid),
         ctx,
     )?;
+    let (pending_outbound_foreign_keys, immediate_outbound_foreign_keys): (Vec<_>, Vec<_>) =
+        relation_constraints
+            .foreign_keys
+            .iter()
+            .cloned()
+            .partition(|constraint| constraint.period_column_index.is_some());
     crate::backend::executor::enforce_outbound_foreign_keys(
         relation_name,
-        &relation_constraints.foreign_keys,
+        &immediate_outbound_foreign_keys,
         Some(current_old_values),
         &current_values,
         ctx,
@@ -2004,9 +2267,28 @@ pub(crate) fn write_updated_row(
                 &current_values,
                 ctx,
             )?;
+            let pending_outbound_checks = (!pending_outbound_foreign_keys.is_empty()).then(|| {
+                PendingOutboundForeignKeyCheck {
+                    relation_name: relation_name.to_string(),
+                    constraints: pending_outbound_foreign_keys,
+                    old_values: current_old_values
+                        .iter()
+                        .map(Value::to_owned_value)
+                        .collect(),
+                    new_values: current_values.iter().map(Value::to_owned_value).collect(),
+                }
+            });
             Ok(WriteUpdatedRowResult::Updated(
                 new_tid,
+                UpdatedRowWriteInfo {
+                    relation_oid,
+                    relation_name: relation_name.to_string(),
+                    desc: desc.clone(),
+                    constraints: relation_constraints.clone(),
+                    values: current_values.iter().map(Value::to_owned_value).collect(),
+                },
                 pending_no_action_checks,
+                pending_outbound_checks.into_iter().collect(),
             ))
         }
         Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
@@ -2279,6 +2561,41 @@ pub(crate) fn enforce_exclusion_constraints_against_values(
                     constraint,
                     values,
                     existing,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn enforce_temporal_constraints_against_values(
+    relation_name: &str,
+    desc: &RelationDesc,
+    constraints: &BoundRelationConstraints,
+    values: &[Value],
+    existing_rows: &[Vec<Value>],
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+) -> Result<(), ExecError> {
+    for constraint in &constraints.temporal {
+        if !constraint.enforced {
+            continue;
+        }
+        validate_temporal_period_value(relation_name, desc, constraint, values)?;
+        if temporal_constraint_skips_conflict_check(constraint, values) {
+            continue;
+        }
+        for existing in existing_rows {
+            if temporal_constraint_skips_conflict_check(constraint, existing) {
+                continue;
+            }
+            if temporal_rows_conflict(constraint, values, existing)? {
+                return Err(temporal_exclusion_violation(
+                    desc,
+                    relation_name,
+                    constraint,
+                    values,
+                    existing,
+                    datetime_config,
                 ));
             }
         }
@@ -3066,6 +3383,25 @@ pub(crate) struct PendingNoActionForeignKeyCheck {
     relation_name: String,
     inbound_constraint: BoundReferencedByForeignKey,
     old_key_values: Vec<Value>,
+    old_parent_values: Option<Vec<Value>>,
+    replacement_parent_values: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingOutboundForeignKeyCheck {
+    relation_name: String,
+    constraints: Vec<BoundForeignKeyConstraint>,
+    old_values: Vec<Value>,
+    new_values: Vec<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingUpdatedExclusionCheck {
+    relation_oid: u32,
+    relation_name: String,
+    desc: RelationDesc,
+    constraints: BoundRelationConstraints,
+    values: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3103,6 +3439,16 @@ pub(crate) fn validate_pending_no_action_checks(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     for recheck in pending {
+        if let Some(old_parent_values) = recheck.old_parent_values.as_deref() {
+            crate::backend::executor::enforce_deferred_inbound_foreign_key_check(
+                &recheck.relation_name,
+                &recheck.inbound_constraint,
+                old_parent_values,
+                recheck.replacement_parent_values.as_deref(),
+                ctx,
+            )?;
+            continue;
+        }
         if referenced_row_exists_for_no_action(
             &recheck.inbound_constraint,
             &recheck.old_key_values,
@@ -3114,6 +3460,54 @@ pub(crate) fn validate_pending_no_action_checks(
             &recheck.relation_name,
             &recheck.inbound_constraint,
             &recheck.old_key_values,
+            ctx,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_pending_updated_exclusion_checks(
+    pending: &[PendingUpdatedExclusionCheck],
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    for (index, check) in pending.iter().enumerate() {
+        let previous_values = pending[..index]
+            .iter()
+            .filter(|previous| previous.relation_oid == check.relation_oid)
+            .map(|previous| previous.values.clone())
+            .collect::<Vec<_>>();
+        if previous_values.is_empty() {
+            continue;
+        }
+        enforce_temporal_constraints_against_values(
+            &check.relation_name,
+            &check.desc,
+            &check.constraints,
+            &check.values,
+            &previous_values,
+            &ctx.datetime_config,
+        )?;
+        enforce_exclusion_constraints_against_values(
+            &check.relation_name,
+            &check.desc,
+            &check.constraints,
+            &check.values,
+            &previous_values,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_pending_outbound_foreign_key_checks(
+    pending: Vec<PendingOutboundForeignKeyCheck>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for check in pending {
+        crate::backend::executor::enforce_outbound_foreign_keys(
+            &check.relation_name,
+            &check.constraints,
+            Some(&check.old_values),
+            &check.new_values,
             ctx,
         )?;
     }
@@ -3178,7 +3572,10 @@ fn foreign_key_key_values(values: &[Value], indexes: &[usize]) -> Vec<Value> {
 }
 
 fn defer_foreign_key_if_needed(
+    relation_name: &str,
     constraint: &BoundReferencedByForeignKey,
+    old_parent_values: &[Value],
+    replacement_parent_values: Option<&[Value]>,
     ctx: &ExecutorContext,
 ) -> bool {
     if ctx.constraint_timing(
@@ -3190,7 +3587,16 @@ fn defer_foreign_key_if_needed(
         return false;
     }
     if let Some(tracker) = ctx.deferred_foreign_keys.as_ref() {
-        tracker.record(constraint.constraint_oid);
+        tracker.record_parent_foreign_key_check(
+            constraint.constraint_oid,
+            relation_name.to_string(),
+            old_parent_values
+                .iter()
+                .map(Value::to_owned_value)
+                .collect::<Vec<_>>(),
+            replacement_parent_values
+                .map(|values| values.iter().map(Value::to_owned_value).collect::<Vec<_>>()),
+        );
     }
     true
 }
@@ -3217,17 +3623,33 @@ fn collect_no_action_checks_on_update(
         {
             continue;
         }
-        if defer_foreign_key_if_needed(constraint, ctx) {
+        if defer_foreign_key_if_needed(
+            relation_name,
+            constraint,
+            previous_values,
+            Some(values),
+            ctx,
+        ) {
             continue;
         }
         if constraint.referenced_period_column_index.is_some() {
-            crate::backend::executor::enforce_inbound_foreign_keys_on_update(
-                relation_name,
-                std::slice::from_ref(constraint),
-                previous_values,
-                values,
-                ctx,
-            )?;
+            pending.push(PendingNoActionForeignKeyCheck {
+                relation_name: relation_name.to_string(),
+                inbound_constraint: constraint.clone(),
+                old_key_values: foreign_key_key_values(
+                    previous_values,
+                    &constraint.referenced_column_indexes,
+                ),
+                old_parent_values: Some(
+                    previous_values
+                        .iter()
+                        .map(Value::to_owned_value)
+                        .collect::<Vec<_>>(),
+                ),
+                replacement_parent_values: Some(
+                    values.iter().map(Value::to_owned_value).collect::<Vec<_>>(),
+                ),
+            });
             continue;
         }
         pending.push(PendingNoActionForeignKeyCheck {
@@ -3237,6 +3659,8 @@ fn collect_no_action_checks_on_update(
                 previous_values,
                 &constraint.referenced_column_indexes,
             ),
+            old_parent_values: None,
+            replacement_parent_values: None,
         });
     }
     Ok(pending)
@@ -3258,22 +3682,30 @@ fn collect_no_action_checks_on_delete(
         {
             continue;
         }
-        if defer_foreign_key_if_needed(constraint, ctx) {
+        if defer_foreign_key_if_needed(relation_name, constraint, values, None, ctx) {
             continue;
         }
         if constraint.referenced_period_column_index.is_some() {
-            crate::backend::executor::enforce_inbound_foreign_keys_on_delete(
-                relation_name,
-                std::slice::from_ref(constraint),
-                values,
-                ctx,
-            )?;
+            pending.push(PendingNoActionForeignKeyCheck {
+                relation_name: relation_name.to_string(),
+                inbound_constraint: constraint.clone(),
+                old_key_values: foreign_key_key_values(
+                    values,
+                    &constraint.referenced_column_indexes,
+                ),
+                old_parent_values: Some(
+                    values.iter().map(Value::to_owned_value).collect::<Vec<_>>(),
+                ),
+                replacement_parent_values: None,
+            });
             continue;
         }
         pending.push(PendingNoActionForeignKeyCheck {
             relation_name: relation_name.to_string(),
             inbound_constraint: constraint.clone(),
             old_key_values: foreign_key_key_values(values, &constraint.referenced_column_indexes),
+            old_parent_values: None,
+            replacement_parent_values: None,
         });
     }
     Ok(pending)
@@ -4693,12 +5125,7 @@ pub fn execute_insert(
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_insert(stmt, catalog);
-    check_relation_column_privileges(
-        ctx,
-        stmt.relation_oid,
-        'a',
-        stmt.target_columns.iter().map(|target| target.column_index),
-    )?;
+    check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
     for subplan in &stmt.subplans {
         check_plan_relation_privileges(subplan, ctx, 'r')?;
     }
@@ -5154,10 +5581,33 @@ fn auth_state_from_executor(ctx: &ExecutorContext) -> AuthState {
     auth
 }
 
+fn auth_state_for_privilege_check(
+    ctx: &ExecutorContext,
+    check_as_user_oid: Option<u32>,
+) -> AuthState {
+    match check_as_user_oid {
+        Some(role_oid) => {
+            let mut auth = AuthState::default();
+            auth.assume_authenticated_user(role_oid);
+            auth
+        }
+        None => auth_state_from_executor(ctx),
+    }
+}
+
 pub(crate) fn relation_acl_allows(
     ctx: &ExecutorContext,
     relation_oid: u32,
     privilege: char,
+) -> Result<bool, ExecError> {
+    relation_acl_allows_as(ctx, relation_oid, privilege, None)
+}
+
+fn relation_acl_allows_as(
+    ctx: &ExecutorContext,
+    relation_oid: u32,
+    privilege: char,
+    check_as_user_oid: Option<u32>,
 ) -> Result<bool, ExecError> {
     let catalog = ctx
         .catalog
@@ -5178,10 +5628,10 @@ pub(crate) fn relation_acl_allows(
                 sqlstate: "XX000",
             })?;
     let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
-    let auth = auth_state_from_executor(ctx);
+    let auth = auth_state_for_privilege_check(ctx, check_as_user_oid);
     if auth.has_effective_membership(class_row.relowner, &auth_catalog)
         || auth_catalog
-            .role_by_oid(ctx.current_user_oid)
+            .role_by_oid(auth.current_user_oid())
             .is_some_and(|role| role.rolsuper)
     {
         return Ok(true);
@@ -5220,6 +5670,16 @@ pub(crate) fn relation_or_all_column_acls_allow(
     privilege: char,
     column_indices: impl IntoIterator<Item = usize>,
 ) -> Result<bool, ExecError> {
+    relation_or_all_column_acls_allow_as(ctx, relation_oid, privilege, column_indices, None)
+}
+
+fn relation_or_all_column_acls_allow_as(
+    ctx: &ExecutorContext,
+    relation_oid: u32,
+    privilege: char,
+    column_indices: impl IntoIterator<Item = usize>,
+    check_as_user_oid: Option<u32>,
+) -> Result<bool, ExecError> {
     let catalog = ctx
         .catalog
         .as_ref()
@@ -5239,10 +5699,10 @@ pub(crate) fn relation_or_all_column_acls_allow(
                 sqlstate: "XX000",
             })?;
     let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
-    let auth = auth_state_from_executor(ctx);
+    let auth = auth_state_for_privilege_check(ctx, check_as_user_oid);
     if auth.has_effective_membership(class_row.relowner, &auth_catalog)
         || auth_catalog
-            .role_by_oid(ctx.current_user_oid)
+            .role_by_oid(auth.current_user_oid())
             .is_some_and(|role| role.rolsuper)
     {
         return Ok(true);
@@ -5286,6 +5746,95 @@ pub(crate) fn relation_permission_denied(ctx: &ExecutorContext, relation_oid: u3
         hint: None,
         sqlstate: "42501",
     }
+}
+
+fn relation_permission_denied_for_requirement(
+    requirement: &RelationPrivilegeRequirement,
+) -> ExecError {
+    let relation_kind = if requirement.relkind == 'v' {
+        "view"
+    } else {
+        "table"
+    };
+    ExecError::DetailedError {
+        message: format!(
+            "permission denied for {relation_kind} {}",
+            requirement.relation_name
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    }
+}
+
+fn requirement_privilege_allows(
+    ctx: &ExecutorContext,
+    requirement: &RelationPrivilegeRequirement,
+    privilege: char,
+    column_indices: &[usize],
+) -> Result<bool, ExecError> {
+    if column_indices.is_empty() {
+        relation_acl_allows_as(
+            ctx,
+            requirement.relation_oid,
+            privilege,
+            requirement.check_as_user_oid,
+        )
+    } else {
+        relation_or_all_column_acls_allow_as(
+            ctx,
+            requirement.relation_oid,
+            privilege,
+            column_indices.iter().copied(),
+            requirement.check_as_user_oid,
+        )
+    }
+}
+
+fn check_relation_privilege_requirement(
+    ctx: &ExecutorContext,
+    requirement: &RelationPrivilegeRequirement,
+) -> Result<(), ExecError> {
+    let RelationPrivilegeMask {
+        select,
+        insert,
+        update,
+        delete,
+    } = requirement.required;
+    let checks = [
+        (select, 'r', requirement.selected_columns.as_slice()),
+        (insert, 'a', requirement.inserted_columns.as_slice()),
+        (update, 'w', requirement.updated_columns.as_slice()),
+        (delete, 'd', &[] as &[usize]),
+    ];
+    for (enabled, privilege, columns) in checks {
+        if enabled && !requirement_privilege_allows(ctx, requirement, privilege, columns)? {
+            return Err(relation_permission_denied_for_requirement(requirement));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn check_relation_privilege_requirements(
+    ctx: &ExecutorContext,
+    requirements: &[RelationPrivilegeRequirement],
+) -> Result<(), ExecError> {
+    for requirement in requirements {
+        check_relation_privilege_requirement(ctx, requirement)?;
+    }
+    Ok(())
+}
+
+fn check_relation_privilege_requirements_for_update(
+    ctx: &ExecutorContext,
+    requirements: &[RelationPrivilegeRequirement],
+) -> Result<(), ExecError> {
+    for requirement in requirements {
+        if !requirement_privilege_allows(ctx, requirement, 'w', &[])? {
+            return Err(relation_permission_denied_for_requirement(requirement));
+        }
+    }
+    Ok(())
 }
 
 fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
@@ -5430,14 +5979,11 @@ pub(crate) fn check_plan_relation_privileges(
 fn check_planned_stmt_relation_privileges_except(
     planned_stmt: &PlannedStmt,
     ctx: &ExecutorContext,
-    privilege: char,
     excluded_oids: &BTreeSet<u32>,
 ) -> Result<(), ExecError> {
-    let mut relation_oids = BTreeSet::new();
-    collect_planned_stmt_relation_oids(planned_stmt, &mut relation_oids);
-    for relation_oid in relation_oids {
-        if !excluded_oids.contains(&relation_oid) {
-            check_relation_privilege(ctx, relation_oid, privilege)?;
+    for requirement in &planned_stmt.relation_privileges {
+        if !excluded_oids.contains(&requirement.relation_oid) {
+            check_relation_privilege_requirement(ctx, requirement)?;
         }
     }
     Ok(())
@@ -5462,15 +6008,9 @@ fn check_planned_stmt_select_privileges_inner(
     ctx: &ExecutorContext,
     require_update: bool,
 ) -> Result<(), ExecError> {
-    let mut relation_oids = BTreeSet::new();
-    collect_planned_stmt_relation_oids(planned_stmt, &mut relation_oids);
-    for relation_oid in &relation_oids {
-        check_relation_privilege(ctx, *relation_oid, 'r')?;
-    }
+    check_relation_privilege_requirements(ctx, &planned_stmt.relation_privileges)?;
     if require_update || plan_contains_lock_rows(&planned_stmt.plan_tree) {
-        for relation_oid in relation_oids {
-            check_relation_privilege(ctx, relation_oid, 'w')?;
-        }
+        check_relation_privilege_requirements_for_update(ctx, &planned_stmt.relation_privileges)?;
     }
     Ok(())
 }
@@ -5480,30 +6020,9 @@ fn check_merge_privileges(
     input_plan: &PlannedStmt,
     ctx: &ExecutorContext,
 ) -> Result<(), ExecError> {
-    if !relation_acl_allows(ctx, stmt.relation_oid, 'r')? {
-        return Err(relation_permission_denied(ctx, stmt.relation_oid));
-    }
-    for clause in &stmt.when_clauses {
-        let privilege = match clause.action {
-            BoundMergeAction::DoNothing => None,
-            BoundMergeAction::Insert { .. } => Some('a'),
-            BoundMergeAction::Update { .. } => Some('w'),
-            BoundMergeAction::Delete => Some('d'),
-        };
-        if let Some(privilege) = privilege
-            && !relation_acl_allows(ctx, stmt.relation_oid, privilege)?
-        {
-            return Err(relation_permission_denied(ctx, stmt.relation_oid));
-        }
-    }
-    let mut source_oids = BTreeSet::new();
-    collect_plan_relation_oids(&input_plan.plan_tree, &mut source_oids);
-    source_oids.remove(&stmt.relation_oid);
-    for relation_oid in source_oids {
-        if !relation_acl_allows(ctx, relation_oid, 'r')? {
-            return Err(relation_permission_denied(ctx, relation_oid));
-        }
-    }
+    check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
+    let excluded_oids = BTreeSet::from([stmt.relation_oid]);
+    check_planned_stmt_relation_privileges_except(input_plan, ctx, &excluded_oids)?;
     Ok(())
 }
 
@@ -6004,14 +6523,23 @@ fn apply_overriding_user_identity_defaults(
     Ok(())
 }
 
-fn domain_constraint_violation(domain_name: &str) -> ExecError {
+fn domain_constraint_violation(domain_name: &str, constraint_name: &str) -> ExecError {
     ExecError::DetailedError {
         message: format!(
-            "value for domain {domain_name} violates check constraint \"{domain_name}_check\""
+            "value for domain {domain_name} violates check constraint \"{constraint_name}\""
         ),
         detail: None,
         hint: None,
         sqlstate: "23514",
+    }
+}
+
+fn domain_not_null_violation(domain_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("domain {domain_name} does not allow null values"),
+        detail: None,
+        hint: None,
+        sqlstate: "23502",
     }
 }
 
@@ -6028,7 +6556,7 @@ fn enforce_domain_constraint_for_value(
         return Ok(());
     };
     if domain.not_null && matches!(value, Value::Null) {
-        return Err(domain_constraint_violation(&domain.name));
+        return Err(domain_not_null_violation(&domain.name));
     }
     if matches!(value, Value::Null) {
         return Ok(());
@@ -6049,26 +6577,44 @@ fn enforce_domain_constraint_for_value(
         }
         return Ok(());
     }
-    let Some(check) = domain.check.as_deref() else {
-        return Ok(());
-    };
-    let raw = parse_expr(check).map_err(ExecError::Parse)?;
-    let desc = RelationDesc {
-        columns: vec![column_desc("value", domain.sql_type, true)],
-    };
-    let scope = scope_for_relation(None, &desc);
-    let bound = {
-        let Some(catalog) = ctx.catalog.as_deref() else {
-            return Ok(());
-        };
-        bind_expr_with_outer_and_ctes(&raw, &scope, catalog, &[], None, &[])
-            .map_err(ExecError::Parse)?
-    };
-    let mut slot = TupleSlot::virtual_row(vec![value.clone()]);
-    match eval_expr(&bound, &mut slot, ctx)? {
-        Value::Bool(false) => Err(domain_constraint_violation(&domain.name)),
-        _ => Ok(()),
+    let mut checks = domain
+        .constraints
+        .iter()
+        .filter_map(|constraint| {
+            (constraint.enforced && matches!(constraint.kind, DomainConstraintLookupKind::Check))
+                .then(|| {
+                    constraint
+                        .expr
+                        .as_ref()
+                        .map(|expr| (&constraint.name, expr))
+                })
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    if checks.is_empty()
+        && let Some(check) = domain.check.as_ref()
+    {
+        checks.push((&domain.name, check));
     }
+    for (constraint_name, check) in checks {
+        let raw = parse_expr(check).map_err(ExecError::Parse)?;
+        let desc = RelationDesc {
+            columns: vec![column_desc("value", domain.sql_type, true)],
+        };
+        let scope = scope_for_relation(None, &desc);
+        let bound = {
+            let Some(catalog) = ctx.catalog.as_deref() else {
+                return Ok(());
+            };
+            bind_expr_with_outer_and_ctes(&raw, &scope, catalog, &[], None, &[])
+                .map_err(ExecError::Parse)?
+        };
+        let mut slot = TupleSlot::virtual_row(vec![value.clone()]);
+        if matches!(eval_expr(&bound, &mut slot, ctx)?, Value::Bool(false)) {
+            return Err(domain_constraint_violation(&domain.name, constraint_name));
+        }
+    }
+    Ok(())
 }
 
 fn enforce_insert_domain_constraints(
@@ -6270,6 +6816,8 @@ pub(crate) fn apply_assignment_target(
     }
     .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
     let value = coerce_record_assignment_value(value, assignment_type, ctx)?;
+    enforce_domain_constraint_for_value(&value, assignment_type, ctx)
+        .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
     let resolved_indirection = if target.indirection.is_empty() {
         target
             .subscripts
@@ -8032,22 +8580,12 @@ pub fn execute_update_with_waiter(
         .iter()
         .map(|target| target.relation_oid)
         .collect::<BTreeSet<_>>();
-    for target in &stmt.targets {
-        check_relation_column_privileges(
-            ctx,
-            target.relation_oid,
-            'w',
-            target
-                .assignments
-                .iter()
-                .map(|assignment| assignment.column_index),
-        )?;
-    }
+    check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
     for subplan in &stmt.subplans {
         check_plan_relation_privileges(subplan, ctx, 'r')?;
     }
     if let Some(input_plan) = &stmt.input_plan {
-        check_planned_stmt_relation_privileges_except(input_plan, ctx, 'r', &target_oids)?;
+        check_planned_stmt_relation_privileges_except(input_plan, ctx, &target_oids)?;
     }
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
@@ -8121,6 +8659,8 @@ pub fn execute_update_with_waiter(
                 )?,
             };
             let mut pending_no_action_checks = Vec::new();
+            let mut pending_outbound_checks = Vec::new();
+            let mut pending_updated_exclusion_checks = Vec::new();
 
             for (tid, original_values) in target_rows {
                 ctx.check_for_interrupts()?;
@@ -8180,8 +8720,21 @@ pub fn execute_update_with_waiter(
                         cid,
                         waiter,
                     ) {
-                        Ok(WriteUpdatedRowResult::Updated(_new_tid, no_action_checks)) => {
+                        Ok(WriteUpdatedRowResult::Updated(
+                            _new_tid,
+                            write_info,
+                            no_action_checks,
+                            outbound_checks,
+                        )) => {
                             pending_no_action_checks.extend(no_action_checks);
+                            pending_outbound_checks.extend(outbound_checks);
+                            pending_updated_exclusion_checks.push(PendingUpdatedExclusionCheck {
+                                relation_oid: write_info.relation_oid,
+                                relation_name: write_info.relation_name,
+                                desc: write_info.desc,
+                                constraints: write_info.constraints,
+                                values: write_info.values,
+                            });
                             ctx.session_stats
                                 .write()
                                 .note_relation_update(target.relation_oid);
@@ -8264,6 +8817,8 @@ pub fn execute_update_with_waiter(
                     }
                 }
             }
+            validate_pending_updated_exclusion_checks(&pending_updated_exclusion_checks, ctx)?;
+            validate_pending_outbound_foreign_key_checks(pending_outbound_checks, ctx)?;
             validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
 
             if let Some(triggers) = &triggers {
@@ -8485,6 +9040,8 @@ fn execute_update_from_joined_input(
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
         let mut pending_no_action_checks = Vec::new();
+        let mut pending_outbound_checks = Vec::new();
+        let mut pending_updated_exclusion_checks = Vec::new();
 
         while let Some(slot) = state.exec_proc_node(ctx)? {
             ctx.check_for_interrupts()?;
@@ -8571,8 +9128,21 @@ fn execute_update_from_joined_input(
                     cid,
                     waiter,
                 )? {
-                    WriteUpdatedRowResult::Updated(new_tid, no_action_checks) => {
+                    WriteUpdatedRowResult::Updated(
+                        new_tid,
+                        write_info,
+                        no_action_checks,
+                        outbound_checks,
+                    ) => {
                         pending_no_action_checks.extend(no_action_checks);
+                        pending_outbound_checks.extend(outbound_checks);
+                        pending_updated_exclusion_checks.push(PendingUpdatedExclusionCheck {
+                            relation_oid: write_info.relation_oid,
+                            relation_name: write_info.relation_name,
+                            desc: write_info.desc,
+                            constraints: write_info.constraints,
+                            values: write_info.values,
+                        });
                         ctx.session_stats
                             .write()
                             .note_relation_update(target.relation_oid);
@@ -8635,6 +9205,8 @@ fn execute_update_from_joined_input(
             }
         }
 
+        validate_pending_updated_exclusion_checks(&pending_updated_exclusion_checks, ctx)?;
+        validate_pending_outbound_foreign_key_checks(pending_outbound_checks, ctx)?;
         validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
 
         if stmt.returning.is_empty() {
@@ -8683,14 +9255,7 @@ pub fn execute_delete_with_waiter(
     )>,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_delete(stmt, catalog);
-    let target_oids = stmt
-        .targets
-        .iter()
-        .map(|target| target.relation_oid)
-        .collect::<BTreeSet<_>>();
-    for relation_oid in &target_oids {
-        check_relation_privilege(ctx, *relation_oid, 'd')?;
-    }
+    check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
     for subplan in &stmt.subplans {
         check_plan_relation_privileges(subplan, ctx, 'r')?;
     }

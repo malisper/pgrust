@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::super::*;
-use super::constraint::validate_not_null_rows;
+use super::constraint::{validate_not_null_rows, verify_not_null_pk_compatible};
 use crate::backend::catalog::pg_constraint::sort_pg_constraint_rows;
 use crate::backend::catalog::{CatalogEntry, CatalogIndexBuildOptions};
 use crate::backend::executor::RelationDesc;
@@ -11,7 +11,9 @@ use crate::backend::parser::{
     ParseError,
 };
 use crate::backend::utils::cache::relcache::RelCacheEntry;
-use crate::include::catalog::{CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, PgConstraintRow};
+use crate::include::catalog::{
+    CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, PgConstraintRow,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PartitionedKeySpec {
@@ -259,9 +261,9 @@ impl<'a> PartitionedKeyInstaller<'a> {
             Some((self.xid, self.visible_cid())),
             self.configured_search_path,
         );
-        let mut used_names = catalog
-            .constraint_rows_for_relation(relation.relation_oid)
-            .into_iter()
+        let relation_constraints = catalog.constraint_rows_for_relation(relation.relation_oid);
+        let mut used_names = relation_constraints
+            .iter()
             .map(|row| row.conname.to_ascii_lowercase())
             .collect::<BTreeSet<_>>();
         let relation_name = self.relation_name(relation.relation_oid)?;
@@ -427,9 +429,9 @@ impl<'a> PartitionedKeyInstaller<'a> {
             Some((self.xid, self.visible_cid())),
             self.configured_search_path,
         );
-        let mut used_names = catalog
-            .constraint_rows_for_relation(relation.relation_oid)
-            .into_iter()
+        let relation_constraints = catalog.constraint_rows_for_relation(relation.relation_oid);
+        let mut used_names = relation_constraints
+            .iter()
             .map(|row| row.conname.to_ascii_lowercase())
             .collect::<BTreeSet<_>>();
         let mut primary_key_owned_not_null_oids = Vec::new();
@@ -450,6 +452,19 @@ impl<'a> PartitionedKeyInstaller<'a> {
                 )));
             };
             if !relation.desc.columns[column_index].storage.nullable {
+                if let Some(row) = relation_constraints.iter().find(|row| {
+                    row.contype == CONSTRAINT_NOTNULL
+                        && row
+                            .conkey
+                            .as_ref()
+                            .is_some_and(|keys| keys.contains(&((column_index + 1) as i16)))
+                }) {
+                    verify_not_null_pk_compatible(
+                        row,
+                        &relation.desc.columns[column_index].name,
+                        relation_name,
+                    )?;
+                }
                 continue;
             }
             let not_null_name = Self::choose_available_constraint_name(

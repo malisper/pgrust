@@ -14,7 +14,7 @@ pub(crate) use rules::{
 };
 pub(crate) use view_dml::{
     NonUpdatableViewColumnReason, ResolvedAutoViewTarget, ViewDmlEvent, ViewDmlRewriteError,
-    resolve_auto_updatable_view_target,
+    ViewPrivilegeContext, resolve_auto_updatable_view_target,
 };
 pub(crate) use views::{
     format_view_definition, load_view_return_query, load_view_return_select,
@@ -24,9 +24,10 @@ pub(crate) use views::{
 use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, ExprArraySubscript, SetReturningCall, SetReturningExpr, SortGroupClause,
-    SqlJsonQueryFunction, SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink, TargetEntry,
-    WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind, WindowSpec,
+    AggAccum, Expr, ExprArraySubscript, RelationPrivilegeRequirement, SetReturningCall,
+    SetReturningExpr, SortGroupClause, SqlJsonQueryFunction, SqlJsonTableBehavior,
+    SqlJsonTablePassingArg, SubLink, TargetEntry, WindowClause, WindowFrame, WindowFrameBound,
+    WindowFuncExpr, WindowFuncKind, WindowSpec,
 };
 use views::rewrite_view_relation_query;
 
@@ -167,6 +168,68 @@ fn rewrite_query(
     Ok(rewritten)
 }
 
+pub(crate) fn relation_has_security_invoker(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> bool {
+    catalog
+        .class_row_by_oid(relation_oid)
+        .and_then(|row| row.reloptions)
+        .is_some_and(|options| {
+            options.iter().any(|option| {
+                let (name, value) = option
+                    .split_once('=')
+                    .map(|(name, value)| (name, value))
+                    .unwrap_or((option.as_str(), "true"));
+                name.eq_ignore_ascii_case("security_invoker")
+                    && matches!(value.to_ascii_lowercase().as_str(), "true" | "on")
+            })
+        })
+}
+
+fn apply_view_permission_context(query: &mut Query, view_owner_oid: u32, security_invoker: bool) {
+    for rte in &mut query.rtable {
+        let Some(permission) = rte.permission.as_mut() else {
+            continue;
+        };
+        permission.check_as_user_oid = (!security_invoker).then_some(view_owner_oid);
+    }
+}
+
+pub(crate) fn collect_query_relation_privileges(
+    query: &Query,
+) -> Vec<RelationPrivilegeRequirement> {
+    let mut privileges = Vec::new();
+    collect_query_relation_privileges_into(query, &mut privileges);
+    privileges
+}
+
+fn collect_query_relation_privileges_into(
+    query: &Query,
+    privileges: &mut Vec<RelationPrivilegeRequirement>,
+) {
+    for rte in &query.rtable {
+        if let Some(permission) = &rte.permission {
+            privileges.push(permission.clone());
+        }
+        match &rte.kind {
+            RangeTblEntryKind::Subquery { query } | RangeTblEntryKind::Cte { query, .. } => {
+                collect_query_relation_privileges_into(query, privileges);
+            }
+            _ => {}
+        }
+    }
+    if let Some(recursive_union) = &query.recursive_union {
+        collect_query_relation_privileges_into(&recursive_union.anchor, privileges);
+        collect_query_relation_privileges_into(&recursive_union.recursive, privileges);
+    }
+    if let Some(set_operation) = &query.set_operation {
+        for input in &set_operation.inputs {
+            collect_query_relation_privileges_into(input, privileges);
+        }
+    }
+}
+
 pub(super) fn rewrite_policy_expr(
     expr: Expr,
     catalog: &dyn CatalogLookup,
@@ -189,13 +252,21 @@ fn rewrite_rte(
             relispopulated: _,
             toast: _,
         } if relkind == 'v' => {
-            let analyzed = rewrite_view_relation_query(
+            let mut analyzed = rewrite_view_relation_query(
                 relation_oid,
                 &rte.desc,
                 rte.alias.as_deref(),
                 catalog,
                 expanded_views,
             )?;
+            let class_row = catalog
+                .class_row_by_oid(relation_oid)
+                .ok_or_else(|| ParseError::UnknownTable(relation_oid.to_string()))?;
+            apply_view_permission_context(
+                &mut analyzed,
+                class_row.relowner,
+                relation_has_security_invoker(catalog, relation_oid),
+            );
             let mut next_views = expanded_views.to_vec();
             next_views.push(relation_oid);
             RangeTblEntryKind::Subquery {

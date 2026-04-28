@@ -57,7 +57,7 @@ use crate::include::catalog::{
     PgConversionRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow,
     PgForeignServerRow, PgForeignTableRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
     PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow,
     PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow,
     PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow,
     relkind_has_storage,
@@ -5696,6 +5696,53 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_not_null_constraint_state_mvcc(
+        &mut self,
+        relation_oid: u32,
+        constraint_name: &str,
+        validated: Option<bool>,
+        no_inherit: Option<bool>,
+        is_local: Option<bool>,
+        inhcount: Option<i16>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if !matches!(entry.relkind, 'r' | 'p') {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let column_index =
+                    not_null_constraint_column_index_visible(&entry.desc, constraint_name)?;
+                let column = &mut entry.desc.columns[column_index];
+                column.storage.nullable = false;
+                if let Some(validated) = validated {
+                    column.not_null_constraint_validated = validated;
+                }
+                if let Some(no_inherit) = no_inherit {
+                    column.not_null_constraint_no_inherit = no_inherit;
+                }
+                if let Some(is_local) = is_local {
+                    column.not_null_constraint_is_local = is_local;
+                }
+                if let Some(inhcount) = inhcount {
+                    column.not_null_constraint_inhcount = inhcount;
+                }
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgAttribute,
+                        BootstrapCatalogKind::PgConstraint,
+                        BootstrapCatalogKind::PgDepend,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn validate_check_constraint_mvcc(
         &mut self,
         relation_oid: u32,
@@ -6555,6 +6602,48 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn update_relation_column_inheritance_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        attinhcount: i16,
+        attislocal: bool,
+        not_null_constraint_inhcount: Option<i16>,
+        not_null_constraint_is_local: Option<bool>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let column_index = relation_column_index_visible(&entry.desc, column_name)?;
+                let column = &mut entry.desc.columns[column_index];
+                column.attinhcount = attinhcount;
+                column.attislocal = attislocal;
+                if let Some(inhcount) = not_null_constraint_inhcount {
+                    column.not_null_constraint_inhcount = inhcount;
+                }
+                if let Some(is_local) = not_null_constraint_is_local {
+                    column.not_null_constraint_is_local = is_local;
+                }
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgAttribute,
+                        BootstrapCatalogKind::PgConstraint,
+                        BootstrapCatalogKind::PgDepend,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
     pub fn alter_table_set_column_default_mvcc(
         &mut self,
         relation_oid: u32,
@@ -7302,7 +7391,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, _new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if !matches!(entry.relkind, 'r' | 'p' | 'm') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'm' | 'v') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 entry.reloptions = reloptions;
@@ -7561,6 +7650,63 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
+    pub fn upsert_sequence_row_mvcc(
+        &mut self,
+        row: PgSequenceRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let kinds = [BootstrapCatalogKind::PgSequence];
+        if let Some(existing) = sequence_row_mvcc(self, ctx, row.seqrelid)? {
+            delete_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    sequences: vec![existing],
+                    ..PhysicalCatalogRows::default()
+                },
+                self.scope_db_oid(),
+                &kinds,
+            )?;
+        }
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                sequences: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.seqrelid);
+        Ok(effect)
+    }
+
+    pub fn delete_sequence_row_mvcc(
+        &mut self,
+        seqrelid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let kinds = [BootstrapCatalogKind::PgSequence];
+        if let Some(existing) = sequence_row_mvcc(self, ctx, seqrelid)? {
+            delete_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    sequences: vec![existing],
+                    ..PhysicalCatalogRows::default()
+                },
+                self.scope_db_oid(),
+                &kinds,
+            )?;
+        }
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, seqrelid);
         Ok(effect)
     }
 
@@ -9939,6 +10085,18 @@ fn relation_statistics_mvcc(
         .collect())
 }
 
+fn sequence_row_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    relation_oid: u32,
+) -> Result<Option<PgSequenceRow>, CatalogError> {
+    Ok(visible_catalog_caches_for_ctx(store, ctx)?
+        .0
+        .sequence_rows()
+        .into_iter()
+        .find(|row| row.seqrelid == relation_oid))
+}
+
 fn relation_statistic_ext_rows_mvcc(
     store: &CatalogStore,
     ctx: &CatalogWriteContext,
@@ -10568,6 +10726,13 @@ fn rows_for_existing_relation_mvcc(
     let attributes = relation_attributes_mvcc(store, ctx, entry.relation_oid)?;
     let attrdefs = relation_attrdefs_mvcc(store, ctx, entry.relation_oid)?;
     let rewrites = relation_rewrites_mvcc(store, ctx, entry.relation_oid)?;
+    let sequences = if entry.relkind == 'S' {
+        sequence_row_mvcc(store, ctx, entry.relation_oid)?
+            .into_iter()
+            .collect()
+    } else {
+        Vec::new()
+    };
     let triggers = relation_triggers_mvcc(store, ctx, entry.relation_oid)?;
     let inherits = relation_inherits_mvcc(store, ctx, entry.relation_oid)?;
     let constraints = if matches!(entry.relkind, 'r' | 'p') {
@@ -10587,6 +10752,7 @@ fn rows_for_existing_relation_mvcc(
         attributes,
         attrdefs,
         rewrites,
+        sequences,
         triggers,
         inherits,
         partitioned_tables: partitioned_table_row_mvcc(store, ctx, entry.relation_oid)?
@@ -10798,6 +10964,15 @@ fn rows_for_existing_relation(
         })
         .collect::<Vec<_>>();
     let rewrites = catcache.rewrite_rows_for_relation(entry.relation_oid);
+    let sequences = if entry.relkind == 'S' {
+        catcache
+            .sequence_rows()
+            .into_iter()
+            .filter(|row| row.seqrelid == entry.relation_oid)
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut triggers = catcache.trigger_rows_for_relation(entry.relation_oid);
     let inherits = catcache
         .inherit_rows()
@@ -10838,6 +11013,7 @@ fn rows_for_existing_relation(
         attributes,
         attrdefs,
         rewrites,
+        sequences,
         triggers,
         inherits,
         partitioned_tables: catcache

@@ -109,7 +109,7 @@ use super::expr_string::{
 use super::expr_txid::eval_txid_builtin_function;
 use super::expr_xml::{
     eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function,
-    unsupported_xml_feature_error,
+    eval_xpath_exists_function, eval_xpath_function, unsupported_xml_feature_error,
 };
 use super::node_types::*;
 use super::pg_regex::{
@@ -145,16 +145,18 @@ use crate::include::catalog::{
     ANYOID, ARRAY_BTREE_OPCLASS_OID, BOX_SPGIST_OPCLASS_OID, BPCHAR_HASH_OPCLASS_OID, BRIN_AM_OID,
     BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN,
     CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID,
-    DEFAULT_COLLATION_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID,
-    INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID, PG_AUTHID_RELATION_OID,
-    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_OWNER_OID,
+    DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID,
+    GLOBAL_TABLESPACE_OID, HASH_AM_OID, INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID,
+    PG_AUTHID_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_OWNER_OID,
     PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
     PG_LARGEOBJECT_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID, PG_READ_ALL_DATA_OID,
     PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID,
     POLY_SPGIST_OPCLASS_OID, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
-    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID,
-    bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
-    default_btree_opclass_oid, default_hash_opclass_oid,
+    PgConversionRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow, QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID,
+    TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID, bootstrap_pg_am_rows,
+    builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid, default_btree_opclass_oid,
+    default_hash_opclass_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
@@ -915,7 +917,7 @@ fn function_arguments_text(
             .enumerate()
             .map(|(index, type_oid)| {
                 let mode = modes.get(index).copied().unwrap_or(b'i');
-                let default = if matches!(mode, b'i' | b'b') {
+                let default = if matches!(mode, b'i' | b'b' | b'v') {
                     let default = defaults.get(input_index).and_then(|value| value.as_deref());
                     input_index += 1;
                     default
@@ -1457,6 +1459,348 @@ fn statistics_visible_in_search_path(
         }
     }
     false
+}
+
+fn catalog_is_temp_schema_name(schema_name: &str) -> bool {
+    schema_name.eq_ignore_ascii_case("pg_temp")
+        || schema_name.to_ascii_lowercase().starts_with("pg_temp_")
+}
+
+fn catalog_visibility_search_path(catalog: &dyn CatalogLookup) -> Vec<String> {
+    let configured = catalog.search_path();
+    let mut search_path = Vec::new();
+    if !configured
+        .iter()
+        .any(|schema| schema.eq_ignore_ascii_case("pg_catalog"))
+    {
+        search_path.push("pg_catalog".into());
+    }
+    search_path.extend(configured);
+    search_path
+}
+
+fn catalog_object_visible_in_search_path(
+    catalog: &dyn CatalogLookup,
+    target_oid: u32,
+    target_namespace_oid: u32,
+    target_name: &str,
+    mut same_name_oid_in_namespace: impl FnMut(u32, &str) -> Option<u32>,
+) -> bool {
+    if catalog
+        .namespace_row_by_oid(target_namespace_oid)
+        .is_some_and(|namespace| catalog_is_temp_schema_name(&namespace.nspname))
+    {
+        return false;
+    }
+    for schema_name in catalog_visibility_search_path(catalog) {
+        if catalog_is_temp_schema_name(&schema_name) {
+            continue;
+        }
+        let Some(namespace) = catalog
+            .namespace_rows()
+            .into_iter()
+            .find(|row| row.nspname.eq_ignore_ascii_case(&schema_name))
+        else {
+            continue;
+        };
+        if let Some(candidate_oid) = same_name_oid_in_namespace(namespace.oid, target_name) {
+            return candidate_oid == target_oid;
+        }
+    }
+    false
+}
+
+fn eval_catalog_visibility_result(
+    values: &[Value],
+    function_name: &'static str,
+    mut is_visible: impl FnMut(u32) -> Result<Option<bool>, ExecError>,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [value] => {
+            let oid = oid_arg_to_u32(value, function_name)?;
+            Ok(is_visible(oid)?.map(Value::Bool).unwrap_or(Value::Null))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: function_name,
+            actual: format!("{function_name}({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_pg_type_is_visible(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    eval_catalog_visibility_result(values, "pg_type_is_visible", |oid| {
+        let catalog = executor_catalog(ctx)?;
+        let Some(row) = catalog.type_by_oid(oid) else {
+            return Ok(None);
+        };
+        Ok(Some(catalog_object_visible_in_search_path(
+            catalog,
+            row.oid,
+            row.typnamespace,
+            &row.typname,
+            |namespace_oid, typname| {
+                catalog
+                    .type_rows()
+                    .into_iter()
+                    .find(|candidate: &PgTypeRow| {
+                        candidate.typnamespace == namespace_oid
+                            && candidate.typname.eq_ignore_ascii_case(typname)
+                    })
+                    .map(|candidate| candidate.oid)
+            },
+        )))
+    })
+}
+
+fn eval_pg_operator_is_visible(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    eval_catalog_visibility_result(values, "pg_operator_is_visible", |oid| {
+        let catalog = executor_catalog(ctx)?;
+        let Some(row) = catalog.operator_by_oid(oid) else {
+            return Ok(None);
+        };
+        Ok(Some(catalog_object_visible_in_search_path(
+            catalog,
+            row.oid,
+            row.oprnamespace,
+            &row.oprname,
+            |namespace_oid, oprname| {
+                catalog
+                    .operator_rows()
+                    .into_iter()
+                    .find(|candidate: &PgOperatorRow| {
+                        candidate.oprnamespace == namespace_oid
+                            && candidate.oprname.eq_ignore_ascii_case(oprname)
+                            && candidate.oprleft == row.oprleft
+                            && candidate.oprright == row.oprright
+                    })
+                    .map(|candidate| candidate.oid)
+            },
+        )))
+    })
+}
+
+fn eval_pg_opclass_is_visible(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    eval_catalog_visibility_result(values, "pg_opclass_is_visible", |oid| {
+        let catalog = executor_catalog(ctx)?;
+        let Some(row) = catalog
+            .opclass_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(catalog_object_visible_in_search_path(
+            catalog,
+            row.oid,
+            row.opcnamespace,
+            &row.opcname,
+            |namespace_oid, opcname| {
+                catalog
+                    .opclass_rows()
+                    .into_iter()
+                    .find(|candidate: &PgOpclassRow| {
+                        candidate.opcnamespace == namespace_oid
+                            && candidate.opcmethod == row.opcmethod
+                            && candidate.opcname.eq_ignore_ascii_case(opcname)
+                    })
+                    .map(|candidate| candidate.oid)
+            },
+        )))
+    })
+}
+
+fn eval_pg_opfamily_is_visible(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    eval_catalog_visibility_result(values, "pg_opfamily_is_visible", |oid| {
+        let catalog = executor_catalog(ctx)?;
+        let Some(row) = catalog
+            .opfamily_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(catalog_object_visible_in_search_path(
+            catalog,
+            row.oid,
+            row.opfnamespace,
+            &row.opfname,
+            |namespace_oid, opfname| {
+                catalog
+                    .opfamily_rows()
+                    .into_iter()
+                    .find(|candidate: &PgOpfamilyRow| {
+                        candidate.opfnamespace == namespace_oid
+                            && candidate.opfmethod == row.opfmethod
+                            && candidate.opfname.eq_ignore_ascii_case(opfname)
+                    })
+                    .map(|candidate| candidate.oid)
+            },
+        )))
+    })
+}
+
+fn eval_pg_conversion_is_visible(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    eval_catalog_visibility_result(values, "pg_conversion_is_visible", |oid| {
+        let catalog = executor_catalog(ctx)?;
+        let Some(row) = catalog
+            .conversion_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(catalog_object_visible_in_search_path(
+            catalog,
+            row.oid,
+            row.connamespace,
+            &row.conname,
+            |namespace_oid, conname| {
+                catalog
+                    .conversion_rows()
+                    .into_iter()
+                    .find(|candidate: &PgConversionRow| {
+                        candidate.connamespace == namespace_oid
+                            && candidate.conname.eq_ignore_ascii_case(conname)
+                    })
+                    .map(|candidate| candidate.oid)
+            },
+        )))
+    })
+}
+
+fn eval_pg_ts_parser_is_visible(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    eval_catalog_visibility_result(values, "pg_ts_parser_is_visible", |oid| {
+        let catalog = executor_catalog(ctx)?;
+        let Some(row) = catalog
+            .ts_parser_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(catalog_object_visible_in_search_path(
+            catalog,
+            row.oid,
+            row.prsnamespace,
+            &row.prsname,
+            |namespace_oid, prsname| {
+                catalog
+                    .ts_parser_rows()
+                    .into_iter()
+                    .find(|candidate: &PgTsParserRow| {
+                        candidate.prsnamespace == namespace_oid
+                            && candidate.prsname.eq_ignore_ascii_case(prsname)
+                    })
+                    .map(|candidate| candidate.oid)
+            },
+        )))
+    })
+}
+
+fn eval_pg_ts_dict_is_visible(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    eval_catalog_visibility_result(values, "pg_ts_dict_is_visible", |oid| {
+        let catalog = executor_catalog(ctx)?;
+        let Some(row) = catalog
+            .ts_dict_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(catalog_object_visible_in_search_path(
+            catalog,
+            row.oid,
+            row.dictnamespace,
+            &row.dictname,
+            |namespace_oid, dictname| {
+                catalog
+                    .ts_dict_rows()
+                    .into_iter()
+                    .find(|candidate: &PgTsDictRow| {
+                        candidate.dictnamespace == namespace_oid
+                            && candidate.dictname.eq_ignore_ascii_case(dictname)
+                    })
+                    .map(|candidate| candidate.oid)
+            },
+        )))
+    })
+}
+
+fn eval_pg_ts_template_is_visible(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    eval_catalog_visibility_result(values, "pg_ts_template_is_visible", |oid| {
+        let catalog = executor_catalog(ctx)?;
+        let Some(row) = catalog
+            .ts_template_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(catalog_object_visible_in_search_path(
+            catalog,
+            row.oid,
+            row.tmplnamespace,
+            &row.tmplname,
+            |namespace_oid, tmplname| {
+                catalog
+                    .ts_template_rows()
+                    .into_iter()
+                    .find(|candidate: &PgTsTemplateRow| {
+                        candidate.tmplnamespace == namespace_oid
+                            && candidate.tmplname.eq_ignore_ascii_case(tmplname)
+                    })
+                    .map(|candidate| candidate.oid)
+            },
+        )))
+    })
+}
+
+fn eval_pg_ts_config_is_visible(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    eval_catalog_visibility_result(values, "pg_ts_config_is_visible", |oid| {
+        let catalog = executor_catalog(ctx)?;
+        let Some(row) = catalog
+            .ts_config_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(catalog_object_visible_in_search_path(
+            catalog,
+            row.oid,
+            row.cfgnamespace,
+            &row.cfgname,
+            |namespace_oid, cfgname| {
+                catalog
+                    .ts_config_rows()
+                    .into_iter()
+                    .find(|candidate: &PgTsConfigRow| {
+                        candidate.cfgnamespace == namespace_oid
+                            && candidate.cfgname.eq_ignore_ascii_case(cfgname)
+                    })
+                    .map(|candidate| candidate.oid)
+            },
+        )))
+    })
 }
 
 fn eval_pg_rust_internal_binary_coercible(values: &[Value]) -> Result<Value, ExecError> {
@@ -5590,13 +5934,91 @@ fn eval_pg_relation_size(values: &[Value], ctx: &ExecutorContext) -> Result<Valu
             },
         ));
     }
+    relation_main_fork_size(&relation, ctx).map(Value::Int64)
+}
+
+fn relation_main_fork_size(
+    relation: &crate::backend::parser::BoundRelation,
+    ctx: &ExecutorContext,
+) -> Result<i64, ExecError> {
     let nblocks = ctx
         .pool
         .with_storage_mut(|s| s.smgr.nblocks(relation.rel, ForkNumber::Main))
         .map_err(crate::backend::access::heap::heapam::HeapError::Storage)?;
-    Ok(Value::Int64(
-        i64::from(nblocks) * i64::from(crate::backend::storage::smgr::smgr::BLCKSZ as i32),
-    ))
+    Ok(i64::from(nblocks) * i64::from(crate::backend::storage::smgr::smgr::BLCKSZ as i32))
+}
+
+fn eval_pg_table_size(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_table_size(regclass)",
+            actual: format!("PgTableSize({} args)", values.len()),
+        }));
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    let catalog = executor_catalog(ctx)?;
+    let relation_oid = match oid_arg_to_u32(value, "pg_table_size") {
+        Ok(oid) => oid,
+        Err(err) if value.as_text().is_some() => {
+            let relation_name = value.as_text().expect("guarded above");
+            catalog
+                .lookup_any_relation(relation_name)
+                .map(|relation| relation.relation_oid)
+                .ok_or(err)?
+        }
+        Err(err) => return Err(err),
+    };
+    let Some(relation) = catalog.relation_by_oid(relation_oid) else {
+        return Ok(Value::Null);
+    };
+    if relation.rel.rel_number == 0 {
+        return Ok(Value::Int64(0));
+    }
+    relation_main_fork_size(&relation, ctx).map(Value::Int64)
+}
+
+fn eval_pg_tablespace_location(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_tablespace_location(oid)",
+            actual: format!("PgTablespaceLocation({} args)", values.len()),
+        }));
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    let mut tablespace_oid = oid_arg_to_u32(value, "pg_tablespace_location")?;
+    if tablespace_oid == 0 {
+        tablespace_oid = DEFAULT_TABLESPACE_OID;
+    }
+    if matches!(
+        tablespace_oid,
+        DEFAULT_TABLESPACE_OID | GLOBAL_TABLESPACE_OID
+    ) {
+        return Ok(Value::Text("".into()));
+    }
+
+    let Some(data_dir) = &ctx.data_dir else {
+        return Ok(Value::Text("".into()));
+    };
+    let source_path = data_dir.join("pg_tblspc").join(tablespace_oid.to_string());
+    let metadata = match std::fs::symlink_metadata(&source_path) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(Value::Null),
+    };
+    if metadata.file_type().is_symlink()
+        && let Ok(target) = std::fs::read_link(&source_path)
+    {
+        return Ok(Value::Text(target.display().to_string().into()));
+    }
+    Ok(Value::Text(source_path.display().to_string().into()))
 }
 
 fn eval_pg_relation_filenode(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -7618,14 +8040,24 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::HasServerPrivilege => {
             eval_has_foreign_privilege_function(ForeignPrivilegeKind::Server, &values, None)
         }
-        BuiltinScalarFunction::PgGetPartKeyDef | BuiltinScalarFunction::PgTableIsVisible => {
-            Err(ExecError::DetailedError {
-                message: "catalog helper requires executor context".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "XX000",
-            })
-        }
+        BuiltinScalarFunction::PgGetPartKeyDef
+        | BuiltinScalarFunction::PgTableIsVisible
+        | BuiltinScalarFunction::PgTypeIsVisible
+        | BuiltinScalarFunction::PgOperatorIsVisible
+        | BuiltinScalarFunction::PgOpclassIsVisible
+        | BuiltinScalarFunction::PgOpfamilyIsVisible
+        | BuiltinScalarFunction::PgConversionIsVisible
+        | BuiltinScalarFunction::PgTsParserIsVisible
+        | BuiltinScalarFunction::PgTsDictIsVisible
+        | BuiltinScalarFunction::PgTsTemplateIsVisible
+        | BuiltinScalarFunction::PgTsConfigIsVisible
+        | BuiltinScalarFunction::PgTableSize
+        | BuiltinScalarFunction::PgTablespaceLocation => Err(ExecError::DetailedError {
+            message: "catalog helper requires executor context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }),
         BuiltinScalarFunction::RegProcToText => {
             eval_reg_object_to_text(&values[0], SqlTypeKind::RegProc, None)
         }
@@ -7829,6 +8261,8 @@ fn eval_plpgsql_builtin_function(
             crate::backend::utils::misc::guc_xml::XmlOptionSetting::Content,
             None,
         ),
+        BuiltinScalarFunction::XPath => eval_xpath_function(&values),
+        BuiltinScalarFunction::XPathExists => eval_xpath_exists_function(&values),
         BuiltinScalarFunction::TsMatch => eval_ts_match_values(&values, None, None),
         BuiltinScalarFunction::TsQueryAnd => match values.as_slice() {
             [Value::TsQuery(left), Value::TsQuery(right)] => Ok(Value::TsQuery(
@@ -9413,6 +9847,17 @@ pub(crate) fn eval_builtin_function(
             eval_pg_statistics_obj_is_visible(&values, ctx)
         }
         BuiltinScalarFunction::PgFunctionIsVisible => eval_pg_function_is_visible(&values, ctx),
+        BuiltinScalarFunction::PgTypeIsVisible => eval_pg_type_is_visible(&values, ctx),
+        BuiltinScalarFunction::PgOperatorIsVisible => eval_pg_operator_is_visible(&values, ctx),
+        BuiltinScalarFunction::PgOpclassIsVisible => eval_pg_opclass_is_visible(&values, ctx),
+        BuiltinScalarFunction::PgOpfamilyIsVisible => eval_pg_opfamily_is_visible(&values, ctx),
+        BuiltinScalarFunction::PgConversionIsVisible => eval_pg_conversion_is_visible(&values, ctx),
+        BuiltinScalarFunction::PgTsParserIsVisible => eval_pg_ts_parser_is_visible(&values, ctx),
+        BuiltinScalarFunction::PgTsDictIsVisible => eval_pg_ts_dict_is_visible(&values, ctx),
+        BuiltinScalarFunction::PgTsTemplateIsVisible => {
+            eval_pg_ts_template_is_visible(&values, ctx)
+        }
+        BuiltinScalarFunction::PgTsConfigIsVisible => eval_pg_ts_config_is_visible(&values, ctx),
         BuiltinScalarFunction::Now | BuiltinScalarFunction::TransactionTimestamp => {
             let mut config = ctx.datetime_config.clone();
             config
@@ -9733,6 +10178,8 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgRelationFilenode => eval_pg_relation_filenode(&values, ctx),
         BuiltinScalarFunction::PgFilenodeRelation => eval_pg_filenode_relation(&values, ctx),
         BuiltinScalarFunction::PgRelationSize => eval_pg_relation_size(&values, ctx),
+        BuiltinScalarFunction::PgTableSize => eval_pg_table_size(&values, ctx),
+        BuiltinScalarFunction::PgTablespaceLocation => eval_pg_tablespace_location(&values, ctx),
         BuiltinScalarFunction::NumNulls => Ok(eval_num_nulls(&values, func_variadic, true)),
         BuiltinScalarFunction::NumNonNulls => Ok(eval_num_nulls(&values, func_variadic, false)),
         BuiltinScalarFunction::PgLogBackendMemoryContexts => {
@@ -9874,6 +10321,8 @@ pub(crate) fn eval_builtin_function(
             crate::backend::utils::misc::guc_xml::XmlOptionSetting::Content,
             Some(ctx),
         ),
+        BuiltinScalarFunction::XPath => eval_xpath_function(&values),
+        BuiltinScalarFunction::XPathExists => eval_xpath_exists_function(&values),
         BuiltinScalarFunction::TsMatch => eval_ts_match_values(
             &values,
             ctx.gucs

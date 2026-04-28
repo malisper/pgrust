@@ -14,10 +14,10 @@ use crate::include::catalog::{
     PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow,
     PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
     PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
-    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
-    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
-    PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow, bootstrap_composite_type_rows,
-    builtin_type_rows, pg_type_desc,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow,
+    PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow,
+    bootstrap_composite_type_rows, builtin_type_rows, pg_type_desc,
 };
 use crate::include::nodes::datetime::TimestampTzADT;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, RecordValue, Value};
@@ -223,6 +223,12 @@ pub(crate) fn catalog_row_values_for_kind(
             .iter()
             .cloned()
             .map(pg_rewrite_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgSequence => rows
+            .sequences
+            .iter()
+            .cloned()
+            .map(pg_sequence_row_values)
             .collect(),
         BootstrapCatalogKind::PgTrigger => rows
             .triggers
@@ -714,6 +720,21 @@ pub(crate) fn pg_ts_config_map_row_from_values(
         maptokentype: expect_int32(&values[1])?,
         mapseqno: expect_int32(&values[2])?,
         mapdict: expect_oid(&values[3])?,
+    })
+}
+
+pub(crate) fn pg_sequence_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgSequenceRow, CatalogError> {
+    Ok(PgSequenceRow {
+        seqrelid: expect_oid(&values[0])?,
+        seqtypid: expect_oid(&values[1])?,
+        seqstart: expect_int64(&values[2])?,
+        seqincrement: expect_int64(&values[3])?,
+        seqmax: expect_int64(&values[4])?,
+        seqmin: expect_int64(&values[5])?,
+        seqcache: expect_int64(&values[6])?,
+        seqcycle: expect_bool(&values[7])?,
     })
 }
 
@@ -1736,6 +1757,19 @@ fn pg_ts_config_map_row_values(row: PgTsConfigMapRow) -> Vec<Value> {
     ]
 }
 
+fn pg_sequence_row_values(row: PgSequenceRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.seqrelid as i32),
+        Value::Int32(row.seqtypid as i32),
+        Value::Int64(row.seqstart),
+        Value::Int64(row.seqincrement),
+        Value::Int64(row.seqmax),
+        Value::Int64(row.seqmin),
+        Value::Int64(row.seqcache),
+        Value::Bool(row.seqcycle),
+    ]
+}
+
 fn pg_proc_row_values(row: PgProcRow) -> Vec<Value> {
     vec![
         Value::Int32(row.oid as i32),
@@ -2333,6 +2367,14 @@ fn expect_int32(value: &Value) -> Result<i32, CatalogError> {
     match value {
         Value::Int32(v) => Ok(*v),
         _ => Err(CatalogError::Corrupt("expected int4 value")),
+    }
+}
+
+fn expect_int64(value: &Value) -> Result<i64, CatalogError> {
+    match value {
+        Value::Int64(v) => Ok(*v),
+        Value::Int32(v) => Ok(i64::from(*v)),
+        _ => Err(CatalogError::Corrupt("expected int8 value")),
     }
 }
 

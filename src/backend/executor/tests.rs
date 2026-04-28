@@ -20077,7 +20077,7 @@ fn jsonpath_arithmetic_recursive_and_subscripts_work() {
                 rows,
                 vec![vec![
                     Value::JsonPath("$.\"a\".**{2}.\"b\"".into()),
-                    Value::JsonPath("$ ? ((@ == 1) is unknown)".into()),
+                    Value::JsonPath("$?((@ == 1) is unknown)".into()),
                     Value::JsonPath("$[last]".into()),
                     Value::JsonPath("$[0.5]".into()),
                     Value::Bool(true),
@@ -20341,10 +20341,10 @@ fn jsonpath_extended_subscripts_parse() {
             assert_eq!(
                 rows,
                 vec![vec![
-                    Value::JsonPath("$[0, 1]".into()),
+                    Value::JsonPath("$[0,1]".into()),
                     Value::JsonPath("$[last - 1]".into()),
                     Value::JsonPath("$[2.5 - 1 to $.size() - 2]".into()),
-                    Value::JsonPath("$[last ? (@.type() == \"number\")]".into()),
+                    Value::JsonPath("$[last?(@.type() == \"number\")]".into()),
                 ]]
             );
         }
@@ -20463,8 +20463,8 @@ fn jsonpath_expression_method_calls_parse() {
             assert_eq!(
                 rows,
                 vec![vec![
-                    Value::JsonPath("($.\"a\" - 5).abs() + 10".into()),
-                    Value::JsonPath("-($.\"a\" * $.\"a\").floor() % 4.3".into()),
+                    Value::JsonPath("(($.\"a\" - 5).abs() + 10)".into()),
+                    Value::JsonPath("(-($.\"a\" * $.\"a\").floor() % 4.3)".into()),
                 ]]
             );
         }
@@ -20518,7 +20518,7 @@ fn jsonpath_numeric_method_calls_parse() {
                 vec![vec![
                     Value::JsonPath("$.number()".into()),
                     Value::JsonPath("$.integer()".into()),
-                    Value::JsonPath("$.decimal(4, 2)".into()),
+                    Value::JsonPath("$.decimal(4,2)".into()),
                 ]]
             );
         }
@@ -20600,9 +20600,9 @@ fn jsonpath_string_predicates_parse() {
             assert_eq!(
                 rows,
                 vec![vec![
-                    Value::JsonPath("$ ? (@ starts with \"abc\")".into()),
-                    Value::JsonPath("$ ? (@ starts with $var)".into()),
-                    Value::JsonPath("$ ? (@ like_regex \"pattern\" flag \"iq\")".into()),
+                    Value::JsonPath("$?(@ starts with \"abc\")".into()),
+                    Value::JsonPath("$?(@ starts with $\"var\")".into()),
+                    Value::JsonPath("$?(@ like_regex \"pattern\" flag \"iq\")".into()),
                 ]]
             );
         }
@@ -20904,6 +20904,285 @@ fn jsonpath_builtin_method_calls_work() {
 }
 
 #[test]
+fn jsonpath_postfix_access_after_expression_work() {
+    assert_eq!(
+        jsonpath::canonicalize_jsonpath("($).a.b").unwrap(),
+        "$.\"a\".\"b\""
+    );
+    assert_eq!(
+        jsonpath::canonicalize_jsonpath("($.a.b).c.d").unwrap(),
+        "$.\"a\".\"b\".\"c\".\"d\""
+    );
+    assert_eq!(
+        jsonpath::canonicalize_jsonpath("(1.2).e").unwrap(),
+        "(1.2).\"e\""
+    );
+    assert_eq!(
+        jsonpath::canonicalize_jsonpath("1.2.e").unwrap(),
+        "(1.2).\"e\""
+    );
+
+    let base = temp_dir("jsonpath_postfix_access_after_expression");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('{\"a\":{\"b\":1}}', '($).a.b')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            match &rows[0][0] {
+                Value::Jsonb(bytes) => assert_eq!(
+                    crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap(),
+                    "1"
+                ),
+                other => panic!("expected jsonb, got {:?}", other),
+            }
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonpath_numeric_literals_work() {
+    for (input, expected) in [
+        (".001", "0.001"),
+        (".001e1", "0.01"),
+        ("1.", "1"),
+        ("1.e1", "10"),
+        ("1e3", "1000"),
+        ("1.2e3", "1200"),
+        ("1..e", "(1).\"e\""),
+        ("1.e3.e", "(1000).\"e\""),
+        ("1.e3.e4", "(1000).\"e4\""),
+        ("0b100101", "37"),
+        ("0o273", "187"),
+        ("0x42F", "1071"),
+        ("1_000_000", "1000000"),
+        ("0x1EEE_FFFF", "518979583"),
+        ("1_000.000_005", "1000.000005"),
+        ("1_000.5e0_1", "10005"),
+    ] {
+        assert_eq!(jsonpath::canonicalize_jsonpath(input).unwrap(), expected);
+    }
+}
+
+#[test]
+fn jsonpath_numeric_literals_error() {
+    fn jsonpath_error_details(input: &str) -> String {
+        match jsonpath::canonicalize_jsonpath(input).unwrap_err() {
+            ExecError::InvalidStorageValue { column, details } if column == "jsonpath" => details,
+            other => panic!("expected jsonpath storage error, got {other:?}"),
+        }
+    }
+
+    for (input, expected) in [
+        (
+            "00",
+            "trailing junk after numeric literal at or near \"00\" of jsonpath input",
+        ),
+        (
+            "1a",
+            "trailing junk after numeric literal at or near \"1a\" of jsonpath input",
+        ),
+        (
+            "1e",
+            "trailing junk after numeric literal at or near \"1e\" of jsonpath input",
+        ),
+        (
+            "1.e",
+            "trailing junk after numeric literal at or near \"1.e\" of jsonpath input",
+        ),
+        (
+            "1.2e",
+            "trailing junk after numeric literal at or near \"1.2e\" of jsonpath input",
+        ),
+        (
+            "100_",
+            "trailing junk after numeric literal at or near \"100_\" of jsonpath input",
+        ),
+        (
+            "1_000_.5",
+            "trailing junk after numeric literal at or near \"1_000_\" of jsonpath input",
+        ),
+        (
+            "1_000.5e_1",
+            "trailing junk after numeric literal at or near \"1_000.5e\" of jsonpath input",
+        ),
+        (
+            "0b",
+            "trailing junk after numeric literal at or near \"0b\" of jsonpath input",
+        ),
+        (
+            "0x",
+            "trailing junk after numeric literal at or near \"0x\" of jsonpath input",
+        ),
+        ("100__000", "syntax error at end of jsonpath input"),
+        ("0b0x", "syntax error at end of jsonpath input"),
+        ("0x0y", "syntax error at end of jsonpath input"),
+        ("0b_10_0101", "syntax error at end of jsonpath input"),
+    ] {
+        assert_eq!(jsonpath_error_details(input), expected);
+    }
+}
+
+#[test]
+fn jsonpath_numeric_pg_input_error_info() {
+    let base = temp_dir("jsonpath_numeric_pg_input_error_info");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select message, detail, hint, sql_error_code from pg_input_error_info('00', 'jsonpath')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text(
+                "trailing junk after numeric literal at or near \"00\" of jsonpath input".into(),
+            ),
+            Value::Null,
+            Value::Null,
+            Value::Text("42601".into()),
+        ]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select message, detail, hint, sql_error_code from pg_input_error_info('1a', 'jsonpath')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text(
+                "trailing junk after numeric literal at or near \"1a\" of jsonpath input".into(),
+            ),
+            Value::Null,
+            Value::Null,
+            Value::Text("42601".into()),
+        ]],
+    );
+}
+
+#[test]
+fn jsonpath_canonical_renderer_work() {
+    for (input, expected) in [
+        ("$.g ? ($.a == 1)", "$.\"g\"?($.\"a\" == 1)"),
+        (
+            "$.g ? (@.a == 1 || @.a == 4 && @.b == 7)",
+            "$.\"g\"?(@.\"a\" == 1 || @.\"a\" == 4 && @.\"b\" == 7)",
+        ),
+        (
+            "$.g ? (exists (@.x ? (@ == 14)))",
+            "$.\"g\"?(exists (@.\"x\"?(@ == 14)))",
+        ),
+        ("$ ? (@.a < 1e1)", "$?(@.\"a\" < 10)"),
+        ("1?(2>3)", "(1)?(2 > 3)"),
+        ("$.a[1,2, 3 to 16]", "$.\"a\"[1,2,3 to 16]"),
+        ("$zip", "$\"zip\""),
+        ("$.g ? (@.zip == $zip)", "$.\"g\"?(@.\"zip\" == $\"zip\")"),
+        ("$.a.**.b", "$.\"a\".**.\"b\""),
+        ("1.2.type()", "(1.2).type()"),
+        ("$+1", "($ + 1)"),
+        ("$--+1", "($ - -1)"),
+        ("1 * 2 + 4 % -3 != false", "(1 * 2 + 4 % -3 != false)"),
+        (
+            "$ ? (@ like_regex \"pattern\" flag \"isim\")",
+            "$?(@ like_regex \"pattern\" flag \"ism\")",
+        ),
+        (
+            "$ ? (@ like_regex \"pattern\" flag \"smixq\")",
+            "$?(@ like_regex \"pattern\" flag \"ismxq\")",
+        ),
+    ] {
+        assert_eq!(jsonpath::canonicalize_jsonpath(input).unwrap(), expected);
+    }
+}
+
+#[test]
+fn jsonpath_remaining_regression_cases_work() {
+    for (input, expected) in [
+        (r#""\b\f\r\n\t\v\"\'\\""#, r#""\b\f\r\n\t\u000b\"'\\""#),
+        (r#""\x50\u0067\u{53}\u{051}\u{00004C}""#, r#""PgSQL""#),
+        (
+            r#"$.foo\x50\u0067\u{53}\u{051}\u{00004C}\t\"bar"#,
+            r##"$."fooPgSQL\t\"bar""##,
+        ),
+        (r#""\z""#, r#""z""#),
+    ] {
+        assert_eq!(jsonpath::canonicalize_jsonpath(input).unwrap(), expected);
+    }
+
+    for (input, expected) in [
+        ("last", "LAST is allowed only in array subscripts"),
+        ("$ ? (last > 0)", "LAST is allowed only in array subscripts"),
+        ("@ + 1", "@ is not allowed in root expressions"),
+    ] {
+        match jsonpath::canonicalize_jsonpath(input).unwrap_err() {
+            ExecError::InvalidStorageValue { column, details } => {
+                assert_eq!(column, "jsonpath");
+                assert_eq!(details, expected);
+            }
+            other => panic!("expected jsonpath storage error, got {other:?}"),
+        }
+    }
+
+    match jsonpath::canonicalize_jsonpath(r#"$ ? (@ like_regex "(invalid pattern")"#).unwrap_err() {
+        ExecError::Regex(RegexError {
+            sqlstate, message, ..
+        }) => {
+            assert_eq!(sqlstate, "2201B");
+            assert_eq!(
+                message,
+                "invalid regular expression: parentheses () not balanced"
+            );
+        }
+        other => panic!("expected regex error, got {other:?}"),
+    }
+
+    match jsonpath::canonicalize_jsonpath(r#"$ ? (@ like_regex "pattern" flag "xsms")"#)
+        .unwrap_err()
+    {
+        ExecError::Regex(RegexError {
+            sqlstate, message, ..
+        }) => {
+            assert_eq!(sqlstate, "0A000");
+            assert_eq!(
+                message,
+                "XQuery \"x\" flag (expanded regular expressions) is not implemented"
+            );
+        }
+        other => panic!("expected regex feature error, got {other:?}"),
+    }
+
+    let flag_info =
+        expr_casts::soft_input_error_info(r#"$ ? (@ like_regex "pattern" flag "a")"#, "jsonpath")
+            .unwrap()
+            .unwrap();
+    assert_eq!(flag_info.sqlstate, "42601");
+    assert_eq!(flag_info.message, "invalid input syntax for type jsonpath");
+    assert_eq!(
+        flag_info.detail.as_deref(),
+        Some("Unrecognized flag character \"a\" in LIKE_REGEX predicate.")
+    );
+
+    let current_info = expr_casts::soft_input_error_info("@ + 1", "jsonpath")
+        .unwrap()
+        .unwrap();
+    assert_eq!(current_info.sqlstate, "42601");
+    assert_eq!(current_info.message, "@ is not allowed in root expressions");
+    assert_eq!(current_info.detail, None);
+}
+
+#[test]
 fn jsonpath_datetime_method_calls_errors() {
     let base = temp_dir("jsonpath_datetime_method_calls_errors");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -21039,9 +21318,10 @@ fn jsonpath_string_predicates_errors() {
     assert!(
         matches!(
             &err,
-            ExecError::InvalidStorageValue { column, details }
-                if column == "jsonpath"
-                    && details == "invalid input syntax for type jsonpath: \"$ ? (@ like_regex \"pattern\" flag \"a\")\""
+            ExecError::DetailedError { message, detail, sqlstate, .. }
+                if message == "invalid input syntax for type jsonpath"
+                    && detail.as_deref() == Some("Unrecognized flag character \"a\" in LIKE_REGEX predicate.")
+                    && *sqlstate == "42601"
         ),
         "{err:?}"
     );

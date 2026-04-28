@@ -1221,20 +1221,24 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             call,
             table_alias,
-        } => Box::new(FunctionScanState {
-            output_columns: call
+        } => {
+            let output_columns = call
                 .output_columns()
                 .iter()
                 .map(|c| c.name.clone())
-                .collect(),
-            call,
-            table_alias,
-            rows: None,
-            next_index: 0,
-            current_bindings: Vec::new(),
-            plan_info,
-            stats: NodeExecStats::default(),
-        }),
+                .collect::<Vec<_>>();
+            Box::new(FunctionScanState {
+                slot: TupleSlot::empty(output_columns.len()),
+                output_columns,
+                call,
+                table_alias,
+                rows: None,
+                next_index: 0,
+                current_bindings: Vec::new(),
+                plan_info,
+                stats: NodeExecStats::default(),
+            })
+        }
         Plan::SubqueryScan {
             plan_info,
             input,

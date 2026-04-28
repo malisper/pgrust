@@ -8,14 +8,16 @@ use crate::backend::commands::tablecmds::{
     build_immediate_index_insert_context, collect_matching_rows_heap,
 };
 use crate::backend::executor::{
-    ConstraintTiming, DeferredForeignKeyTracker, ExecError, ExecutorContext, StatementResult,
+    ConstraintTiming, DeferredForeignKeyTracker, ExecError, ExecutorContext,
+    PendingParentForeignKeyCheck, StatementResult, enforce_deferred_inbound_foreign_key_check,
     enforce_outbound_foreign_keys,
 };
 use crate::backend::parser::{
     AlterTableAddConstraintStatement, AlterTableValidateConstraintStatement, BoundDeleteStatement,
     BoundInsertStatement, BoundRelation, BoundRelationConstraints, BoundUpdateStatement,
     CatalogLookup, ParseError, PreparedInsert, QualifiedNameRef, SetConstraintsStatement,
-    bind_relation_constraints, normalize_alter_table_add_constraint,
+    bind_referenced_by_foreign_keys, bind_relation_constraints,
+    normalize_alter_table_add_constraint,
 };
 use crate::backend::storage::lmgr::TableLockMode;
 use crate::backend::storage::smgr::RelFileLocator;
@@ -110,6 +112,7 @@ pub(crate) fn alter_table_add_constraint_lock_requests(
     )
     .map_err(ExecError::Parse)?;
     match normalized {
+        crate::backend::parser::NormalizedAlterTableConstraint::Noop => {}
         crate::backend::parser::NormalizedAlterTableConstraint::ForeignKey(action) => {
             let referenced_relation = catalog
                 .lookup_relation_by_oid(action.referenced_relation_oid)
@@ -123,6 +126,24 @@ pub(crate) fn alter_table_add_constraint_lock_requests(
             );
         }
         crate::backend::parser::NormalizedAlterTableConstraint::Check(action)
+            if !stmt.only && !action.no_inherit =>
+        {
+            for child_oid in catalog.find_all_inheritors(relation.relation_oid) {
+                if child_oid == relation.relation_oid {
+                    continue;
+                }
+                let child_relation =
+                    catalog.lookup_relation_by_oid(child_oid).ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnknownTable(child_oid.to_string()))
+                    })?;
+                add_lock_request(
+                    &mut requests,
+                    child_relation.rel,
+                    TableLockMode::AccessExclusive,
+                );
+            }
+        }
+        crate::backend::parser::NormalizedAlterTableConstraint::NotNull(action)
             if !stmt.only && !action.no_inherit =>
         {
             for child_oid in catalog.find_all_inheritors(relation.relation_oid) {
@@ -311,7 +332,11 @@ fn collect_constraint_validation_targets(
     catalog: &LazyCatalogLookup,
     tracker: &DeferredForeignKeyTracker,
     target: &ConstraintValidationTarget,
-) -> (BTreeSet<u32>, BTreeSet<u32>) {
+) -> (
+    BTreeSet<u32>,
+    Vec<PendingParentForeignKeyCheck>,
+    BTreeSet<u32>,
+) {
     let foreign_keys = tracker
         .affected_constraint_oids()
         .into_iter()
@@ -319,6 +344,11 @@ fn collect_constraint_validation_targets(
             should_validate_constraint(catalog, tracker, *constraint_oid, target)
         })
         .collect::<BTreeSet<_>>();
+    let parent_checks = tracker
+        .pending_parent_foreign_key_checks()
+        .into_iter()
+        .filter(|check| should_validate_constraint(catalog, tracker, check.constraint_oid, target))
+        .collect::<Vec<_>>();
     let unique_constraints = tracker
         .pending_unique_constraint_oids()
         .into_iter()
@@ -326,7 +356,7 @@ fn collect_constraint_validation_targets(
             should_validate_constraint(catalog, tracker, *constraint_oid, target)
         })
         .collect::<BTreeSet<_>>();
-    (foreign_keys, unique_constraints)
+    (foreign_keys, parent_checks, unique_constraints)
 }
 
 fn validate_foreign_key_constraints(
@@ -365,6 +395,44 @@ fn validate_foreign_key_constraints(
                 ctx,
             )?;
         }
+    }
+    Ok(())
+}
+
+fn validate_parent_foreign_key_checks(
+    catalog: &LazyCatalogLookup,
+    checks: &[PendingParentForeignKeyCheck],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for check in checks {
+        let Some(row) = catalog.constraint_row_by_oid(check.constraint_oid) else {
+            continue;
+        };
+        if row.contype != CONSTRAINT_FOREIGN {
+            continue;
+        }
+        let Some(referenced_relation) = catalog.lookup_relation_by_oid(row.confrelid) else {
+            continue;
+        };
+        let constraints = bind_referenced_by_foreign_keys(
+            referenced_relation.relation_oid,
+            &referenced_relation.desc,
+            catalog,
+        )
+        .map_err(ExecError::Parse)?;
+        let Some(constraint) = constraints
+            .iter()
+            .find(|constraint| constraint.constraint_oid == check.constraint_oid)
+        else {
+            continue;
+        };
+        enforce_deferred_inbound_foreign_key_check(
+            &check.relation_name,
+            constraint,
+            &check.old_parent_values,
+            check.replacement_parent_values.as_deref(),
+            ctx,
+        )?;
     }
     Ok(())
 }
@@ -437,9 +505,9 @@ fn validate_constraint_target(
     tracker: &DeferredForeignKeyTracker,
     target: ConstraintValidationTarget,
 ) -> Result<(), ExecError> {
-    let (foreign_key_oids, unique_oids) =
+    let (foreign_key_oids, parent_checks, unique_oids) =
         collect_constraint_validation_targets(catalog, tracker, &target);
-    if foreign_key_oids.is_empty() && unique_oids.is_empty() {
+    if foreign_key_oids.is_empty() && parent_checks.is_empty() && unique_oids.is_empty() {
         return Ok(());
     }
     let mut ctx = build_constraint_validation_context(
@@ -451,9 +519,15 @@ fn validate_constraint_target(
         interrupts,
         datetime_config,
     )?;
+    validate_parent_foreign_key_checks(catalog, &parent_checks, &mut ctx)?;
     validate_foreign_key_constraints(catalog, &foreign_key_oids, &mut ctx)?;
     validate_unique_constraints(catalog, tracker, &unique_oids, &mut ctx)?;
+    let parent_foreign_key_oids = parent_checks
+        .iter()
+        .map(|check| check.constraint_oid)
+        .collect::<BTreeSet<_>>();
     tracker.clear_foreign_key_constraints(&foreign_key_oids);
+    tracker.clear_parent_foreign_key_checks(&parent_foreign_key_oids);
     tracker.clear_unique_constraints(&unique_oids);
     Ok(())
 }

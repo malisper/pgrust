@@ -1,4 +1,9 @@
+use crate::backend::executor::{
+    Value, format_array_value_text, render_datetime_value_text, render_internal_char_text,
+    render_tsquery_text, render_tsvector_text, render_uuid_text,
+};
 use crate::backend::libpq::pqformat::format_bytea_text;
+use crate::include::nodes::datum::ArrayValue;
 use crate::pgrust::session::ByteaOutputFormat;
 
 use super::serialize::{decode_payload, encode_payload};
@@ -36,6 +41,41 @@ pub struct PgMcvItem {
     pub values: Vec<Option<String>>,
     pub frequency: f64,
     pub base_frequency: f64,
+}
+
+pub fn statistics_value_key(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::Int16(v) => Some(v.to_string()),
+        Value::Int32(v) => Some(v.to_string()),
+        Value::Int64(v) => Some(v.to_string()),
+        Value::Float64(v) => Some(v.to_string()),
+        Value::Bool(v) => Some(v.to_string()),
+        Value::Text(text) => Some(text.to_string()),
+        Value::TextRef(_, _) => Some(value.as_text().unwrap_or_default().to_string()),
+        Value::Numeric(v) => Some(v.render()),
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => {
+            Some(render_datetime_value_text(value).unwrap_or_else(|| format!("{value:?}")))
+        }
+        Value::Bytea(v) => Some(format!("{v:?}")),
+        Value::Uuid(v) => Some(render_uuid_text(v)),
+        Value::Bit(v) => Some(format!("{:?}", v.bytes)),
+        Value::Array(values) => Some(format_array_value_text(&ArrayValue::from_1d(
+            values.clone(),
+        ))),
+        Value::PgArray(array) => Some(format_array_value_text(array)),
+        Value::TsVector(v) => Some(render_tsvector_text(v)),
+        Value::TsQuery(v) => Some(render_tsquery_text(v)),
+        Value::InternalChar(v) => Some(render_internal_char_text(*v)),
+        Value::Json(text) => Some(text.to_string()),
+        Value::Jsonb(bytes) => Some(format!("{bytes:?}")),
+        Value::JsonPath(text) => Some(text.to_string()),
+        other => Some(format!("{other:?}")),
+    }
 }
 
 pub fn encode_pg_ndistinct_payload(payload: &PgNdistinctPayload) -> Result<Vec<u8>, String> {

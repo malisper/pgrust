@@ -23,6 +23,9 @@ mod upperrels;
 mod util;
 
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType};
+use crate::backend::statistics::types::{
+    PgDependenciesPayload, PgMcvListPayload, PgNdistinctPayload,
+};
 use crate::include::catalog::PgStatisticRow;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query};
 use crate::include::nodes::pathnodes::{Path, PlannerConfig, PlannerInfo, RestrictInfo};
@@ -51,6 +54,17 @@ struct RelationStats {
     reltuples: f64,
     width: usize,
     stats_by_attnum: HashMap<i16, PgStatisticRow>,
+    extended_stats: Vec<ExtendedStatistic>,
+}
+
+#[derive(Debug, Clone)]
+struct ExtendedStatistic {
+    target_ids: Vec<i16>,
+    expressions: Vec<(i16, Expr)>,
+    expression_stats: HashMap<i16, PgStatisticRow>,
+    ndistinct: Option<PgNdistinctPayload>,
+    dependencies: Option<PgDependenciesPayload>,
+    mcv: Option<PgMcvListPayload>,
 }
 
 #[derive(Debug, Clone)]

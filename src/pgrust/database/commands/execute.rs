@@ -980,13 +980,27 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableSet(ref alter_stmt) => {
+                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                if catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .is_some_and(|relation| relation.relkind == 'v')
+                {
+                    self.execute_alter_view_set_options_stmt_with_search_path(
+                        client_id,
+                        alter_stmt,
+                        configured_search_path,
+                    )
+                } else {
+                    Ok(StatementResult::AffectedRows(0))
+                }
+            }
             Statement::Show(_)
             | Statement::Set(_)
             | Statement::Reset(_)
             | Statement::Prepare(_)
             | Statement::Execute(_)
             | Statement::Deallocate(_)
-            | Statement::AlterTableSet(_)
             | Statement::AlterIndexSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CreateRole(ref create_stmt) => {
                 self.execute_create_role_stmt(client_id, create_stmt, None)
@@ -1202,7 +1216,7 @@ impl Database {
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
-                    data_dir: None,
+                    data_dir: Some(self.cluster.base_dir.clone()),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
@@ -1520,7 +1534,7 @@ impl Database {
                     crate::backend::executor::DeferredForeignKeyTracker::default();
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
-                    data_dir: None,
+                    data_dir: Some(self.cluster.base_dir.clone()),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
@@ -1650,7 +1664,7 @@ impl Database {
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
-                    data_dir: None,
+                    data_dir: Some(self.cluster.base_dir.clone()),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
@@ -1886,7 +1900,7 @@ impl Database {
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
-                    data_dir: None,
+                    data_dir: Some(self.cluster.base_dir.clone()),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
@@ -2002,7 +2016,7 @@ impl Database {
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
-                    data_dir: None,
+                    data_dir: Some(self.cluster.base_dir.clone()),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
@@ -2103,6 +2117,12 @@ impl Database {
                 .execute_create_domain_stmt_with_search_path(
                     client_id,
                     create_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterDomain(ref alter_stmt) => self
+                .execute_alter_domain_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
                     configured_search_path,
                 ),
             Statement::CreateConversion(ref create_stmt) => self
@@ -2390,15 +2410,41 @@ impl Database {
                 ),
             Statement::TruncateTable(ref truncate_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                let relations = truncate_stmt
-                    .table_names
+                let mut relations = Vec::new();
+                for name in &truncate_stmt.table_names {
+                    let Some(entry) = catalog.lookup_any_relation(name) else {
+                        continue;
+                    };
+                    if !relations
+                        .iter()
+                        .any(|existing: &crate::backend::parser::BoundRelation| {
+                            existing.relation_oid == entry.relation_oid
+                        })
+                    {
+                        relations.push(entry.clone());
+                    }
+                    if entry.relkind == 'p' {
+                        for target in partitioned_truncate_targets(&catalog, entry.relation_oid) {
+                            if relations.iter().any(
+                                |existing: &crate::backend::parser::BoundRelation| {
+                                    existing.relation_oid == target.relation_oid
+                                },
+                            ) {
+                                continue;
+                            }
+                            relations.push(target);
+                        }
+                    }
+                }
+                let target_relation_oids = relations
                     .iter()
-                    .filter_map(|name| catalog.lookup_any_relation(name))
+                    .map(|relation| relation.relation_oid)
                     .collect::<Vec<_>>();
                 for relation in &relations {
-                    reject_relation_with_referencing_foreign_keys(
+                    reject_relation_with_referencing_foreign_keys_except(
                         &catalog,
                         relation.relation_oid,
+                        &target_relation_oids,
                         "TRUNCATE on table without referencing foreign keys",
                     )?;
                 }
@@ -2417,7 +2463,7 @@ impl Database {
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
-                    data_dir: None,
+                    data_dir: Some(self.cluster.base_dir.clone()),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     lock_status_provider: Some(std::sync::Arc::new(self.clone())),
@@ -2652,7 +2698,7 @@ impl Database {
         let session_replication_role = self.session_replication_role(client_id);
         let ctx = ExecutorContext {
             pool: std::sync::Arc::clone(&self.pool),
-            data_dir: None,
+            data_dir: Some(self.cluster.base_dir.clone()),
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
             lock_status_provider: Some(std::sync::Arc::new(self.clone())),

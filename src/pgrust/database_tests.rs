@@ -8982,10 +8982,24 @@ fn alter_table_set_not_null_rejects_existing_no_inherit_constraint() {
     db.execute(1, "create table p1 (a int not null no inherit)")
         .unwrap();
     match db.execute(1, "alter table p1 alter column a set not null") {
-        Err(ExecError::Parse(ParseError::InvalidTableDefinition(message)))
-            if message
-                == "cannot change NO INHERIT status of NOT NULL constraint \"p1_a_not_null\" on relation \"p1\"" =>
-            {}
+        Err(ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(
+                message,
+                "cannot change NO INHERIT status of NOT NULL constraint \"p1_a_not_null\" on relation \"p1\""
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some(
+                    "You might need to make the existing constraint inheritable using ALTER TABLE ... ALTER CONSTRAINT ... INHERIT."
+                )
+            );
+            assert_eq!(sqlstate, "0A000");
+        }
         other => panic!("expected existing NO INHERIT SET NOT NULL failure, got {other:?}"),
     }
 }
@@ -9630,6 +9644,280 @@ fn relation_privileges_gate_select_dml_copy_and_locking() {
 }
 
 #[test]
+fn normal_view_select_uses_view_owner_for_base_privileges() {
+    fn assert_table_permission_denied(result: Result<StatementResult, ExecError>, table: &str) {
+        match result {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, format!("permission denied for table {table}"));
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected table permission error for {table}, got {other:?}"),
+        }
+    }
+
+    let dir = temp_dir("normal_view_owner_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role view_tenant login")
+        .unwrap();
+    session
+        .execute(&db, "create table view_base(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into view_base values (1)")
+        .unwrap();
+    session
+        .execute(&db, "create view view_owner_v as select id from view_base")
+        .unwrap();
+    session
+        .execute(&db, "grant select on view_owner_v to view_tenant")
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization view_tenant")
+        .unwrap();
+    assert_table_permission_denied(session.execute(&db, "select * from view_base"), "view_base");
+    session.execute(&db, "select * from view_owner_v").unwrap();
+}
+
+#[test]
+fn view_update_column_privileges_are_checked_on_view_columns() {
+    fn assert_view_permission_denied(result: Result<StatementResult, ExecError>, view: &str) {
+        match result {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, format!("permission denied for view {view}"));
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected view permission error for {view}, got {other:?}"),
+        }
+    }
+
+    let dir = temp_dir("view_update_column_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role view_updater login")
+        .unwrap();
+    session
+        .execute(&db, "create table view_update_base(a int4, b text, c int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into view_update_base values (1, 'one', 10)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view view_update_v as select b as bb, c as cc, a as aa from view_update_base",
+        )
+        .unwrap();
+    session
+        .execute(&db, "grant select on view_update_v to view_updater")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant update (bb, cc) on view_update_v to view_updater",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization view_updater")
+        .unwrap();
+    session
+        .execute(&db, "update view_update_v set bb = bb, cc = cc")
+        .unwrap();
+    assert_view_permission_denied(
+        session.execute(&db, "update view_update_v set aa = aa"),
+        "view_update_v",
+    );
+}
+
+#[test]
+fn security_invoker_view_select_requires_caller_base_privileges() {
+    fn assert_table_permission_denied(result: Result<StatementResult, ExecError>, table: &str) {
+        match result {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, format!("permission denied for table {table}"));
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected table permission error for {table}, got {other:?}"),
+        }
+    }
+
+    let dir = temp_dir("security_invoker_view_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role invoker_tenant login")
+        .unwrap();
+    session
+        .execute(&db, "create table invoker_base(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into invoker_base values (1)")
+        .unwrap();
+    session
+        .execute(&db, "create view invoker_v as select id from invoker_base")
+        .unwrap();
+    session
+        .execute(&db, "alter view invoker_v set (security_invoker = true)")
+        .unwrap();
+    session
+        .execute(&db, "grant select on invoker_v to invoker_tenant")
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization invoker_tenant")
+        .unwrap();
+    assert_table_permission_denied(
+        session.execute(&db, "select * from invoker_v"),
+        "invoker_base",
+    );
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant select on invoker_base to invoker_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization invoker_tenant")
+        .unwrap();
+    session.execute(&db, "select * from invoker_v").unwrap();
+}
+
+#[test]
+fn ordinary_view_over_security_invoker_view_checks_inner_base_as_caller() {
+    fn assert_table_permission_denied(result: Result<StatementResult, ExecError>, table: &str) {
+        match result {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, format!("permission denied for table {table}"));
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected table permission error for {table}, got {other:?}"),
+        }
+    }
+
+    let dir = temp_dir("nested_security_invoker_view_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role nested_tenant login")
+        .unwrap();
+    session
+        .execute(&db, "create table nested_base(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into nested_base values (1)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view nested_inner_v as select id from nested_base",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter view nested_inner_v set (security_invoker = true)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view nested_outer_v as select id from nested_inner_v",
+        )
+        .unwrap();
+    session
+        .execute(&db, "grant select on nested_outer_v to nested_tenant")
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization nested_tenant")
+        .unwrap();
+    assert_table_permission_denied(
+        session.execute(&db, "select * from nested_outer_v"),
+        "nested_base",
+    );
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant select on nested_base to nested_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization nested_tenant")
+        .unwrap();
+    session
+        .execute(&db, "select * from nested_outer_v")
+        .unwrap();
+}
+
+#[test]
+fn nested_view_update_checks_intermediate_view_privileges_before_base_table() {
+    let dir = temp_dir("nested_view_update_intermediate_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role nested_owner login")
+        .unwrap();
+    session
+        .execute(&db, "create role nested_updater login")
+        .unwrap();
+    session
+        .execute(&db, "create table nested_update_base(a int4, b text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into nested_update_base values (1, 'one')")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization nested_owner")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view nested_update_inner_v as select * from nested_update_base",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant select on nested_update_inner_v to nested_updater",
+        )
+        .unwrap();
+    session
+        .execute(&db, "set session authorization nested_updater")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view nested_update_outer_v as select * from nested_update_inner_v",
+        )
+        .unwrap();
+
+    match session.execute(&db, "update nested_update_outer_v set b = b") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for view nested_update_inner_v");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected inner view permission error, got {other:?}"),
+    }
+}
+
+#[test]
 fn merge_returning_projects_action_old_new_and_source() {
     let dir = temp_dir("merge_returning_projects_action");
     let db = Database::open(&dir, 128).unwrap();
@@ -10171,6 +10459,23 @@ fn create_view_persists_security_reloptions() {
             crate::include::nodes::datum::ArrayValue::from_1d(vec![
                 Value::Text("security_barrier=true".into()),
                 Value::Text("security_invoker=false".into()),
+            ])
+            .with_element_type_oid(TEXT_TYPE_OID)
+        )]]
+    );
+
+    db.execute(1, "alter view secure_items set (security_invoker=true)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'secure_items'",
+        ),
+        vec![vec![Value::PgArray(
+            crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                Value::Text("security_barrier=true".into()),
+                Value::Text("security_invoker=true".into()),
             ])
             .with_element_type_oid(TEXT_TYPE_OID)
         )]]
@@ -17029,6 +17334,176 @@ fn alter_table_add_column_merges_temp_multi_parent_child_metadata() {
 }
 
 #[test]
+fn alter_table_add_column_only_parent_with_inheritance_children_errors() {
+    let base = temp_dir("alter_table_add_column_only_inherited_parent");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table add_parent (a int)").unwrap();
+    db.execute(1, "create table add_child () inherits (add_parent)")
+        .unwrap();
+
+    match db.execute(1, "alter table only add_parent add column b int") {
+        Err(ExecError::Parse(ParseError::InvalidTableDefinition(message))) => {
+            assert_eq!(message, "column must be added to child tables too");
+        }
+        other => panic!("expected ONLY ADD COLUMN inheritance error, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_rename_column_inheritance_recurses() {
+    let base = temp_dir("alter_table_rename_column_inherits");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table rename_parent (a int)").unwrap();
+    db.execute(
+        1,
+        "create table rename_child (b int) inherits (rename_parent)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table rename_grandchild (c int) inherits (rename_child)",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table rename_child rename column a to d") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "cannot rename inherited column \"a\"");
+        }
+        other => panic!("expected inherited rename rejection, got {other:?}"),
+    }
+    match db.execute(1, "alter table only rename_parent rename column a to d") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "inherited column \"a\" must be renamed in child tables too"
+            );
+        }
+        other => panic!("expected ONLY rename inheritance rejection, got {other:?}"),
+    }
+
+    db.execute(1, "alter table rename_parent rename column a to d")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, a.attname, a.attinhcount, a.attislocal
+             from pg_attribute a
+             join pg_class c on c.oid = a.attrelid
+             where c.relname in ('rename_parent', 'rename_child', 'rename_grandchild')
+               and a.attname = 'd'
+             order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("rename_child".into()),
+                Value::Text("d".into()),
+                Value::Int16(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("rename_grandchild".into()),
+                Value::Text("d".into()),
+                Value::Int16(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("rename_parent".into()),
+                Value::Text("d".into()),
+                Value::Int16(0),
+                Value::Bool(true),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn alter_table_drop_column_inheritance_metadata() {
+    let base = temp_dir("alter_table_drop_column_inherits");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table drop_parent (f1 int, f2 int)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table drop_child (f1 int not null) inherits (drop_parent)",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table drop_child drop column f1") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "cannot drop inherited column \"f1\"");
+        }
+        other => panic!("expected inherited drop rejection, got {other:?}"),
+    }
+
+    db.execute(1, "alter table drop_parent drop column f1")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a.attinhcount, a.attislocal, a.attnotnull
+             from pg_attribute a
+             join pg_class c on c.oid = a.attrelid
+             where c.relname = 'drop_child' and a.attname = 'f1'",
+        ),
+        vec![vec![Value::Int16(0), Value::Bool(true), Value::Bool(true)]]
+    );
+
+    db.execute(1, "alter table drop_child drop column f1")
+        .unwrap();
+    match db.execute(1, "select f1 from drop_child") {
+        Err(ExecError::Parse(ParseError::UnknownColumn(column))) => {
+            assert_eq!(column, "f1");
+        }
+        other => panic!("expected dropped child column to be absent, got {other:?}"),
+    }
+
+    db.execute(1, "create table drop_parent2 (f1 int, f2 int)")
+        .unwrap();
+    db.execute(1, "create table drop_child2 () inherits (drop_parent2)")
+        .unwrap();
+    db.execute(1, "alter table drop_parent2 drop column f1")
+        .unwrap();
+    match db.execute(1, "select f1 from drop_child2") {
+        Err(ExecError::Parse(ParseError::UnknownColumn(column))) => {
+            assert_eq!(column, "f1");
+        }
+        other => panic!("expected inherited-only child column to be dropped, got {other:?}"),
+    }
+
+    db.execute(1, "create table drop_p1 (id int, name text)")
+        .unwrap();
+    db.execute(1, "create table drop_p2 (id2 int, name text)")
+        .unwrap();
+    db.execute(1, "create table drop_c1 () inherits (drop_p1, drop_p2)")
+        .unwrap();
+    db.execute(1, "create table drop_gc1 () inherits (drop_c1)")
+        .unwrap();
+    db.execute(1, "alter table only drop_p1 drop column name")
+        .unwrap();
+    db.execute(1, "alter table drop_p2 drop column name")
+        .unwrap();
+    match db.execute(1, "alter table drop_gc1 drop column name") {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "cannot drop inherited column \"name\"");
+        }
+        other => panic!("expected grandchild inherited drop rejection, got {other:?}"),
+    }
+    db.execute(1, "alter table drop_c1 drop column name")
+        .unwrap();
+    match db.execute(1, "alter table drop_gc1 drop column name") {
+        Err(ExecError::Parse(ParseError::UnknownColumn(column))) => {
+            assert_eq!(column, "name");
+        }
+        other => panic!("expected grandchild column to be dropped with parent, got {other:?}"),
+    }
+}
+
+#[test]
 fn alter_table_add_column_propagates_temp_not_null_constraints() {
     let base = temp_dir("alter_table_add_column_temp_not_null");
     let db = Database::open(&base, 16).unwrap();
@@ -17134,12 +17609,14 @@ fn alter_table_add_column_temp_not_null_validates_inherited_child_rows() {
         .unwrap();
 
     match session.execute(&db, "alter table parent1 add column a1 int4 not null") {
-        Err(ExecError::NotNullViolation {
-            relation,
-            column,
-            constraint,
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
             ..
-        }) if relation == "child1" && column == "a1" && constraint == "parent1_a1_not_null" => {}
+        }) if message == "column \"a1\" of relation \"child1\" contains null values"
+            && detail.is_none()
+            && sqlstate == "23502" => {}
         other => panic!("expected inherited child validation failure, got {other:?}"),
     }
 }
@@ -24264,6 +24741,118 @@ fn create_sequence_supports_functions_and_sequence_scans() {
 }
 
 #[test]
+fn pg_sequence_catalog_tracks_sequence_metadata() {
+    let base = temp_dir("pg_sequence_catalog_metadata");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create sequence seq start with 5 increment by 2 minvalue 1 maxvalue 99 cache 7 cycle",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select s.seqtypid::int8, s.seqstart, s.seqincrement, s.seqmax, s.seqmin, s.seqcache, s.seqcycle \
+             from pg_catalog.pg_sequence s join pg_catalog.pg_class c on c.oid = s.seqrelid \
+             where c.relname = 'seq'"
+        ),
+        vec![vec![
+            Value::Int64(20),
+            Value::Int64(5),
+            Value::Int64(2),
+            Value::Int64(99),
+            Value::Int64(1),
+            Value::Int64(7),
+            Value::Bool(true),
+        ]]
+    );
+
+    db.execute(1, "alter sequence seq increment by 3 no cycle cache 4")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select s.seqincrement, s.seqcache, s.seqcycle \
+             from pg_catalog.pg_sequence s join pg_catalog.pg_class c on c.oid = s.seqrelid \
+             where c.relname = 'seq'"
+        ),
+        vec![vec![Value::Int64(3), Value::Int64(4), Value::Bool(false)]]
+    );
+
+    db.execute(1, "create table serial_items (id serial)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_catalog.pg_sequence s join pg_catalog.pg_class c on c.oid = s.seqrelid \
+             where c.relname = 'serial_items_id_seq'"
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(1, "drop sequence seq").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_catalog.pg_sequence s join pg_catalog.pg_class c on c.oid = s.seqrelid \
+             where c.relname = 'seq'"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn catalog_visibility_functions_cover_psql_describe_helpers() {
+    let db = Database::open_ephemeral(64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_type_is_visible('int4'::regtype), \
+                    pg_type_is_visible(0::oid), \
+                    pg_operator_is_visible(0::oid), \
+                    pg_opclass_is_visible(0::oid), \
+                    pg_opfamily_is_visible(0::oid), \
+                    pg_conversion_is_visible(0::oid), \
+                    pg_ts_parser_is_visible(0::oid), \
+                    pg_ts_dict_is_visible(0::oid), \
+                    pg_ts_template_is_visible(0::oid), \
+                    pg_ts_config_is_visible(0::oid)"
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        ]]
+    );
+
+    for sql in [
+        "select pg_operator_is_visible(oid) from pg_operator where oprname = '=' order by oid limit 1",
+        "select pg_opclass_is_visible(oid) from pg_opclass where opcname = 'int4_ops' order by oid limit 1",
+        "select pg_opfamily_is_visible(oid) from pg_opfamily where opfname = 'integer_ops' order by oid limit 1",
+        "select pg_ts_parser_is_visible(oid) from pg_ts_parser where prsname = 'default'",
+        "select pg_ts_dict_is_visible(oid) from pg_ts_dict where dictname = 'simple'",
+        "select pg_ts_template_is_visible(oid) from pg_ts_template where tmplname = 'simple'",
+        "select pg_ts_config_is_visible(oid) from pg_ts_config where cfgname = 'simple'",
+    ] {
+        assert_eq!(query_rows(&db, 1, sql), vec![vec![Value::Bool(true)]]);
+    }
+}
+
+#[test]
 fn alter_sequence_rename_moves_conflicting_array_type_names() {
     let base = temp_dir("alter_sequence_rename_array_type_conflict");
     let db = Database::open(&base, 64).unwrap();
@@ -24630,12 +25219,14 @@ fn alter_table_add_constraints_support_not_valid_and_validate() {
         1,
         "alter table items validate constraint items_note_required",
     ) {
-        Err(ExecError::NotNullViolation {
-            relation,
-            column,
-            constraint,
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
             ..
-        }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
+        }) if message == "column \"note\" of relation \"items\" contains null values"
+            && detail.is_none()
+            && sqlstate == "23502" => {}
         other => panic!("expected NOT NULL validate failure, got {other:?}"),
     }
 
@@ -24666,6 +25257,380 @@ fn alter_table_add_constraints_support_not_valid_and_validate() {
             vec![Value::Text("items_note_required".into()), Value::Bool(true)],
         ]
     );
+}
+
+#[test]
+fn not_null_not_valid_blocks_pk_and_identity_until_validated() {
+    let base = temp_dir("not_null_not_valid_pk_identity");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nn_pk_identity (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "insert into nn_pk_identity values (null, 1), (2, 2)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table nn_pk_identity add constraint nn_a not null a not valid",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table nn_pk_identity add primary key (a)") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        }) => {
+            assert_eq!(message, "cannot create primary key on column \"a\"");
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "The constraint \"nn_a\" on column \"a\" of table \"nn_pk_identity\", marked NOT VALID, is incompatible with a primary key."
+                )
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT.")
+            );
+            assert_eq!(sqlstate, "55000");
+        }
+        other => panic!("expected invalid NOT NULL to block primary key, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "alter table nn_pk_identity alter column a add generated always as identity",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(
+                message,
+                "incompatible NOT VALID constraint \"nn_a\" on relation \"nn_pk_identity\""
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT.")
+            );
+            assert_eq!(sqlstate, "55000");
+        }
+        other => panic!("expected invalid NOT NULL to block identity, got {other:?}"),
+    }
+
+    match db.execute(1, "alter table nn_pk_identity alter column a set not null") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        }) if message == "column \"a\" of relation \"nn_pk_identity\" contains null values"
+            && detail.is_none()
+            && sqlstate == "23502" => {}
+        other => panic!("expected SET NOT NULL validation failure, got {other:?}"),
+    }
+
+    db.execute(1, "update nn_pk_identity set a = 1 where a is null")
+        .unwrap();
+    db.execute(1, "alter table nn_pk_identity alter column a set not null")
+        .unwrap();
+    db.execute(1, "alter table nn_pk_identity add primary key (a)")
+        .unwrap();
+}
+
+#[test]
+fn no_inherit_not_null_blocks_primary_key() {
+    let base = temp_dir("not_null_no_inherit_pk");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nn_noinh_pk (a int4)").unwrap();
+    db.execute(
+        1,
+        "alter table nn_noinh_pk add constraint nn_noinh not null a no inherit",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table nn_noinh_pk add primary key (a)") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        }) => {
+            assert_eq!(message, "cannot create primary key on column \"a\"");
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "The constraint \"nn_noinh\" on column \"a\" of table \"nn_noinh_pk\", marked NO INHERIT, is incompatible with a primary key."
+                )
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some(
+                    "You might need to make the existing constraint inheritable using ALTER TABLE ... ALTER CONSTRAINT ... INHERIT."
+                )
+            );
+            assert_eq!(sqlstate, "55000");
+        }
+        other => panic!("expected NO INHERIT NOT NULL to block primary key, got {other:?}"),
+    }
+}
+
+#[test]
+fn not_null_inheritance_metadata_and_alter_constraint_inheritability() {
+    let base = temp_dir("not_null_inheritance_metadata");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nn_inh_parent (a int4)")
+        .unwrap();
+    db.execute(1, "create table nn_inh_child () inherits (nn_inh_parent)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table nn_inh_parent add constraint nn_parent not null a not valid",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, conname, convalidated, conislocal, coninhcount::int4, connoinherit
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where c.relname in ('nn_inh_parent', 'nn_inh_child')
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("nn_inh_child".into()),
+                Value::Text("nn_parent".into()),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Int32(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("nn_inh_parent".into()),
+                Value::Text("nn_parent".into()),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Int32(0),
+                Value::Bool(false),
+            ],
+        ]
+    );
+
+    db.execute(
+        1,
+        "alter table nn_inh_parent alter constraint nn_parent no inherit",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, conislocal, coninhcount::int4, connoinherit
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where c.relname in ('nn_inh_parent', 'nn_inh_child')
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("nn_inh_child".into()),
+                Value::Bool(true),
+                Value::Int32(0),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("nn_inh_parent".into()),
+                Value::Bool(true),
+                Value::Int32(0),
+                Value::Bool(true),
+            ],
+        ]
+    );
+
+    db.execute(
+        1,
+        "alter table nn_inh_parent alter constraint nn_parent inherit",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, conislocal, coninhcount::int4, connoinherit
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where c.relname in ('nn_inh_parent', 'nn_inh_child')
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("nn_inh_child".into()),
+                Value::Bool(true),
+                Value::Int32(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("nn_inh_parent".into()),
+                Value::Bool(true),
+                Value::Int32(0),
+                Value::Bool(false),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn alter_table_inherit_validates_not_null_constraints() {
+    let base = temp_dir("alter_table_inherit_not_null");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nn_ai_parent (a int4)").unwrap();
+    db.execute(
+        1,
+        "alter table nn_ai_parent add constraint nn_parent not null a not valid",
+    )
+    .unwrap();
+    db.execute(1, "create table nn_ai_child (a int4)").unwrap();
+
+    match db.execute(1, "alter table nn_ai_child inherit nn_ai_parent") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "column \"a\" in child table \"nn_ai_child\" must be marked NOT NULL"
+            );
+            assert_eq!(sqlstate, "42804");
+        }
+        other => panic!("expected missing child NOT NULL inherit failure, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "alter table nn_ai_child add constraint nn_child not null a not valid",
+    )
+    .unwrap();
+    db.execute(1, "alter table nn_ai_child inherit nn_ai_parent")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, convalidated, conislocal, coninhcount::int4
+               from pg_constraint
+              where conrelid = (select oid from pg_class where relname = 'nn_ai_child')",
+        ),
+        vec![vec![
+            Value::Text("nn_child".into()),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Int32(1),
+        ]]
+    );
+
+    db.execute(1, "create table nn_ai_valid_parent (a int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table nn_ai_valid_parent add constraint nn_valid_parent not null a",
+    )
+    .unwrap();
+    db.execute(1, "create table nn_ai_invalid_child (a int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table nn_ai_invalid_child add constraint nn_invalid_child not null a not valid",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "alter table nn_ai_invalid_child inherit nn_ai_valid_parent",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "constraint \"nn_invalid_child\" conflicts with NOT VALID constraint on child table \"nn_ai_invalid_child\""
+            );
+            assert_eq!(sqlstate, "42P17");
+        }
+        other => panic!("expected invalid child NOT NULL inherit failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_table_inheritance_local_not_null_names_override_inherited_names() {
+    let base = temp_dir("create_inherit_not_null_names");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table nn_name_parent (a int4 primary key initially deferred)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table nn_name_child_pk (primary key (a) deferrable) inherits (nn_name_parent)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table nn_name_child_named (primary key (a) deferrable, constraint a_nn not null a) inherits (nn_name_parent)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, k.conname, k.conislocal, k.coninhcount::int4
+               from pg_constraint k join pg_class c on c.oid = k.conrelid
+              where c.relname in ('nn_name_child_pk', 'nn_name_child_named')
+                and k.contype = 'n'
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("nn_name_child_named".into()),
+                Value::Text("a_nn".into()),
+                Value::Bool(true),
+                Value::Int32(1),
+            ],
+            vec![
+                Value::Text("nn_name_child_pk".into()),
+                Value::Text("nn_name_child_pk_a_not_null".into()),
+                Value::Bool(true),
+                Value::Int32(1),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn partitioned_table_rejects_not_null_no_inherit() {
+    let base = temp_dir("partitioned_not_null_no_inherit");
+    let db = Database::open(&base, 16).unwrap();
+
+    match db.execute(
+        1,
+        "create table nn_part_noinh (a int4, not null a no inherit) partition by list (a)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(
+                message,
+                "not-null constraints on partitioned tables cannot be NO INHERIT"
+            );
+            assert_eq!(sqlstate, "42P16");
+        }
+        other => panic!("expected partitioned NOT NULL NO INHERIT failure, got {other:?}"),
+    }
 }
 
 #[test]
@@ -26288,6 +27253,368 @@ fn foreign_keys_block_parent_ddl_and_allow_child_drop() {
     db.execute(1, "drop table parents").unwrap();
 }
 
+fn assert_period_fk_action_error(result: Result<StatementResult, ExecError>, expected: &str) {
+    match result {
+        Err(ExecError::DetailedError { message, .. })
+        | Err(ExecError::Parse(ParseError::DetailedError { message, .. }))
+            if message == expected => {}
+        other => panic!("expected PERIOD FK action error `{expected}`, got {other:?}"),
+    }
+}
+
+#[test]
+fn without_overlaps_remaining_period_foreign_keys_reject_unsupported_actions_before_catalog_writes()
+{
+    let base = temp_dir("period_fk_action_validation");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table period_parent (
+            id int4,
+            valid_at int4range,
+            primary key (id, valid_at without overlaps)
+        )",
+    )
+    .unwrap();
+
+    assert_period_fk_action_error(
+        db.execute(
+            1,
+            "create table period_child_bad (
+                id int4 primary key,
+                parent_id int4,
+                valid_at int4range,
+                foreign key (parent_id, period valid_at)
+                    references period_parent (id, period valid_at)
+                    on update cascade
+            )",
+        ),
+        "unsupported ON UPDATE action for foreign key constraint using PERIOD",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname = 'period_child_bad'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    db.execute(
+        1,
+        "create table period_child_alter (
+            id int4 primary key,
+            parent_id int4,
+            valid_at int4range
+        )",
+    )
+    .unwrap();
+    assert_period_fk_action_error(
+        db.execute(
+            1,
+            "alter table period_child_alter
+             add constraint period_child_alter_fk
+             foreign key (parent_id, period valid_at)
+             references period_parent (id, period valid_at)
+             on delete set null",
+        ),
+        "unsupported ON DELETE action for foreign key constraint using PERIOD",
+    );
+    assert_period_fk_action_error(
+        db.execute(
+            1,
+            "alter table period_child_alter
+             alter column parent_id set default 0,
+             add constraint period_child_alter_fk
+             foreign key (parent_id, period valid_at)
+             references period_parent (id, period valid_at)
+             on delete set default on update set default",
+        ),
+        "unsupported ON UPDATE action for foreign key constraint using PERIOD",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint where conname = 'period_child_alter_fk'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn without_overlaps_remaining_drop_column_cascade_drops_dependent_foreign_key_constraints() {
+    let base = temp_dir("drop_column_cascade_fk");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table cascade_parent (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table cascade_child (
+            id int4 primary key,
+            parent_id int4 constraint cascade_child_fk references cascade_parent
+        )",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table cascade_child drop column parent_id") {
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            ..
+        }) if message
+            == "cannot drop column parent_id of table cascade_child because other objects depend on it"
+            && detail.contains("constraint cascade_child_fk on table cascade_child") => {}
+        other => panic!("expected DROP COLUMN FK dependency blocker, got {other:?}"),
+    }
+
+    clear_backend_notices();
+    db.execute(1, "alter table cascade_child drop column parent_id cascade")
+        .unwrap();
+    assert_eq!(
+        take_backend_notices()
+            .into_iter()
+            .map(|notice| notice.message)
+            .collect::<Vec<_>>(),
+        vec!["drop cascades to constraint cascade_child_fk on table cascade_child"]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint where conname = 'cascade_child_fk'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn without_overlaps_remaining_deferred_temporal_parent_update_reports_parent_side_fk_at_commit() {
+    let base = temp_dir("deferred_temporal_parent_fk");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table temporal_parent (
+                id int4,
+                valid_at int4range,
+                primary key (id, valid_at without overlaps)
+            )",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table temporal_child (
+                id int4 primary key,
+                parent_id int4,
+                valid_at int4range,
+                constraint temporal_child_fk
+                    foreign key (parent_id, period valid_at)
+                    references temporal_parent (id, period valid_at)
+                    deferrable initially deferred
+            )",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into temporal_parent values (1, '[1,10)')")
+        .unwrap();
+    session
+        .execute(&db, "insert into temporal_child values (1, 1, '[1,5)')")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "update temporal_parent set valid_at = '[5,10)' where id = 1",
+        )
+        .unwrap();
+    match session.execute(&db, "commit") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint,
+            message,
+            detail: Some(detail),
+        }) => {
+            assert_eq!(constraint, "temporal_child_fk");
+            assert!(message.contains("update or delete on table \"temporal_parent\""));
+            assert!(detail.contains("is still referenced from table \"temporal_child\""));
+        }
+        other => panic!("expected deferred parent-side FK violation at COMMIT, got {other:?}"),
+    }
+}
+
+#[test]
+fn without_overlaps_remaining_alter_column_range_default_coerces_string_literal() {
+    let base = temp_dir("range_default_string_literal");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table range_defaults (span int4range)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table range_defaults alter column span set default '[-1,-1]'",
+    )
+    .unwrap();
+    db.execute(1, "insert into range_defaults default values")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select span is null from range_defaults"),
+        vec![vec![Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn without_overlaps_remaining_partitioned_temporal_foreign_keys_enforce_leaves_and_row_movement() {
+    let base = temp_dir("partitioned_temporal_fk_row_movement");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pt_parent (
+            id int4,
+            valid_at int4range,
+            primary key (id, valid_at without overlaps)
+        ) partition by list (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pt_parent_1 partition of pt_parent for values in (1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pt_parent_2 partition of pt_parent for values in (2)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into pt_parent values (1, '[1,10)'), (2, '[1,10)')",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "create table pt_child (
+            id int4,
+            parent_id int4,
+            valid_at int4range,
+            primary key (id, valid_at without overlaps),
+            constraint pt_child_fk foreign key (parent_id, period valid_at)
+                references pt_parent (id, period valid_at)
+        ) partition by list (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pt_child_1 partition of pt_child for values in (1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pt_child_2 partition of pt_child for values in (2)",
+    )
+    .unwrap();
+    db.execute(1, "insert into pt_child values (1, 1, '[1,5)')")
+        .unwrap();
+
+    match db.execute(1, "insert into pt_child values (1, 2, '[10,12)')") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "pt_child_fk");
+        }
+        other => panic!("expected partitioned temporal FK insert violation, got {other:?}"),
+    }
+
+    db.execute(1, "update pt_child set id = 2 where id = 1")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tableoid::regclass::text, id, parent_id from pt_child",
+        ),
+        vec![vec![
+            Value::Text("pt_child_2".into()),
+            Value::Int32(2),
+            Value::Int32(1),
+        ]]
+    );
+
+    match db.execute(1, "update pt_parent set valid_at = '[5,10)' where id = 1") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint,
+            message,
+            ..
+        }) => {
+            assert_eq!(constraint, "pt_child_fk_1");
+            assert!(message.contains("update or delete on table \"pt_parent_1\""));
+        }
+        other => panic!("expected partitioned referenced update violation, got {other:?}"),
+    }
+    match db.execute(1, "delete from pt_parent where id = 1") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint,
+            message,
+            ..
+        }) => {
+            assert_eq!(constraint, "pt_child_fk_1");
+            assert!(message.contains("update or delete on table \"pt_parent_1\""));
+        }
+        other => panic!("expected partitioned referenced delete violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn truncate_all_foreign_key_relations_together() {
+    let base = temp_dir("truncate_all_foreign_key_relations");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4 references parents)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1)").unwrap();
+    db.execute(1, "insert into children values (1, 1)").unwrap();
+
+    match db.execute(1, "truncate parents") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
+            if actual.contains("foreign key constraint") => {}
+        other => panic!("expected single-table truncate to be blocked, got {other:?}"),
+    }
+
+    db.execute(1, "truncate parents, children").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from parents")[0][0],
+        Value::Int64(0)
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from children")[0][0],
+        Value::Int64(0)
+    );
+
+    db.execute(1, "insert into parents values (2)").unwrap();
+    db.execute(1, "insert into children values (2, 2)").unwrap();
+
+    let mut session = Session::new(2);
+    session.execute(&db, "truncate parents, children").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from parents")[0][0],
+        Value::Int64(0)
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from children")[0][0],
+        Value::Int64(0)
+    );
+}
+
 #[test]
 fn foreign_key_locking_blocks_parent_delete_until_child_insert_finishes() {
     use std::sync::mpsc;
@@ -26354,12 +27681,14 @@ fn alter_table_set_and_drop_not_null_updates_enforcement_and_catalog() {
         .unwrap();
 
     match db.execute(1, "alter table items alter column note set not null") {
-        Err(ExecError::NotNullViolation {
-            relation,
-            column,
-            constraint,
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
             ..
-        }) if relation == "items" && column == "note" && constraint == "items_note_not_null" => {}
+        }) if message == "column \"note\" of relation \"items\" contains null values"
+            && detail.is_none()
+            && sqlstate == "23502" => {}
         other => panic!("expected SET NOT NULL validation failure, got {other:?}"),
     }
 
@@ -26545,6 +27874,76 @@ fn alter_table_rename_constraint_updates_catalog_and_enforcement() {
         }) if relation == "items" && constraint == "items_id_guard" => {}
         other => panic!("expected renamed CHECK constraint violation, got {other:?}"),
     }
+}
+
+#[test]
+fn alter_table_rename_check_constraint_inheritance_recurses() {
+    let base = temp_dir("alter_table_rename_constraint_inherits");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table constraint_parent (a int constraint con1 check (a > 0))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table constraint_child () inherits (constraint_parent)",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "alter table constraint_child rename constraint con1 to con2",
+    ) {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(message, "cannot rename inherited constraint \"con1\"");
+        }
+        other => panic!("expected inherited constraint rename rejection, got {other:?}"),
+    }
+    match db.execute(
+        1,
+        "alter table only constraint_parent rename constraint con1 to con2",
+    ) {
+        Err(ExecError::DetailedError { message, .. }) => {
+            assert_eq!(
+                message,
+                "inherited constraint \"con1\" must be renamed in child tables too"
+            );
+        }
+        other => panic!("expected ONLY constraint rename rejection, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "alter table constraint_parent rename constraint con1 to con2",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, con.conname, con.coninhcount, con.conislocal
+             from pg_constraint con
+             join pg_class c on c.oid = con.conrelid
+             where c.relname in ('constraint_parent', 'constraint_child')
+             order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("constraint_child".into()),
+                Value::Text("con2".into()),
+                Value::Int16(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("constraint_parent".into()),
+                Value::Text("con2".into()),
+                Value::Int16(0),
+                Value::Bool(true),
+            ],
+        ]
+    );
 }
 
 #[test]
@@ -37820,6 +39219,102 @@ fn create_function_scalar_calls_work_in_select_and_where() {
 }
 
 #[test]
+fn create_function_defaults_and_named_calls_work() {
+    let dir = temp_dir("create_function_defaults_named");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function dfunc(a int4 = 1, b int4 = 2) returns int4 language sql as $$ select $1 + $2 $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select dfunc(), dfunc(10), dfunc(10, 20)"),
+        vec![vec![Value::Int32(3), Value::Int32(12), Value::Int32(30)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select dfunc(a := 7), dfunc(b => 11, a => 4)"),
+        vec![vec![Value::Int32(9), Value::Int32(15)]]
+    );
+
+    db.execute(
+        1,
+        "create function choose_text(a text, b text default 'fallback', flag bool default true) returns text language sql as $$ select case when $3 then $1 else $2 end $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select choose_text('a'), choose_text('a', 'b', flag := false), choose_text(b => 'b', a => 'a')",
+        ),
+        vec![vec![
+            Value::Text("a".into()),
+            Value::Text("b".into()),
+            Value::Text("a".into()),
+        ]]
+    );
+
+    db.execute(
+        1,
+        "create function default_series(a int4 default 1, b int4 default 2) returns setof int4 language sql as $$ values ($1), ($2) $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from default_series(b => 5)"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(5)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select * from default_series()"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+
+    match db.execute(1, "select choose_text(a => 'a', a => 'b')") {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. }))
+            if message == "argument name \"a\" used more than once" => {}
+        other => panic!("expected duplicate named argument error, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_or_replace_function_preserves_default_contract() {
+    let dir = temp_dir("create_function_replace_defaults");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function replace_default(a int4 default 1, b int4 default 2) returns int4 language sql as $$ select $1 + $2 $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create or replace function replace_default(a int4 default 10, b int4 default 20) returns int4 language sql as $$ select $1 + $2 $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select replace_default()"),
+        vec![vec![Value::Int32(30)]]
+    );
+
+    match db.execute(
+        1,
+        "create or replace function replace_default(a int4, b int4) returns int4 language sql as $$ select $1 + $2 $$",
+    ) {
+        Err(ExecError::DetailedError { message, .. })
+            if message == "cannot remove parameter defaults from existing function" => {}
+        other => panic!("expected cannot remove defaults error, got {other:?}"),
+    }
+    match db.execute(
+        1,
+        "create or replace function replace_default(x int4 default 10, b int4 default 20) returns int4 language sql as $$ select $1 + $2 $$",
+    ) {
+        Err(ExecError::DetailedError { message, .. })
+            if message == "cannot change name of input parameter \"a\"" => {}
+        other => panic!("expected cannot change input parameter name error, got {other:?}"),
+    }
+}
+
+#[test]
 fn create_or_replace_function_updates_existing_body() {
     let dir = temp_dir("create_or_replace_function");
     let db = Database::open(&dir, 64).unwrap();
@@ -38494,6 +39989,60 @@ fn create_tablespace_absolute_location_creates_symlinked_version_dir() {
     let link_path = dir.join("pg_tblspc").join(tablespace_oid.to_string());
     assert!(link_path.exists());
     assert!(tablespace_dir.join("PG_18_202406281").is_dir());
+}
+
+#[test]
+fn pg_table_size_and_tablespace_location_helpers_work() {
+    let dir = temp_dir("pg_table_size_and_tablespace_location_helpers");
+    let tablespace_dir = dir.join("external_tablespace");
+    fs::create_dir_all(&tablespace_dir).unwrap();
+
+    let db = Database::open(&dir, 32).expect("open database");
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create table size_test (id int)")
+        .unwrap();
+    session
+        .execute(&db, "create view size_view as select * from size_test")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            &format!(
+                "create tablespace regress_tblspace location '{}'",
+                tablespace_dir.display()
+            ),
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_table_size('size_test'::regclass), pg_table_size('size_view'::regclass), pg_table_size(null::regclass)",
+        ),
+        vec![vec![Value::Int64(0), Value::Int64(0), Value::Null]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select pg_tablespace_location(1663::oid)"),
+        vec![vec![Value::Text("".into())]]
+    );
+    let location_rows = match session
+        .execute(
+            &db,
+            "select pg_tablespace_location(oid) from pg_tablespace where spcname = 'regress_tblspace'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => rows,
+        other => panic!("expected query result, got {other:?}"),
+    };
+    assert_eq!(
+        location_rows,
+        vec![vec![Value::Text(
+            tablespace_dir.display().to_string().into()
+        )]]
+    );
 }
 
 #[test]
@@ -41730,6 +43279,147 @@ fn dynamic_domain_and_range_creation_after_user_range_table() {
         other => panic!("expected restrictedrange check violation, got {other:?}"),
     }
     db.execute(1, "drop table float8range_test").unwrap();
+}
+
+#[test]
+fn alter_domain_constraints_update_catalog_and_enforcement() {
+    let dir = temp_dir("alter_domain_constraints");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create domain things as int").unwrap();
+    db.execute(1, "create table thethings (stuff things)")
+        .unwrap();
+    db.execute(1, "insert into thethings values (55)").unwrap();
+
+    match db.execute(
+        1,
+        "alter domain things add constraint meow check (value < 11)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "column \"stuff\" of table \"thethings\" contains values that violate the new constraint"
+            );
+        }
+        other => panic!("expected domain validation error, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "alter domain things add constraint meow check (value < 11) not valid",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, contype, convalidated, conbin \
+             from pg_constraint \
+             where contypid = 'things'::regtype \
+             order by conname",
+        ),
+        vec![vec![
+            Value::Text("meow".into()),
+            Value::Text("c".into()),
+            Value::Bool(false),
+            Value::Text("value < 11".into()),
+        ]],
+    );
+    match db.execute(1, "insert into thethings values (12)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain things violates check constraint \"meow\""
+            );
+        }
+        other => panic!("expected domain check violation, got {other:?}"),
+    }
+
+    db.execute(1, "update thethings set stuff = 10").unwrap();
+    db.execute(1, "alter domain things validate constraint meow")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select convalidated from pg_constraint where contypid = 'things'::regtype and conname = 'meow'",
+        ),
+        vec![vec![Value::Bool(true)]],
+    );
+
+    db.execute(1, "alter domain things rename constraint meow to bark")
+        .unwrap();
+    db.execute(1, "alter domain things set not null").unwrap();
+    db.execute(1, "alter domain things drop constraint if exists missing")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, contype from pg_constraint \
+             where contypid = 'things'::regtype order by conname",
+        ),
+        vec![
+            vec![Value::Text("bark".into()), Value::Text("c".into())],
+            vec![
+                Value::Text("things_not_null".into()),
+                Value::Text("n".into()),
+            ],
+        ],
+    );
+    match db.execute(1, "insert into thethings values (null)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23502");
+            assert_eq!(message, "domain things does not allow null values");
+        }
+        other => panic!("expected domain not-null violation, got {other:?}"),
+    }
+    match db.execute(1, "update thethings set stuff = null") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23502");
+            assert_eq!(message, "domain things does not allow null values");
+        }
+        other => panic!("expected domain not-null violation on update, got {other:?}"),
+    }
+    db.execute(1, "alter domain things drop not null").unwrap();
+    db.execute(1, "insert into thethings values (null)")
+        .unwrap();
+    db.execute(1, "alter domain things drop constraint bark")
+        .unwrap();
+    db.execute(1, "insert into thethings values (12)").unwrap();
+
+    db.execute(1, "alter domain things set default 7").unwrap();
+    db.execute(1, "alter domain things drop default").unwrap();
+    db.execute(1, "create schema domdst").unwrap();
+    db.execute(1, "alter domain things rename to things2")
+        .unwrap();
+    db.execute(1, "alter domain things2 set schema domdst")
+        .unwrap();
+    db.execute(1, "alter domain domdst.things2 owner to current_user")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select t.typname, n.nspname \
+             from pg_type t join pg_namespace n on n.oid = t.typnamespace \
+             where t.typname = 'things2'",
+        ),
+        vec![vec![
+            Value::Text("things2".into()),
+            Value::Text("domdst".into()),
+        ]],
+    );
 }
 
 #[test]

@@ -26,7 +26,162 @@ fn reset_reloptions(current: Option<Vec<String>>, reset_options: &[String]) -> O
     (!reloptions.is_empty()).then_some(reloptions)
 }
 
+fn normalize_view_reloption(
+    option: &crate::backend::parser::RelOption,
+) -> Result<String, ExecError> {
+    let name = option.name.to_ascii_lowercase();
+    if !matches!(name.as_str(), "security_barrier" | "security_invoker") {
+        return Err(ExecError::DetailedError {
+            message: format!("unrecognized parameter \"{}\"", option.name),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    let value = match option.value.to_ascii_lowercase().as_str() {
+        "true" | "on" => "true",
+        "false" | "off" => "false",
+        _ => {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "invalid value for boolean option \"{name}\": {}",
+                    option.value
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+    };
+    Ok(format!("{name}={value}"))
+}
+
+fn set_view_reloptions(
+    current: Option<Vec<String>>,
+    options: &[crate::backend::parser::RelOption],
+) -> Result<Option<Vec<String>>, ExecError> {
+    let mut reloptions = current.unwrap_or_default();
+    for option in options {
+        let normalized = normalize_view_reloption(option)?;
+        let name = normalized
+            .split_once('=')
+            .map(|(name, _)| name)
+            .unwrap_or(normalized.as_str())
+            .to_string();
+        reloptions.retain(|existing| {
+            let existing_name = existing
+                .split_once('=')
+                .map(|(name, _)| name)
+                .unwrap_or(existing.as_str());
+            !existing_name.eq_ignore_ascii_case(&name)
+        });
+        reloptions.push(normalized);
+    }
+    Ok((!reloptions.is_empty()).then_some(reloptions))
+}
+
 impl Database {
+    pub(crate) fn execute_alter_view_set_options_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &crate::backend::parser::AlterTableSetStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let Some(relation) = catalog.lookup_any_relation(&alter_stmt.table_name) else {
+            if alter_stmt.if_exists {
+                push_notice(format!(
+                    r#"relation "{}" does not exist, skipping"#,
+                    alter_stmt.table_name
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                alter_stmt.table_name.clone(),
+            )));
+        };
+        if relation.relkind != 'v' {
+            return Err(ExecError::Parse(ParseError::WrongObjectType {
+                name: alter_stmt.table_name.clone(),
+                expected: "view",
+            }));
+        }
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_alter_view_set_options_stmt_in_transaction_with_search_path(
+            client_id,
+            alter_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
+    pub(crate) fn execute_alter_view_set_options_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &crate::backend::parser::AlterTableSetStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let Some(relation) = catalog.lookup_any_relation(&alter_stmt.table_name) else {
+            if alter_stmt.if_exists {
+                push_notice(format!(
+                    r#"relation "{}" does not exist, skipping"#,
+                    alter_stmt.table_name
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                alter_stmt.table_name.clone(),
+            )));
+        };
+        if relation.relkind != 'v' {
+            return Err(ExecError::Parse(ParseError::WrongObjectType {
+                name: alter_stmt.table_name.clone(),
+                expected: "view",
+            }));
+        }
+        ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
+        let current = catalog
+            .class_row_by_oid(relation.relation_oid)
+            .and_then(|row| row.reloptions);
+        let reloptions = set_view_reloptions(current, &alter_stmt.options)?;
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .alter_relation_reloptions_mvcc(relation.relation_oid, reloptions, &ctx)
+            .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_alter_table_reset_stmt_with_search_path(
         &self,
         client_id: ClientId,

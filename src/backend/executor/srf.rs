@@ -116,6 +116,52 @@ pub(crate) fn eval_set_returning_call(
     Ok(rows)
 }
 
+pub(crate) fn eval_set_returning_call_simple_values(
+    call: &SetReturningCall,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    if call.with_ordinality() || call.output_columns().len() != 1 {
+        return single_column_slots_to_values(eval_set_returning_call(call, slot, ctx)?);
+    }
+
+    match call {
+        SetReturningCall::GenerateSeries {
+            start,
+            stop,
+            step,
+            timezone,
+            output_columns,
+            ..
+        } => eval_generate_series_values(
+            start,
+            stop,
+            step,
+            timezone.as_ref(),
+            output_columns[0].sql_type.kind,
+            slot,
+            ctx,
+        ),
+        _ => single_column_slots_to_values(eval_set_returning_call(call, slot, ctx)?),
+    }
+}
+
+fn single_column_slots_to_values(mut rows: Vec<TupleSlot>) -> Result<Vec<Value>, ExecError> {
+    rows.iter_mut()
+        .map(|row| {
+            row.values()?
+                .first()
+                .cloned()
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: "set-returning function produced an empty row".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })
+        })
+        .collect()
+}
+
 fn execute_user_defined_set_returning_function_by_language(
     proc_oid: u32,
     args: &[Expr],
@@ -1214,113 +1260,209 @@ fn eval_generate_series(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
+    eval_generate_series_values(start, stop, step, timezone, output_kind, slot, ctx).map(|values| {
+        values
+            .into_iter()
+            .map(|value| TupleSlot::virtual_row(vec![value]))
+            .collect()
+    })
+}
+
+fn eval_generate_series_values(
+    start: &Expr,
+    stop: &Expr,
+    step: &Expr,
+    timezone: Option<&Expr>,
+    output_kind: SqlTypeKind,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
     let start_val = eval_expr(start, slot, ctx)?;
     let stop_val = eval_expr(stop, slot, ctx)?;
     let step_val = eval_expr(step, slot, ctx)?;
 
     if matches!(output_kind, SqlTypeKind::Timestamp) {
-        return eval_timestamp_generate_series(start_val, stop_val, step_val, output_kind, ctx);
+        return single_column_slots_to_values(eval_timestamp_generate_series(
+            start_val,
+            stop_val,
+            step_val,
+            output_kind,
+            ctx,
+        )?);
     }
     if matches!(output_kind, SqlTypeKind::TimestampTz) {
-        return eval_timestamptz_generate_series(
+        return single_column_slots_to_values(eval_timestamptz_generate_series(
             start_val, stop_val, step_val, timezone, slot, ctx,
-        );
+        )?);
     }
 
     if matches!(output_kind, SqlTypeKind::Numeric) {
-        let to_numeric = |v: Value, label: &'static str| -> Result<NumericValue, ExecError> {
-            match v {
-                Value::Numeric(n) => Ok(n),
-                Value::Int32(i) => Ok(NumericValue::from_i64(i64::from(i))),
-                Value::Int64(i) => Ok(NumericValue::from_i64(i)),
-                other => Err(ExecError::TypeMismatch {
-                    op: label,
-                    left: other,
-                    right: Value::Null,
-                }),
-            }
-        };
-        let start = to_numeric(start_val, "generate_series start")?;
-        let stop = to_numeric(stop_val, "generate_series stop")?;
-        let step = to_numeric(step_val, "generate_series step")?;
-        let validate = |value: &NumericValue, arg: &'static str| -> Result<(), ExecError> {
-            match value {
-                NumericValue::NaN => Err(ExecError::GenerateSeriesInvalidArg(arg, "NaN")),
-                NumericValue::PosInf | NumericValue::NegInf => {
-                    Err(ExecError::GenerateSeriesInvalidArg(arg, "infinity"))
-                }
-                NumericValue::Finite { .. } => Ok(()),
-            }
-        };
-        validate(&start, "start")?;
-        validate(&stop, "stop")?;
-        validate(&step, "step size")?;
-        let series_dscale = [start.dscale(), stop.dscale(), step.dscale()]
+        let mut state = GenerateSeriesState::numeric(start_val, stop_val, step_val)?;
+        return collect_value_per_call_values(ctx, |ctx| state.next_value(ctx));
+    }
+
+    let mut state = GenerateSeriesState::integral(start_val, stop_val, step_val, output_kind)?;
+    collect_value_per_call_values(ctx, |ctx| state.next_value(ctx))
+}
+
+fn collect_value_per_call_values(
+    ctx: &mut ExecutorContext,
+    mut next: impl FnMut(&mut ExecutorContext) -> Result<Option<Value>, ExecError>,
+) -> Result<Vec<Value>, ExecError> {
+    let mut rows = Vec::new();
+    while let Some(value) = next(ctx)? {
+        rows.push(value);
+    }
+    Ok(rows)
+}
+
+enum GenerateSeriesState {
+    Numeric {
+        current: NumericValue,
+        stop: NumericValue,
+        step: NumericValue,
+        step_cmp: std::cmp::Ordering,
+        dscale: u32,
+    },
+    Integral {
+        current: i64,
+        stop: i64,
+        step: i64,
+        output_kind: SqlTypeKind,
+    },
+}
+
+impl GenerateSeriesState {
+    fn numeric(start: Value, stop: Value, step: Value) -> Result<Self, ExecError> {
+        let start = generate_series_numeric_arg(start, "generate_series start")?;
+        let stop = generate_series_numeric_arg(stop, "generate_series stop")?;
+        let step = generate_series_numeric_arg(step, "generate_series step")?;
+        validate_generate_series_numeric_arg(&start, "start")?;
+        validate_generate_series_numeric_arg(&stop, "stop")?;
+        validate_generate_series_numeric_arg(&step, "step size")?;
+        let dscale = [start.dscale(), stop.dscale(), step.dscale()]
             .into_iter()
             .max()
             .unwrap_or(0);
-
-        use std::cmp::Ordering;
         let step_cmp = step.cmp(&NumericValue::zero());
-        if step_cmp == Ordering::Equal {
+        if step_cmp == std::cmp::Ordering::Equal {
             return Err(ExecError::GenerateSeriesZeroStep);
         }
-
-        let mut current = start;
-        let mut rows = Vec::new();
-        loop {
-            ctx.check_for_interrupts()?;
-            let done = match step_cmp {
-                Ordering::Greater => current.cmp(&stop) == Ordering::Greater,
-                Ordering::Less => current.cmp(&stop) == Ordering::Less,
-                Ordering::Equal => unreachable!(),
-            };
-            if done {
-                break;
-            }
-            rows.push(TupleSlot::virtual_row(vec![Value::Numeric(
-                current.clone().with_dscale(series_dscale),
-            )]));
-            current = current.add(&step).with_dscale(series_dscale);
-        }
-        return Ok(rows);
+        Ok(GenerateSeriesState::Numeric {
+            current: start,
+            stop,
+            step,
+            step_cmp,
+            dscale,
+        })
     }
 
-    let to_i64 = |v: Value, label: &'static str| -> Result<i64, ExecError> {
-        match v {
-            Value::Int32(v) => Ok(i64::from(v)),
-            Value::Int64(v) => Ok(v),
-            other => Err(ExecError::TypeMismatch {
-                op: label,
-                left: other,
-                right: Value::Null,
-            }),
+    fn integral(
+        start: Value,
+        stop: Value,
+        step: Value,
+        output_kind: SqlTypeKind,
+    ) -> Result<Self, ExecError> {
+        let current = generate_series_i64_arg(start, "generate_series start")?;
+        let stop = generate_series_i64_arg(stop, "generate_series stop")?;
+        let step = generate_series_i64_arg(step, "generate_series step")?;
+        if step == 0 {
+            return Err(ExecError::GenerateSeriesZeroStep);
         }
-    };
-    let mut current = to_i64(start_val, "generate_series start")?;
-    let end = to_i64(stop_val, "generate_series stop")?;
-    let step = to_i64(step_val, "generate_series step")?;
-    if step == 0 {
-        return Err(ExecError::GenerateSeriesZeroStep);
+        Ok(GenerateSeriesState::Integral {
+            current,
+            stop,
+            step,
+            output_kind,
+        })
     }
-    let mut rows = Vec::new();
-    loop {
+
+    fn next_value(&mut self, ctx: &mut ExecutorContext) -> Result<Option<Value>, ExecError> {
         ctx.check_for_interrupts()?;
-        let done = if step > 0 {
-            current > end
-        } else {
-            current < end
-        };
-        if done {
-            break;
+        match self {
+            GenerateSeriesState::Numeric {
+                current,
+                stop,
+                step,
+                step_cmp,
+                dscale,
+            } => {
+                let done = match step_cmp {
+                    std::cmp::Ordering::Greater => current.cmp(stop) == std::cmp::Ordering::Greater,
+                    std::cmp::Ordering::Less => current.cmp(stop) == std::cmp::Ordering::Less,
+                    std::cmp::Ordering::Equal => unreachable!(),
+                };
+                if done {
+                    return Ok(None);
+                }
+                let value = current.clone().with_dscale(*dscale);
+                *current = current.add(step).with_dscale(*dscale);
+                Ok(Some(Value::Numeric(value)))
+            }
+            GenerateSeriesState::Integral {
+                current,
+                stop,
+                step,
+                output_kind,
+            } => {
+                let done = if *step > 0 {
+                    *current > *stop
+                } else {
+                    *current < *stop
+                };
+                if done {
+                    return Ok(None);
+                }
+                let value = *current;
+                *current += *step;
+                Ok(Some(match output_kind {
+                    SqlTypeKind::Int8 => Value::Int64(value),
+                    _ => Value::Int32(value as i32),
+                }))
+            }
         }
-        rows.push(TupleSlot::virtual_row(vec![match output_kind {
-            SqlTypeKind::Int8 => Value::Int64(current),
-            _ => Value::Int32(current as i32),
-        }]));
-        current += step;
     }
-    Ok(rows)
+}
+
+fn generate_series_numeric_arg(
+    value: Value,
+    label: &'static str,
+) -> Result<NumericValue, ExecError> {
+    match value {
+        Value::Numeric(n) => Ok(n),
+        Value::Int32(i) => Ok(NumericValue::from_i64(i64::from(i))),
+        Value::Int64(i) => Ok(NumericValue::from_i64(i)),
+        other => Err(ExecError::TypeMismatch {
+            op: label,
+            left: other,
+            right: Value::Null,
+        }),
+    }
+}
+
+fn validate_generate_series_numeric_arg(
+    value: &NumericValue,
+    arg: &'static str,
+) -> Result<(), ExecError> {
+    match value {
+        NumericValue::NaN => Err(ExecError::GenerateSeriesInvalidArg(arg, "NaN")),
+        NumericValue::PosInf | NumericValue::NegInf => {
+            Err(ExecError::GenerateSeriesInvalidArg(arg, "infinity"))
+        }
+        NumericValue::Finite { .. } => Ok(()),
+    }
+}
+
+fn generate_series_i64_arg(value: Value, label: &'static str) -> Result<i64, ExecError> {
+    match value {
+        Value::Int32(v) => Ok(i64::from(v)),
+        Value::Int64(v) => Ok(v),
+        other => Err(ExecError::TypeMismatch {
+            op: label,
+            left: other,
+            right: Value::Null,
+        }),
+    }
 }
 
 fn timestamp_add_interval(base: i64, step: IntervalValue) -> Option<i64> {

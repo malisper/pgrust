@@ -754,11 +754,18 @@ pub struct FunctionScanState {
     pub(crate) call: SetReturningCall,
     pub(crate) table_alias: Option<String>,
     pub(crate) output_columns: Vec<String>,
-    pub(crate) rows: Option<Vec<MaterializedRow>>,
+    pub(crate) rows: Option<FunctionScanRows>,
+    pub(crate) slot: TupleSlot,
     pub(crate) next_index: usize,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub(crate) enum FunctionScanRows {
+    Simple(Vec<Value>),
+    Materialized(Vec<MaterializedRow>),
 }
 
 pub struct SubqueryScanState {

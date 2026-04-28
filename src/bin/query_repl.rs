@@ -1118,6 +1118,7 @@ fn run_statement(
         | Statement::CreateSchema(_)
         | Statement::CreateTablespace(_)
         | Statement::CreateDomain(_)
+        | Statement::AlterDomain(_)
         | Statement::CreateType(_)
         | Statement::AlterType(_)
         | Statement::AlterTypeOwner(_)

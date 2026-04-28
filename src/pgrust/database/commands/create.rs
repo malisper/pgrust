@@ -35,9 +35,11 @@ use crate::include::nodes::primnodes::{
     SqlJsonTableColumnKind, SqlXmlTableColumnKind, Var, attrno_index,
 };
 use crate::pgrust::database::ddl::{append_view_check_option, format_sql_type_name};
+use crate::pgrust::database::sequences::pg_sequence_row;
 use crate::pgrust::database::{
-    SequenceData, SequenceRuntime, default_sequence_name_base, format_nextval_default_oid,
-    initial_sequence_state, resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
+    DomainConstraintEntry, DomainConstraintKind, SequenceData, SequenceRuntime,
+    default_sequence_name_base, format_nextval_default_oid, initial_sequence_state,
+    resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
 };
 use crate::pl::plpgsql::validate_create_function_body;
 
@@ -1714,6 +1716,67 @@ fn encode_proc_arg_defaults(defaults: &[Option<String>]) -> Option<String> {
         .then(|| serde_json::to_string(defaults).expect("procedure defaults serialize"))
 }
 
+fn callable_proc_arg_names(row: &PgProcRow) -> Vec<String> {
+    let input_count = row.pronargs.max(0) as usize;
+    let names = row.proargnames.clone().unwrap_or_default();
+    if let (Some(_all_argtypes), Some(modes)) =
+        (row.proallargtypes.as_ref(), row.proargmodes.as_ref())
+    {
+        let mut input_names = Vec::with_capacity(input_count);
+        for (index, mode) in modes.iter().copied().enumerate() {
+            if matches!(mode, b'i' | b'b' | b'v') {
+                input_names.push(names.get(index).cloned().unwrap_or_default());
+            }
+        }
+        input_names.resize(input_count, String::new());
+        return input_names;
+    }
+    let mut input_names = names;
+    input_names.resize(input_count, String::new());
+    input_names.truncate(input_count);
+    input_names
+}
+
+fn proc_drop_signature_hint(row: &PgProcRow, catalog: &dyn CatalogLookup) -> String {
+    let args = parse_proc_argtype_oids(&row.proargtypes)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|oid| proc_signature_type_name(catalog, oid))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Use DROP FUNCTION {}({}) first.", row.proname, args)
+}
+
+fn validate_replaced_proc_signature(
+    existing: &PgProcRow,
+    new_row: &PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    if existing.pronargdefaults > new_row.pronargdefaults {
+        return Err(ExecError::DetailedError {
+            message: "cannot remove parameter defaults from existing function".into(),
+            detail: None,
+            hint: Some(proc_drop_signature_hint(existing, catalog)),
+            sqlstate: "42P13",
+        });
+    }
+
+    for (old_name, new_name) in callable_proc_arg_names(existing)
+        .into_iter()
+        .zip(callable_proc_arg_names(new_row))
+    {
+        if !old_name.is_empty() && old_name != new_name {
+            return Err(ExecError::DetailedError {
+                message: format!("cannot change name of input parameter \"{old_name}\""),
+                detail: None,
+                hint: Some(proc_drop_signature_hint(existing, catalog)),
+                sqlstate: "42P13",
+            });
+        }
+    }
+    Ok(())
+}
+
 fn invalid_procedure_attribute() -> ExecError {
     ExecError::DetailedError {
         message: "invalid attribute in procedure definition".into(),
@@ -1729,6 +1792,14 @@ fn validate_proc_arg_order(args: &[CreateFunctionArg], proc_kind: char) -> Resul
     for arg in args {
         let is_input = matches!(arg.mode, FunctionArgMode::In | FunctionArgMode::InOut);
         let is_output = matches!(arg.mode, FunctionArgMode::Out | FunctionArgMode::InOut);
+        if arg.default_expr.is_some() && !is_input {
+            return Err(ExecError::DetailedError {
+                message: "only input parameters can have default values".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
+        }
         if saw_variadic_input && is_input {
             return Err(ExecError::DetailedError {
                 message: "VARIADIC parameter must be the last input parameter".into(),
@@ -1888,6 +1959,22 @@ fn column_attnums_for_names(
                 .unwrap_or_else(|| panic!("missing column for foreign key: {column_name}"))
         })
         .collect()
+}
+
+fn unique_domain_constraint_name(
+    base_name: String,
+    used_names: &mut std::collections::BTreeSet<String>,
+) -> String {
+    if used_names.insert(base_name.to_ascii_lowercase()) {
+        return base_name;
+    }
+    for suffix in 1.. {
+        let candidate = format!("{base_name}{suffix}");
+        if used_names.insert(candidate.to_ascii_lowercase()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded domain constraint suffix search")
 }
 
 impl Database {
@@ -2411,6 +2498,13 @@ impl Database {
                     .map_err(map_catalog_error)?;
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
+                let pg_sequence_effect = self
+                    .catalog
+                    .write()
+                    .upsert_sequence_row_mvcc(pg_sequence_row(entry.relation_oid, &data), &ctx)
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&pg_sequence_effect)?;
+                catalog_effects.push(pg_sequence_effect);
                 sequence_effects.push(self.sequences.apply_upsert(entry.relation_oid, data, true));
                 entry.relation_oid
             }
@@ -2651,8 +2745,52 @@ impl Database {
             )));
         }
         drop(domains);
-        let oid = self.allocate_dynamic_type_oids(2, None, None)?;
+        let oid = self.allocate_dynamic_type_oids(
+            2 + u32::try_from(create_stmt.constraints.len()).unwrap_or(0),
+            None,
+            None,
+        )?;
         let array_oid = oid.saturating_add(1);
+        let mut used_constraint_names = std::collections::BTreeSet::new();
+        let constraints = create_stmt
+            .constraints
+            .iter()
+            .enumerate()
+            .map(|(index, constraint)| {
+                let base_name = constraint
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| match constraint.kind {
+                        crate::backend::parser::DomainConstraintSpecKind::Check { .. } => {
+                            format!("{}_check", object_name)
+                        }
+                        crate::backend::parser::DomainConstraintSpecKind::NotNull => {
+                            format!("{}_not_null", object_name)
+                        }
+                    });
+                let name = unique_domain_constraint_name(base_name, &mut used_constraint_names);
+                DomainConstraintEntry {
+                    oid: oid.saturating_add(2 + u32::try_from(index).unwrap_or(0)),
+                    name,
+                    kind: match constraint.kind {
+                        crate::backend::parser::DomainConstraintSpecKind::Check { .. } => {
+                            DomainConstraintKind::Check
+                        }
+                        crate::backend::parser::DomainConstraintSpecKind::NotNull => {
+                            DomainConstraintKind::NotNull
+                        }
+                    },
+                    expr: match &constraint.kind {
+                        crate::backend::parser::DomainConstraintSpecKind::Check { expr } => {
+                            Some(expr.clone())
+                        }
+                        crate::backend::parser::DomainConstraintSpecKind::NotNull => None,
+                    },
+                    validated: !constraint.not_valid,
+                    enforced: true,
+                }
+            })
+            .collect::<Vec<_>>();
         let mut domains = self.domains.write();
         domains.insert(
             normalized,
@@ -2661,10 +2799,12 @@ impl Database {
                 array_oid,
                 name: object_name,
                 namespace_oid,
+                owner_oid: self.auth_state(client_id).current_user_oid(),
                 sql_type,
                 default: create_stmt.default.clone(),
                 check: create_stmt.check.clone(),
                 not_null: create_stmt.not_null,
+                constraints,
                 enum_check,
                 typacl: None,
                 comment: None,
@@ -3149,6 +3289,11 @@ impl Database {
             prosqlbody: None,
             proconfig: proc_config_from_options(&create_stmt.config),
         };
+        if proc_kind == 'f'
+            && let Some(existing) = existing_proc.as_ref()
+        {
+            validate_replaced_proc_signature(existing, &proc_row, &catalog)?;
+        }
 
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -4056,7 +4201,27 @@ impl Database {
                         )?;
                         if let Some(parent_oid) = lowered.partition_parent_oid {
                             let next_cid = self
+                                .reconcile_partitioned_parent_keys_for_attached_child_in_transaction(
+                                    client_id,
+                                    xid,
+                                    next_cid,
+                                    parent_oid,
+                                    relation.relation_oid,
+                                    configured_search_path,
+                                    catalog_effects,
+                                )?;
+                            let next_cid = self
                                 .reconcile_partitioned_parent_indexes_for_attached_child_in_transaction(
+                                    client_id,
+                                    xid,
+                                    next_cid,
+                                    parent_oid,
+                                    relation.relation_oid,
+                                    configured_search_path,
+                                    catalog_effects,
+                                )?;
+                            let next_cid = self
+                                .reconcile_partitioned_parent_foreign_keys_for_attached_child_in_transaction(
                                     client_id,
                                     xid,
                                     next_cid,
@@ -4204,7 +4369,27 @@ impl Database {
                 )?;
                 if let Some(parent_oid) = lowered.partition_parent_oid {
                     let next_cid = self
+                        .reconcile_partitioned_parent_keys_for_attached_child_in_transaction(
+                            client_id,
+                            xid,
+                            next_cid,
+                            parent_oid,
+                            relation.relation_oid,
+                            configured_search_path,
+                            catalog_effects,
+                        )?;
+                    let next_cid = self
                         .reconcile_partitioned_parent_indexes_for_attached_child_in_transaction(
+                            client_id,
+                            xid,
+                            next_cid,
+                            parent_oid,
+                            relation.relation_oid,
+                            configured_search_path,
+                            catalog_effects,
+                        )?;
+                    let next_cid = self
+                        .reconcile_partitioned_parent_foreign_keys_for_attached_child_in_transaction(
                             client_id,
                             xid,
                             next_cid,

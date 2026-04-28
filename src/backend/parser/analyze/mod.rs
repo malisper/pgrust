@@ -36,23 +36,25 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAmopRow, PgAmprocRow, PgAttributeRow, PgAuthIdRow,
-    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow,
-    PgDependRow, PgEnumRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow,
-    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
-    PgPartitionedTableRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRangeRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
-    PgStatisticRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsTemplateRow, PgTypeRow,
-    PgUserMappingRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows, bootstrap_pg_amop_rows,
-    bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
+    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow,
+    PgDatabaseRow, PgDependRow, PgEnumRow, PgForeignDataWrapperRow, PgForeignServerRow,
+    PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
+    PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRangeRow, PgRewriteRow, PgStatisticExtDataRow,
+    PgStatisticExtRow, PgStatisticRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow, PgUserMappingRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows,
+    bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_conversion_rows, bootstrap_pg_database_rows,
+    bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
     bootstrap_pg_proc_row_by_oid, bootstrap_pg_proc_rows, bootstrap_pg_proc_rows_by_name,
     bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
-    bootstrap_pg_ts_template_rows, builtin_range_rows, builtin_type_row_by_name,
-    builtin_type_row_by_oid, builtin_type_rows, is_synthetic_range_proc_name,
-    multirange_type_ref_for_sql_type, proc_oid_for_builtin_aggregate_function,
-    proc_oid_for_builtin_hypothetical_aggregate_function, range_type_ref_for_sql_type,
-    relkind_is_analyzable, synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
+    bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows, builtin_range_rows,
+    builtin_type_row_by_name, builtin_type_row_by_oid, builtin_type_rows,
+    is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
+    proc_oid_for_builtin_aggregate_function, proc_oid_for_builtin_hypothetical_aggregate_function,
+    range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
+    synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::pathnodes::{PlannerConfig, PlannerIndexExprCacheEntry};
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
@@ -968,6 +970,10 @@ pub trait CatalogLookup {
         bootstrap_pg_opclass_rows()
     }
 
+    fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
+        bootstrap_pg_opfamily_rows()
+    }
+
     fn amproc_rows(&self) -> Vec<PgAmprocRow> {
         bootstrap_pg_amproc_rows()
     }
@@ -1014,6 +1020,10 @@ pub trait CatalogLookup {
         bootstrap_pg_ts_config_rows().to_vec()
     }
 
+    fn ts_parser_rows(&self) -> Vec<PgTsParserRow> {
+        bootstrap_pg_ts_parser_rows().to_vec()
+    }
+
     fn ts_dict_rows(&self) -> Vec<PgTsDictRow> {
         bootstrap_pg_ts_dict_rows().to_vec()
     }
@@ -1038,6 +1048,10 @@ pub trait CatalogLookup {
 
     fn cast_rows(&self) -> Vec<PgCastRow> {
         bootstrap_pg_cast_rows()
+    }
+
+    fn conversion_rows(&self) -> Vec<PgConversionRow> {
+        bootstrap_pg_conversion_rows().to_vec()
     }
 
     fn type_rows(&self) -> Vec<PgTypeRow> {
@@ -1569,6 +1583,10 @@ impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
         self.inner.opclass_rows()
     }
 
+    fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
+        self.inner.opfamily_rows()
+    }
+
     fn collation_rows(&self) -> Vec<PgCollationRow> {
         self.inner.collation_rows()
     }
@@ -1891,6 +1909,10 @@ impl CatalogLookup for Catalog {
         CatCache::from_catalog(self).opclass_rows()
     }
 
+    fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
+        CatCache::from_catalog(self).opfamily_rows()
+    }
+
     fn collation_rows(&self) -> Vec<PgCollationRow> {
         CatCache::from_catalog(self).collation_rows()
     }
@@ -1927,6 +1949,10 @@ impl CatalogLookup for Catalog {
         CatCache::from_catalog(self).ts_config_rows()
     }
 
+    fn ts_parser_rows(&self) -> Vec<PgTsParserRow> {
+        CatCache::from_catalog(self).ts_parser_rows()
+    }
+
     fn ts_dict_rows(&self) -> Vec<PgTsDictRow> {
         CatCache::from_catalog(self).ts_dict_rows()
     }
@@ -1937,6 +1963,10 @@ impl CatalogLookup for Catalog {
 
     fn ts_config_map_rows(&self) -> Vec<PgTsConfigMapRow> {
         CatCache::from_catalog(self).ts_config_map_rows()
+    }
+
+    fn conversion_rows(&self) -> Vec<PgConversionRow> {
+        CatCache::from_catalog(self).conversion_rows()
     }
 
     fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<PgAggregateRow> {
@@ -2552,6 +2582,22 @@ pub struct DomainLookup {
     pub default: Option<String>,
     pub check: Option<String>,
     pub not_null: bool,
+    pub constraints: Vec<DomainConstraintLookup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainConstraintLookup {
+    pub name: String,
+    pub kind: DomainConstraintLookupKind,
+    pub expr: Option<String>,
+    pub validated: bool,
+    pub enforced: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DomainConstraintLookupKind {
+    Check,
+    NotNull,
 }
 
 impl CatalogLookup for LiteralDefaultCatalog {
