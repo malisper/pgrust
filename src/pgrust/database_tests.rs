@@ -17224,6 +17224,32 @@ fn plpgsql_exception_sqlstate_condition_matches_error_code() {
 }
 
 #[test]
+fn plpgsql_variadic_parameter_is_visible_as_positional_array() {
+    let base = temp_dir("plpgsql_variadic_positional");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_variadic_notice(variadic int4[]) returns void language plpgsql as $$
+         begin
+           for i in array_lower($1, 1)..array_upper($1, 1) loop
+             raise notice '%', $1[i];
+           end loop;
+         end
+         $$",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "select plpgsql_variadic_notice(1,2,3)")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![String::from("1"), String::from("2"), String::from("3")]
+    );
+}
+
+#[test]
 fn comment_on_function_missing_signature_uses_canonical_type_names() {
     let base = temp_dir("comment_on_function_missing_sig");
     let db = Database::open(&base, 16).unwrap();

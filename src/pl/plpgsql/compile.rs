@@ -900,7 +900,7 @@ pub(crate) fn compile_function_from_proc(
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| format!("column{}", index + 1));
             match *mode {
-                b'i' => {
+                b'i' | b'v' => {
                     let slot = env.define_parameter_var(&name, sql_type);
                     parameter_slots.push(CompiledFunctionSlot {
                         name,
