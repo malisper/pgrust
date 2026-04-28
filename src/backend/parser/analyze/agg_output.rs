@@ -1281,12 +1281,14 @@ pub(super) fn bind_agg_output_expr_in_clause(
             agg_list,
             n_keys,
         ),
-        SqlExpr::Parameter(index) => Err(ParseError::DetailedError {
-            message: format!("there is no parameter ${index}"),
-            detail: None,
-            hint: None,
-            sqlstate: "42P02",
-        }),
+        SqlExpr::Parameter(_) => bind_expr_with_outer_and_ctes(
+            expr,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            &[],
+        ),
         SqlExpr::Default => Err(ParseError::UnexpectedToken {
             expected: "expression",
             actual: "DEFAULT".into(),

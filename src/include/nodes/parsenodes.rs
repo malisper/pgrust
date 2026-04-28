@@ -2294,6 +2294,13 @@ pub struct ExecuteStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedExternalParam {
+    pub paramid: usize,
+    pub arg: SqlExpr,
+    pub type_name: Option<RawTypeName>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeallocateStatement {
     pub name: Option<String>,
 }

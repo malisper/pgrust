@@ -599,6 +599,7 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         oid = oid.saturating_add(1);
     }
     for (family, type_oid, proc_oid) in [
+        (HASH_ARRAY_FAMILY_OID, ANYARRAYOID, HASH_ARRAY_PROC_OID),
         (HASH_BOOL_FAMILY_OID, BOOL_TYPE_OID, HASH_BOOL_PROC_OID),
         (HASH_INTEGER_FAMILY_OID, INT2_TYPE_OID, HASH_INT2_PROC_OID),
         (HASH_INTEGER_FAMILY_OID, INT4_TYPE_OID, HASH_INT4_PROC_OID),
@@ -680,7 +681,17 @@ fn build_bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
             amproc: proc_oid,
         });
         oid = oid.saturating_add(1);
-        if family == HASH_ENUM_FAMILY_OID {
+        if family == HASH_ARRAY_FAMILY_OID {
+            rows.push(PgAmprocRow {
+                oid,
+                amprocfamily: family,
+                amproclefttype: type_oid,
+                amprocrighttype: type_oid,
+                amprocnum: 2,
+                amproc: HASH_ARRAY_EXTENDED_PROC_OID,
+            });
+            oid = oid.saturating_add(1);
+        } else if family == HASH_ENUM_FAMILY_OID {
             rows.push(PgAmprocRow {
                 oid,
                 amprocfamily: family,

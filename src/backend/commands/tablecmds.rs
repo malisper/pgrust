@@ -445,7 +445,7 @@ pub(crate) fn execute_explain(
     } = stmt;
     let statement = *statement;
     if let Statement::Update(update) = statement {
-        return execute_explain_update(update, analyze, costs, verbose, catalog);
+        return execute_explain_update(update, analyze, costs, verbose, catalog, ctx);
     }
     if let Statement::Delete(delete) = statement {
         return execute_explain_delete(delete, analyze, costs, verbose, catalog);
@@ -716,14 +716,14 @@ fn execute_explain_update(
     costs: bool,
     verbose: bool,
     catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
-    if analyze {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "EXPLAIN ANALYZE UPDATE".into(),
-        )));
-    }
-
     let bound = finalize_bound_update_stmt(bind_update(&stmt, catalog)?, catalog);
+    if analyze {
+        let xid = ctx.ensure_write_xid()?;
+        let cid = ctx.next_command_id;
+        execute_update(bound.clone(), catalog, ctx, xid, cid)?;
+    }
     let lines = explain_update_lines(&stmt, &bound, costs, verbose);
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("QUERY PLAN")],

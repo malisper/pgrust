@@ -1186,6 +1186,14 @@ fn rebase_window_frame_bound_subplan_ids(
     }
 }
 
+fn rebase_partition_prune_info(
+    mut info: crate::include::nodes::plannodes::PartitionPrunePlan,
+    base: usize,
+) -> crate::include::nodes::plannodes::PartitionPrunePlan {
+    info.filter = rebase_expr_subplan_ids(info.filter, base);
+    info
+}
+
 fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
     match plan {
         Plan::Result { .. }
@@ -1197,6 +1205,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             source_id,
             desc,
             items,
+            partition_prune,
             children,
         } => Plan::MergeAppend {
             plan_info,
@@ -1209,6 +1218,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                     ..item
                 })
                 .collect(),
+            partition_prune: partition_prune.map(|info| rebase_partition_prune_info(info, base)),
             children: children
                 .into_iter()
                 .map(|child| rebase_plan_subplan_ids(child, base))
@@ -1296,11 +1306,13 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             plan_info,
             source_id,
             desc,
+            partition_prune,
             children,
         } => Plan::Append {
             plan_info,
             source_id,
             desc,
+            partition_prune: partition_prune.map(|info| rebase_partition_prune_info(info, base)),
             children: children
                 .into_iter()
                 .map(|child| rebase_plan_subplan_ids(child, base))
@@ -1669,6 +1681,15 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
     }
 }
 
+fn finalize_partition_prune_info(
+    mut info: crate::include::nodes::plannodes::PartitionPrunePlan,
+    catalog: &dyn CatalogLookup,
+    subplans: &mut Vec<Plan>,
+) -> crate::include::nodes::plannodes::PartitionPrunePlan {
+    info.filter = finalize_expr_subqueries(info.filter, catalog, subplans);
+    info
+}
+
 pub(super) fn finalize_plan_subqueries(
     plan: Plan,
     catalog: &dyn CatalogLookup,
@@ -1696,6 +1717,7 @@ pub(super) fn finalize_plan_subqueries(
             source_id,
             desc,
             items,
+            partition_prune,
             children,
         } => Plan::MergeAppend {
             plan_info,
@@ -1708,6 +1730,8 @@ pub(super) fn finalize_plan_subqueries(
                     ..item
                 })
                 .collect(),
+            partition_prune: partition_prune
+                .map(|info| finalize_partition_prune_info(info, catalog, subplans)),
             children: children
                 .into_iter()
                 .map(|child| finalize_plan_subqueries(child, catalog, subplans))
@@ -1755,11 +1779,14 @@ pub(super) fn finalize_plan_subqueries(
             plan_info,
             source_id,
             desc,
+            partition_prune,
             children,
         } => Plan::Append {
             plan_info,
             source_id,
             desc,
+            partition_prune: partition_prune
+                .map(|info| finalize_partition_prune_info(info, catalog, subplans)),
             children: children
                 .into_iter()
                 .map(|child| finalize_plan_subqueries(child, catalog, subplans))

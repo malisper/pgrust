@@ -391,7 +391,9 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             }
         }
         SqlExpr::Default => SqlType::new(SqlTypeKind::Text),
-        SqlExpr::Parameter(_) => SqlType::new(SqlTypeKind::Text),
+        SqlExpr::Parameter(index) => {
+            external_param_type(*index).unwrap_or_else(|| SqlType::new(SqlTypeKind::Text))
+        }
         SqlExpr::Const(Value::Int16(_)) => SqlType::new(SqlTypeKind::Int2),
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
         SqlExpr::Const(Value::Int64(_)) => SqlType::new(SqlTypeKind::Int8),

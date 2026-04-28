@@ -1,4 +1,5 @@
 use crate::RelFileLocator;
+use crate::backend::parser::{LoweredPartitionSpec, PartitionBoundSpec};
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
@@ -150,6 +151,23 @@ impl PlannedStmt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionPruneChildDomain {
+    pub spec: LoweredPartitionSpec,
+    pub sibling_bounds: Vec<PartitionBoundSpec>,
+    pub bound: Option<PartitionBoundSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionPrunePlan {
+    pub spec: LoweredPartitionSpec,
+    pub sibling_bounds: Vec<PartitionBoundSpec>,
+    pub filter: Expr,
+    pub child_bounds: Vec<Option<PartitionBoundSpec>>,
+    pub child_domains: Vec<Vec<PartitionPruneChildDomain>>,
+    pub subplans_removed: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
     Result {
         plan_info: PlanEstimate,
@@ -158,6 +176,7 @@ pub enum Plan {
         plan_info: PlanEstimate,
         source_id: usize,
         desc: RelationDesc,
+        partition_prune: Option<PartitionPrunePlan>,
         children: Vec<Plan>,
     },
     MergeAppend {
@@ -165,6 +184,7 @@ pub enum Plan {
         source_id: usize,
         desc: RelationDesc,
         items: Vec<OrderByEntry>,
+        partition_prune: Option<PartitionPrunePlan>,
         children: Vec<Plan>,
     },
     Unique {

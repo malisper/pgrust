@@ -5,7 +5,9 @@ use crate::include::access::relscan::ScanDirection;
 use crate::include::catalog::PgInheritsRow;
 use crate::include::nodes::parsenodes::SetOperator;
 use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind};
-use crate::include::nodes::plannodes::{AggregateStrategy, IndexScanKey, PlanEstimate};
+use crate::include::nodes::plannodes::{
+    AggregateStrategy, IndexScanKey, PartitionPrunePlan, PlanEstimate,
+};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
     SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var, WindowClause,
@@ -434,6 +436,7 @@ pub enum Path {
         source_id: usize,
         desc: RelationDesc,
         child_roots: Vec<Option<PlannerSubroot>>,
+        partition_prune: Option<PartitionPrunePlan>,
         children: Vec<Path>,
     },
     MergeAppend {
@@ -442,6 +445,7 @@ pub enum Path {
         source_id: usize,
         desc: RelationDesc,
         items: Vec<OrderByEntry>,
+        partition_prune: Option<PartitionPrunePlan>,
         children: Vec<Path>,
     },
     Unique {

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write as _;
@@ -36,12 +37,12 @@ use crate::backend::parser::{
     CopySource, CopyToDestination, CopyToSource, CopyToStatement, CreateFunctionStatement,
     CreateTableAsQuery, CreateTableAsStatement, CteBody, DeallocateStatement, DetachPartitionMode,
     DiscardTarget, ExecuteStatement, FromItem, InsertSource, InsertStatement, OrderByItem,
-    ParseError, ParseOptions, PrepareStatement, PreparedInsert, PreparedStatementQuery,
-    RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec, SelectItem, SelectStatement,
-    SqlCallArgs, SqlExpr, SqlFunctionArg, Statement, UpdateStatement, ValuesStatement, bind_delete,
-    bind_insert, bind_insert_prepared, bind_insert_with_outer_scopes_and_ctes, bind_update,
-    bound_cte_from_query_rows, pg_plan_query_with_config, pg_plan_query_with_outer_scopes_and_ctes,
-    plan_merge,
+    ParseError, ParseOptions, PrepareStatement, PreparedExternalParam, PreparedInsert,
+    PreparedStatementQuery, RawTypeName, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
+    SelectItem, SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, Statement, UpdateStatement,
+    ValuesStatement, bind_delete, bind_insert, bind_insert_prepared,
+    bind_insert_with_outer_scopes_and_ctes, bind_update, bound_cte_from_query_rows,
+    pg_plan_query_with_config, pg_plan_query_with_outer_scopes_and_ctes, plan_merge,
 };
 use crate::backend::rewrite::relation_has_row_security;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
@@ -1414,6 +1415,132 @@ struct PreparedSelectStatement {
     query: PreparedStatementQuery,
     query_sql: String,
     parameter_types: Vec<RawTypeName>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedPreparedStatement {
+    pub(crate) statement: Statement,
+    pub(crate) params: Vec<PreparedExternalParam>,
+}
+
+thread_local! {
+    static SESSION_PREPARED_STATEMENTS: RefCell<HashMap<String, PreparedSelectStatement>> =
+        RefCell::new(HashMap::new());
+}
+
+pub(crate) struct PreparedStatementThreadContextGuard {
+    old: Option<HashMap<String, PreparedSelectStatement>>,
+}
+
+impl Drop for PreparedStatementThreadContextGuard {
+    fn drop(&mut self) {
+        if let Some(old) = self.old.take() {
+            SESSION_PREPARED_STATEMENTS.with(|cell| {
+                cell.replace(old);
+            });
+        }
+    }
+}
+
+fn prepared_statement_name(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
+fn prepared_statement_error(name: &str) -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: format!("prepared statement \"{name}\" does not exist"),
+        detail: None,
+        hint: None,
+        sqlstate: "26000",
+    })
+}
+
+fn prepared_statement_param_count_error(expected: usize, actual: usize) -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: format!(
+            "wrong number of parameters for prepared statement: expected {expected}, got {actual}"
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "08P01",
+    })
+}
+
+fn prepared_statement_param_error(param: usize) -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: format!("there is no parameter ${param}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42P02",
+    })
+}
+
+fn max_prepared_param_in_sql(sql: &str) -> usize {
+    let mut max_param = 0;
+    let bytes = sql.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'$' {
+            index += 1;
+            continue;
+        }
+        let start = index + 1;
+        let mut end = start;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end > start
+            && let Ok(param) = sql[start..end].parse::<usize>()
+        {
+            max_param = max_param.max(param);
+        }
+        index = end.max(index + 1);
+    }
+    max_param
+}
+
+fn resolve_prepared_from_entry(
+    prepared: PreparedSelectStatement,
+    args: &[SqlExpr],
+) -> Result<ResolvedPreparedStatement, ExecError> {
+    let max_param = max_prepared_param_in_sql(&prepared.query_sql);
+    if !prepared.parameter_types.is_empty() && max_param > prepared.parameter_types.len() {
+        return Err(prepared_statement_param_error(max_param));
+    }
+    let expected = if prepared.parameter_types.is_empty() {
+        max_param
+    } else {
+        prepared.parameter_types.len()
+    };
+    if args.len() != expected {
+        return Err(prepared_statement_param_count_error(expected, args.len()));
+    }
+    let statement = match prepared.query {
+        PreparedStatementQuery::Select(select) => Statement::Select(select),
+        PreparedStatementQuery::Update(update) => Statement::Update(update),
+    };
+    let params = args
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| PreparedExternalParam {
+            paramid: index + 1,
+            arg: arg.clone(),
+            type_name: prepared.parameter_types.get(index).cloned(),
+        })
+        .collect();
+    Ok(ResolvedPreparedStatement { statement, params })
+}
+
+pub(crate) fn resolve_thread_prepared_statement(
+    execute_stmt: &ExecuteStatement,
+) -> Result<Option<ResolvedPreparedStatement>, ExecError> {
+    let name = prepared_statement_name(&execute_stmt.name);
+    SESSION_PREPARED_STATEMENTS.with(|cell| {
+        let Some(prepared) = cell.borrow().get(&name).cloned() else {
+            return Ok(None);
+        };
+        resolve_prepared_from_entry(prepared, &execute_stmt.args).map(Some)
+    })
 }
 
 struct PreparedParamSubstitution<'a> {
@@ -4340,6 +4467,7 @@ impl Session {
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_stats_state(self.client_id, Arc::clone(&self.stats_state));
         db.install_plpgsql_function_cache(self.client_id, Arc::clone(&self.plpgsql_function_cache));
+        let _prepared_guard = self.push_prepared_statement_thread_context();
         let result = stacker::grow(32 * 1024 * 1024, || {
             StackDepthGuard::enter(self.datetime_config.max_stack_depth_kb)
                 .run(|| self.execute_internal(db, sql, statement_lock_scope.scope_id()))
@@ -4399,13 +4527,6 @@ impl Session {
             }
             return Ok(StatementResult::AffectedRows(0));
         }
-
-        let stmt = match stmt {
-            Statement::Explain(ref explain_stmt) => {
-                Statement::Explain(self.resolve_prepared_statement_in_explain(explain_stmt)?)
-            }
-            other => other,
-        };
 
         if self.active_txn.is_some()
             && !matches!(
@@ -4473,6 +4594,11 @@ impl Session {
             Statement::Prepare(ref prepare_stmt) => self.apply_prepare_statement(prepare_stmt),
             Statement::Execute(ref execute_stmt) => {
                 self.execute_prepared_statement(db, execute_stmt, statement_lock_scope_id)
+            }
+            Statement::Explain(ref explain_stmt)
+                if matches!(explain_stmt.statement.as_ref(), Statement::Execute(_)) =>
+            {
+                self.execute_prepared_explain_statement(db, explain_stmt, statement_lock_scope_id)
             }
             Statement::Deallocate(ref deallocate_stmt) => {
                 self.apply_deallocate_statement(deallocate_stmt)
@@ -6846,15 +6972,19 @@ impl Session {
     }
 
     fn prepared_statement_name(name: &str) -> String {
-        name.to_ascii_lowercase()
+        prepared_statement_name(name)
     }
 
     fn prepared_statement_error(name: &str) -> ExecError {
-        ExecError::Parse(ParseError::DetailedError {
-            message: format!("prepared statement \"{name}\" does not exist"),
-            detail: None,
-            hint: None,
-            sqlstate: "26000",
+        prepared_statement_error(name)
+    }
+
+    pub(crate) fn push_prepared_statement_thread_context(
+        &self,
+    ) -> PreparedStatementThreadContextGuard {
+        SESSION_PREPARED_STATEMENTS.with(|cell| {
+            let old = cell.replace(self.prepared_selects.clone());
+            PreparedStatementThreadContextGuard { old: Some(old) }
         })
     }
 
@@ -6871,14 +7001,15 @@ impl Session {
                 sqlstate: "42P05",
             }));
         }
-        self.prepared_selects.insert(
-            name,
-            PreparedSelectStatement {
-                query: prepare_stmt.query.clone(),
-                query_sql: prepare_stmt.query_sql.clone(),
-                parameter_types: prepare_stmt.parameter_types.clone(),
-            },
-        );
+        let prepared = PreparedSelectStatement {
+            query: prepare_stmt.query.clone(),
+            query_sql: prepare_stmt.query_sql.clone(),
+            parameter_types: prepare_stmt.parameter_types.clone(),
+        };
+        self.prepared_selects.insert(name.clone(), prepared.clone());
+        SESSION_PREPARED_STATEMENTS.with(|cell| {
+            cell.borrow_mut().insert(name, prepared);
+        });
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -6888,12 +7019,18 @@ impl Session {
     ) -> Result<StatementResult, ExecError> {
         let Some(name) = deallocate_stmt.name.as_deref() else {
             self.prepared_selects.clear();
+            SESSION_PREPARED_STATEMENTS.with(|cell| {
+                cell.borrow_mut().clear();
+            });
             return Ok(StatementResult::AffectedRows(0));
         };
         let name = Self::prepared_statement_name(name);
         if self.prepared_selects.remove(&name).is_none() {
             return Err(Self::prepared_statement_error(&name));
         }
+        SESSION_PREPARED_STATEMENTS.with(|cell| {
+            cell.borrow_mut().remove(&name);
+        });
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -6956,6 +7093,67 @@ impl Session {
         })
     }
 
+    fn resolve_prepared_statement_for_execute(
+        &self,
+        execute_stmt: &ExecuteStatement,
+    ) -> Result<ResolvedPreparedStatement, ExecError> {
+        let prepared = self.resolve_prepared_statement(execute_stmt)?;
+        let max_param = Self::max_prepared_param_in_sql(&prepared.query_sql);
+        if !prepared.parameter_types.is_empty() && max_param > prepared.parameter_types.len() {
+            return Err(Self::prepared_statement_param_error(max_param));
+        }
+        let expected = if prepared.parameter_types.is_empty() {
+            max_param
+        } else {
+            prepared.parameter_types.len()
+        };
+        if execute_stmt.args.len() != expected {
+            return Err(Self::prepared_statement_param_count_error(
+                expected,
+                execute_stmt.args.len(),
+            ));
+        }
+        let statement = match prepared.query {
+            PreparedStatementQuery::Select(select) => Statement::Select(select),
+            PreparedStatementQuery::Update(update) => Statement::Update(update),
+        };
+        let params = execute_stmt
+            .args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| PreparedExternalParam {
+                paramid: index + 1,
+                arg: arg.clone(),
+                type_name: prepared.parameter_types.get(index).cloned(),
+            })
+            .collect();
+        Ok(ResolvedPreparedStatement { statement, params })
+    }
+
+    fn max_prepared_param_in_sql(sql: &str) -> usize {
+        let mut max_param = 0;
+        let bytes = sql.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] != b'$' {
+                index += 1;
+                continue;
+            }
+            let start = index + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if end > start
+                && let Ok(param) = sql[start..end].parse::<usize>()
+            {
+                max_param = max_param.max(param);
+            }
+            index = end.max(index + 1);
+        }
+        max_param
+    }
+
     fn resolve_prepared_statement_in_explain(
         &self,
         explain_stmt: &crate::include::nodes::parsenodes::ExplainStatement,
@@ -7003,23 +7201,11 @@ impl Session {
     }
 
     fn prepared_statement_param_count_error(expected: usize, actual: usize) -> ExecError {
-        ExecError::Parse(ParseError::DetailedError {
-            message: format!(
-                "wrong number of parameters for prepared statement: expected {expected}, got {actual}"
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "08P01",
-        })
+        prepared_statement_param_count_error(expected, actual)
     }
 
     fn prepared_statement_param_error(param: usize) -> ExecError {
-        ExecError::Parse(ParseError::DetailedError {
-            message: format!("there is no parameter ${param}"),
-            detail: None,
-            hint: None,
-            sqlstate: "42P02",
-        })
+        prepared_statement_param_error(param)
     }
 
     fn substitute_select_statement(
@@ -7482,6 +7668,13 @@ impl Session {
                 }
                 expr.clone()
             }
+            SqlExpr::Parameter(index) => {
+                let name = format!("${index}");
+                if let Some(arg) = Self::substitute_param_ref(&name, subst)? {
+                    return Ok(arg);
+                }
+                expr.clone()
+            }
             SqlExpr::Add(left, right) => SqlExpr::Add(
                 Box::new(Self::substitute_sql_expr(left, subst)?),
                 Box::new(Self::substitute_sql_expr(right, subst)?),
@@ -7828,14 +8021,54 @@ impl Session {
         execute_stmt: &ExecuteStatement,
         statement_lock_scope_id: Option<u64>,
     ) -> Result<StatementResult, ExecError> {
-        let prepared = self.resolve_prepared_statement_to_statement(execute_stmt)?;
+        let resolved = self.resolve_prepared_statement_for_execute(execute_stmt)?;
         if self.active_txn.is_some() {
+            // Transactional prepared execution still uses the older substitution path until
+            // transaction-local external-param plumbing is threaded through the large session
+            // command dispatcher.
+            let prepared = self.resolve_prepared_statement_to_statement(execute_stmt)?;
             return self.execute_in_transaction(db, prepared, statement_lock_scope_id);
         }
         let search_path = self.configured_search_path();
-        db.execute_statement_with_search_path_datetime_config_gucs_and_planner_config(
+        db.execute_prepared_statement_with_search_path_datetime_config_gucs_and_planner_config(
             self.client_id,
-            prepared,
+            resolved.statement,
+            &resolved.params,
+            search_path.as_deref(),
+            &self.datetime_config,
+            &self.gucs,
+            self.planner_config(),
+        )
+    }
+
+    fn execute_prepared_explain_statement(
+        &mut self,
+        db: &Database,
+        explain_stmt: &crate::include::nodes::parsenodes::ExplainStatement,
+        statement_lock_scope_id: Option<u64>,
+    ) -> Result<StatementResult, ExecError> {
+        let Statement::Execute(execute_stmt) = explain_stmt.statement.as_ref() else {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "EXPLAIN EXECUTE",
+                actual: format!("{:?}", explain_stmt.statement),
+            }));
+        };
+        let resolved = self.resolve_prepared_statement_for_execute(execute_stmt)?;
+        let mut resolved_explain = explain_stmt.clone();
+        resolved_explain.statement = Box::new(resolved.statement);
+        if self.active_txn.is_some() {
+            let fallback = self.resolve_prepared_statement_in_explain(explain_stmt)?;
+            return self.execute_in_transaction(
+                db,
+                Statement::Explain(fallback),
+                statement_lock_scope_id,
+            );
+        }
+        let search_path = self.configured_search_path();
+        db.execute_prepared_statement_with_search_path_datetime_config_gucs_and_planner_config(
+            self.client_id,
+            Statement::Explain(resolved_explain),
+            &resolved.params,
             search_path.as_deref(),
             &self.datetime_config,
             &self.gucs,

@@ -18,9 +18,9 @@ use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, CaseExpr as BoundCaseExpr,
     CaseTestExpr as BoundCaseTestExpr, CaseWhen as BoundCaseWhen, ExprArraySubscript, OpExprKind,
-    ScalarFunctionImpl, SqlJsonQueryFunction, SqlJsonQueryFunctionKind, SqlJsonTableBehavior,
-    SqlJsonTablePassingArg, SqlJsonTableQuotes, SqlJsonTableWrapper, WindowFuncKind,
-    expr_contains_set_returning, expr_sql_type_hint,
+    Param, ParamKind, ScalarFunctionImpl, SqlJsonQueryFunction, SqlJsonQueryFunctionKind,
+    SqlJsonTableBehavior, SqlJsonTablePassingArg, SqlJsonTableQuotes, SqlJsonTableWrapper,
+    WindowFuncKind, expr_contains_set_returning, expr_sql_type_hint,
 };
 
 mod func;
@@ -2558,14 +2558,12 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 }
             }
         }
-        SqlExpr::Parameter(index) => {
-            return Err(ParseError::DetailedError {
-                message: format!("there is no parameter ${index}"),
-                detail: None,
-                hint: None,
-                sqlstate: "42P02",
-            });
-        }
+        SqlExpr::Parameter(index) => Expr::Param(Param {
+            paramkind: ParamKind::External,
+            paramid: *index,
+            paramtype: external_param_type(*index)
+                .unwrap_or_else(|| SqlType::new(SqlTypeKind::Text)),
+        }),
         SqlExpr::Default => {
             return Err(ParseError::UnexpectedToken {
                 expected: "expression",
@@ -5999,6 +5997,14 @@ pub(super) fn catalog_backed_explicit_cast_allowed(
         && let Some(multirange_type) = multirange_type_ref_for_sql_type(target_type)
     {
         return source_type == multirange_type.range_type.sql_type;
+    }
+    if !source_type.is_array
+        && is_text_like_type(source_type)
+        && !target_type.is_array
+        && matches!(target_type.kind, SqlTypeKind::Composite)
+        && target_type.typrelid != 0
+    {
+        return true;
     }
     if source_type.is_array || !is_text_like_type(source_type) {
         return true;

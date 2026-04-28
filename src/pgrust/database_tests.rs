@@ -6871,6 +6871,98 @@ fn hash_partitioned_tables_route_rows_and_validate_bounds() {
 }
 
 #[test]
+fn partition_bounds_accept_array_hash_enum_and_composite_keys() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table hp_arr (a int4[]) partition by hash (a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp_arr_0 partition of hp_arr for values with (modulus 2, remainder 0)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp_arr_1 partition of hp_arr for values with (modulus 2, remainder 1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into hp_arr values ('{1}'), ('{1,2}'), ('{4,5}')",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from hp_arr_0"),
+        vec![vec![Value::Int64(2)]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from hp_arr_1"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    session
+        .execute(&db, "create type part_color as enum ('green', 'blue')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table enum_part (a part_color) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table enum_part_blue partition of enum_part for values in ('blue')",
+        )
+        .unwrap();
+    let StatementResult::Query { rows, .. } = session
+        .execute(
+            &db,
+            "explain (costs off) select * from enum_part where a = 'blue'",
+        )
+        .unwrap()
+    else {
+        panic!("expected enum partition EXPLAIN result");
+    };
+    assert!(rows.iter().any(|row| {
+        matches!(row.first(), Some(Value::Text(line)) if line.contains("enum_part_blue"))
+    }));
+
+    session
+        .execute(&db, "create type part_pair as (a int4, b int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table rec_part (a part_pair) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table rec_part_11 partition of rec_part for values in ('(1,1)')",
+        )
+        .unwrap();
+    let StatementResult::Query { rows, .. } = session
+        .execute(
+            &db,
+            "explain (costs off) select * from rec_part where a = '(1,1)'::part_pair",
+        )
+        .unwrap()
+    else {
+        panic!("expected composite partition EXPLAIN result");
+    };
+    assert!(rows.iter().any(|row| {
+        matches!(row.first(), Some(Value::Text(line)) if line.contains("rec_part_11"))
+    }));
+}
+
+#[test]
 fn create_table_partition_validation_matches_postgres_messages() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -12090,6 +12182,122 @@ fn sql_prepare_execute_parameters_and_explain_execute_work() {
         }
         other => panic!("expected update returning result, got {other:?}"),
     }
+}
+
+#[test]
+fn plpgsql_dynamic_explain_execute_uses_session_prepared_statement() {
+    let dir = temp_dir("plpgsql_dynamic_explain_execute_prepared");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table dyn_prep(id int4, label text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into dyn_prep values (1, 'a'), (2, 'b')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "prepare dyn_lookup(int4) as select avg(id) from dyn_prep where id = $1",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function dyn_explain(text) returns setof text language plpgsql as $$ \
+             declare ln text; \
+             begin \
+               for ln in execute format('explain (analyze, costs off, summary off, timing off, buffers off) %s', $1) loop \
+                 return next ln; \
+               end loop; \
+             end $$",
+        )
+        .unwrap();
+
+    let StatementResult::Query { rows, .. } = session
+        .execute(&db, "select dyn_explain('execute dyn_lookup(1)')")
+        .unwrap()
+    else {
+        panic!("expected dynamic EXPLAIN query result");
+    };
+    assert!(rows.iter().any(|row| {
+        matches!(row.first(), Some(Value::Text(line)) if line.contains("Seq Scan on dyn_prep"))
+    }));
+
+    session
+        .execute(
+            &db,
+            "create table dyn_ab(a int4, b int4) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table dyn_ab_a1 partition of dyn_ab for values in (1) partition by list (b)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table dyn_ab_a1_b1 partition of dyn_ab_a1 for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table dyn_ab_a2 partition of dyn_ab for values in (2) partition by list (b)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table dyn_ab_a2_b1 partition of dyn_ab_a2 for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function dyn_parallel_explain(text) returns setof text language plpgsql as $$ \
+             declare ln text; \
+             begin \
+               for ln in execute format('explain (analyze, costs off, summary off, timing off, buffers off) %s', $1) loop \
+                 ln := regexp_replace(ln, 'actual rows=\\d+(?:\\.\\d+)? loops=\\d+', 'actual rows=N loops=N'); \
+                 perform regexp_matches(ln, 'Index Searches: \\d+'); \
+                 if found then \
+                   continue; \
+                 end if; \
+                 return next ln; \
+               end loop; \
+             end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "prepare dyn_ab_lookup(int4, int4) as select avg(a) from dyn_ab where a between $1 and $2 and b < 4",
+        )
+        .unwrap();
+    session.execute(&db, "set parallel_setup_cost = 0").unwrap();
+    session.execute(&db, "set parallel_tuple_cost = 0").unwrap();
+    session
+        .execute(&db, "set min_parallel_table_scan_size = 0")
+        .unwrap();
+    session
+        .execute(&db, "set max_parallel_workers_per_gather = 2")
+        .unwrap();
+    let StatementResult::Query { rows, .. } = session
+        .execute(
+            &db,
+            "select dyn_parallel_explain('execute dyn_ab_lookup (2, 2)')",
+        )
+        .unwrap()
+    else {
+        panic!("expected dynamic partition EXPLAIN query result");
+    };
+    assert!(rows.iter().any(|row| {
+        matches!(row.first(), Some(Value::Text(line)) if line.contains("dyn_ab_a2_b1"))
+    }));
 }
 
 #[test]
@@ -35068,6 +35276,46 @@ fn create_table_as_execute_uses_prepared_select() {
     );
 
     session.execute(&db, "deallocate copy_items").unwrap();
+}
+
+#[test]
+fn execute_prepared_select_uses_external_params() {
+    let base = temp_dir("execute_prepared_select_uses_external_params");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table prep_items (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "insert into prep_items (id) values (1), (2)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "prepare read_item (int4) as select id from prep_items where id = $1",
+        )
+        .unwrap();
+
+    let StatementResult::Query { rows, .. } = session.execute(&db, "execute read_item(2)").unwrap()
+    else {
+        panic!("expected EXECUTE query result");
+    };
+    assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+
+    let StatementResult::Query { rows, .. } = session
+        .execute(&db, "explain (costs off) execute read_item(2)")
+        .unwrap()
+    else {
+        panic!("expected EXPLAIN query result");
+    };
+    let plan = rows
+        .iter()
+        .filter_map(|row| row.first())
+        .map(|value| value.as_text().unwrap_or_default().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plan.contains("$1"), "{plan}");
 }
 
 #[test]

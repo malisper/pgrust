@@ -3691,6 +3691,9 @@ fn render_verbose_join_expr(
             .find(|source| source.paramid == param.paramid)
             .map(|source| render_verbose_expr(&source.expr, &source.column_names, ctx))
             .unwrap_or_else(|| format!("${}", param.paramid)),
+        Expr::Param(param) if param.paramkind == ParamKind::External => {
+            format!("${}", param.paramid)
+        }
         Expr::Const(value) => {
             strip_outer_parens(&render_explain_expr(&Expr::Const(value.clone()), &[]))
         }
@@ -3809,6 +3812,9 @@ fn render_verbose_expr(
             .find(|source| source.paramid == param.paramid)
             .map(|source| render_verbose_expr(&source.expr, &source.column_names, ctx))
             .unwrap_or_else(|| format!("${}", param.paramid)),
+        Expr::Param(param) if param.paramkind == ParamKind::External => {
+            format!("${}", param.paramid)
+        }
         Expr::Const(value) => {
             strip_outer_parens(&render_explain_expr(&Expr::Const(value.clone()), &[]))
         }

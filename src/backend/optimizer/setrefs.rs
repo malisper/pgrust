@@ -12,7 +12,8 @@ use crate::backend::parser::analyze::{
 use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, PlannerSubroot, RestrictInfo};
 use crate::include::nodes::plannodes::{
-    ExecParamSource, IndexScanKey, IndexScanKeyArgument, Plan, PlanEstimate, PlanRowMark,
+    ExecParamSource, IndexScanKey, IndexScanKeyArgument, PartitionPruneChildDomain,
+    PartitionPrunePlan, Plan, PlanEstimate, PlanRowMark,
 };
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, OUTER_VAR, OpExpr,
@@ -3366,6 +3367,10 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
             paramkind: ParamKind::Exec,
             ..
         }) => panic!("planner path contains PARAM_EXEC in {path_node}.{field}: {expr:?}"),
+        Expr::Param(Param {
+            paramkind: ParamKind::External,
+            ..
+        }) => {}
         Expr::WindowFunc(window_func) => {
             for arg in &window_func.args {
                 validate_planner_expr(arg, path_node, field);
@@ -3875,6 +3880,7 @@ fn set_append_references(
     source_id: usize,
     desc: crate::include::nodes::primnodes::RelationDesc,
     child_roots: Vec<Option<PlannerSubroot>>,
+    partition_prune: Option<PartitionPrunePlan>,
     children: Vec<Path>,
 ) -> Plan {
     assert!(
@@ -3886,27 +3892,137 @@ fn set_append_references(
     let single_child_root_alias = (children.len() == 1)
         .then(|| append_source_alias(ctx, source_id))
         .flatten();
+    let children = children
+        .into_iter()
+        .enumerate()
+        .map(|(index, child)| {
+            let child_root = child_roots
+                .get(index)
+                .and_then(Option::as_ref)
+                .map(PlannerSubroot::as_ref)
+                .or(ctx.root);
+            let mut child_plan = recurse_with_root(ctx, child_root, child);
+            if let Some(alias) = single_child_root_alias.as_deref() {
+                apply_single_append_scan_alias(&mut child_plan, alias);
+            }
+            child_plan
+        })
+        .collect();
+    let (partition_prune, mut children) =
+        flatten_partition_append_children(partition_prune, children);
+    if partition_prune.is_some()
+        && let Some(alias) = append_source_alias(ctx, source_id)
+    {
+        for (index, child) in children.iter_mut().enumerate() {
+            apply_single_append_scan_alias(child, &format!("{alias}_{}", index + 1));
+        }
+    }
     Plan::Append {
         plan_info,
         source_id,
         desc,
-        children: children
-            .into_iter()
-            .enumerate()
-            .map(|(index, child)| {
-                let child_root = child_roots
-                    .get(index)
-                    .and_then(Option::as_ref)
-                    .map(PlannerSubroot::as_ref)
-                    .or(ctx.root);
-                let mut child_plan = recurse_with_root(ctx, child_root, child);
-                if let Some(alias) = single_child_root_alias.as_deref() {
-                    apply_single_append_scan_alias(&mut child_plan, alias);
-                }
-                child_plan
-            })
-            .collect(),
+        partition_prune,
+        children,
     }
+}
+
+fn partition_prune_child_domains(
+    info: &PartitionPrunePlan,
+    child_index: usize,
+) -> Vec<PartitionPruneChildDomain> {
+    info.child_domains
+        .get(child_index)
+        .filter(|domains| !domains.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            vec![PartitionPruneChildDomain {
+                spec: info.spec.clone(),
+                sibling_bounds: info.sibling_bounds.clone(),
+                bound: info.child_bounds.get(child_index).cloned().flatten(),
+            }]
+        })
+}
+
+fn flatten_partition_append_children(
+    mut partition_prune: Option<PartitionPrunePlan>,
+    children: Vec<Plan>,
+) -> (Option<PartitionPrunePlan>, Vec<Plan>) {
+    let Some(info) = partition_prune.as_mut() else {
+        return (partition_prune, children);
+    };
+    if children.is_empty() {
+        return (partition_prune, children);
+    }
+
+    let mut flattened_children = Vec::new();
+    let mut flattened_bounds = Vec::new();
+    let mut flattened_domains = Vec::new();
+    let mut changed = false;
+
+    for (index, child) in children.into_iter().enumerate() {
+        let parent_domains = partition_prune_child_domains(info, index);
+        let parent_bound = info.child_bounds.get(index).cloned().flatten();
+        match child {
+            Plan::Append {
+                partition_prune: Some(child_prune),
+                children: nested_children,
+                ..
+            } if !nested_children.is_empty() => {
+                changed = true;
+                for (nested_index, nested_child) in nested_children.into_iter().enumerate() {
+                    let mut domains = parent_domains.clone();
+                    domains.extend(partition_prune_child_domains(&child_prune, nested_index));
+                    flattened_domains.push(domains);
+                    flattened_bounds.push(parent_bound.clone());
+                    flattened_children.push(nested_child);
+                }
+            }
+            Plan::Projection {
+                plan_info,
+                input,
+                targets,
+            } => match *input {
+                Plan::Append {
+                    partition_prune: Some(child_prune),
+                    children: nested_children,
+                    ..
+                } if !nested_children.is_empty() => {
+                    changed = true;
+                    for (nested_index, nested_child) in nested_children.into_iter().enumerate() {
+                        let mut domains = parent_domains.clone();
+                        domains.extend(partition_prune_child_domains(&child_prune, nested_index));
+                        flattened_domains.push(domains);
+                        flattened_bounds.push(parent_bound.clone());
+                        flattened_children.push(Plan::Projection {
+                            plan_info,
+                            input: Box::new(nested_child),
+                            targets: targets.clone(),
+                        });
+                    }
+                }
+                input => {
+                    flattened_domains.push(parent_domains);
+                    flattened_bounds.push(parent_bound);
+                    flattened_children.push(Plan::Projection {
+                        plan_info,
+                        input: Box::new(input),
+                        targets,
+                    });
+                }
+            },
+            other => {
+                flattened_domains.push(parent_domains);
+                flattened_bounds.push(parent_bound);
+                flattened_children.push(other);
+            }
+        }
+    }
+
+    if changed {
+        info.child_bounds = flattened_bounds;
+        info.child_domains = flattened_domains;
+    }
+    (partition_prune, flattened_children)
 }
 
 fn append_source_alias(ctx: &SetRefsContext<'_>, source_id: usize) -> Option<String> {
@@ -3961,6 +4077,7 @@ fn set_merge_append_references(
     source_id: usize,
     desc: crate::include::nodes::primnodes::RelationDesc,
     items: Vec<OrderByEntry>,
+    partition_prune: Option<PartitionPrunePlan>,
     children: Vec<Path>,
 ) -> Plan {
     let lowered_items = if let Some(first_child) = children.first() {
@@ -3981,16 +4098,109 @@ fn set_merge_append_references(
     } else {
         Vec::new()
     };
+    let children = children
+        .into_iter()
+        .map(|child| set_plan_refs(ctx, child))
+        .collect();
+    let (partition_prune, mut children) =
+        flatten_partition_merge_append_children(partition_prune, children);
+    if partition_prune.is_some()
+        && let Some(alias) = append_source_alias(ctx, source_id)
+    {
+        for (index, child) in children.iter_mut().enumerate() {
+            apply_single_append_scan_alias(child, &format!("{alias}_{}", index + 1));
+        }
+    }
     Plan::MergeAppend {
         plan_info,
         source_id,
         desc,
         items: lowered_items,
-        children: children
-            .into_iter()
-            .map(|child| set_plan_refs(ctx, child))
-            .collect(),
+        partition_prune,
+        children,
     }
+}
+
+fn flatten_partition_merge_append_children(
+    mut partition_prune: Option<PartitionPrunePlan>,
+    children: Vec<Plan>,
+) -> (Option<PartitionPrunePlan>, Vec<Plan>) {
+    let Some(info) = partition_prune.as_mut() else {
+        return (partition_prune, children);
+    };
+    if children.is_empty() {
+        return (partition_prune, children);
+    }
+
+    let mut flattened_children = Vec::new();
+    let mut flattened_bounds = Vec::new();
+    let mut flattened_domains = Vec::new();
+    let mut changed = false;
+
+    for (index, child) in children.into_iter().enumerate() {
+        let parent_domains = partition_prune_child_domains(info, index);
+        let parent_bound = info.child_bounds.get(index).cloned().flatten();
+        match child {
+            Plan::MergeAppend {
+                partition_prune: Some(child_prune),
+                children: nested_children,
+                ..
+            } if !nested_children.is_empty() => {
+                changed = true;
+                for (nested_index, nested_child) in nested_children.into_iter().enumerate() {
+                    let mut domains = parent_domains.clone();
+                    domains.extend(partition_prune_child_domains(&child_prune, nested_index));
+                    flattened_domains.push(domains);
+                    flattened_bounds.push(parent_bound.clone());
+                    flattened_children.push(nested_child);
+                }
+            }
+            Plan::Projection {
+                plan_info,
+                input,
+                targets,
+            } => match *input {
+                Plan::MergeAppend {
+                    partition_prune: Some(child_prune),
+                    children: nested_children,
+                    ..
+                } if !nested_children.is_empty() => {
+                    changed = true;
+                    for (nested_index, nested_child) in nested_children.into_iter().enumerate() {
+                        let mut domains = parent_domains.clone();
+                        domains.extend(partition_prune_child_domains(&child_prune, nested_index));
+                        flattened_domains.push(domains);
+                        flattened_bounds.push(parent_bound.clone());
+                        flattened_children.push(Plan::Projection {
+                            plan_info,
+                            input: Box::new(nested_child),
+                            targets: targets.clone(),
+                        });
+                    }
+                }
+                input => {
+                    flattened_domains.push(parent_domains);
+                    flattened_bounds.push(parent_bound);
+                    flattened_children.push(Plan::Projection {
+                        plan_info,
+                        input: Box::new(input),
+                        targets,
+                    });
+                }
+            },
+            other => {
+                flattened_domains.push(parent_domains);
+                flattened_bounds.push(parent_bound);
+                flattened_children.push(other);
+            }
+        }
+    }
+
+    if changed {
+        info.child_bounds = flattened_bounds;
+        info.child_domains = flattened_domains;
+    }
+    (partition_prune, flattened_children)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5126,17 +5336,35 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             source_id,
             desc,
             child_roots,
+            partition_prune,
             children,
             ..
-        } => set_append_references(ctx, plan_info, source_id, desc, child_roots, children),
+        } => set_append_references(
+            ctx,
+            plan_info,
+            source_id,
+            desc,
+            child_roots,
+            partition_prune,
+            children,
+        ),
         Path::MergeAppend {
             plan_info,
             source_id,
             desc,
             items,
+            partition_prune,
             children,
             ..
-        } => set_merge_append_references(ctx, plan_info, source_id, desc, items, children),
+        } => set_merge_append_references(
+            ctx,
+            plan_info,
+            source_id,
+            desc,
+            items,
+            partition_prune,
+            children,
+        ),
         Path::Unique {
             plan_info,
             key_indices,
