@@ -1178,6 +1178,11 @@ fn validate_publication_filter_types(
                 validate_publication_filter_types(child, relation, catalog)?;
             }
         }
+        JsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                validate_publication_filter_types(child, relation, catalog)?;
+            }
+        }
         Const(Value::EnumOid(_)) => {
             return Err(invalid_publication_where_error(
                 "User-defined types are not allowed.",
@@ -1402,6 +1407,11 @@ fn validate_publication_filter_expr(expr: &SqlExpr) -> Result<(), ExecError> {
         }
         Xml(xml) => {
             for child in xml.child_exprs() {
+                validate_publication_filter_expr(child)?;
+            }
+        }
+        JsonQueryFunction(func) => {
+            for child in func.child_exprs() {
                 validate_publication_filter_expr(child)?;
             }
         }

@@ -17143,6 +17143,79 @@ fn build_json_table_quotes(pair: Pair<'_, Rule>) -> Result<JsonTableQuotes, Pars
     }
 }
 
+fn build_json_query_function(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let inner = if pair.as_rule() == Rule::json_query_function_expr {
+        pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?
+    } else {
+        pair
+    };
+    let kind = match inner.as_rule() {
+        Rule::json_exists_function_expr => JsonQueryFunctionKind::Exists,
+        Rule::json_value_function_expr => JsonQueryFunctionKind::Value,
+        Rule::json_query_function_call_expr => JsonQueryFunctionKind::Query,
+        _ => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "SQL/JSON query function",
+                actual: inner.as_str().into(),
+            });
+        }
+    };
+
+    let mut context = None;
+    let mut path = None;
+    let mut passing = Vec::new();
+    let mut returning = None;
+    let mut wrapper = JsonTableWrapper::Unspecified;
+    let mut quotes = JsonTableQuotes::Unspecified;
+    let mut on_empty = None;
+    let mut on_error = None;
+
+    for part in inner.into_inner() {
+        match part.as_rule() {
+            Rule::json_value_expr if context.is_none() => {
+                context = Some(build_json_value_expr(part)?);
+            }
+            Rule::expr if path.is_none() => {
+                path = Some(build_expr(part)?);
+            }
+            Rule::json_query_passing_clause => {
+                passing = part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::json_table_passing_arg)
+                    .map(build_json_table_passing_arg)
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            Rule::json_returning_clause => {
+                returning = Some(build_json_returning_clause_with_format(part)?);
+            }
+            Rule::json_table_wrapper_clause => wrapper = build_json_table_wrapper(part)?,
+            Rule::json_table_quotes_clause => quotes = build_json_table_quotes(part)?,
+            Rule::json_exists_on_error_clause | Rule::json_query_behavior_clause => {
+                let (behavior, target) = build_json_table_behavior_clause(part)?;
+                match target {
+                    JsonTableBehaviorTarget::Empty => on_empty = Some(behavior),
+                    JsonTableBehaviorTarget::Error => on_error = Some(behavior),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(SqlExpr::JsonQueryFunction(Box::new(
+        JsonQueryFunctionExpr {
+            kind,
+            context: context.ok_or(ParseError::UnexpectedEof)?,
+            path: path.ok_or(ParseError::UnexpectedEof)?,
+            passing,
+            returning,
+            wrapper,
+            quotes,
+            on_empty,
+            on_error,
+        },
+    )))
+}
+
 fn build_join_clause(
     pair: Pair<'_, Rule>,
 ) -> Result<(JoinKind, FromItem, JoinConstraint), ParseError> {
@@ -20313,6 +20386,12 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::SessionUser => "session_user".to_string(),
         SqlExpr::CurrentRole => "current_role".to_string(),
         SqlExpr::AtTimeZone { .. } => "timezone".to_string(),
+        SqlExpr::JsonQueryFunction(func) => match func.kind {
+            JsonQueryFunctionKind::Exists => "json_exists",
+            JsonQueryFunctionKind::Value => "json_value",
+            JsonQueryFunctionKind::Query => "json_query",
+        }
+        .to_string(),
         SqlExpr::FuncCall { name, .. } => sql_json_public_func_name(name)
             .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name))
             .to_string(),
@@ -20394,19 +20473,32 @@ fn build_json_value_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     }
 }
 
-fn build_json_returning_clause(pair: Pair<'_, Rule>) -> Result<RawTypeName, ParseError> {
+fn build_json_returning_clause_with_format(
+    pair: Pair<'_, Rule>,
+) -> Result<JsonQueryReturning, ParseError> {
     let mut ty = None;
+    let mut format_json = false;
     let mut encoding = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::type_name => ty = Some(build_type_name(part)),
-            Rule::json_format_clause => encoding = json_format_clause_encoding(part),
+            Rule::json_format_clause => {
+                format_json = true;
+                encoding = json_format_clause_encoding(part);
+            }
             _ => {}
         }
     }
     let ty = ty.ok_or(ParseError::UnexpectedEof)?;
     validate_json_returning_encoding(&ty, encoding.as_deref())?;
-    Ok(ty)
+    Ok(JsonQueryReturning {
+        type_name: ty,
+        format_json,
+    })
+}
+
+fn build_json_returning_clause(pair: Pair<'_, Rule>) -> Result<RawTypeName, ParseError> {
+    build_json_returning_clause_with_format(pair).map(|returning| returning.type_name)
 }
 
 fn json_format_clause_encoding(pair: Pair<'_, Rule>) -> Option<String> {
@@ -23299,6 +23391,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::json_constructor_expr => {
             build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
         }
+        Rule::json_query_function_expr
+        | Rule::json_exists_function_expr
+        | Rule::json_value_function_expr
+        | Rule::json_query_function_call_expr => build_json_query_function(pair),
         Rule::json_constructor => build_json_constructor(pair),
         Rule::json_scalar_constructor_expr => build_json_scalar_constructor(pair),
         Rule::json_serialize_constructor_expr => build_json_serialize_constructor(pair),

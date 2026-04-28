@@ -914,6 +914,10 @@ fn raw_expr_any(expr: &SqlExpr, predicate: &impl Fn(&SqlExpr) -> bool) -> bool {
         | SqlExpr::GeometryUnaryOp { expr: inner, .. }
         | SqlExpr::Subscript { expr: inner, .. } => raw_expr_any(inner, predicate),
         SqlExpr::Xml(xml) => xml.child_exprs().any(|expr| raw_expr_any(expr, predicate)),
+        SqlExpr::JsonQueryFunction(func) => func
+            .child_exprs()
+            .iter()
+            .any(|expr| raw_expr_any(expr, predicate)),
     }
 }
 

@@ -979,6 +979,72 @@ pub struct SqlJsonTablePassingArg {
     pub expr: Expr,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlJsonQueryFunctionKind {
+    Exists,
+    Value,
+    Query,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlJsonQueryFunction {
+    pub kind: SqlJsonQueryFunctionKind,
+    pub context: Expr,
+    pub path: Expr,
+    pub passing: Vec<SqlJsonTablePassingArg>,
+    pub result_type: SqlType,
+    pub result_format_json: bool,
+    pub wrapper: SqlJsonTableWrapper,
+    pub quotes: SqlJsonTableQuotes,
+    pub on_empty: SqlJsonTableBehavior,
+    pub on_error: SqlJsonTableBehavior,
+}
+
+impl SqlJsonQueryFunction {
+    pub fn child_exprs(&self) -> Vec<&Expr> {
+        let mut exprs = Vec::with_capacity(2 + self.passing.len() + 2);
+        exprs.push(&self.context);
+        exprs.push(&self.path);
+        exprs.extend(self.passing.iter().map(|arg| &arg.expr));
+        push_sql_json_behavior_expr(&self.on_empty, &mut exprs);
+        push_sql_json_behavior_expr(&self.on_error, &mut exprs);
+        exprs
+    }
+
+    pub fn map_exprs(self, mut map: impl FnMut(Expr) -> Expr) -> Self {
+        let SqlJsonQueryFunction {
+            kind,
+            context,
+            path,
+            passing,
+            result_type,
+            result_format_json,
+            wrapper,
+            quotes,
+            on_empty,
+            on_error,
+        } = self;
+        SqlJsonQueryFunction {
+            kind,
+            context: map(context),
+            path: map(path),
+            passing: passing
+                .into_iter()
+                .map(|arg| SqlJsonTablePassingArg {
+                    name: arg.name,
+                    expr: map(arg.expr),
+                })
+                .collect(),
+            result_type,
+            result_format_json,
+            wrapper,
+            quotes,
+            on_empty: on_empty.map_exprs(&mut map),
+            on_error: on_error.map_exprs(&mut map),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlJsonTableColumn {
     pub name: String,
@@ -2218,6 +2284,7 @@ pub enum Expr {
     Case(Box<CaseExpr>),
     CaseTest(Box<CaseTestExpr>),
     Func(Box<FuncExpr>),
+    SqlJsonQueryFunction(Box<SqlJsonQueryFunction>),
     SetReturning(Box<SetReturningExpr>),
     SubLink(Box<SubLink>),
     SubPlan(Box<SubPlan>),
@@ -2616,6 +2683,7 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         Expr::CaseTest(case_test) => Some(case_test.type_id),
         Expr::Op(op) => Some(op.opresulttype),
         Expr::Func(func) => func.funcresulttype,
+        Expr::SqlJsonQueryFunction(func) => Some(func.result_type),
         Expr::SetReturning(srf) => Some(srf.sql_type),
         Expr::ScalarArrayOp(_) => Some(SqlType::new(SqlTypeKind::Bool)),
         Expr::Bool(_)
@@ -2801,6 +2869,16 @@ pub fn expr_contains_set_returning(expr: &Expr) -> bool {
                 || expr_contains_set_returning(&case_expr.defresult)
         }
         Expr::Func(func) => func.args.iter().any(expr_contains_set_returning),
+        Expr::SqlJsonQueryFunction(func) => {
+            expr_contains_set_returning(&func.context)
+                || expr_contains_set_returning(&func.path)
+                || func
+                    .passing
+                    .iter()
+                    .any(|arg| expr_contains_set_returning(&arg.expr))
+                || sql_json_behavior_contains_set_returning(&func.on_empty)
+                || sql_json_behavior_contains_set_returning(&func.on_error)
+        }
         Expr::ScalarArrayOp(op) => {
             expr_contains_set_returning(&op.left) || expr_contains_set_returning(&op.right)
         }
@@ -2867,6 +2945,13 @@ pub fn expr_contains_set_returning(expr: &Expr) -> bool {
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn sql_json_behavior_contains_set_returning(behavior: &SqlJsonTableBehavior) -> bool {
+    match behavior {
+        SqlJsonTableBehavior::Default(expr) => expr_contains_set_returning(expr),
+        _ => false,
     }
 }
 

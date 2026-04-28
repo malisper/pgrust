@@ -140,6 +140,10 @@ pub(super) fn expr_contains_window(expr: &SqlExpr) -> bool {
                 || filter.as_deref().is_some_and(expr_contains_window)
         }
         SqlExpr::Xml(xml) => xml.child_exprs().any(expr_contains_window),
+        SqlExpr::JsonQueryFunction(func) => func
+            .child_exprs()
+            .iter()
+            .any(|expr| expr_contains_window(expr)),
         SqlExpr::Column(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
@@ -493,6 +497,10 @@ fn expr_contains_current_level_var(expr: &Expr, sublevels_up: usize) -> bool {
         Expr::Func(func) => func
             .args
             .iter()
+            .any(|expr| expr_contains_current_level_var(expr, sublevels_up)),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
             .any(|expr| expr_contains_current_level_var(expr, sublevels_up)),
         Expr::SetReturning(set_returning) => {
             crate::include::nodes::primnodes::set_returning_call_exprs(&set_returning.call)

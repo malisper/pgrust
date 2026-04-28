@@ -5,8 +5,8 @@ use super::super::*;
 use crate::backend::parser::{
     AlterTableTriggerMode, AlterTableTriggerStateStatement, AlterTableTriggerTarget,
     AlterTriggerRenameStatement, CatalogLookup, CommentOnTriggerStatement, CreateTriggerStatement,
-    DropTriggerStatement, ParseError, RawWindowFrameBound, SqlCallArgs, SqlExpr, SqlType,
-    SqlTypeKind, TriggerEvent, TriggerLevel, TriggerTiming,
+    DropTriggerStatement, JsonTableBehavior, ParseError, RawWindowFrameBound, SqlCallArgs, SqlExpr,
+    SqlType, SqlTypeKind, TriggerEvent, TriggerLevel, TriggerTiming,
     bind_scalar_expr_in_named_relation_scope, parse_expr,
 };
 use crate::include::catalog::{
@@ -1795,6 +1795,19 @@ fn rewrite_trigger_system_column_refs(expr: &mut SqlExpr) {
             }
             for arg in &mut xml.args {
                 rewrite_trigger_system_column_refs(arg);
+            }
+        }
+        SqlExpr::JsonQueryFunction(func) => {
+            rewrite_trigger_system_column_refs(&mut func.context);
+            rewrite_trigger_system_column_refs(&mut func.path);
+            for arg in &mut func.passing {
+                rewrite_trigger_system_column_refs(&mut arg.expr);
+            }
+            if let Some(JsonTableBehavior::Default(expr)) = &mut func.on_empty {
+                rewrite_trigger_system_column_refs(expr);
+            }
+            if let Some(JsonTableBehavior::Default(expr)) = &mut func.on_error {
+                rewrite_trigger_system_column_refs(expr);
             }
         }
         SqlExpr::FuncCall {

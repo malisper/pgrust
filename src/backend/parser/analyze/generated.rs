@@ -199,6 +199,12 @@ fn validate_generated_expr_inner(
             ensure_immutable_function(func.funcid, catalog)?;
             validate_exprs(&func.args, desc, column_index, catalog)
         }
+        Expr::SqlJsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                validate_generated_expr_inner(child, desc, column_index, catalog)?;
+            }
+            Ok(())
+        }
         Expr::Op(op) => validate_exprs(&op.args, desc, column_index, catalog),
         Expr::Bool(bool_expr) => validate_exprs(&bool_expr.args, desc, column_index, catalog),
         Expr::Case(case_expr) => {
@@ -362,6 +368,10 @@ fn expr_uses_user_defined_function(expr: &Expr, catalog: &dyn CatalogLookup) -> 
         Expr::Xml(xml) => xml
             .child_exprs()
             .any(|expr| expr_uses_user_defined_function(expr, catalog)),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(|expr| expr_uses_user_defined_function(expr, catalog)),
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
@@ -490,6 +500,10 @@ fn expr_references_column_inner(expr: &Expr, column_index: usize) -> bool {
         Expr::Func(func) => func
             .args
             .iter()
+            .any(|expr| expr_references_column_inner(expr, column_index)),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
             .any(|expr| expr_references_column_inner(expr, column_index)),
         Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
             .into_iter()

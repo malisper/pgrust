@@ -2710,6 +2710,10 @@ fn expr_uses_only_index_keys(
             .args
             .iter()
             .all(|arg| expr_uses_only_index_keys(arg, source_id, covered_columns)),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .all(|arg| expr_uses_only_index_keys(arg, source_id, covered_columns)),
         Expr::ScalarArrayOp(saop) => {
             expr_uses_only_index_keys(&saop.left, source_id, covered_columns)
                 && expr_uses_only_index_keys(&saop.right, source_id, covered_columns)
@@ -2848,6 +2852,11 @@ fn validate_executable_expr(
             .args
             .iter()
             .for_each(|arg| validate_executable_expr(arg, plan_node, field, allowed_exec_params)),
+        Expr::SqlJsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                validate_executable_expr(child, plan_node, field, allowed_exec_params);
+            }
+        }
         Expr::SubPlan(subplan) => {
             if let Some(testexpr) = &subplan.testexpr {
                 validate_executable_expr(testexpr, plan_node, field, allowed_exec_params);
@@ -3355,6 +3364,11 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
             .args
             .iter()
             .for_each(|arg| validate_planner_expr(arg, path_node, field)),
+        Expr::SqlJsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                validate_planner_expr(child, path_node, field);
+            }
+        }
         Expr::SetReturning(srf) => {
             for arg in set_returning_call_exprs(&srf.call) {
                 validate_planner_expr(arg, path_node, field);

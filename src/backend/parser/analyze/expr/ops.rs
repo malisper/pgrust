@@ -160,6 +160,11 @@ pub(super) fn bind_arithmetic_expr(
     }
     if !left_type.is_array && !right_type.is_array {
         let result_type = match (op, left_type.kind, right_type.kind) {
+            ("+", SqlTypeKind::Date, SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8)
+            | ("+", SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8, SqlTypeKind::Date)
+            | ("-", SqlTypeKind::Date, SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8) => {
+                Some(SqlType::new(SqlTypeKind::Date))
+            }
             ("+", SqlTypeKind::Date, SqlTypeKind::Time)
             | ("+", SqlTypeKind::Time, SqlTypeKind::Date)
             | ("-", SqlTypeKind::Date, SqlTypeKind::Time) => {

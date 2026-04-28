@@ -214,6 +214,10 @@ fn expr_references_local_cte(expr: &Expr, local_ctes: &HashMap<usize, String>) -
             .args
             .iter()
             .find_map(|arg| expr_references_local_cte(arg, local_ctes)),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .find_map(|arg| expr_references_local_cte(arg, local_ctes)),
         Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
             .into_iter()
             .find_map(|arg| expr_references_local_cte(arg, local_ctes)),
@@ -3397,6 +3401,9 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 field: field.clone(),
                 field_type,
             })
+        }
+        SqlExpr::JsonQueryFunction(_) => {
+            bind_grouped_plain_expr(expr, input_scope, catalog, outer_scopes, grouped_outer)
         }
         SqlExpr::CurrentDate => Ok(Expr::CurrentDate),
         SqlExpr::CurrentCatalog => Ok(Expr::CurrentCatalog),

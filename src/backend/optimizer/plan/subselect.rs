@@ -3,7 +3,8 @@
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, ExprArraySubscript, ProjectSetTarget, SetReturningCall, SubLink, SubPlan,
+    AggAccum, Expr, ExprArraySubscript, ProjectSetTarget, SetReturningCall, SqlJsonQueryFunction,
+    SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink, SubPlan,
 };
 
 use super::planner::planner;
@@ -172,6 +173,23 @@ pub(super) fn finalize_expr_subqueries(
                 .collect(),
             ..*func
         })),
+        Expr::SqlJsonQueryFunction(func) => {
+            Expr::SqlJsonQueryFunction(Box::new(SqlJsonQueryFunction {
+                context: finalize_expr_subqueries(func.context, catalog, subplans),
+                path: finalize_expr_subqueries(func.path, catalog, subplans),
+                passing: func
+                    .passing
+                    .into_iter()
+                    .map(|arg| SqlJsonTablePassingArg {
+                        name: arg.name,
+                        expr: finalize_expr_subqueries(arg.expr, catalog, subplans),
+                    })
+                    .collect(),
+                on_empty: finalize_sql_json_behavior(func.on_empty, catalog, subplans),
+                on_error: finalize_sql_json_behavior(func.on_error, catalog, subplans),
+                ..*func
+            }))
+        }
         Expr::SetReturning(srf) => Expr::SetReturning(Box::new(
             crate::include::nodes::primnodes::SetReturningExpr {
                 call: finalize_set_returning_call(srf.call, catalog, subplans),
@@ -308,6 +326,19 @@ pub(super) fn finalize_expr_subqueries(
                 .collect(),
             ..*xml
         })),
+    }
+}
+
+fn finalize_sql_json_behavior(
+    behavior: SqlJsonTableBehavior,
+    catalog: &dyn CatalogLookup,
+    subplans: &mut Vec<Plan>,
+) -> SqlJsonTableBehavior {
+    match behavior {
+        SqlJsonTableBehavior::Default(expr) => {
+            SqlJsonTableBehavior::Default(finalize_expr_subqueries(expr, catalog, subplans))
+        }
+        other => other,
     }
 }
 
@@ -671,6 +702,23 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 .collect(),
             ..*func
         })),
+        Expr::SqlJsonQueryFunction(func) => {
+            Expr::SqlJsonQueryFunction(Box::new(SqlJsonQueryFunction {
+                context: rebase_expr_subplan_ids(func.context, base),
+                path: rebase_expr_subplan_ids(func.path, base),
+                passing: func
+                    .passing
+                    .into_iter()
+                    .map(|arg| SqlJsonTablePassingArg {
+                        name: arg.name,
+                        expr: rebase_expr_subplan_ids(arg.expr, base),
+                    })
+                    .collect(),
+                on_empty: rebase_sql_json_behavior(func.on_empty, base),
+                on_error: rebase_sql_json_behavior(func.on_error, base),
+                ..*func
+            }))
+        }
         Expr::SetReturning(srf) => Expr::SetReturning(Box::new(
             crate::include::nodes::primnodes::SetReturningExpr {
                 call: rebase_set_returning_call_subplan_ids(srf.call, base),
@@ -808,6 +856,15 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 .collect(),
             ..*xml
         })),
+    }
+}
+
+fn rebase_sql_json_behavior(behavior: SqlJsonTableBehavior, base: usize) -> SqlJsonTableBehavior {
+    match behavior {
+        SqlJsonTableBehavior::Default(expr) => {
+            SqlJsonTableBehavior::Default(rebase_expr_subplan_ids(expr, base))
+        }
+        other => other,
     }
 }
 

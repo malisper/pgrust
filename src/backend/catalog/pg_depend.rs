@@ -435,6 +435,11 @@ pub(crate) fn collect_sql_expr_column_names(expr: &SqlExpr, out: &mut BTreeSet<S
                 collect_sql_expr_column_names(child, out);
             }
         }
+        SqlExpr::JsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                collect_sql_expr_column_names(child, out);
+            }
+        }
         SqlExpr::FuncCall {
             args,
             order_by,

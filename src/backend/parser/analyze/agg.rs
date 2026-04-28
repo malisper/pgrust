@@ -303,6 +303,10 @@ pub(super) fn expr_contains_agg(catalog: &dyn CatalogLookup, expr: &SqlExpr) -> 
         SqlExpr::Xml(xml) => xml
             .child_exprs()
             .any(|expr| expr_contains_agg(catalog, expr)),
+        SqlExpr::JsonQueryFunction(func) => func
+            .child_exprs()
+            .iter()
+            .any(|expr| expr_contains_agg(catalog, expr)),
     }
 }
 
@@ -474,6 +478,10 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
             expr_references_input_scope(left) || expr_references_input_scope(right)
         }
         SqlExpr::Xml(xml) => xml.child_exprs().any(expr_references_input_scope),
+        SqlExpr::JsonQueryFunction(func) => func
+            .child_exprs()
+            .iter()
+            .any(|expr| expr_references_input_scope(expr)),
     }
 }
 
@@ -686,6 +694,11 @@ pub(super) fn collect_aggs(
         }
         SqlExpr::Xml(xml) => {
             for child in xml.child_exprs() {
+                collect_aggs(catalog, child, aggs);
+            }
+        }
+        SqlExpr::JsonQueryFunction(func) => {
+            for child in func.child_exprs() {
                 collect_aggs(catalog, child, aggs);
             }
         }

@@ -3916,6 +3916,7 @@ fn domain_value_equals(value: &Value, expected: &Value) -> bool {
     match (value, expected) {
         (Value::Text(left), Value::Text(right)) => left.as_str() == right.as_str(),
         (Value::TextRef(_, _), Value::Text(right)) => value.as_text() == Some(right.as_str()),
+        (Value::Bit(left), Value::Text(right)) => render_bit_text(left) == right.as_str(),
         (Value::Int16(left), Value::Int64(right)) => i64::from(*left) == *right,
         (Value::Int32(left), Value::Int64(right)) => i64::from(*left) == *right,
         (Value::Int64(left), Value::Int64(right)) => left == right,
@@ -5978,6 +5979,17 @@ pub(crate) fn cast_text_value_with_config(
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
         SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
+}
+
+pub(crate) fn cast_text_value_with_catalog_and_config(
+    text: &str,
+    ty: SqlType,
+    explicit: bool,
+    catalog: Option<&dyn CatalogLookup>,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    let value = cast_text_value_with_config(text, ty, explicit, config)?;
+    enforce_domain_check(value, ty, catalog)
 }
 
 pub(super) fn cast_numeric_value(

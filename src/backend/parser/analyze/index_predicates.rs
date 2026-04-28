@@ -248,6 +248,10 @@ fn single_local_varno(expr: &Expr) -> Option<usize> {
             }
             Expr::CaseTest(_) => true,
             Expr::Func(func) => func.args.iter().all(|arg| visit(arg, found)),
+            Expr::SqlJsonQueryFunction(func) => func
+                .child_exprs()
+                .into_iter()
+                .all(|expr| visit(expr, found)),
             Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
                 .into_iter()
                 .all(|expr| visit(expr, found)),
@@ -347,6 +351,7 @@ pub(crate) fn expr_uses_ctid(expr: &Expr) -> bool {
         }
         Expr::CaseTest(_) => false,
         Expr::Func(func) => func.args.iter().any(expr_uses_ctid),
+        Expr::SqlJsonQueryFunction(func) => func.child_exprs().into_iter().any(expr_uses_ctid),
         Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
             .into_iter()
             .any(expr_uses_ctid),

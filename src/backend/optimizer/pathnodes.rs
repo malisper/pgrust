@@ -1056,6 +1056,7 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         Expr::Func(func) => func
             .funcresulttype
             .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        Expr::SqlJsonQueryFunction(func) => func.result_type,
         Expr::SetReturning(srf) => srf.sql_type,
         Expr::Bool(_)
         | Expr::IsNull(_)

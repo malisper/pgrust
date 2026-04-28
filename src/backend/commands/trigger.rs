@@ -3,8 +3,8 @@ use crate::backend::executor::{
     eval_expr,
 };
 use crate::backend::parser::{
-    CatalogLookup, RawWindowFrameBound, SqlCallArgs, SqlExpr, SqlType, SqlTypeKind, TriggerLevel,
-    TriggerTiming, bind_scalar_expr_in_named_relation_scope, parse_expr,
+    CatalogLookup, JsonTableBehavior, RawWindowFrameBound, SqlCallArgs, SqlExpr, SqlType,
+    SqlTypeKind, TriggerLevel, TriggerTiming, bind_scalar_expr_in_named_relation_scope, parse_expr,
 };
 use crate::include::catalog::{
     PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, PG_TOAST_NAMESPACE_OID,
@@ -915,6 +915,19 @@ fn rewrite_trigger_system_column_refs(expr: &mut SqlExpr) {
             }
             for arg in &mut xml.args {
                 rewrite_trigger_system_column_refs(arg);
+            }
+        }
+        SqlExpr::JsonQueryFunction(func) => {
+            rewrite_trigger_system_column_refs(&mut func.context);
+            rewrite_trigger_system_column_refs(&mut func.path);
+            for arg in &mut func.passing {
+                rewrite_trigger_system_column_refs(&mut arg.expr);
+            }
+            if let Some(JsonTableBehavior::Default(expr)) = &mut func.on_empty {
+                rewrite_trigger_system_column_refs(expr);
+            }
+            if let Some(JsonTableBehavior::Default(expr)) = &mut func.on_error {
+                rewrite_trigger_system_column_refs(expr);
             }
         }
         SqlExpr::FuncCall {

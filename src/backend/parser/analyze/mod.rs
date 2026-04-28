@@ -4010,6 +4010,12 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
+            SqlExpr::JsonQueryFunction(func) => {
+                for child in func.child_exprs() {
+                    self.visit_expr(child, context)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -4233,6 +4239,10 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
         | SqlExpr::FieldSelect { expr: inner, .. } => sql_expr_references_table(inner, table_name),
         SqlExpr::Xml(xml) => xml
             .child_exprs()
+            .any(|child| sql_expr_references_table(child, table_name)),
+        SqlExpr::JsonQueryFunction(func) => func
+            .child_exprs()
+            .iter()
             .any(|child| sql_expr_references_table(child, table_name)),
         SqlExpr::Add(left, right)
         | SqlExpr::Sub(left, right)

@@ -3334,6 +3334,12 @@ fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
             }
             Ok(())
         }
+        Expr::SqlJsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                reject_unsupported_check_expr(child)?;
+            }
+            Ok(())
+        }
         Expr::ScalarArrayOp(expr) => {
             reject_unsupported_check_expr(&expr.left)?;
             reject_unsupported_check_expr(&expr.right)

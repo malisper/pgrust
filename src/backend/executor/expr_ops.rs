@@ -475,6 +475,12 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> 
             .checked_add(*r)
             .map(Value::Interval)
             .ok_or_else(interval_out_of_range),
+        (Value::Date(l), r) if integer_days_i32(r).is_some() => Ok(Value::Date(DateADT(
+            checked_add_i32(l.0, integer_days_i32(r).unwrap())?,
+        ))),
+        (l, Value::Date(r)) if integer_days_i32(l).is_some() => Ok(Value::Date(DateADT(
+            checked_add_i32(r.0, integer_days_i32(l).unwrap())?,
+        ))),
         (Value::Date(l), Value::Time(r)) => date_time_value(*l, *r).map(Value::Timestamp),
         (Value::Time(l), Value::Date(r)) => date_time_value(*r, *l).map(Value::Timestamp),
         (Value::Date(l), Value::TimeTz(r)) => date_timetz_value(*l, *r).map(Value::TimestampTz),
@@ -597,6 +603,9 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::PgLsn(l), r) if parsed_numeric_value(r).is_some() => {
             Ok(Value::PgLsn(sub_pg_lsn_offset(*l, r)?))
         }
+        (Value::Date(l), r) if integer_days_i32(r).is_some() => Ok(Value::Date(DateADT(
+            checked_sub_i32(l.0, integer_days_i32(r).unwrap())?,
+        ))),
         (Value::Date(l), Value::Date(r)) => Ok(Value::Int32(l.0 - r.0)),
         (Value::Timestamp(l), Value::Timestamp(r)) => timestamp_diff_interval(l.0, r.0),
         (Value::TimestampTz(l), Value::TimestampTz(r)) => timestamp_diff_interval(l.0, r.0),
@@ -2281,6 +2290,15 @@ fn checked_add_i32(left: i32, right: i32) -> Result<i32, ExecError> {
 
 fn checked_add_i64(left: i64, right: i64) -> Result<i64, ExecError> {
     left.checked_add(right).ok_or(ExecError::Int8OutOfRange)
+}
+
+fn integer_days_i32(value: &Value) -> Option<i32> {
+    match value {
+        Value::Int16(v) => Some(i32::from(*v)),
+        Value::Int32(v) => Some(*v),
+        Value::Int64(v) => i32::try_from(*v).ok(),
+        _ => None,
+    }
 }
 
 fn checked_sub_i16(left: i16, right: i16) -> Result<i16, ExecError> {

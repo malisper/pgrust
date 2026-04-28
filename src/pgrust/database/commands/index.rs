@@ -25,6 +25,9 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::RelOption;
+use crate::include::nodes::primnodes::{
+    Expr, ExprArraySubscript, ScalarArrayOpExpr, expr_sql_type_hint,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 struct ResolvedIndexSupportMetadata {
@@ -89,6 +92,198 @@ fn invalid_fillfactor_error(value: &str) -> ExecError {
         detail: Some("Valid values are between \"10\" and \"100\".".into()),
         hint: None,
         sqlstate: "22023",
+    }
+}
+
+fn index_expression_immutable_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "functions in index expression must be marked IMMUTABLE".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42P17",
+    }
+}
+
+fn ensure_index_expression_immutable(
+    expr: &Expr,
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+) -> Result<(), ExecError> {
+    match expr {
+        Expr::Var(_) | Expr::Const(_) | Expr::Param(_) | Expr::CaseTest(_) => Ok(()),
+        Expr::Aggref(_) | Expr::WindowFunc(_) | Expr::SubLink(_) | Expr::SubPlan(_) => {
+            Err(index_expression_immutable_error())
+        }
+        Expr::SetReturning(_) => Err(index_expression_immutable_error()),
+        Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => Err(index_expression_immutable_error()),
+        Expr::Func(func) => {
+            ensure_index_proc_immutable(func.funcid, catalog)?;
+            ensure_index_exprs_immutable(&func.args, catalog)
+        }
+        Expr::Op(op) => {
+            if op.opfuncid != 0 {
+                ensure_index_proc_immutable(op.opfuncid, catalog)?;
+            }
+            ensure_index_exprs_immutable(&op.args, catalog)
+        }
+        Expr::Bool(bool_expr) => ensure_index_exprs_immutable(&bool_expr.args, catalog),
+        Expr::Case(case_expr) => {
+            if let Some(arg) = case_expr.arg.as_deref() {
+                ensure_index_expression_immutable(arg, catalog)?;
+            }
+            for arm in &case_expr.args {
+                ensure_index_expression_immutable(&arm.expr, catalog)?;
+                ensure_index_expression_immutable(&arm.result, catalog)?;
+            }
+            ensure_index_expression_immutable(&case_expr.defresult, catalog)
+        }
+        Expr::SqlJsonQueryFunction(func) => {
+            ensure_sql_json_index_expression_immutable(func, catalog)?;
+            for child in func.child_exprs() {
+                ensure_index_expression_immutable(child, catalog)?;
+            }
+            Ok(())
+        }
+        Expr::ScalarArrayOp(saop) => ensure_scalar_array_op_immutable(saop, catalog),
+        Expr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                ensure_index_expression_immutable(child, catalog)?;
+            }
+            Ok(())
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => {
+            ensure_index_expression_immutable(inner, catalog)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            ensure_index_expression_immutable(expr, catalog)?;
+            ensure_index_expression_immutable(pattern, catalog)?;
+            if let Some(escape) = escape.as_deref() {
+                ensure_index_expression_immutable(escape, catalog)?;
+            }
+            Ok(())
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            ensure_index_expression_immutable(left, catalog)?;
+            ensure_index_expression_immutable(right, catalog)
+        }
+        Expr::ArrayLiteral { elements, .. } => ensure_index_exprs_immutable(elements, catalog),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .try_for_each(|(_, expr)| ensure_index_expression_immutable(expr, catalog)),
+        Expr::ArraySubscript { array, subscripts } => {
+            ensure_index_expression_immutable(array, catalog)?;
+            for subscript in subscripts {
+                ensure_array_subscript_immutable(subscript, catalog)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn ensure_index_exprs_immutable(
+    exprs: &[Expr],
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+) -> Result<(), ExecError> {
+    exprs
+        .iter()
+        .try_for_each(|expr| ensure_index_expression_immutable(expr, catalog))
+}
+
+fn ensure_scalar_array_op_immutable(
+    saop: &ScalarArrayOpExpr,
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+) -> Result<(), ExecError> {
+    ensure_index_expression_immutable(&saop.left, catalog)?;
+    ensure_index_expression_immutable(&saop.right, catalog)
+}
+
+fn ensure_array_subscript_immutable(
+    subscript: &ExprArraySubscript,
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+) -> Result<(), ExecError> {
+    if let Some(lower) = subscript.lower.as_ref() {
+        ensure_index_expression_immutable(lower, catalog)?;
+    }
+    if let Some(upper) = subscript.upper.as_ref() {
+        ensure_index_expression_immutable(upper, catalog)?;
+    }
+    Ok(())
+}
+
+fn ensure_index_proc_immutable(
+    proc_oid: u32,
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+) -> Result<(), ExecError> {
+    if proc_oid != 0
+        && catalog
+            .proc_row_by_oid(proc_oid)
+            .is_some_and(|row| row.provolatile == 'i')
+    {
+        return Ok(());
+    }
+    Err(index_expression_immutable_error())
+}
+
+fn ensure_sql_json_index_expression_immutable(
+    func: &crate::include::nodes::primnodes::SqlJsonQueryFunction,
+    _catalog: &dyn crate::backend::parser::CatalogLookup,
+) -> Result<(), ExecError> {
+    let path =
+        sql_json_constant_path_text(&func.path).ok_or_else(index_expression_immutable_error)?;
+    let passing_types = func
+        .passing
+        .iter()
+        .map(|arg| {
+            (
+                arg.name.clone(),
+                expr_sql_type_hint(&arg.expr).unwrap_or_else(|| {
+                    crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Text)
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+    if crate::backend::executor::jsonpath::jsonpath_is_mutable(&path, &passing_types)? {
+        return Err(index_expression_immutable_error());
+    }
+    Ok(())
+}
+
+fn sql_json_constant_path_text(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Const(value) => value.as_text().map(str::to_string),
+        Expr::Cast(inner, sql_type)
+            if !sql_type.is_array
+                && matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::JsonPath) =>
+        {
+            sql_json_constant_path_text(inner)
+        }
+        _ => None,
     }
 }
 
@@ -2113,6 +2308,20 @@ impl Database {
                     )
                     .map_err(ExecError::Parse)?,
                 );
+                let bound_expr = crate::backend::parser::bind_relation_expr(
+                    expr_sql,
+                    Some(
+                        create_stmt
+                            .table_name
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(&create_stmt.table_name),
+                    ),
+                    &entry.desc,
+                    &catalog,
+                )
+                .map_err(ExecError::Parse)?;
+                ensure_index_expression_immutable(&bound_expr, &catalog)?;
                 reject_record_index_column(column)?;
             }
         }

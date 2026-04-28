@@ -17,7 +17,9 @@ use crate::include::catalog::{
 use crate::include::nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, CaseExpr as BoundCaseExpr,
     CaseTestExpr as BoundCaseTestExpr, CaseWhen as BoundCaseWhen, ExprArraySubscript, OpExprKind,
-    ScalarFunctionImpl, WindowFuncKind, expr_contains_set_returning, expr_sql_type_hint,
+    ScalarFunctionImpl, SqlJsonQueryFunction, SqlJsonQueryFunctionKind, SqlJsonTableBehavior,
+    SqlJsonTablePassingArg, SqlJsonTableQuotes, SqlJsonTableWrapper, WindowFuncKind,
+    expr_contains_set_returning, expr_sql_type_hint,
 };
 
 mod func;
@@ -173,6 +175,590 @@ fn reject_typed_srf(expr: &TypedExpr, context: &'static str) -> Result<(), Parse
         Err(set_returning_not_allowed_error(context))
     } else {
         Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_sql_json_query_function(
+    func: &JsonQueryFunctionExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let kind = match func.kind {
+        JsonQueryFunctionKind::Exists => SqlJsonQueryFunctionKind::Exists,
+        JsonQueryFunctionKind::Value => SqlJsonQueryFunctionKind::Value,
+        JsonQueryFunctionKind::Query => SqlJsonQueryFunctionKind::Query,
+    };
+    let result_type = sql_json_query_function_returning_type(func, catalog)?;
+    if matches!(func.kind, JsonQueryFunctionKind::Value)
+        && func
+            .returning
+            .as_ref()
+            .is_some_and(|returning| returning.format_json)
+    {
+        return Err(ParseError::DetailedError {
+            message: "cannot specify FORMAT JSON in RETURNING clause of JSON_VALUE()".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+
+    let raw_path_type = infer_sql_expr_type_with_ctes(
+        &func.path,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    );
+    if !sql_json_query_function_path_type_allowed(raw_path_type) {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "JSON path expression must be of type jsonpath, not of type {}",
+                sql_type_name(raw_path_type)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+
+    let context = bind_expr_with_outer_and_ctes(
+        &func.context,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let path = bind_expr_with_outer_and_ctes(
+        &func.path,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let passing = func
+        .passing
+        .iter()
+        .map(|arg| {
+            bind_expr_with_outer_and_ctes(
+                &arg.expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+            .map(|expr| SqlJsonTablePassingArg {
+                name: arg.name.clone(),
+                expr,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let wrapper = sql_json_query_function_wrapper(func.wrapper);
+    let quotes = sql_json_query_function_quotes(func.quotes);
+    if matches!(
+        wrapper,
+        SqlJsonTableWrapper::Conditional | SqlJsonTableWrapper::Unconditional
+    ) && matches!(quotes, SqlJsonTableQuotes::Omit)
+    {
+        return Err(ParseError::DetailedError {
+            message: "SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used"
+                .into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+
+    let on_empty = bind_sql_json_query_function_behavior(
+        sql_json_query_function_on_empty(func),
+        result_type,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let on_error = bind_sql_json_query_function_behavior(
+        sql_json_query_function_on_error(func),
+        result_type,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    if !matches!(func.kind, JsonQueryFunctionKind::Exists) {
+        validate_sql_json_query_function_behavior(func.kind, &on_empty, "EMPTY")?;
+    }
+    validate_sql_json_query_function_behavior(func.kind, &on_error, "ERROR")?;
+
+    Ok(Expr::SqlJsonQueryFunction(Box::new(SqlJsonQueryFunction {
+        kind,
+        context,
+        path,
+        passing,
+        result_type,
+        result_format_json: func
+            .returning
+            .as_ref()
+            .is_some_and(|returning| returning.format_json),
+        wrapper,
+        quotes,
+        on_empty,
+        on_error,
+    })))
+}
+
+fn sql_json_query_function_returning_type(
+    func: &JsonQueryFunctionExpr,
+    catalog: &dyn CatalogLookup,
+) -> Result<SqlType, ParseError> {
+    let sql_type = match &func.returning {
+        Some(returning) => resolve_raw_type_name(&returning.type_name, catalog)?,
+        None => match func.kind {
+            JsonQueryFunctionKind::Exists => SqlType::new(SqlTypeKind::Bool),
+            JsonQueryFunctionKind::Value => SqlType::new(SqlTypeKind::Text),
+            JsonQueryFunctionKind::Query => SqlType::new(SqlTypeKind::Jsonb),
+        },
+    };
+    if sql_json_query_function_returning_type_is_pseudo(sql_type) {
+        return Err(ParseError::DetailedError {
+            message: "returning pseudo-types is not supported in SQL/JSON functions".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    Ok(sql_type)
+}
+
+fn sql_json_query_function_returning_type_is_pseudo(sql_type: SqlType) -> bool {
+    !sql_type.is_array
+        && matches!(
+            sql_type.kind,
+            SqlTypeKind::AnyArray
+                | SqlTypeKind::AnyElement
+                | SqlTypeKind::AnyRange
+                | SqlTypeKind::AnyMultirange
+                | SqlTypeKind::AnyCompatible
+                | SqlTypeKind::AnyCompatibleArray
+                | SqlTypeKind::AnyCompatibleRange
+                | SqlTypeKind::AnyCompatibleMultirange
+                | SqlTypeKind::AnyEnum
+                | SqlTypeKind::Record
+                | SqlTypeKind::Void
+                | SqlTypeKind::Trigger
+                | SqlTypeKind::FdwHandler
+                | SqlTypeKind::Internal
+                | SqlTypeKind::Cstring
+        )
+}
+
+fn sql_json_query_function_path_type_allowed(sql_type: SqlType) -> bool {
+    !sql_type.is_array
+        && matches!(
+            sql_type.kind,
+            SqlTypeKind::Text | SqlTypeKind::Char | SqlTypeKind::Varchar | SqlTypeKind::JsonPath
+        )
+}
+
+fn sql_json_query_function_on_empty(func: &JsonQueryFunctionExpr) -> &JsonTableBehavior {
+    func.on_empty.as_ref().unwrap_or(&JsonTableBehavior::Null)
+}
+
+fn sql_json_query_function_on_error(func: &JsonQueryFunctionExpr) -> &JsonTableBehavior {
+    match func.kind {
+        JsonQueryFunctionKind::Exists => {
+            func.on_error.as_ref().unwrap_or(&JsonTableBehavior::False)
+        }
+        JsonQueryFunctionKind::Value | JsonQueryFunctionKind::Query => {
+            func.on_error.as_ref().unwrap_or(&JsonTableBehavior::Null)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_sql_json_query_function_behavior(
+    behavior: &JsonTableBehavior,
+    target_type: SqlType,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<SqlJsonTableBehavior, ParseError> {
+    Ok(match behavior {
+        JsonTableBehavior::Null => SqlJsonTableBehavior::Null,
+        JsonTableBehavior::Error => SqlJsonTableBehavior::Error,
+        JsonTableBehavior::Empty => SqlJsonTableBehavior::Empty,
+        JsonTableBehavior::EmptyArray => SqlJsonTableBehavior::EmptyArray,
+        JsonTableBehavior::EmptyObject => SqlJsonTableBehavior::EmptyObject,
+        JsonTableBehavior::True => SqlJsonTableBehavior::True,
+        JsonTableBehavior::False => SqlJsonTableBehavior::False,
+        JsonTableBehavior::Unknown => SqlJsonTableBehavior::Unknown,
+        JsonTableBehavior::Default(expr) => {
+            validate_sql_json_query_function_default_expr(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            let raw_type = infer_sql_expr_type_with_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            reject_sql_json_behavior_default_cast(raw_type, target_type, catalog)?;
+            let bound = bind_expr_with_outer_and_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            SqlJsonTableBehavior::Default(bound)
+        }
+    })
+}
+
+fn reject_sql_json_behavior_default_cast(
+    source_type: SqlType,
+    target_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    if !target_type.is_array
+        && matches!(target_type.kind, SqlTypeKind::Bit | SqlTypeKind::VarBit)
+        && is_integer_family(source_type)
+    {
+        let target_name = catalog_sql_type_name(target_type, catalog);
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "cannot cast behavior expression of type {} to {}",
+                sql_type_name(source_type),
+                target_name
+            ),
+            detail: None,
+            hint: Some(format!(
+                "You will need to explicitly cast the expression to type {target_name}."
+            )),
+            sqlstate: "42846",
+        });
+    }
+    Ok(())
+}
+
+fn validate_sql_json_query_function_default_expr(
+    expr: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(), ParseError> {
+    if raw_sql_expr_any(expr, &|expr| matches!(expr, SqlExpr::Column(_))) {
+        return Err(sql_json_default_expr_error(
+            "DEFAULT expression must not contain column references",
+        ));
+    }
+    if super::agg::expr_contains_agg(catalog, expr)
+        || raw_sql_expr_any(expr, &|expr| {
+            matches!(
+                expr,
+                SqlExpr::FuncCall { over: Some(_), .. }
+                    | SqlExpr::ScalarSubquery(_)
+                    | SqlExpr::ArraySubquery(_)
+                    | SqlExpr::Exists(_)
+                    | SqlExpr::InSubquery { .. }
+                    | SqlExpr::QuantifiedSubquery { .. }
+            )
+        })
+    {
+        return Err(sql_json_default_expr_error(
+            "can only specify a constant, non-aggregate function, or operator expression for DEFAULT",
+        ));
+    }
+    let bound =
+        bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    if expr_contains_set_returning(&bound) {
+        return Err(sql_json_default_expr_error(
+            "DEFAULT expression must not return a set",
+        ));
+    }
+    Ok(())
+}
+
+fn sql_json_default_expr_error(message: impl Into<String>) -> ParseError {
+    ParseError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn raw_sql_expr_any(expr: &SqlExpr, predicate: &impl Fn(&SqlExpr) -> bool) -> bool {
+    if predicate(expr) {
+        return true;
+    }
+    match expr {
+        SqlExpr::Column(_)
+        | SqlExpr::Default
+        | SqlExpr::Const(_)
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
+        | SqlExpr::Random
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentCatalog
+        | SqlExpr::CurrentSchema
+        | SqlExpr::CurrentUser
+        | SqlExpr::SessionUser
+        | SqlExpr::CurrentRole
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. }
+        | SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
+        | SqlExpr::Exists(_) => false,
+        SqlExpr::FuncCall {
+            args,
+            order_by,
+            within_group,
+            filter,
+            ..
+        } => {
+            args.args()
+                .iter()
+                .any(|arg| raw_sql_expr_any(&arg.value, predicate))
+                || order_by
+                    .iter()
+                    .any(|item| raw_sql_expr_any(&item.expr, predicate))
+                || within_group.as_deref().is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| raw_sql_expr_any(&item.expr, predicate))
+                })
+                || filter
+                    .as_deref()
+                    .is_some_and(|expr| raw_sql_expr_any(expr, predicate))
+        }
+        SqlExpr::InSubquery { expr, .. } => raw_sql_expr_any(expr, predicate),
+        SqlExpr::QuantifiedSubquery { left, .. } => raw_sql_expr_any(left, predicate),
+        SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
+            raw_sql_expr_any(expr, predicate)
+        }
+        SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => elements
+            .iter()
+            .any(|expr| raw_sql_expr_any(expr, predicate)),
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            raw_sql_expr_any(array, predicate)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_deref()
+                        .is_some_and(|expr| raw_sql_expr_any(expr, predicate))
+                        || subscript
+                            .upper
+                            .as_deref()
+                            .is_some_and(|expr| raw_sql_expr_any(expr, predicate))
+                })
+        }
+        SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::Overlaps(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
+        | SqlExpr::QuantifiedArray {
+            left, array: right, ..
+        }
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonbExistsAny(left, right)
+        | SqlExpr::JsonbExistsAll(left, right)
+        | SqlExpr::JsonbPathExists(left, right)
+        | SqlExpr::JsonbPathMatch(left, right)
+        | SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::GeometryBinaryOp { left, right, .. }
+        | SqlExpr::AtTimeZone {
+            expr: left,
+            zone: right,
+        }
+        | SqlExpr::BinaryOperator { left, right, .. } => {
+            raw_sql_expr_any(left, predicate) || raw_sql_expr_any(right, predicate)
+        }
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            raw_sql_expr_any(expr, predicate)
+                || raw_sql_expr_any(pattern, predicate)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| raw_sql_expr_any(expr, predicate))
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            arg.as_deref()
+                .is_some_and(|expr| raw_sql_expr_any(expr, predicate))
+                || args.iter().any(|arm| {
+                    raw_sql_expr_any(&arm.expr, predicate)
+                        || raw_sql_expr_any(&arm.result, predicate)
+                })
+                || defresult
+                    .as_deref()
+                    .is_some_and(|expr| raw_sql_expr_any(expr, predicate))
+        }
+        SqlExpr::Cast(inner, _)
+        | SqlExpr::Collate { expr: inner, .. }
+        | SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
+        | SqlExpr::Not(inner)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::Subscript { expr: inner, .. } => raw_sql_expr_any(inner, predicate),
+        SqlExpr::Xml(xml) => xml
+            .child_exprs()
+            .any(|expr| raw_sql_expr_any(expr, predicate)),
+        SqlExpr::JsonQueryFunction(func) => func
+            .child_exprs()
+            .iter()
+            .any(|expr| raw_sql_expr_any(expr, predicate)),
+    }
+}
+
+fn validate_sql_json_query_function_behavior(
+    kind: JsonQueryFunctionKind,
+    behavior: &SqlJsonTableBehavior,
+    target: &'static str,
+) -> Result<(), ParseError> {
+    let valid = match kind {
+        JsonQueryFunctionKind::Exists => {
+            target == "ERROR"
+                && matches!(
+                    behavior,
+                    SqlJsonTableBehavior::Error
+                        | SqlJsonTableBehavior::True
+                        | SqlJsonTableBehavior::False
+                        | SqlJsonTableBehavior::Unknown
+                )
+        }
+        JsonQueryFunctionKind::Value => matches!(
+            behavior,
+            SqlJsonTableBehavior::Error
+                | SqlJsonTableBehavior::Null
+                | SqlJsonTableBehavior::Default(_)
+        ),
+        JsonQueryFunctionKind::Query => matches!(
+            behavior,
+            SqlJsonTableBehavior::Error
+                | SqlJsonTableBehavior::Null
+                | SqlJsonTableBehavior::Empty
+                | SqlJsonTableBehavior::EmptyArray
+                | SqlJsonTableBehavior::EmptyObject
+                | SqlJsonTableBehavior::Default(_)
+        ),
+    };
+    if valid {
+        return Ok(());
+    }
+    let detail = match kind {
+        JsonQueryFunctionKind::Exists => {
+            "Only ERROR, TRUE, FALSE, or UNKNOWN is allowed in ON ERROR for JSON_EXISTS()."
+        }
+        JsonQueryFunctionKind::Value => {
+            "Only ERROR, NULL, or DEFAULT expression is allowed in ON ERROR for JSON_VALUE()."
+        }
+        JsonQueryFunctionKind::Query => {
+            "Only ERROR, NULL, EMPTY ARRAY, EMPTY OBJECT, or DEFAULT expression is allowed in ON ERROR for JSON_QUERY()."
+        }
+    };
+    Err(ParseError::DetailedError {
+        message: format!("invalid ON {target} behavior"),
+        detail: Some(detail.replace("ON ERROR", &format!("ON {target}"))),
+        hint: None,
+        sqlstate: "42601",
+    })
+}
+
+fn sql_json_query_function_wrapper(wrapper: JsonTableWrapper) -> SqlJsonTableWrapper {
+    match wrapper {
+        JsonTableWrapper::Unspecified => SqlJsonTableWrapper::Unspecified,
+        JsonTableWrapper::Without => SqlJsonTableWrapper::Without,
+        JsonTableWrapper::Conditional => SqlJsonTableWrapper::Conditional,
+        JsonTableWrapper::Unconditional => SqlJsonTableWrapper::Unconditional,
+    }
+}
+
+fn sql_json_query_function_quotes(quotes: JsonTableQuotes) -> SqlJsonTableQuotes {
+    match quotes {
+        JsonTableQuotes::Unspecified => SqlJsonTableQuotes::Unspecified,
+        JsonTableQuotes::Keep => SqlJsonTableQuotes::Keep,
+        JsonTableQuotes::Omit => SqlJsonTableQuotes::Omit,
+    }
+}
+
+fn raise_sql_json_behavior_varlevels(
+    behavior: SqlJsonTableBehavior,
+    levels: usize,
+) -> SqlJsonTableBehavior {
+    match behavior {
+        SqlJsonTableBehavior::Default(expr) => {
+            SqlJsonTableBehavior::Default(raise_expr_varlevels(expr, levels))
+        }
+        other => other,
     }
 }
 
@@ -912,6 +1498,23 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
                 .collect(),
             ..*func
         })),
+        Expr::SqlJsonQueryFunction(func) => {
+            Expr::SqlJsonQueryFunction(Box::new(SqlJsonQueryFunction {
+                context: raise_expr_varlevels(func.context, levels),
+                path: raise_expr_varlevels(func.path, levels),
+                passing: func
+                    .passing
+                    .into_iter()
+                    .map(|arg| SqlJsonTablePassingArg {
+                        name: arg.name,
+                        expr: raise_expr_varlevels(arg.expr, levels),
+                    })
+                    .collect(),
+                on_empty: raise_sql_json_behavior_varlevels(func.on_empty, levels),
+                on_error: raise_sql_json_behavior_varlevels(func.on_error, levels),
+                ..*func
+            }))
+        }
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
             crate::include::nodes::primnodes::ScalarArrayOpExpr {
                 left: Box::new(raise_expr_varlevels(*saop.left, levels)),
@@ -1861,6 +2464,16 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
     Ok(match expr {
         SqlExpr::Xml(xml) => {
             return bind_xml_expr(xml, scope, catalog, outer_scopes, grouped_outer, ctes);
+        }
+        SqlExpr::JsonQueryFunction(func) => {
+            return bind_sql_json_query_function(
+                func,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
         }
         SqlExpr::Column(name) => {
             if let Some(relation_name) = name.strip_suffix(".*") {

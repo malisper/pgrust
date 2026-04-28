@@ -5,9 +5,9 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::include::nodes::primnodes::{
     Aggref, BoolExpr, BoolExprType, CaseExpr, CaseWhen, Expr, ExprArraySubscript, FuncExpr,
-    JoinType, OpExpr, OpExprKind, OrderByEntry, RelationDesc, ScalarArrayOpExpr, SubLink,
-    SubLinkType, Var, WindowFuncExpr, WindowFuncKind, XmlExpr, set_returning_call_exprs,
-    user_attrno,
+    JoinType, OpExpr, OpExprKind, OrderByEntry, RelationDesc, ScalarArrayOpExpr,
+    SqlJsonQueryFunction, SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink, SubLinkType, Var,
+    WindowFuncExpr, WindowFuncKind, XmlExpr, set_returning_call_exprs, user_attrno,
 };
 
 use super::{and_exprs, expr_relids, flatten_and_conjuncts, joininfo, relids_subset};
@@ -601,6 +601,33 @@ fn adjust_expr_for_pullup(expr: Expr, offset: usize, levels_to_parent: usize) ->
             args: adjust_exprs_for_pullup(func.args, offset, levels_to_parent)?,
             ..*func
         })),
+        Expr::SqlJsonQueryFunction(func) => {
+            Expr::SqlJsonQueryFunction(Box::new(SqlJsonQueryFunction {
+                context: adjust_expr_for_pullup(func.context, offset, levels_to_parent)?,
+                path: adjust_expr_for_pullup(func.path, offset, levels_to_parent)?,
+                passing: func
+                    .passing
+                    .into_iter()
+                    .map(|arg| {
+                        Some(SqlJsonTablePassingArg {
+                            name: arg.name,
+                            expr: adjust_expr_for_pullup(arg.expr, offset, levels_to_parent)?,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+                on_empty: adjust_sql_json_behavior_for_pullup(
+                    func.on_empty,
+                    offset,
+                    levels_to_parent,
+                )?,
+                on_error: adjust_sql_json_behavior_for_pullup(
+                    func.on_error,
+                    offset,
+                    levels_to_parent,
+                )?,
+                ..*func
+            }))
+        }
         Expr::SetReturning(_) => return None,
         Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
             testexpr: adjust_optional_box_expr(sublink.testexpr, offset, levels_to_parent)?,
@@ -739,6 +766,19 @@ fn adjust_expr_for_pullup(expr: Expr, offset: usize, levels_to_parent: usize) ->
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => expr,
+    })
+}
+
+fn adjust_sql_json_behavior_for_pullup(
+    behavior: SqlJsonTableBehavior,
+    offset: usize,
+    levels_to_parent: usize,
+) -> Option<SqlJsonTableBehavior> {
+    Some(match behavior {
+        SqlJsonTableBehavior::Default(expr) => {
+            SqlJsonTableBehavior::Default(adjust_expr_for_pullup(expr, offset, levels_to_parent)?)
+        }
+        other => other,
     })
 }
 
@@ -910,6 +950,9 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
                     .as_ref()
                     .is_some_and(|expr| expr_contains_sublink(expr))
         }
+        Expr::SqlJsonQueryFunction(func) => {
+            func.child_exprs().into_iter().any(expr_contains_sublink)
+        }
         Expr::IsDistinctFrom(left, right)
         | Expr::IsNotDistinctFrom(left, right)
         | Expr::Coalesce(left, right) => {
@@ -979,6 +1022,9 @@ fn expr_contains_outer_var(expr: &Expr) -> bool {
                 || expr_contains_outer_var(&case_expr.defresult)
         }
         Expr::Func(func) => func.args.iter().any(expr_contains_outer_var),
+        Expr::SqlJsonQueryFunction(func) => {
+            func.child_exprs().into_iter().any(expr_contains_outer_var)
+        }
         Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
             .into_iter()
             .any(expr_contains_outer_var),

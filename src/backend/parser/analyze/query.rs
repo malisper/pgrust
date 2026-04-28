@@ -479,6 +479,9 @@ pub(crate) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .collect(),
             ..*func
         })),
+        Expr::SqlJsonQueryFunction(func) => Expr::SqlJsonQueryFunction(Box::new(
+            (*func).map_exprs(|expr| shift_expr_rtindexes(expr, offset)),
+        )),
         Expr::SetReturning(srf) => Expr::SetReturning(Box::new(SetReturningExpr {
             call: srf
                 .call
@@ -757,6 +760,11 @@ pub(crate) fn rewrite_local_vars_for_output_exprs(
                 .collect(),
             ..*func
         })),
+        Expr::SqlJsonQueryFunction(func) => Expr::SqlJsonQueryFunction(Box::new(
+            (*func).map_exprs(|expr| {
+                rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs)
+            }),
+        )),
         Expr::SetReturning(srf) => Expr::SetReturning(Box::new(SetReturningExpr {
             call: srf.call.map_exprs(|expr| {
                 rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs)

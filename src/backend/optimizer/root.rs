@@ -1225,6 +1225,10 @@ fn expr_contains_local_var_for_unique_lookup(expr: &Expr) -> bool {
             .args
             .iter()
             .any(expr_contains_local_var_for_unique_lookup),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(expr_contains_local_var_for_unique_lookup),
         Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
             .into_iter()
             .any(expr_contains_local_var_for_unique_lookup),
@@ -1487,6 +1491,10 @@ fn expr_contains_sublink_for_minmax_rewrite(expr: &Expr) -> bool {
         Expr::Func(func) => func
             .args
             .iter()
+            .any(expr_contains_sublink_for_minmax_rewrite),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
             .any(expr_contains_sublink_for_minmax_rewrite),
         Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
             .into_iter()
@@ -1836,6 +1844,10 @@ fn expr_contains_local_var_outside_subquery(expr: &Expr) -> bool {
         Expr::Func(func) => func
             .args
             .iter()
+            .any(expr_contains_local_var_outside_subquery),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
             .any(expr_contains_local_var_outside_subquery),
         Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
             .into_iter()
@@ -2216,6 +2228,10 @@ fn expr_contains_window_func(expr: &Expr) -> bool {
                 || expr_contains_window_func(&case_expr.defresult)
         }
         Expr::Func(func) => func.args.iter().any(expr_contains_window_func),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(expr_contains_window_func),
         Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
             .into_iter()
             .any(expr_contains_window_func),
@@ -2344,6 +2360,11 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
         }
         Expr::CaseTest(_) => {}
         Expr::Func(func) => collect_expr_vec(&func.args, group_by, exprs),
+        Expr::SqlJsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                collect_group_input_exprs(child, group_by, exprs);
+            }
+        }
         Expr::SetReturning(srf) => {
             for arg in set_returning_call_exprs(&srf.call) {
                 collect_group_input_exprs(arg, group_by, exprs);
@@ -2490,6 +2511,11 @@ fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
         Expr::Func(func) => {
             for arg in &func.args {
                 collect_supporting_inputs(arg, exprs);
+            }
+        }
+        Expr::SqlJsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                collect_supporting_inputs(child, exprs);
             }
         }
         Expr::SetReturning(srf) => {
@@ -2787,6 +2813,11 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
         Expr::Func(func) => {
             for arg in &func.args {
                 collect_query_outer_refs_expr(arg, levelsup, exprs);
+            }
+        }
+        Expr::SqlJsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                collect_query_outer_refs_expr(child, levelsup, exprs);
             }
         }
         Expr::SetReturning(srf) => {

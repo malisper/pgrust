@@ -25,8 +25,8 @@ use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, ExprArraySubscript, SetReturningCall, SetReturningExpr, SortGroupClause,
-    SubLink, TargetEntry, WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr,
-    WindowFuncKind, WindowSpec,
+    SqlJsonQueryFunction, SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink, TargetEntry,
+    WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind, WindowSpec,
 };
 use views::rewrite_view_relation_query;
 
@@ -737,6 +737,20 @@ fn rewrite_set_returning_call(
     })
 }
 
+fn rewrite_sql_json_behavior(
+    behavior: SqlJsonTableBehavior,
+    catalog: &dyn CatalogLookup,
+    expanded_views: &[u32],
+    active_policy_relations: &mut Vec<u32>,
+) -> Result<SqlJsonTableBehavior, ParseError> {
+    match behavior {
+        SqlJsonTableBehavior::Default(expr) => Ok(SqlJsonTableBehavior::Default(
+            rewrite_semantic_expr(expr, catalog, expanded_views, active_policy_relations)?,
+        )),
+        other => Ok(other),
+    }
+}
+
 fn rewrite_semantic_expr(
     expr: Expr,
     catalog: &dyn CatalogLookup,
@@ -788,6 +802,50 @@ fn rewrite_semantic_expr(
                 .collect::<Result<Vec<_>, _>>()?,
             ..*func
         })),
+        Expr::SqlJsonQueryFunction(func) => {
+            Expr::SqlJsonQueryFunction(Box::new(SqlJsonQueryFunction {
+                context: rewrite_semantic_expr(
+                    func.context,
+                    catalog,
+                    expanded_views,
+                    active_policy_relations,
+                )?,
+                path: rewrite_semantic_expr(
+                    func.path,
+                    catalog,
+                    expanded_views,
+                    active_policy_relations,
+                )?,
+                passing: func
+                    .passing
+                    .into_iter()
+                    .map(|arg| {
+                        Ok(SqlJsonTablePassingArg {
+                            name: arg.name,
+                            expr: rewrite_semantic_expr(
+                                arg.expr,
+                                catalog,
+                                expanded_views,
+                                active_policy_relations,
+                            )?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ParseError>>()?,
+                on_empty: rewrite_sql_json_behavior(
+                    func.on_empty,
+                    catalog,
+                    expanded_views,
+                    active_policy_relations,
+                )?,
+                on_error: rewrite_sql_json_behavior(
+                    func.on_error,
+                    catalog,
+                    expanded_views,
+                    active_policy_relations,
+                )?,
+                ..*func
+            }))
+        }
         Expr::SetReturning(srf) => Expr::SetReturning(Box::new(SetReturningExpr {
             call: rewrite_set_returning_call(
                 srf.call,

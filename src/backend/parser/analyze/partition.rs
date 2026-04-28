@@ -1159,6 +1159,10 @@ fn raw_expr_any(expr: &SqlExpr, predicate: &impl Fn(&SqlExpr) -> bool) -> bool {
         | SqlExpr::GeometryUnaryOp { expr: inner, .. }
         | SqlExpr::Subscript { expr: inner, .. } => raw_expr_any(inner, predicate),
         SqlExpr::Xml(xml) => xml.child_exprs().any(|expr| raw_expr_any(expr, predicate)),
+        SqlExpr::JsonQueryFunction(func) => func
+            .child_exprs()
+            .iter()
+            .any(|expr| raw_expr_any(expr, predicate)),
     }
 }
 
@@ -1181,6 +1185,10 @@ fn partition_key_pseudotype_name(key_type: SqlType, raw_expr: &SqlExpr) -> Optio
 fn partition_expr_is_mutable(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
     match expr {
         Expr::Func(func) => partition_func_is_mutable(func, catalog),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(|expr| partition_expr_is_mutable(expr, catalog)),
         Expr::Op(op) => op
             .args
             .iter()
@@ -1306,6 +1314,7 @@ fn expr_contains_var(expr: &Expr) -> bool {
     match expr {
         Expr::Var(_) => true,
         Expr::Func(func) => func.args.iter().any(expr_contains_var),
+        Expr::SqlJsonQueryFunction(func) => func.child_exprs().into_iter().any(expr_contains_var),
         Expr::Op(op) => op.args.iter().any(expr_contains_var),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_var),
         Expr::Case(case_expr) => {

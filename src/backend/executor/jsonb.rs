@@ -148,27 +148,24 @@ impl JsonbValue {
 }
 
 pub(crate) fn render_temporal_jsonb_value(value: &JsonbValue) -> String {
+    let mut config = DateTimeConfig::default();
+    config.time_zone = "UTC".into();
     match value {
-        JsonbValue::Date(v) => render_json_datetime_value_text_with_config(
-            &Value::Date(*v),
-            &DateTimeConfig::default(),
-        ),
-        JsonbValue::Time(v) => render_json_datetime_value_text_with_config(
-            &Value::Time(*v),
-            &DateTimeConfig::default(),
-        ),
-        JsonbValue::TimeTz(v) => render_json_datetime_value_text_with_config(
-            &Value::TimeTz(*v),
-            &DateTimeConfig::default(),
-        ),
-        JsonbValue::Timestamp(v) => render_json_datetime_value_text_with_config(
-            &Value::Timestamp(*v),
-            &DateTimeConfig::default(),
-        ),
-        JsonbValue::TimestampTz(v) => render_json_datetime_value_text_with_config(
-            &Value::TimestampTz(*v),
-            &DateTimeConfig::default(),
-        ),
+        JsonbValue::Date(v) => {
+            render_json_datetime_value_text_with_config(&Value::Date(*v), &config)
+        }
+        JsonbValue::Time(v) => {
+            render_json_datetime_value_text_with_config(&Value::Time(*v), &config)
+        }
+        JsonbValue::TimeTz(v) => {
+            render_json_datetime_value_text_with_config(&Value::TimeTz(*v), &config)
+        }
+        JsonbValue::Timestamp(v) => {
+            render_json_datetime_value_text_with_config(&Value::Timestamp(*v), &config)
+        }
+        JsonbValue::TimestampTz(v) => {
+            render_json_datetime_value_text_with_config(&Value::TimestampTz(*v), &config)
+        }
         JsonbValue::TimestampTzWithOffset(v, offset_seconds) => {
             Some(render_jsonpath_timestamptz_with_offset(*v, *offset_seconds))
         }
