@@ -3011,11 +3011,6 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
     let mut visible_ctes = local_ctes.clone();
     visible_ctes.extend_from_slice(outer_ctes);
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
-    if entry.relkind == 'p' && stmt.on_conflict.is_some() {
-        return Err(ParseError::FeatureNotSupported(
-            "INSERT ... ON CONFLICT on partitioned tables".into(),
-        ));
-    }
     if stmt.on_conflict.as_ref().is_some_and(|clause| {
         clause.action == crate::include::nodes::parsenodes::OnConflictAction::Update
     }) && relation_has_row_security(entry.relation_oid, catalog)

@@ -1,8 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use super::super::*;
-use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::parser::analyze::infer_relation_expr_sql_type;
 use crate::backend::parser::{
     AlterPublicationAction, AlterPublicationStatement, BoundRelation, CatalogLookup,
@@ -12,16 +11,19 @@ use crate::backend::parser::{
     SqlType, SqlTypeKind, function_arg_values, is_system_column_name, parse_expr,
     resolve_raw_type_name,
 };
-use crate::backend::utils::cache::catcache::CatCache;
+use crate::backend::utils::cache::catcache::normalize_catalog_name;
+use crate::backend::utils::cache::syscache::{
+    SysCacheId, SysCacheTuple, scan_publication_namespace_rows_by_publication_db,
+    search_sys_cache_list1_db, search_sys_cache1_db,
+};
 use crate::include::catalog::{
-    CURRENT_DATABASE_NAME, INFORMATION_SCHEMA_NAMESPACE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_TOAST_NAMESPACE_OID, PUBLISH_GENCOLS_NONE, PUBLISH_GENCOLS_STORED,
+    INFORMATION_SCHEMA_NAMESPACE_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
+    PUBLISH_GENCOLS_NONE, PUBLISH_GENCOLS_STORED, PgAuthIdRow, PgAuthMembersRow, PgNamespaceRow,
     PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow,
 };
+use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{ColumnGeneratedKind, RawXmlExprOp};
-use crate::pgrust::database::ddl::{
-    ensure_can_set_role, ensure_relation_owner, format_sql_type_name,
-};
+use crate::pgrust::database::ddl::{ensure_relation_owner, format_sql_type_name};
 
 struct ResolvedPublicationTargets {
     relation_rows: Vec<PgPublicationRelRow>,
@@ -32,6 +34,290 @@ struct ResolvedPublicationTargets {
 enum PublicationMembershipKind {
     Table,
     Schema,
+}
+
+#[derive(Clone, Copy)]
+enum MembershipMode {
+    Inherit,
+    Set,
+}
+
+fn oid_key(oid: u32) -> Value {
+    Value::Int64(i64::from(oid))
+}
+
+fn catalog_name_lookup_keys(name: &str) -> Vec<Value> {
+    let normalized = normalize_catalog_name(name);
+    let mut names = vec![normalized.to_string()];
+    let folded = normalized.to_ascii_lowercase();
+    if folded != normalized {
+        names.push(folded);
+    }
+    names
+        .into_iter()
+        .map(|name| Value::Text(name.into()))
+        .collect()
+}
+
+fn role_row_by_oid_visible(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    role_oid: u32,
+) -> Result<Option<PgAuthIdRow>, ExecError> {
+    Ok(search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AuthIdOid,
+        oid_key(role_oid),
+    )
+    .map_err(map_catalog_error)?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::AuthId(row) => Some(row),
+        _ => None,
+    }))
+}
+
+fn role_row_by_name_visible(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    role_name: &str,
+) -> Result<Option<PgAuthIdRow>, ExecError> {
+    for key in catalog_name_lookup_keys(role_name) {
+        let row = search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::AuthIdRolname, key)
+            .map_err(map_catalog_error)?
+            .into_iter()
+            .find_map(|tuple| match tuple {
+                SysCacheTuple::AuthId(row) => Some(row),
+                _ => None,
+            });
+        if row.is_some() {
+            return Ok(row);
+        }
+    }
+    Ok(None)
+}
+
+fn membership_rows_for_member_visible(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    member_oid: u32,
+) -> Result<Vec<PgAuthMembersRow>, ExecError> {
+    Ok(search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AuthMembersMemberRole,
+        oid_key(member_oid),
+    )
+    .map_err(map_catalog_error)?
+    .into_iter()
+    .filter_map(|tuple| match tuple {
+        SysCacheTuple::AuthMembers(row) => Some(row),
+        _ => None,
+    })
+    .collect())
+}
+
+fn role_has_effective_membership_visible(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    member_oid: u32,
+    target_oid: u32,
+    mode: MembershipMode,
+) -> Result<bool, ExecError> {
+    if member_oid == target_oid {
+        return Ok(true);
+    }
+    if role_row_by_oid_visible(db, client_id, txn_ctx, member_oid)?.is_some_and(|row| row.rolsuper)
+    {
+        return Ok(true);
+    }
+
+    let mut pending = VecDeque::from([member_oid]);
+    let mut visited = BTreeSet::new();
+    while let Some(next_member_oid) = pending.pop_front() {
+        if !visited.insert(next_member_oid) {
+            continue;
+        }
+        for membership in
+            membership_rows_for_member_visible(db, client_id, txn_ctx, next_member_oid)?
+        {
+            let membership_allows_mode = match mode {
+                MembershipMode::Inherit => membership.inherit_option,
+                MembershipMode::Set => membership.set_option,
+            };
+            if !membership_allows_mode {
+                continue;
+            }
+            if membership.roleid == target_oid {
+                return Ok(true);
+            }
+            pending.push_back(membership.roleid);
+        }
+    }
+    Ok(false)
+}
+
+fn ensure_can_set_role_visible(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    role_oid: u32,
+    role_name: &str,
+) -> Result<(), ExecError> {
+    let auth = db.auth_state(client_id);
+    if role_has_effective_membership_visible(
+        db,
+        client_id,
+        txn_ctx,
+        auth.current_user_oid(),
+        role_oid,
+        MembershipMode::Set,
+    )? {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("must be able to SET ROLE \"{role_name}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
+}
+
+fn role_has_database_create_privilege_visible(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    role_oid: u32,
+) -> Result<bool, ExecError> {
+    if role_row_by_oid_visible(db, client_id, txn_ctx, role_oid)?.is_some_and(|row| row.rolsuper) {
+        return Ok(true);
+    }
+    let grantee_oids = db
+        .database_create_grants
+        .read()
+        .iter()
+        .map(|grant| grant.grantee_oid)
+        .collect::<Vec<_>>();
+    for grantee_oid in grantee_oids {
+        if role_has_effective_membership_visible(
+            db,
+            client_id,
+            txn_ctx,
+            role_oid,
+            grantee_oid,
+            MembershipMode::Inherit,
+        )? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn namespace_row_by_name_visible(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    namespace_name: &str,
+) -> Result<Option<PgNamespaceRow>, ExecError> {
+    for key in catalog_name_lookup_keys(namespace_name) {
+        let row = search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::NamespaceName, key)
+            .map_err(map_catalog_error)?
+            .into_iter()
+            .find_map(|tuple| match tuple {
+                SysCacheTuple::Namespace(row) => Some(row),
+                _ => None,
+            });
+        if row.is_some() {
+            return Ok(row);
+        }
+    }
+    Ok(None)
+}
+
+fn namespace_row_by_oid_visible(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    namespace_oid: u32,
+) -> Result<Option<PgNamespaceRow>, ExecError> {
+    Ok(search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::NamespaceOid,
+        oid_key(namespace_oid),
+    )
+    .map_err(map_catalog_error)?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Namespace(row) => Some(row),
+        _ => None,
+    }))
+}
+
+fn publication_row_by_name_visible(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    publication_name: &str,
+) -> Result<Option<PgPublicationRow>, ExecError> {
+    for key in catalog_name_lookup_keys(publication_name) {
+        let row = search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::PublicationName, key)
+            .map_err(map_catalog_error)?
+            .into_iter()
+            .find_map(|tuple| match tuple {
+                SysCacheTuple::Publication(row) => Some(row),
+                _ => None,
+            });
+        if row.is_some() {
+            return Ok(row);
+        }
+    }
+    Ok(None)
+}
+
+fn publication_rel_rows_for_publication_visible(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    publication_oid: u32,
+) -> Result<Vec<PgPublicationRelRow>, ExecError> {
+    let mut rows = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::PublicationRelPrpubid,
+        oid_key(publication_oid),
+    )
+    .map_err(map_catalog_error)?
+    .into_iter()
+    .filter_map(|tuple| match tuple {
+        SysCacheTuple::PublicationRel(row) => Some(row),
+        _ => None,
+    })
+    .collect::<Vec<_>>();
+    rows.sort_by_key(|row| (row.prpubid, row.prrelid, row.oid));
+    Ok(rows)
+}
+
+fn publication_namespace_rows_for_publication_visible(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    publication_oid: u32,
+) -> Result<Vec<PgPublicationNamespaceRow>, ExecError> {
+    let mut rows =
+        scan_publication_namespace_rows_by_publication_db(db, client_id, txn_ctx, publication_oid)
+            .map_err(map_catalog_error)?;
+    rows.sort_by_key(|row| (row.pnpubid, row.pnnspid, row.oid));
+    Ok(rows)
 }
 
 impl Database {
@@ -67,21 +353,22 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let auth = self.auth_state(client_id);
-        let auth_catalog = self
-            .auth_catalog(client_id, Some((xid, cid)))
-            .map_err(map_catalog_error)?;
-        let current_role = auth_catalog
-            .role_by_oid(auth.current_user_oid())
-            .ok_or_else(current_role_missing_error)?;
-        if !self.user_has_database_create_privilege(&auth, &auth_catalog) {
-            return Err(permission_denied_for_database_error());
+        let txn_ctx = Some((xid, cid));
+        let current_role =
+            role_row_by_oid_visible(self, client_id, txn_ctx, auth.current_user_oid())?
+                .ok_or_else(current_role_missing_error)?;
+        if !role_has_database_create_privilege_visible(
+            self,
+            client_id,
+            txn_ctx,
+            auth.current_user_oid(),
+        )? {
+            return Err(permission_denied_for_database_error(
+                &publication_database_name_for_permission_error(self),
+            ));
         }
 
-        let catcache = self
-            .backend_catcache(client_id, Some((xid, cid)))
-            .map_err(map_catalog_error)?;
-        if catcache
-            .publication_row_by_name(&stmt.publication_name)
+        if publication_row_by_name_visible(self, client_id, txn_ctx, &stmt.publication_name)?
             .is_some()
         {
             return Err(duplicate_publication_error(&stmt.publication_name));
@@ -102,6 +389,11 @@ impl Database {
                 "must be superuser to create FOR ALL SEQUENCES publication",
             ));
         }
+        let mut row = publication_row_defaults(&stmt.publication_name, auth.current_user_oid());
+        row.puballtables = stmt.target.for_all_tables;
+        row.puballsequences = stmt.target.for_all_sequences;
+        apply_publication_options(&mut row, &stmt.options)?;
+
         let mut resolved = resolve_publication_targets(
             self,
             client_id,
@@ -109,6 +401,8 @@ impl Database {
             cid,
             configured_search_path,
             &stmt.target,
+            &stmt.publication_name,
+            row.pubviaroot,
             DuplicateHandling::Error,
             true,
         )?;
@@ -120,6 +414,8 @@ impl Database {
                 cid,
                 configured_search_path,
                 &stmt.target.except_tables,
+                &stmt.publication_name,
+                row.pubviaroot,
             )?;
         }
         if !resolved.namespace_rows.is_empty() && !current_role.rolsuper {
@@ -127,11 +423,6 @@ impl Database {
                 "must be superuser to create FOR TABLES IN SCHEMA publication",
             ));
         }
-
-        let mut row = publication_row_defaults(&stmt.publication_name, auth.current_user_oid());
-        row.puballtables = stmt.target.for_all_tables;
-        row.puballsequences = stmt.target.for_all_sequences;
-        apply_publication_options(&mut row, &stmt.options)?;
 
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -185,20 +476,23 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let auth = self.auth_state(client_id);
-        let auth_catalog = self
-            .auth_catalog(client_id, Some((xid, cid)))
-            .map_err(map_catalog_error)?;
-        let current_role = auth_catalog
-            .role_by_oid(auth.current_user_oid())
-            .ok_or_else(current_role_missing_error)?;
-        let catcache = self
-            .backend_catcache(client_id, Some((xid, cid)))
-            .map_err(map_catalog_error)?;
-        let publication = catcache
-            .publication_row_by_name(&stmt.publication_name)
-            .cloned()
-            .ok_or_else(|| publication_does_not_exist_error(&stmt.publication_name))?;
-        if !auth.has_effective_membership(publication.pubowner, &auth_catalog) {
+        let txn_ctx = Some((xid, cid));
+        let current_role =
+            role_row_by_oid_visible(self, client_id, txn_ctx, auth.current_user_oid())?
+                .ok_or_else(current_role_missing_error)?;
+        let publication =
+            publication_row_by_name_visible(self, client_id, txn_ctx, &stmt.publication_name)?
+                .ok_or_else(|| publication_does_not_exist_error(&stmt.publication_name))?;
+        if !current_role.rolsuper
+            && !role_has_effective_membership_visible(
+                self,
+                client_id,
+                txn_ctx,
+                auth.current_user_oid(),
+                publication.pubowner,
+                MembershipMode::Inherit,
+            )?
+        {
             return Err(must_be_publication_owner_error(&publication.pubname));
         }
 
@@ -225,23 +519,46 @@ impl Database {
                 )
                 .map_err(map_catalog_error)?,
             AlterPublicationAction::OwnerTo { new_owner } => {
-                let new_owner_row = find_role_by_name(auth_catalog.roles(), new_owner)
-                    .cloned()
+                let new_owner_row = role_row_by_name_visible(self, client_id, txn_ctx, new_owner)?
                     .ok_or_else(|| role_does_not_exist_error(new_owner))?;
-                ensure_can_set_role(self, client_id, new_owner_row.oid, &new_owner_row.rolname)?;
-                if !self.role_has_database_create_privilege(new_owner_row.oid, &auth_catalog) {
-                    return Err(permission_denied_for_database_error());
-                }
-                if (publication.puballtables
-                    || publication.puballsequences
-                    || !catcache
-                        .publication_namespace_rows_for_publication(publication.oid)
-                        .is_empty())
-                    && !new_owner_row.rolsuper
-                {
-                    return Err(must_be_superuser_error(
-                        "new owner of FOR ALL TABLES or ALL SEQUENCES or TABLES IN SCHEMA publication must be superuser",
-                    ));
+                if !current_role.rolsuper {
+                    ensure_can_set_role_visible(
+                        self,
+                        client_id,
+                        txn_ctx,
+                        new_owner_row.oid,
+                        &new_owner_row.rolname,
+                    )?;
+                    if !role_has_database_create_privilege_visible(
+                        self,
+                        client_id,
+                        txn_ctx,
+                        new_owner_row.oid,
+                    )? {
+                        return Err(permission_denied_for_database_error(
+                            &publication_database_name_for_permission_error(self),
+                        ));
+                    }
+                    if publication.puballtables && !new_owner_row.rolsuper {
+                        return Err(publication_owner_change_requires_superuser_error(
+                            &publication.pubname,
+                            "The owner of a FOR ALL TABLES publication must be a superuser.",
+                        ));
+                    }
+                    if !new_owner_row.rolsuper
+                        && !publication_namespace_rows_for_publication_visible(
+                            self,
+                            client_id,
+                            txn_ctx,
+                            publication.oid,
+                        )?
+                        .is_empty()
+                    {
+                        return Err(publication_owner_change_requires_superuser_error(
+                            &publication.pubname,
+                            "The owner of a FOR TABLES IN SCHEMA publication must be a superuser.",
+                        ));
+                    }
                 }
                 // :HACK: PostgreSQL tracks publication ownership through shared
                 // dependency state. Until pgrust grows pg_shdepend, owner
@@ -261,6 +578,15 @@ impl Database {
             AlterPublicationAction::SetOptions(options) => {
                 let mut updated = publication.clone();
                 apply_publication_options(&mut updated, options)?;
+                if !updated.pubviaroot {
+                    reject_existing_partitioned_root_memberships_when_not_via_root(
+                        self,
+                        client_id,
+                        txn_ctx,
+                        configured_search_path,
+                        &updated,
+                    )?;
+                }
                 self.catalog
                     .write()
                     .replace_publication_row_mvcc(updated, &ctx)
@@ -280,6 +606,8 @@ impl Database {
                     cid,
                     configured_search_path,
                     target,
+                    &publication.pubname,
+                    publication.pubviaroot,
                     DuplicateHandling::Error,
                     true,
                 )?;
@@ -288,10 +616,18 @@ impl Database {
                         "must be superuser to add or set schemas",
                     ));
                 }
-                let existing_rel_rows =
-                    catcache.publication_rel_rows_for_publication(publication.oid);
-                let existing_namespace_rows =
-                    catcache.publication_namespace_rows_for_publication(publication.oid);
+                let existing_rel_rows = publication_rel_rows_for_publication_visible(
+                    self,
+                    client_id,
+                    txn_ctx,
+                    publication.oid,
+                )?;
+                let existing_namespace_rows = publication_namespace_rows_for_publication_visible(
+                    self,
+                    client_id,
+                    txn_ctx,
+                    publication.oid,
+                )?;
                 reject_publication_column_list_schema_conflicts(
                     target,
                     &publication.pubname,
@@ -358,13 +694,23 @@ impl Database {
                     cid,
                     configured_search_path,
                     target,
+                    &publication.pubname,
+                    publication.pubviaroot,
                     DuplicateHandling::Error,
                     false,
                 )?;
-                let existing_rel_rows =
-                    catcache.publication_rel_rows_for_publication(publication.oid);
-                let existing_namespace_rows =
-                    catcache.publication_namespace_rows_for_publication(publication.oid);
+                let existing_rel_rows = publication_rel_rows_for_publication_visible(
+                    self,
+                    client_id,
+                    txn_ctx,
+                    publication.oid,
+                )?;
+                let existing_namespace_rows = publication_namespace_rows_for_publication_visible(
+                    self,
+                    client_id,
+                    txn_ctx,
+                    publication.oid,
+                )?;
                 let target_rel_oids = resolved
                     .relation_rows
                     .iter()
@@ -434,7 +780,12 @@ impl Database {
                             "must be superuser to set ALL SEQUENCES",
                         ));
                     }
-                    if !publication_supports_all_target_operations(&publication, &catcache) {
+                    if !publication_supports_all_target_operations(
+                        self,
+                        client_id,
+                        txn_ctx,
+                        &publication,
+                    )? {
                         return Err(publication_all_target_unsupported_error(
                             &publication.pubname,
                             if target.for_all_tables {
@@ -452,6 +803,8 @@ impl Database {
                             cid,
                             configured_search_path,
                             &target.except_tables,
+                            &publication.pubname,
+                            publication.pubviaroot,
                         )?
                     } else {
                         Vec::new()
@@ -493,6 +846,8 @@ impl Database {
                         cid,
                         configured_search_path,
                         target,
+                        &publication.pubname,
+                        publication.pubviaroot,
                         DuplicateHandling::Dedup,
                         true,
                     )?;
@@ -563,24 +918,27 @@ impl Database {
             )));
         }
         let auth = self.auth_state(client_id);
-        let auth_catalog = self
-            .auth_catalog(client_id, Some((xid, cid)))
-            .map_err(map_catalog_error)?;
         let mut current_cid = cid;
         let mut dropped = 0usize;
 
         for publication_name in &stmt.publication_names {
-            let catcache = self
-                .backend_catcache(client_id, Some((xid, current_cid)))
-                .map_err(map_catalog_error)?;
-            let Some(publication) = catcache.publication_row_by_name(publication_name).cloned()
+            let txn_ctx = Some((xid, current_cid));
+            let Some(publication) =
+                publication_row_by_name_visible(self, client_id, txn_ctx, publication_name)?
             else {
                 if stmt.if_exists {
                     continue;
                 }
                 return Err(publication_does_not_exist_error(publication_name));
             };
-            if !auth.has_effective_membership(publication.pubowner, &auth_catalog) {
+            if !role_has_effective_membership_visible(
+                self,
+                client_id,
+                txn_ctx,
+                auth.current_user_oid(),
+                publication.pubowner,
+                MembershipMode::Inherit,
+            )? {
                 return Err(must_be_publication_owner_error(&publication.pubname));
             }
             let ctx = CatalogWriteContext {
@@ -639,17 +997,18 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let auth = self.auth_state(client_id);
-        let auth_catalog = self
-            .auth_catalog(client_id, Some((xid, cid)))
-            .map_err(map_catalog_error)?;
-        let catcache = self
-            .backend_catcache(client_id, Some((xid, cid)))
-            .map_err(map_catalog_error)?;
-        let publication = catcache
-            .publication_row_by_name(&stmt.publication_name)
-            .cloned()
-            .ok_or_else(|| publication_does_not_exist_error(&stmt.publication_name))?;
-        if !auth.has_effective_membership(publication.pubowner, &auth_catalog) {
+        let txn_ctx = Some((xid, cid));
+        let publication =
+            publication_row_by_name_visible(self, client_id, txn_ctx, &stmt.publication_name)?
+                .ok_or_else(|| publication_does_not_exist_error(&stmt.publication_name))?;
+        if !role_has_effective_membership_visible(
+            self,
+            client_id,
+            txn_ctx,
+            auth.current_user_oid(),
+            publication.pubowner,
+            MembershipMode::Inherit,
+        )? {
             return Err(must_be_publication_owner_error(&publication.pubname));
         }
 
@@ -693,13 +1052,12 @@ fn resolve_publication_targets(
     cid: CommandId,
     configured_search_path: Option<&[String]>,
     target: &PublicationTargetSpec,
+    publication_name: &str,
+    publish_via_partition_root: bool,
     duplicates: DuplicateHandling,
     require_relation_ownership: bool,
 ) -> Result<ResolvedPublicationTargets, ExecError> {
     let catalog = db.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-    let _catcache = db
-        .backend_catcache(client_id, Some((xid, cid)))
-        .map_err(map_catalog_error)?;
     if matches!(duplicates, DuplicateHandling::Error) {
         reject_conflicting_publication_table_duplicates(&catalog, target)?;
     }
@@ -716,6 +1074,16 @@ fn resolve_publication_targets(
                 if require_relation_ownership {
                     ensure_relation_owner(db, client_id, &relation, &table.relation_name)?;
                 }
+                reject_partitioned_publication_qualifiers_when_not_via_root(
+                    db,
+                    client_id,
+                    Some((xid, cid)),
+                    configured_search_path,
+                    publication_name,
+                    &relation,
+                    table,
+                    publish_via_partition_root,
+                )?;
                 if let Some(existing_has_filter) =
                     seen_relations.insert(relation.relation_oid, table.where_clause.is_some())
                 {
@@ -730,7 +1098,7 @@ fn resolve_publication_targets(
                     continue;
                 }
                 let prqual = validate_publication_row_filter(&catalog, &relation, table)?;
-                relation_rows.push(PgPublicationRelRow {
+                let row = PgPublicationRelRow {
                     oid: 0,
                     prpubid: 0,
                     prrelid: relation.relation_oid,
@@ -741,7 +1109,28 @@ fn resolve_publication_targets(
                         &table.relation_name,
                         &table.column_names,
                     )?,
-                });
+                };
+                relation_rows.push(row.clone());
+                if !table.only && row.prqual.is_none() && row.prattrs.is_none() {
+                    for child_oid in catalog.find_all_inheritors(relation.relation_oid) {
+                        if child_oid == relation.relation_oid
+                            || seen_relations.contains_key(&child_oid)
+                        {
+                            continue;
+                        }
+                        let Some(child) = catalog.relation_by_oid(child_oid) else {
+                            continue;
+                        };
+                        if child.relispartition {
+                            continue;
+                        }
+                        seen_relations.insert(child_oid, false);
+                        relation_rows.push(PgPublicationRelRow {
+                            prrelid: child_oid,
+                            ..row.clone()
+                        });
+                    }
+                }
             }
             PublicationObjectSpec::Schema(schema) => {
                 let namespace = resolve_publication_schema(
@@ -811,6 +1200,8 @@ fn resolve_publication_except_tables(
     cid: CommandId,
     configured_search_path: Option<&[String]>,
     except_tables: &[PublicationTableSpec],
+    publication_name: &str,
+    publish_via_partition_root: bool,
 ) -> Result<Vec<PgPublicationRelRow>, ExecError> {
     let target = PublicationTargetSpec {
         for_all_tables: false,
@@ -829,6 +1220,8 @@ fn resolve_publication_except_tables(
         cid,
         configured_search_path,
         &target,
+        publication_name,
+        publish_via_partition_root,
         DuplicateHandling::Error,
         true,
     )?;
@@ -855,6 +1248,107 @@ fn reject_publication_drop_filters(target: &PublicationTargetSpec) -> Result<(),
             detail: None,
             hint: None,
             sqlstate: "42601",
+        });
+    }
+    Ok(())
+}
+
+fn reject_partitioned_publication_qualifiers_when_not_via_root(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    configured_search_path: Option<&[String]>,
+    publication_name: &str,
+    relation: &BoundRelation,
+    table: &PublicationTableSpec,
+    publish_via_partition_root: bool,
+) -> Result<(), ExecError> {
+    if publish_via_partition_root || relation.relkind != 'p' {
+        return Ok(());
+    }
+    if table.where_clause.is_some() {
+        let relation_name =
+            publication_relation_unqualified_name(db, client_id, txn_ctx, relation.relation_oid)
+                .unwrap_or_else(|| unqualified_relation_name(&table.relation_name));
+        return Err(ExecError::DetailedError {
+            message: format!("cannot use publication WHERE clause for relation \"{relation_name}\""),
+            detail: Some(
+                "WHERE clause cannot be used for a partitioned table when publish_via_partition_root is false."
+                    .into(),
+            ),
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    if !table.column_names.is_empty() {
+        let relation_name =
+            publication_relation_qualified_name(db, client_id, txn_ctx, relation.relation_oid)
+                .or_else(|| {
+                    db.relation_display_name(
+                        client_id,
+                        txn_ctx,
+                        configured_search_path,
+                        relation.relation_oid,
+                    )
+                })
+                .unwrap_or_else(|| table.relation_name.clone());
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "cannot use column list for relation \"{relation_name}\" in publication \"{publication_name}\""
+            ),
+            detail: Some(
+                "Column lists cannot be specified for partitioned tables when publish_via_partition_root is false."
+                    .into(),
+            ),
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    Ok(())
+}
+
+fn reject_existing_partitioned_root_memberships_when_not_via_root(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    _configured_search_path: Option<&[String]>,
+    publication: &PgPublicationRow,
+) -> Result<(), ExecError> {
+    for row in
+        publication_rel_rows_for_publication_visible(db, client_id, txn_ctx, publication.oid)?
+    {
+        if row.prqual.is_none() && row.prattrs.is_none() {
+            continue;
+        }
+        if !publication_relation_is_partitioned(db, client_id, txn_ctx, row.prrelid)? {
+            continue;
+        }
+        let relation_name =
+            publication_relation_unqualified_name(db, client_id, txn_ctx, row.prrelid)
+                .unwrap_or_else(|| row.prrelid.to_string());
+        if row.prqual.is_some() {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot set parameter \"publish_via_partition_root\" to false for publication \"{}\"",
+                    publication.pubname
+                ),
+                detail: Some(format!(
+                    "The publication contains a WHERE clause for partitioned table \"{relation_name}\", which is not allowed when \"publish_via_partition_root\" is false."
+                )),
+                hint: None,
+                sqlstate: "22023",
+            });
+        }
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "cannot set parameter \"publish_via_partition_root\" to false for publication \"{}\"",
+                publication.pubname
+            ),
+            detail: Some(format!(
+                "The publication contains a column list for partitioned table \"{relation_name}\", which is not allowed when \"publish_via_partition_root\" is false."
+            )),
+            hint: None,
+            sqlstate: "22023",
         });
     }
     Ok(())
@@ -1045,6 +1539,17 @@ fn validate_publication_filter_types(
                 ));
             }
         }
+        Collate {
+            expr: inner,
+            collation,
+        } => {
+            validate_publication_filter_types(inner, relation, catalog)?;
+            if publication_filter_collation_is_user_defined(collation, catalog) {
+                return Err(invalid_publication_where_error(
+                    "User-defined collations are not allowed.",
+                ));
+            }
+        }
         FuncCall { args, .. } => {
             for arg in function_arg_values(args) {
                 validate_publication_filter_types(arg, relation, catalog)?;
@@ -1098,7 +1603,6 @@ fn validate_publication_filter_types(
         UnaryPlus(inner)
         | Negate(inner)
         | BitNot(inner)
-        | Collate { expr: inner, .. }
         | IsNull(inner)
         | IsNotNull(inner)
         | Not(inner)
@@ -1232,6 +1736,38 @@ fn publication_filter_type_is_user_defined(sql_type: SqlType, catalog: &dyn Cata
         && catalog.type_by_oid(row.typelem).is_some_and(|elem| {
             elem.typnamespace != PG_CATALOG_NAMESPACE_OID
                 && elem.typnamespace != INFORMATION_SCHEMA_NAMESPACE_OID
+        })
+}
+
+fn publication_filter_collation_is_user_defined(
+    collation: &str,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    let (schema_name, collation_name) = collation
+        .rsplit_once('.')
+        .map(|(schema, name)| (Some(schema), name))
+        .unwrap_or((None, collation));
+    let collation_name = normalize_catalog_name(collation_name).to_ascii_lowercase();
+    let schema_oid = schema_name.and_then(|schema| {
+        let schema = normalize_catalog_name(schema).to_ascii_lowercase();
+        catalog
+            .namespace_rows()
+            .into_iter()
+            .find(|row| row.nspname.eq_ignore_ascii_case(&schema))
+            .map(|row| row.oid)
+    });
+    catalog
+        .collation_rows()
+        .into_iter()
+        .filter(|row| row.collname.eq_ignore_ascii_case(&collation_name))
+        .filter(|row| {
+            schema_oid
+                .map(|oid| row.collnamespace == oid)
+                .unwrap_or(true)
+        })
+        .any(|row| {
+            row.collnamespace != PG_CATALOG_NAMESPACE_OID
+                && row.collnamespace != INFORMATION_SCHEMA_NAMESPACE_OID
         })
 }
 
@@ -1569,9 +2105,12 @@ fn lookup_publication_relation(
 ) -> Result<BoundRelation, ExecError> {
     match catalog.lookup_any_relation(relation_name) {
         Some(relation) => Ok(relation),
-        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
-            relation_name.to_string(),
-        ))),
+        None => Err(ExecError::DetailedError {
+            message: format!("relation \"{relation_name}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42P01",
+        }),
     }
 }
 
@@ -1582,6 +2121,7 @@ fn resolve_publication_schema(
     configured_search_path: Option<&[String]>,
     schema: &crate::backend::parser::PublicationSchemaSpec,
 ) -> Result<crate::include::catalog::PgNamespaceRow, ExecError> {
+    let temp_namespace = db.owned_temp_namespace(client_id);
     let schema_name = match &schema.schema_name {
         PublicationSchemaName::Name(name) => name.clone(),
         PublicationSchemaName::CurrentSchema => db
@@ -1590,15 +2130,16 @@ fn resolve_publication_schema(
             .find(|schema_name| {
                 !schema_name.is_empty()
                     && schema_name != "$user"
+                    && schema_name != "pg_temp"
+                    && !schema_name.starts_with("pg_temp_")
+                    && !temp_namespace
+                        .as_ref()
+                        .is_some_and(|namespace| namespace.name == *schema_name)
                     && !schema_name.eq_ignore_ascii_case("pg_catalog")
             })
-            .ok_or(ParseError::NoSchemaSelectedForCreate)
-            .map_err(ExecError::Parse)?,
+            .ok_or_else(no_schema_selected_for_current_schema_error)?,
     };
-    db.backend_catcache(client_id, txn_ctx)
-        .map_err(map_catalog_error)?
-        .namespace_by_name(&schema_name)
-        .cloned()
+    namespace_row_by_name_visible(db, client_id, txn_ctx, &schema_name)?
         .filter(|row| !db.other_session_temp_namespace_oid(client_id, row.oid))
         .ok_or_else(|| schema_does_not_exist_error(&schema_name))
 }
@@ -1701,17 +2242,25 @@ fn publication_target_is_all_kind(target: &PublicationTargetSpec) -> bool {
 }
 
 fn publication_supports_all_target_operations(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
     publication: &PgPublicationRow,
-    catcache: &CatCache,
-) -> bool {
-    publication.puballtables
-        || publication.puballsequences
-        || (catcache
-            .publication_rel_rows_for_publication(publication.oid)
+) -> Result<bool, ExecError> {
+    if publication.puballtables || publication.puballsequences {
+        return Ok(true);
+    }
+    Ok(
+        publication_rel_rows_for_publication_visible(db, client_id, txn_ctx, publication.oid)?
             .is_empty()
-            && catcache
-                .publication_namespace_rows_for_publication(publication.oid)
-                .is_empty())
+            && publication_namespace_rows_for_publication_visible(
+                db,
+                client_id,
+                txn_ctx,
+                publication.oid,
+            )?
+            .is_empty(),
+    )
 }
 
 fn merge_catalog_effects(
@@ -1802,12 +2351,24 @@ fn current_role_missing_error() -> ExecError {
     }
 }
 
-fn permission_denied_for_database_error() -> ExecError {
+fn permission_denied_for_database_error(database_name: &str) -> ExecError {
     ExecError::DetailedError {
-        message: format!("permission denied for database {CURRENT_DATABASE_NAME}"),
+        message: format!("permission denied for database {database_name}"),
         detail: None,
         hint: None,
         sqlstate: "42501",
+    }
+}
+
+fn publication_database_name_for_permission_error(db: &Database) -> String {
+    let current = db.current_database_name();
+    // :HACK: pgrust still boots the single regression database as `postgres`,
+    // while PostgreSQL's regression harness connects to a database named
+    // `regression` and the GRANT path accepts that name as an alias.
+    if current == "postgres" {
+        "regression".into()
+    } else {
+        current
     }
 }
 
@@ -1847,11 +2408,32 @@ fn schema_does_not_exist_error(schema_name: &str) -> ExecError {
     }
 }
 
+fn no_schema_selected_for_current_schema_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "no schema has been selected for CURRENT_SCHEMA".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "3F000",
+    }
+}
+
 fn must_be_superuser_error(message: &'static str) -> ExecError {
     ExecError::DetailedError {
         message: message.into(),
         detail: None,
         hint: None,
+        sqlstate: "42501",
+    }
+}
+
+fn publication_owner_change_requires_superuser_error(
+    publication_name: &str,
+    hint: &'static str,
+) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("permission denied to change owner of publication \"{publication_name}\""),
+        detail: None,
+        hint: Some(hint.into()),
         sqlstate: "42501",
     }
 }
@@ -1873,7 +2455,7 @@ fn publication_all_tables_membership_error(
         message: format!("publication \"{publication_name}\" is defined as FOR ALL TABLES"),
         detail: Some(match membership_kind {
             PublicationMembershipKind::Table => {
-                "Tables or sequences cannot be added to or dropped from FOR ALL TABLES publications.".into()
+                "Tables cannot be added to or dropped from FOR ALL TABLES publications.".into()
             }
             PublicationMembershipKind::Schema => {
                 "Schemas cannot be added to or dropped from FOR ALL TABLES publications.".into()
@@ -1979,7 +2561,16 @@ fn publication_relation_already_member_error(
     relation_oid: u32,
 ) -> ExecError {
     let relation_name = db
-        .relation_display_name(client_id, txn_ctx, configured_search_path, relation_oid)
+        .backend_catcache(client_id, txn_ctx)
+        .ok()
+        .and_then(|cache| {
+            cache
+                .class_by_oid(relation_oid)
+                .map(|row| row.relname.clone())
+        })
+        .or_else(|| {
+            db.relation_display_name(client_id, txn_ctx, configured_search_path, relation_oid)
+        })
         .unwrap_or_else(|| relation_oid.to_string());
     ExecError::DetailedError {
         message: format!(
@@ -2014,15 +2605,21 @@ fn publication_relation_not_member_error(
     db: &Database,
     client_id: ClientId,
     txn_ctx: CatalogTxnContext,
-    _configured_search_path: Option<&[String]>,
+    configured_search_path: Option<&[String]>,
     _publication_name: &str,
     relation_oid: u32,
 ) -> ExecError {
     let relation_name = db
         .backend_catcache(client_id, txn_ctx)
         .ok()
-        .and_then(|catcache| catcache.class_by_oid(relation_oid).cloned())
-        .map(|class| class.relname)
+        .and_then(|cache| {
+            cache
+                .class_by_oid(relation_oid)
+                .map(|row| row.relname.clone())
+        })
+        .or_else(|| {
+            db.relation_display_name(client_id, txn_ctx, configured_search_path, relation_oid)
+        })
         .unwrap_or_else(|| relation_oid.to_string());
     ExecError::DetailedError {
         message: format!("relation \"{relation_name}\" is not part of the publication"),
@@ -2055,13 +2652,61 @@ fn publication_namespace_name(
     txn_ctx: CatalogTxnContext,
     namespace_oid: u32,
 ) -> Option<String> {
-    db.backend_catcache(client_id, txn_ctx)
+    namespace_row_by_oid_visible(db, client_id, txn_ctx, namespace_oid)
         .ok()
-        .and_then(|catcache| {
-            catcache
-                .namespace_by_oid(namespace_oid)
-                .map(|row| row.nspname.clone())
-        })
+        .flatten()
+        .map(|row| row.nspname)
+}
+
+fn publication_relation_unqualified_name(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    relation_oid: u32,
+) -> Option<String> {
+    db.backend_catcache(client_id, txn_ctx)
+        .ok()?
+        .class_rows()
+        .into_iter()
+        .find(|row| row.oid == relation_oid)
+        .map(|row| row.relname)
+}
+
+fn publication_relation_qualified_name(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    relation_oid: u32,
+) -> Option<String> {
+    let catcache = db.backend_catcache(client_id, txn_ctx).ok()?;
+    let class = catcache
+        .class_rows()
+        .into_iter()
+        .find(|row| row.oid == relation_oid)?;
+    let namespace = catcache.namespace_by_oid(class.relnamespace)?;
+    Some(format!("{}.{}", namespace.nspname, class.relname))
+}
+
+fn publication_relation_is_partitioned(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    relation_oid: u32,
+) -> Result<bool, ExecError> {
+    Ok(db
+        .backend_catcache(client_id, txn_ctx)
+        .map_err(map_catalog_error)?
+        .class_rows()
+        .into_iter()
+        .find(|row| row.oid == relation_oid)
+        .is_some_and(|row| row.relkind == 'p'))
+}
+
+fn unqualified_relation_name(relation_name: &str) -> String {
+    relation_name
+        .rsplit_once('.')
+        .map(|(_, name)| name.to_string())
+        .unwrap_or_else(|| relation_name.to_string())
 }
 
 #[cfg(test)]
@@ -2469,7 +3114,7 @@ mod tests {
                 message,
                 sqlstate: "42501",
                 ..
-            } if message == format!("permission denied for database {CURRENT_DATABASE_NAME}")
+            } if message == "permission denied for database regression"
         ));
         assert_eq!(publication_owner_name(&db, "pub"), "tenant");
     }
@@ -2763,6 +3408,133 @@ mod tests {
             other => panic!("expected query result, got {other:?}"),
         };
         assert_eq!(rows, vec![vec![Value::Text("pub_test".into())]]);
+    }
+
+    #[test]
+    fn current_schema_publications_preserve_quoted_schema_and_table_names() {
+        let base = temp_dir("current_schema_quoted_names");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create temp table temp_marker (id int4)")
+            .unwrap();
+        session
+            .execute(&db, "create schema \"CURRENT_SCHEMA\"")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create table \"CURRENT_SCHEMA\".\"CURRENT_SCHEMA\" (id int4)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create publication pub_current for tables in schema CURRENT_SCHEMA",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create publication pub_quoted for tables in schema \"CURRENT_SCHEMA\"",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create publication pub_both for tables in schema CURRENT_SCHEMA, \"CURRENT_SCHEMA\"",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create publication pub_table for table \"CURRENT_SCHEMA\".\"CURRENT_SCHEMA\"",
+            )
+            .unwrap();
+
+        let schema_rows = match session
+            .execute(
+                &db,
+                "select p.pubname, n.nspname \
+                 from pg_catalog.pg_publication p \
+                      join pg_catalog.pg_publication_namespace pn on pn.pnpubid = p.oid \
+                      join pg_catalog.pg_namespace n on n.oid = pn.pnnspid \
+                 where p.pubname in ('pub_both', 'pub_current', 'pub_quoted') \
+                 order by p.pubname, n.nspname",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => rows,
+            other => panic!("expected query result, got {other:?}"),
+        };
+        assert_eq!(
+            schema_rows,
+            vec![
+                vec![
+                    Value::Text("pub_both".into()),
+                    Value::Text("CURRENT_SCHEMA".into()),
+                ],
+                vec![Value::Text("pub_both".into()), Value::Text("public".into())],
+                vec![
+                    Value::Text("pub_current".into()),
+                    Value::Text("public".into()),
+                ],
+                vec![
+                    Value::Text("pub_quoted".into()),
+                    Value::Text("CURRENT_SCHEMA".into()),
+                ],
+            ]
+        );
+
+        let table_rows = match session
+            .execute(
+                &db,
+                "select p.pubname, n.nspname, c.relname \
+                 from pg_catalog.pg_publication p \
+                      join pg_catalog.pg_publication_rel pr on pr.prpubid = p.oid \
+                      join pg_catalog.pg_class c on c.oid = pr.prrelid \
+                      join pg_catalog.pg_namespace n on n.oid = c.relnamespace \
+                 where p.pubname = 'pub_table'",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => rows,
+            other => panic!("expected query result, got {other:?}"),
+        };
+        assert_eq!(
+            table_rows,
+            vec![vec![
+                Value::Text("pub_table".into()),
+                Value::Text("CURRENT_SCHEMA".into()),
+                Value::Text("CURRENT_SCHEMA".into()),
+            ]]
+        );
+
+        session.execute(&db, "set search_path = ''").unwrap();
+        let err = session
+            .execute(
+                &db,
+                "create publication pub_empty for tables in schema CURRENT_SCHEMA",
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::DetailedError {
+                message,
+                sqlstate: "3F000",
+                ..
+            } if message == "no schema has been selected for CURRENT_SCHEMA"
+        ));
+        let err = session
+            .execute(&db, "create publication pub_bad for table CURRENT_SCHEMA")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                actual,
+                ..
+            }) if actual == "syntax error at or near \"CURRENT_SCHEMA\""
+        ));
     }
 
     #[test]

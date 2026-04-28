@@ -2742,6 +2742,7 @@ impl Database {
         if let Some(fdw_options) = &alter_stmt.fdw_options {
             column.fdw_options = format_fdw_options(fdw_options)?;
         }
+        let mut created_owned_sequence = None;
         if let Some(serial_column) = owned_sequence.as_ref() {
             let mut used_names = std::collections::BTreeSet::new();
             let created = self.create_owned_sequence_for_serial_column(
@@ -2766,6 +2767,7 @@ impl Database {
                 serial_column.sql_type,
             ));
             column.default_sequence_oid = Some(created.sequence_oid);
+            created_owned_sequence = Some(created);
         }
         let targets = collect_add_column_targets(&catalog, &relation, &column, alter_stmt.only)?;
         let indexes = targets
@@ -2874,6 +2876,24 @@ impl Database {
                 .map_err(map_catalog_error)?;
             self.apply_catalog_mutation_effect_immediate(&effect)?;
             catalog_effects.push(effect);
+            if target.relation.relation_oid == relation.relation_oid
+                && let Some(created_sequence) = created_owned_sequence.as_ref()
+            {
+                let effect = self
+                    .catalog
+                    .write()
+                    .set_sequence_owned_by_dependency_mvcc(
+                        created_sequence.sequence_oid,
+                        Some((
+                            target.relation.relation_oid,
+                            created_sequence.column_index.saturating_add(1) as i32,
+                        )),
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+            }
             let (toast_namespace_oid, toast_namespace_name) =
                 if target.relation.relpersistence == 't' {
                     let temp_backend_id = self.temp_backend_id(client_id);

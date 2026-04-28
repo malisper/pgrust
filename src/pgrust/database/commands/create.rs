@@ -4010,7 +4010,7 @@ impl Database {
                 sequence_effects,
             )?);
         }
-        for created in created_sequences {
+        for created in &created_sequences {
             let column = desc
                 .columns
                 .get_mut(created.column_index)
@@ -4193,6 +4193,31 @@ impl Database {
                                 partition_spec: None,
                             }
                         };
+                        for created_sequence in &created_sequences {
+                            let ctx = CatalogWriteContext {
+                                pool: self.pool.clone(),
+                                txns: self.txns.clone(),
+                                xid,
+                                cid: table_cid.saturating_add(1),
+                                client_id,
+                                waiter: None,
+                                interrupts: Arc::clone(&interrupts),
+                            };
+                            let effect = self
+                                .catalog
+                                .write()
+                                .set_sequence_owned_by_dependency_mvcc(
+                                    created_sequence.sequence_oid,
+                                    Some((
+                                        relation.relation_oid,
+                                        created_sequence.column_index.saturating_add(1) as i32,
+                                    )),
+                                    &ctx,
+                                )
+                                .map_err(map_catalog_error)?;
+                            self.apply_catalog_mutation_effect_immediate(&effect)?;
+                            catalog_effects.push(effect);
+                        }
                         let mut constraint_cid_base = table_cid.saturating_add(1);
                         if !lowered.parent_oids.is_empty() {
                             constraint_cid_base =

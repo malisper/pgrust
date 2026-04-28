@@ -1966,6 +1966,83 @@ fn search_sys_cache_list_db(
     Ok(tuples)
 }
 
+pub(crate) fn scan_authid_rows_db(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Result<Vec<PgAuthIdRow>, CatalogError> {
+    if txn_ctx.is_none() {
+        db.accept_invalidation_messages(client_id);
+    }
+    let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
+        .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
+    probe_system_catalog_rows_visible_in_db(
+        &db.pool,
+        &db.txns,
+        &snapshot,
+        client_id,
+        db.database_oid,
+        PG_AUTHID_OID_INDEX_OID,
+        Vec::new(),
+    )?
+    .into_iter()
+    .map(pg_authid_row_from_values)
+    .collect()
+}
+
+pub(crate) fn scan_auth_members_rows_db(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Result<Vec<PgAuthMembersRow>, CatalogError> {
+    if txn_ctx.is_none() {
+        db.accept_invalidation_messages(client_id);
+    }
+    let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
+        .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
+    probe_system_catalog_rows_visible_in_db(
+        &db.pool,
+        &db.txns,
+        &snapshot,
+        client_id,
+        db.database_oid,
+        PG_AUTH_MEMBERS_OID_INDEX_OID,
+        Vec::new(),
+    )?
+    .into_iter()
+    .map(pg_auth_members_row_from_values)
+    .collect()
+}
+
+pub(crate) fn scan_publication_namespace_rows_by_publication_db(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    publication_oid: u32,
+) -> Result<Vec<PgPublicationNamespaceRow>, CatalogError> {
+    if txn_ctx.is_none() {
+        db.accept_invalidation_messages(client_id);
+    }
+    let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
+        .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
+    probe_system_catalog_rows_visible_in_db(
+        &db.pool,
+        &db.txns,
+        &snapshot,
+        client_id,
+        db.database_oid,
+        PG_PUBLICATION_NAMESPACE_PNNSPID_PNPUBID_INDEX_OID,
+        vec![ScanKeyData {
+            attribute_number: 2,
+            strategy: BT_EQUAL_STRATEGY_NUMBER,
+            argument: oid_key(publication_oid),
+        }],
+    )?
+    .into_iter()
+    .map(pg_publication_namespace_row_from_values)
+    .collect()
+}
+
 fn load_backend_catcache(
     db: &Database,
     client_id: ClientId,
@@ -2157,9 +2234,37 @@ pub fn ensure_type_rows(
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
 ) -> Vec<PgTypeRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.type_rows())
-        .unwrap_or_default()
+    let mut rows_by_oid = BTreeMap::new();
+    for row in builtin_type_rows()
+        .into_iter()
+        .chain(bootstrap_composite_type_rows())
+    {
+        rows_by_oid.insert(row.oid, row);
+    }
+
+    if txn_ctx.is_none() {
+        db.accept_invalidation_messages(client_id);
+    }
+    if let Some(snapshot) = get_catalog_snapshot(db, client_id, txn_ctx, None)
+        && let Ok(rows) = probe_system_catalog_rows_visible_in_db(
+            &db.pool,
+            &db.txns,
+            &snapshot,
+            client_id,
+            db.database_oid,
+            PG_TYPE_OID_INDEX_OID,
+            Vec::new(),
+        )
+    {
+        for row in rows
+            .into_iter()
+            .filter_map(|values| pg_type_row_from_values(values).map_err(|_| ()).ok())
+        {
+            rows_by_oid.insert(row.oid, row);
+        }
+    }
+
+    rows_by_oid.into_values().collect()
 }
 
 pub fn ensure_index_rows(

@@ -211,8 +211,7 @@ pub(crate) fn resolve_create_schema_stmt(
     let schema_name = stmt
         .schema_name
         .clone()
-        .unwrap_or_else(|| target_owner.rolname.clone())
-        .to_ascii_lowercase();
+        .unwrap_or_else(|| target_owner.rolname.clone());
 
     if schema_name.starts_with("pg_") {
         return Err(ExecError::DetailedError {

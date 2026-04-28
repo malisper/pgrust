@@ -1,4 +1,5 @@
 use super::*;
+use crate::backend::utils::cache::syscache::{SysCacheId, SysCacheTuple, search_sys_cache1_db};
 
 impl Database {
     pub(crate) fn temp_db_oid(temp_backend_id: TempBackendId) -> u32 {
@@ -58,20 +59,27 @@ impl Database {
         txn_ctx: CatalogTxnContext,
         schema_name: &str,
     ) -> Option<crate::include::catalog::PgNamespaceRow> {
-        search_sys_cache1_db(
-            self,
-            client_id,
-            txn_ctx,
-            SysCacheId::NamespaceName,
-            Value::Text(schema_name.to_ascii_lowercase().into()),
-        )
-        .ok()?
-        .into_iter()
-        .find_map(|tuple| match tuple {
-            SysCacheTuple::Namespace(row) => Some(row),
-            _ => None,
+        let mut lookup_names = vec![schema_name.to_string()];
+        let folded = schema_name.to_ascii_lowercase();
+        if folded != schema_name {
+            lookup_names.push(folded);
+        }
+        lookup_names.into_iter().find_map(|lookup_name| {
+            search_sys_cache1_db(
+                self,
+                client_id,
+                txn_ctx,
+                SysCacheId::NamespaceName,
+                Value::Text(lookup_name.into()),
+            )
+            .ok()?
+            .into_iter()
+            .find_map(|tuple| match tuple {
+                SysCacheTuple::Namespace(row) => Some(row),
+                _ => None,
+            })
+            .filter(|row| !self.other_session_temp_namespace_oid(client_id, row.oid))
         })
-        .filter(|row| !self.other_session_temp_namespace_oid(client_id, row.oid))
     }
 
     pub(crate) fn visible_namespace_oid_by_name(
@@ -94,7 +102,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
         allow_temporary_namespace: bool,
     ) -> Result<(String, u32, TablePersistence), ParseError> {
-        let lowered_name = object_name.to_ascii_lowercase();
+        let relation_name = object_name.to_string();
         let temp_backend_id = self.temp_backend_id(client_id);
         let temp_namespace = self.owned_temp_namespace(client_id);
         let is_temp_schema_name = |schema: &str| {
@@ -108,7 +116,7 @@ impl Database {
             let normalized_schema = schema_name.to_ascii_lowercase();
             if normalized_schema == "pg_catalog" {
                 return Err(ParseError::UnsupportedQualifiedName(format!(
-                    "{normalized_schema}.{lowered_name}"
+                    "{normalized_schema}.{relation_name}"
                 )));
             }
             if is_temp_schema_name(&normalized_schema) {
@@ -128,28 +136,28 @@ impl Database {
                     });
                 }
                 return Ok((
-                    lowered_name,
+                    relation_name,
                     Self::temp_namespace_oid(temp_backend_id),
                     TablePersistence::Temporary,
                 ));
             }
             let namespace = self
-                .visible_namespace_by_name(client_id, txn_ctx, &normalized_schema)
+                .visible_namespace_by_name(client_id, txn_ctx, schema_name)
                 .ok_or_else(|| ParseError::UnexpectedToken {
                     expected: "existing schema",
-                    actual: format!("schema \"{normalized_schema}\" does not exist"),
+                    actual: format!("schema \"{schema_name}\" does not exist"),
                 })?;
             let storage_name = if namespace.oid == PUBLIC_NAMESPACE_OID {
-                lowered_name.clone()
+                relation_name.clone()
             } else {
-                format!("{}.{}", namespace.nspname, lowered_name)
+                format!("{}.{}", namespace.nspname, relation_name)
             };
             return Ok((storage_name, namespace.oid, persistence));
         }
 
         if allow_temporary_namespace && persistence == TablePersistence::Temporary {
             return Ok((
-                lowered_name,
+                relation_name.clone(),
                 Self::temp_namespace_oid(temp_backend_id),
                 TablePersistence::Temporary,
             ));
@@ -179,7 +187,7 @@ impl Database {
                     });
                 }
                 return Ok((
-                    lowered_name,
+                    relation_name.clone(),
                     Self::temp_namespace_oid(temp_backend_id),
                     TablePersistence::Temporary,
                 ));
@@ -188,9 +196,9 @@ impl Database {
                 self.visible_namespace_by_name(client_id, txn_ctx, &schema_name)
             {
                 let storage_name = if namespace.oid == PUBLIC_NAMESPACE_OID {
-                    lowered_name.clone()
+                    relation_name.clone()
                 } else {
-                    format!("{}.{}", namespace.nspname, lowered_name)
+                    format!("{}.{}", namespace.nspname, relation_name)
                 };
                 return Ok((storage_name, namespace.oid, persistence));
             }

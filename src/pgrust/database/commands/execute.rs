@@ -1170,6 +1170,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterSchemaRename(ref alter_stmt) => self
+                .execute_alter_schema_rename_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterPublication(ref alter_stmt) => self
                 .execute_alter_publication_stmt_with_search_path(
                     client_id,
@@ -2127,6 +2133,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateCollation(ref create_stmt) => self
+                .execute_create_collation_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CreatePublication(ref create_stmt) => self
                 .execute_create_publication_stmt_with_search_path(
                     client_id,
@@ -2282,6 +2294,12 @@ impl Database {
                 ),
             Statement::DropConversion(ref drop_stmt) => self
                 .execute_drop_conversion_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
+            Statement::DropCollation(ref drop_stmt) => self
+                .execute_drop_collation_stmt_with_search_path(
                     client_id,
                     drop_stmt,
                     configured_search_path,

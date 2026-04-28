@@ -403,6 +403,7 @@ pub enum Statement {
     AlterMaterializedViewSetSchema(AlterRelationSetSchemaStatement),
     AlterViewOwner(AlterRelationOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
+    AlterSchemaRename(AlterSchemaRenameStatement),
     AlterTableSetPersistence(AlterTableSetPersistenceStatement),
     AlterTableSet(AlterTableSetStatement),
     AlterTableReset(AlterTableResetStatement),
@@ -447,6 +448,7 @@ pub enum Statement {
     CommentOnOperator(CommentOnOperatorStatement),
     CreateDomain(CreateDomainStatement),
     CreateConversion(CreateConversionStatement),
+    CreateCollation(CreateCollationStatement),
     CreatePublication(CreatePublicationStatement),
     CommentOnRole(CommentOnRoleStatement),
     GrantObject(GrantObjectStatement),
@@ -456,6 +458,7 @@ pub enum Statement {
     DropType(DropTypeStatement),
     DropSequence(DropSequenceStatement),
     DropConversion(DropConversionStatement),
+    DropCollation(DropCollationStatement),
     DropDatabase(DropDatabaseStatement),
     DropPublication(DropPublicationStatement),
     DropStatistics(DropStatisticsStatement),
@@ -2796,6 +2799,12 @@ pub struct AlterSchemaOwnerStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterSchemaRenameStatement {
+    pub schema_name: String,
+    pub new_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableRenameColumnStatement {
     pub if_exists: bool,
     pub only: bool,
@@ -3203,6 +3212,12 @@ pub struct CreateConversionStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateCollationStatement {
+    pub collation_name: String,
+    pub source_collation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateForeignDataWrapperStatement {
     pub fdw_name: String,
     pub handler_name: Option<String>,
@@ -3351,6 +3366,13 @@ pub struct DropRoleStatement {
 pub struct DropConversionStatement {
     pub if_exists: bool,
     pub conversion_name: String,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropCollationStatement {
+    pub if_exists: bool,
+    pub collation_name: String,
     pub cascade: bool,
 }
 

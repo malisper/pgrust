@@ -320,10 +320,12 @@ fn execute_statement_with_source(
             expected: "ALTER VIEW OWNER handled by database/session layer",
             actual: "ALTER VIEW OWNER".into(),
         })),
-        Statement::AlterSchemaOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "ALTER SCHEMA OWNER handled by database/session layer",
-            actual: "ALTER SCHEMA OWNER".into(),
-        })),
+        Statement::AlterSchemaOwner(_) | Statement::AlterSchemaRename(_) => {
+            Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "ALTER SCHEMA handled by database/session layer",
+                actual: "ALTER SCHEMA".into(),
+            }))
+        }
         Statement::CommentOnTable(_) | Statement::CommentOnColumn(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON TABLE handled by database/session layer",
             actual: "COMMENT ON TABLE".into(),
@@ -539,6 +541,10 @@ fn execute_statement_with_source(
             expected: "CREATE CONVERSION handled by database/session layer",
             actual: "CREATE CONVERSION".into(),
         })),
+        Statement::CreateCollation(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE COLLATION handled by database/session layer",
+            actual: "CREATE COLLATION".into(),
+        })),
         Statement::CreateType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE TYPE handled by database/session layer",
             actual: "CREATE TYPE".into(),
@@ -580,6 +586,10 @@ fn execute_statement_with_source(
         Statement::DropConversion(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP CONVERSION handled by database/session layer",
             actual: "DROP CONVERSION".into(),
+        })),
+        Statement::DropCollation(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP COLLATION handled by database/session layer",
+            actual: "DROP COLLATION".into(),
         })),
         Statement::DropType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP TYPE handled by database/session layer",
@@ -915,6 +925,10 @@ pub fn execute_readonly_statement_with_config(
             expected: "read-only statement",
             actual: "CREATE CONVERSION".into(),
         })),
+        Statement::CreateCollation(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE COLLATION".into(),
+        })),
         Statement::CreateTrigger(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE TRIGGER".into(),
@@ -930,6 +944,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::AlterSchemaOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "ALTER SCHEMA OWNER".into(),
+        })),
+        Statement::AlterSchemaRename(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER SCHEMA RENAME".into(),
         })),
         Statement::CreateDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
@@ -975,6 +993,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::DropConversion(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP CONVERSION".into(),
+        })),
+        Statement::DropCollation(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP COLLATION".into(),
         })),
         Statement::DropType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

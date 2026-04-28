@@ -4,8 +4,8 @@ use crate::backend::parser::{SqlTypeKind, parse_expr};
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
     DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_AM_RELATION_OID,
-    PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
-    PG_CONVERSION_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+    PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_COLLATION_RELATION_OID,
+    PG_CONSTRAINT_RELATION_OID, PG_CONVERSION_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
     PG_FOREIGN_SERVER_RELATION_OID, PG_LANGUAGE_RELATION_OID, PG_NAMESPACE_RELATION_OID,
     PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
     PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
@@ -96,6 +96,22 @@ pub fn relation_constraint_depend_rows(constraint_oid: u32, relation_oid: u32) -
     }];
     sort_pg_depend_rows(&mut rows);
     rows
+}
+
+pub fn sequence_owned_by_depend_row(
+    sequence_oid: u32,
+    relation_oid: u32,
+    attnum: i32,
+) -> PgDependRow {
+    PgDependRow {
+        classid: PG_CLASS_RELATION_OID,
+        objid: sequence_oid,
+        objsubid: 0,
+        refclassid: PG_CLASS_RELATION_OID,
+        refobjid: relation_oid,
+        refobjsubid: attnum,
+        deptype: DEPENDENCY_AUTO,
+    }
 }
 
 pub fn foreign_key_constraint_depend_rows(
@@ -832,6 +848,20 @@ pub fn conversion_depend_rows(row: &crate::include::catalog::PgConversionRow) ->
             deptype: DEPENDENCY_NORMAL,
         });
     }
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn collation_depend_rows(row: &crate::include::catalog::PgCollationRow) -> Vec<PgDependRow> {
+    let mut rows = vec![PgDependRow {
+        classid: PG_COLLATION_RELATION_OID,
+        objid: row.oid,
+        objsubid: 0,
+        refclassid: PG_NAMESPACE_RELATION_OID,
+        refobjid: row.collnamespace,
+        refobjsubid: 0,
+        deptype: DEPENDENCY_NORMAL,
+    }];
     sort_pg_depend_rows(&mut rows);
     rows
 }
