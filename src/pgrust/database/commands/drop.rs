@@ -2551,29 +2551,6 @@ impl Database {
                     &auth_catalog,
                 );
 
-                let mut relation_notice_rows = relation_rows
-                    .iter()
-                    .filter(|row| {
-                        (!row.relispartition
-                            || !partition_has_parent_in_schema(&catcache, row.oid, schema.oid))
-                            && matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'v')
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                relation_notice_rows.sort_by_key(|row| row.oid);
-                for relation in relation_notice_rows {
-                    notices.push(format!(
-                        "drop cascades to {} {}",
-                        drop_table_relation_kind_name(relation.relkind),
-                        drop_schema_display_relation_name(
-                            &catcache,
-                            &visible_namespaces,
-                            relation.relnamespace,
-                            &relation.relname
-                        )
-                    ));
-                }
-
                 let mut proc_rows = catcache
                     .proc_rows()
                     .into_iter()

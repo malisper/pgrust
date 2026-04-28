@@ -2,9 +2,9 @@ use super::*;
 use crate::backend::parser::analyze::multiranges::bind_maybe_multirange_overlap_or_adjacent;
 use crate::backend::parser::analyze::ranges::bind_maybe_range_overlap_or_adjacent;
 use crate::include::catalog::{
-    C_COLLATION_OID, TEXT_CMP_GE_PROC_OID, TEXT_CMP_GT_PROC_OID, TEXT_CMP_LE_PROC_OID,
-    TEXT_CMP_LT_PROC_OID, TEXT_PATTERN_GE_OPERATOR_OID, TEXT_PATTERN_GT_OPERATOR_OID,
-    TEXT_PATTERN_LE_OPERATOR_OID, TEXT_PATTERN_LT_OPERATOR_OID,
+    C_COLLATION_OID, RECORD_TYPE_OID, TEXT_CMP_GE_PROC_OID, TEXT_CMP_GT_PROC_OID,
+    TEXT_CMP_LE_PROC_OID, TEXT_CMP_LT_PROC_OID, TEXT_PATTERN_GE_OPERATOR_OID,
+    TEXT_PATTERN_GT_OPERATOR_OID, TEXT_PATTERN_LE_OPERATOR_OID, TEXT_PATTERN_LT_OPERATOR_OID,
 };
 use crate::include::nodes::primnodes::OpExpr;
 
@@ -2063,6 +2063,11 @@ pub(super) fn bind_catalog_binary_operator_expr(
         .ok_or_else(|| ParseError::UnsupportedType(sql_type_name(right_type)))?;
     let operator = catalog
         .operator_by_name_left_right(op, left_oid, right_oid)
+        .or_else(|| {
+            let left_oid = catalog_operator_lookup_oid_for_row_type(left_type, left_oid);
+            let right_oid = catalog_operator_lookup_oid_for_row_type(right_type, right_oid);
+            catalog.operator_by_name_left_right(op, left_oid, right_oid)
+        })
         .ok_or_else(|| ParseError::UndefinedOperator {
             op,
             left_type: sql_type_name(left_type),
@@ -2093,6 +2098,14 @@ pub(super) fn bind_catalog_binary_operator_expr(
             coerce_bound_expr(right_bound, raw_right_type, right_type),
         ],
     ))
+}
+
+fn catalog_operator_lookup_oid_for_row_type(sql_type: SqlType, oid: u32) -> u32 {
+    if matches!(sql_type.kind, SqlTypeKind::Composite | SqlTypeKind::Record) {
+        RECORD_TYPE_OID
+    } else {
+        oid
+    }
 }
 
 fn builtin_impl_for_catalog_proc(
