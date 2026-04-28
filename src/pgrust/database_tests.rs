@@ -16943,6 +16943,55 @@ fn comment_on_function_uses_pg_proc_description_rows() {
 }
 
 #[test]
+fn plpgsql_keyword_vars_and_comment_on_function_body() {
+    let base = temp_dir("plpgsql_keyword_vars_comment");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_return_var_test() returns int4 language plpgsql as $$
+         declare
+           return int4 := 42;
+         begin
+           return := return + 1;
+           return return;
+         end
+         $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_return_var_test()"),
+        vec![vec![Value::Int32(43)]]
+    );
+
+    db.execute(
+        1,
+        "create function plpgsql_comment_body_test() returns int4 language plpgsql as $$
+         declare
+           comment int4 := 21;
+         begin
+           comment := comment * 2;
+           comment on function plpgsql_comment_body_test() is 'body comment';
+           return comment;
+         end
+         $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_comment_body_test()"),
+        vec![vec![Value::Int32(42)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select obj_description('plpgsql_comment_body_test()'::regprocedure, 'pg_proc')"
+        ),
+        vec![vec![Value::Text("body comment".into())]]
+    );
+}
+
+#[test]
 fn comment_on_function_missing_signature_uses_canonical_type_names() {
     let base = temp_dir("comment_on_function_missing_sig");
     let db = Database::open(&base, 16).unwrap();

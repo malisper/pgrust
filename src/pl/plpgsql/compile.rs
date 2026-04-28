@@ -10,11 +10,12 @@ use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::parser::{
     ArraySubscript, Assignment, AssignmentTarget, AssignmentTargetIndirection, BoundCte,
     BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup,
-    CreateTableAsStatement, CreateTableStatement, CteBody, DeleteStatement, FromItem, InsertSource,
-    InsertStatement, OnConflictClause, OnConflictTarget, OrderByItem, ParseError, RawWindowFrame,
-    RawWindowFrameBound, RawWindowSpec, RawXmlExpr, SelectItem, SelectStatement, SlotScopeColumn,
-    SqlCallArgs, SqlCaseWhen, SqlExpr, SqlType, SqlTypeKind, Statement, UpdateStatement,
-    ValuesStatement, XmlTableColumn, bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
+    CommentOnFunctionStatement, CreateTableAsStatement, CreateTableStatement, CteBody,
+    DeleteStatement, FromItem, InsertSource, InsertStatement, OnConflictClause, OnConflictTarget,
+    OrderByItem, ParseError, RawWindowFrame, RawWindowFrameBound, RawWindowSpec, RawXmlExpr,
+    SelectItem, SelectStatement, SlotScopeColumn, SqlCallArgs, SqlCaseWhen, SqlExpr, SqlType,
+    SqlTypeKind, Statement, UpdateStatement, ValuesStatement, XmlTableColumn,
+    bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
     bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
     parse_statement, parse_type_name, pg_plan_query_with_outer_scopes_and_ctes,
     pg_plan_values_query_with_outer_scopes_and_ctes, resolve_raw_type_name,
@@ -350,6 +351,9 @@ pub(crate) enum CompiledStmt {
         name: String,
         value: Option<String>,
         is_local: bool,
+    },
+    CommentOnFunction {
+        stmt: CommentOnFunctionStatement,
     },
     GetDiagnostics {
         stacked: bool,
@@ -2234,6 +2238,7 @@ fn compile_exec_sql_stmt(
             value: stmt.value,
             is_local: stmt.is_local,
         }),
+        Statement::CommentOnFunction(stmt) => Ok(CompiledStmt::CommentOnFunction { stmt }),
         other => Err(ParseError::UnexpectedToken {
             expected: "PL/pgSQL SQL statement",
             actual: format!("{other:?}"),

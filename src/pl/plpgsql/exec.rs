@@ -1712,6 +1712,7 @@ fn exec_do_stmt(
         | CompiledStmt::MoveCursor { .. }
         | CompiledStmt::CloseCursor { .. }
         | CompiledStmt::UnsupportedTransactionCommand { .. }
+        | CompiledStmt::CommentOnFunction { .. }
         | CompiledStmt::SelectInto { .. }
         | CompiledStmt::ExecInsertInto { .. }
         | CompiledStmt::ExecInsert { .. }
@@ -2215,6 +2216,10 @@ fn exec_function_stmt(
             } else {
                 state.session_guc_writes.insert(normalized);
             }
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::CommentOnFunction { stmt } => {
+            exec_function_comment_on_function(stmt, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::GetDiagnostics { stacked, items } => {
@@ -3110,6 +3115,39 @@ fn exec_function_create_table(
     Ok(())
 }
 
+fn exec_function_comment_on_function(
+    stmt: &crate::backend::parser::CommentOnFunctionStatement,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let db = ctx.database.clone().ok_or_else(|| {
+        function_runtime_error(
+            "PL/pgSQL COMMENT ON FUNCTION requires database execution context",
+            None,
+            "0A000",
+        )
+    })?;
+    let xid = ctx.ensure_write_xid()?;
+    let cid = ctx.next_command_id;
+    let client_id = ctx.client_id;
+    let search_path = plpgsql_configured_search_path(ctx);
+    let effect_start = ctx.catalog_effects.len();
+    db.execute_comment_on_function_stmt_in_transaction_with_search_path(
+        client_id,
+        stmt,
+        xid,
+        cid,
+        search_path.as_deref(),
+        &mut ctx.catalog_effects,
+    )?;
+    let consumed_catalog_cids = ctx
+        .catalog_effects
+        .len()
+        .saturating_sub(effect_start)
+        .max(1);
+    advance_plpgsql_command_id_by(ctx, consumed_catalog_cids as u32);
+    Ok(())
+}
+
 fn exec_function_drop_index(
     stmt: &crate::backend::parser::DropIndexStatement,
     ctx: &mut ExecutorContext,
@@ -3438,6 +3476,26 @@ fn advance_plpgsql_command_id(ctx: &mut ExecutorContext) {
 fn advance_plpgsql_command_id_by(ctx: &mut ExecutorContext, count: CommandId) {
     ctx.next_command_id = ctx.next_command_id.saturating_add(count);
     ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(ctx.next_command_id);
+}
+
+fn plpgsql_configured_search_path(ctx: &ExecutorContext) -> Option<Vec<String>> {
+    let value = ctx.gucs.get("search_path")?;
+    if value.trim().eq_ignore_ascii_case("default") {
+        return None;
+    }
+    Some(
+        value
+            .split(',')
+            .map(|schema| {
+                schema
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_ascii_lowercase()
+            })
+            .filter(|schema| !schema.is_empty())
+            .collect(),
+    )
 }
 
 fn execute_function_query_result(
@@ -5747,6 +5805,7 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
         CompiledStmt::Perform { .. } => "PERFORM",
         CompiledStmt::DynamicExecute { .. } => "EXECUTE",
         CompiledStmt::SetGuc { .. } => "SQL statement",
+        CompiledStmt::CommentOnFunction { .. } => "SQL statement",
         CompiledStmt::GetDiagnostics { .. } => "GET DIAGNOSTICS",
         CompiledStmt::OpenCursor { .. } => "OPEN",
         CompiledStmt::FetchCursor { .. } => "FETCH",

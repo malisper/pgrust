@@ -22,7 +22,7 @@ exception_condition = { others_condition | sqlstate_condition | ident }
 others_condition = { kw_others }
 sqlstate_condition = { kw_sqlstate ~ sql_string }
 
-stmt = { nested_block_stmt | null_stmt | if_stmt | while_stmt | loop_stmt | foreach_stmt | for_stmt | exit_stmt | raise_stmt | assert_stmt | continue_stmt | return_query_stmt | return_next_stmt | return_stmt | perform_stmt | dynamic_execute_stmt | get_diagnostics_stmt | open_cursor_stmt | fetch_cursor_stmt | move_cursor_stmt | close_cursor_stmt | assign_stmt | exec_sql_stmt }
+stmt = { nested_block_stmt | null_stmt | if_stmt | while_stmt | loop_stmt | foreach_stmt | for_stmt | exit_stmt | raise_stmt | assert_stmt | continue_stmt | assign_stmt | return_query_stmt | return_next_stmt | return_stmt | perform_stmt | dynamic_execute_stmt | get_diagnostics_stmt | open_cursor_stmt | fetch_cursor_stmt | move_cursor_stmt | close_cursor_stmt | exec_sql_stmt }
 nested_block_stmt = { block ~ semi }
 null_stmt = { kw_null ~ semi }
 assign_stmt = { assign_target ~ assign_op ~ expr_until_semi ~ semi }

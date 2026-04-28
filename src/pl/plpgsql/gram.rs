@@ -2341,6 +2341,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_keyword_named_assignment_target() {
+        let block = parse_block(
+            "
+            begin
+                return := return + 1;
+                return return;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::Assign { target, expr } = unline(&block.statements[0]) else {
+            panic!("expected assignment statement");
+        };
+        assert_eq!(target, &AssignTarget::Name("return".into()));
+        assert_eq!(expr, "return + 1");
+        assert!(matches!(unline(&block.statements[1]), Stmt::Return { .. }));
+    }
+
+    #[test]
     fn parse_subscripted_assignment_target() {
         let block = parse_block(
             "
