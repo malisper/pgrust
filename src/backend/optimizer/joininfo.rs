@@ -874,6 +874,7 @@ mod tests {
             },
             inh: false,
             security_quals: Vec::new(),
+            permission: None,
             kind: RangeTblEntryKind::Result,
         }
     }

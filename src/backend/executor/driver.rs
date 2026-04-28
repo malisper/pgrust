@@ -101,6 +101,7 @@ pub fn execute_plan(plan: Plan, ctx: &mut ExecutorContext) -> Result<StatementRe
             PlannedStmt {
                 command_type: crate::include::executor::execdesc::CommandType::Select,
                 depends_on_row_security: false,
+                relation_privileges: Vec::new(),
                 plan_tree: plan,
                 subplans: Vec::new(),
                 ext_params: Vec::new(),

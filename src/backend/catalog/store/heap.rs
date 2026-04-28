@@ -7302,7 +7302,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, _new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if !matches!(entry.relkind, 'r' | 'p' | 'm') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'm' | 'v') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 entry.reloptions = reloptions;

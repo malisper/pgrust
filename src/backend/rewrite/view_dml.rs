@@ -74,8 +74,16 @@ pub(crate) struct ResolvedAutoViewTarget {
     pub(crate) combined_predicate: Option<Expr>,
     pub(crate) updatable_column_map: Vec<Option<usize>>,
     pub(crate) non_updatable_column_reasons: Vec<Option<NonUpdatableViewColumnReason>>,
+    pub(crate) privilege_contexts: Vec<ViewPrivilegeContext>,
     pub(crate) all_view_predicates: Vec<ViewCheck>,
     pub(crate) view_check_options: Vec<ViewCheck>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ViewPrivilegeContext {
+    pub(crate) relation: BoundRelation,
+    pub(crate) check_as_user_oid: Option<u32>,
+    pub(crate) column_map: Vec<Option<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +103,31 @@ pub(crate) enum ViewDmlRewriteError {
         reason: NonUpdatableViewColumnReason,
     },
     MultipleAssignments(String),
+}
+
+fn view_check_as_user_oid(catalog: &dyn CatalogLookup, view_oid: u32) -> Option<u32> {
+    let class_row = catalog.class_row_by_oid(view_oid)?;
+    let security_invoker = class_row.reloptions.as_ref().is_some_and(|options| {
+        options.iter().any(|option| {
+            let (name, value) = option
+                .split_once('=')
+                .map(|(name, value)| (name, value))
+                .unwrap_or((option.as_str(), "true"));
+            name.eq_ignore_ascii_case("security_invoker")
+                && matches!(value.to_ascii_lowercase().as_str(), "true" | "on")
+        })
+    });
+    (!security_invoker).then_some(class_row.relowner)
+}
+
+fn compose_column_maps(
+    outer_to_inner: &[Option<usize>],
+    inner_to_relation: &[Option<usize>],
+) -> Vec<Option<usize>> {
+    outer_to_inner
+        .iter()
+        .map(|inner| inner.and_then(|index| inner_to_relation.get(index).copied().flatten()))
+        .collect()
 }
 
 impl ViewDmlRewriteError {
@@ -167,12 +200,17 @@ pub(crate) fn resolve_auto_updatable_view_target(
             });
         }
         return Ok(ResolvedAutoViewTarget {
-            base_relation,
+            base_relation: base_relation.clone(),
             base_inh: analyzed.base_inh,
             visible_output_exprs: analyzed.output_exprs,
             combined_predicate: query.where_qual.clone(),
-            updatable_column_map: analyzed.updatable_column_map,
+            updatable_column_map: analyzed.updatable_column_map.clone(),
             non_updatable_column_reasons: analyzed.non_updatable_column_reasons,
+            privilege_contexts: vec![ViewPrivilegeContext {
+                relation: base_relation,
+                check_as_user_oid: view_check_as_user_oid(catalog, relation_oid),
+                column_map: analyzed.updatable_column_map,
+            }],
             all_view_predicates,
             view_check_options,
         });
@@ -185,6 +223,7 @@ pub(crate) fn resolve_auto_updatable_view_target(
 
     let mut next_views = expanded_views.to_vec();
     next_views.push(relation_oid);
+    let nested_view_relation = base_relation.clone();
     let nested = resolve_auto_updatable_view_target(
         analyzed.base_relation_oid,
         &base_relation.desc,
@@ -199,6 +238,7 @@ pub(crate) fn resolve_auto_updatable_view_target(
         combined_predicate: nested_combined_predicate,
         updatable_column_map: nested_updatable_column_map,
         non_updatable_column_reasons: nested_non_updatable_column_reasons,
+        privilege_contexts: nested_privilege_contexts,
         all_view_predicates: nested_all_view_predicates,
         view_check_options: nested_view_check_options,
     } = nested;
@@ -233,11 +273,13 @@ pub(crate) fn resolve_auto_updatable_view_target(
                 &nested_visible_output_exprs,
             ),
         });
-    let mut updatable_column_map = Vec::with_capacity(analyzed.updatable_column_map.len());
+    let current_updatable_column_map = analyzed.updatable_column_map.clone();
+    let mut updatable_column_map = Vec::with_capacity(current_updatable_column_map.len());
     let mut non_updatable_column_reasons =
         Vec::with_capacity(analyzed.non_updatable_column_reasons.len());
-    for (column, reason) in analyzed
-        .updatable_column_map
+    for (column, reason) in current_updatable_column_map
+        .iter()
+        .copied()
         .into_iter()
         .zip(analyzed.non_updatable_column_reasons.into_iter())
     {
@@ -271,6 +313,17 @@ pub(crate) fn resolve_auto_updatable_view_target(
         local_view_check,
         view_check_option(catalog, relation_oid),
     );
+    let mut privilege_contexts = vec![ViewPrivilegeContext {
+        relation: nested_view_relation,
+        check_as_user_oid: view_check_as_user_oid(catalog, relation_oid),
+        column_map: current_updatable_column_map.clone(),
+    }];
+    privilege_contexts.extend(nested_privilege_contexts.into_iter().map(|context| {
+        ViewPrivilegeContext {
+            column_map: compose_column_maps(&current_updatable_column_map, &context.column_map),
+            ..context
+        }
+    }));
 
     Ok(ResolvedAutoViewTarget {
         base_relation,
@@ -279,6 +332,7 @@ pub(crate) fn resolve_auto_updatable_view_target(
         combined_predicate,
         updatable_column_map,
         non_updatable_column_reasons,
+        privilege_contexts,
         all_view_predicates,
         view_check_options,
     })

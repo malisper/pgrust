@@ -103,6 +103,7 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
                 desc: child.desc.clone(),
                 inh: false,
                 security_quals: Vec::new(),
+                permission: None,
                 kind: RangeTblEntryKind::Relation {
                     rel: child.rel,
                     relation_oid: child.relation_oid,

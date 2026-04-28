@@ -9630,6 +9630,280 @@ fn relation_privileges_gate_select_dml_copy_and_locking() {
 }
 
 #[test]
+fn normal_view_select_uses_view_owner_for_base_privileges() {
+    fn assert_table_permission_denied(result: Result<StatementResult, ExecError>, table: &str) {
+        match result {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, format!("permission denied for table {table}"));
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected table permission error for {table}, got {other:?}"),
+        }
+    }
+
+    let dir = temp_dir("normal_view_owner_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role view_tenant login")
+        .unwrap();
+    session
+        .execute(&db, "create table view_base(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into view_base values (1)")
+        .unwrap();
+    session
+        .execute(&db, "create view view_owner_v as select id from view_base")
+        .unwrap();
+    session
+        .execute(&db, "grant select on view_owner_v to view_tenant")
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization view_tenant")
+        .unwrap();
+    assert_table_permission_denied(session.execute(&db, "select * from view_base"), "view_base");
+    session.execute(&db, "select * from view_owner_v").unwrap();
+}
+
+#[test]
+fn view_update_column_privileges_are_checked_on_view_columns() {
+    fn assert_view_permission_denied(result: Result<StatementResult, ExecError>, view: &str) {
+        match result {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, format!("permission denied for view {view}"));
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected view permission error for {view}, got {other:?}"),
+        }
+    }
+
+    let dir = temp_dir("view_update_column_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role view_updater login")
+        .unwrap();
+    session
+        .execute(&db, "create table view_update_base(a int4, b text, c int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into view_update_base values (1, 'one', 10)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view view_update_v as select b as bb, c as cc, a as aa from view_update_base",
+        )
+        .unwrap();
+    session
+        .execute(&db, "grant select on view_update_v to view_updater")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant update (bb, cc) on view_update_v to view_updater",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization view_updater")
+        .unwrap();
+    session
+        .execute(&db, "update view_update_v set bb = bb, cc = cc")
+        .unwrap();
+    assert_view_permission_denied(
+        session.execute(&db, "update view_update_v set aa = aa"),
+        "view_update_v",
+    );
+}
+
+#[test]
+fn security_invoker_view_select_requires_caller_base_privileges() {
+    fn assert_table_permission_denied(result: Result<StatementResult, ExecError>, table: &str) {
+        match result {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, format!("permission denied for table {table}"));
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected table permission error for {table}, got {other:?}"),
+        }
+    }
+
+    let dir = temp_dir("security_invoker_view_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role invoker_tenant login")
+        .unwrap();
+    session
+        .execute(&db, "create table invoker_base(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into invoker_base values (1)")
+        .unwrap();
+    session
+        .execute(&db, "create view invoker_v as select id from invoker_base")
+        .unwrap();
+    session
+        .execute(&db, "alter view invoker_v set (security_invoker = true)")
+        .unwrap();
+    session
+        .execute(&db, "grant select on invoker_v to invoker_tenant")
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization invoker_tenant")
+        .unwrap();
+    assert_table_permission_denied(
+        session.execute(&db, "select * from invoker_v"),
+        "invoker_base",
+    );
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant select on invoker_base to invoker_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization invoker_tenant")
+        .unwrap();
+    session.execute(&db, "select * from invoker_v").unwrap();
+}
+
+#[test]
+fn ordinary_view_over_security_invoker_view_checks_inner_base_as_caller() {
+    fn assert_table_permission_denied(result: Result<StatementResult, ExecError>, table: &str) {
+        match result {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, format!("permission denied for table {table}"));
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected table permission error for {table}, got {other:?}"),
+        }
+    }
+
+    let dir = temp_dir("nested_security_invoker_view_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role nested_tenant login")
+        .unwrap();
+    session
+        .execute(&db, "create table nested_base(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into nested_base values (1)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view nested_inner_v as select id from nested_base",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter view nested_inner_v set (security_invoker = true)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view nested_outer_v as select id from nested_inner_v",
+        )
+        .unwrap();
+    session
+        .execute(&db, "grant select on nested_outer_v to nested_tenant")
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization nested_tenant")
+        .unwrap();
+    assert_table_permission_denied(
+        session.execute(&db, "select * from nested_outer_v"),
+        "nested_base",
+    );
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant select on nested_base to nested_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization nested_tenant")
+        .unwrap();
+    session
+        .execute(&db, "select * from nested_outer_v")
+        .unwrap();
+}
+
+#[test]
+fn nested_view_update_checks_intermediate_view_privileges_before_base_table() {
+    let dir = temp_dir("nested_view_update_intermediate_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role nested_owner login")
+        .unwrap();
+    session
+        .execute(&db, "create role nested_updater login")
+        .unwrap();
+    session
+        .execute(&db, "create table nested_update_base(a int4, b text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into nested_update_base values (1, 'one')")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization nested_owner")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view nested_update_inner_v as select * from nested_update_base",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant select on nested_update_inner_v to nested_updater",
+        )
+        .unwrap();
+    session
+        .execute(&db, "set session authorization nested_updater")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view nested_update_outer_v as select * from nested_update_inner_v",
+        )
+        .unwrap();
+
+    match session.execute(&db, "update nested_update_outer_v set b = b") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for view nested_update_inner_v");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected inner view permission error, got {other:?}"),
+    }
+}
+
+#[test]
 fn merge_returning_projects_action_old_new_and_source() {
     let dir = temp_dir("merge_returning_projects_action");
     let db = Database::open(&dir, 128).unwrap();
@@ -10171,6 +10445,23 @@ fn create_view_persists_security_reloptions() {
             crate::include::nodes::datum::ArrayValue::from_1d(vec![
                 Value::Text("security_barrier=true".into()),
                 Value::Text("security_invoker=false".into()),
+            ])
+            .with_element_type_oid(TEXT_TYPE_OID)
+        )]]
+    );
+
+    db.execute(1, "alter view secure_items set (security_invoker=true)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'secure_items'",
+        ),
+        vec![vec![Value::PgArray(
+            crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                Value::Text("security_barrier=true".into()),
+                Value::Text("security_invoker=true".into()),
             ])
             .with_element_type_oid(TEXT_TYPE_OID)
         )]]

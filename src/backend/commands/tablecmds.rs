@@ -84,7 +84,10 @@ use crate::include::nodes::execnodes::*;
 use crate::include::nodes::parsenodes::{IndexColumnDef, RelOption};
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
-use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, expr_sql_type_hint};
+use crate::include::nodes::primnodes::{
+    QueryColumn, RelationPrivilegeMask, RelationPrivilegeRequirement, TargetEntry,
+    expr_sql_type_hint,
+};
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::database::commands::privilege::{
     acl_grants_privilege, effective_acl_grantee_names,
@@ -4692,12 +4695,7 @@ pub fn execute_insert(
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_insert(stmt, catalog);
-    check_relation_column_privileges(
-        ctx,
-        stmt.relation_oid,
-        'a',
-        stmt.target_columns.iter().map(|target| target.column_index),
-    )?;
+    check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
     for subplan in &stmt.subplans {
         check_plan_relation_privileges(subplan, ctx, 'r')?;
     }
@@ -5153,10 +5151,33 @@ fn auth_state_from_executor(ctx: &ExecutorContext) -> AuthState {
     auth
 }
 
+fn auth_state_for_privilege_check(
+    ctx: &ExecutorContext,
+    check_as_user_oid: Option<u32>,
+) -> AuthState {
+    match check_as_user_oid {
+        Some(role_oid) => {
+            let mut auth = AuthState::default();
+            auth.assume_authenticated_user(role_oid);
+            auth
+        }
+        None => auth_state_from_executor(ctx),
+    }
+}
+
 pub(crate) fn relation_acl_allows(
     ctx: &ExecutorContext,
     relation_oid: u32,
     privilege: char,
+) -> Result<bool, ExecError> {
+    relation_acl_allows_as(ctx, relation_oid, privilege, None)
+}
+
+fn relation_acl_allows_as(
+    ctx: &ExecutorContext,
+    relation_oid: u32,
+    privilege: char,
+    check_as_user_oid: Option<u32>,
 ) -> Result<bool, ExecError> {
     let catalog = ctx
         .catalog
@@ -5177,10 +5198,10 @@ pub(crate) fn relation_acl_allows(
                 sqlstate: "XX000",
             })?;
     let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
-    let auth = auth_state_from_executor(ctx);
+    let auth = auth_state_for_privilege_check(ctx, check_as_user_oid);
     if auth.has_effective_membership(class_row.relowner, &auth_catalog)
         || auth_catalog
-            .role_by_oid(ctx.current_user_oid)
+            .role_by_oid(auth.current_user_oid())
             .is_some_and(|role| role.rolsuper)
     {
         return Ok(true);
@@ -5213,6 +5234,16 @@ pub(crate) fn relation_or_all_column_acls_allow(
     privilege: char,
     column_indices: impl IntoIterator<Item = usize>,
 ) -> Result<bool, ExecError> {
+    relation_or_all_column_acls_allow_as(ctx, relation_oid, privilege, column_indices, None)
+}
+
+fn relation_or_all_column_acls_allow_as(
+    ctx: &ExecutorContext,
+    relation_oid: u32,
+    privilege: char,
+    column_indices: impl IntoIterator<Item = usize>,
+    check_as_user_oid: Option<u32>,
+) -> Result<bool, ExecError> {
     let catalog = ctx
         .catalog
         .as_ref()
@@ -5232,10 +5263,10 @@ pub(crate) fn relation_or_all_column_acls_allow(
                 sqlstate: "XX000",
             })?;
     let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
-    let auth = auth_state_from_executor(ctx);
+    let auth = auth_state_for_privilege_check(ctx, check_as_user_oid);
     if auth.has_effective_membership(class_row.relowner, &auth_catalog)
         || auth_catalog
-            .role_by_oid(ctx.current_user_oid)
+            .role_by_oid(auth.current_user_oid())
             .is_some_and(|role| role.rolsuper)
     {
         return Ok(true);
@@ -5279,6 +5310,95 @@ pub(crate) fn relation_permission_denied(ctx: &ExecutorContext, relation_oid: u3
         hint: None,
         sqlstate: "42501",
     }
+}
+
+fn relation_permission_denied_for_requirement(
+    requirement: &RelationPrivilegeRequirement,
+) -> ExecError {
+    let relation_kind = if requirement.relkind == 'v' {
+        "view"
+    } else {
+        "table"
+    };
+    ExecError::DetailedError {
+        message: format!(
+            "permission denied for {relation_kind} {}",
+            requirement.relation_name
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    }
+}
+
+fn requirement_privilege_allows(
+    ctx: &ExecutorContext,
+    requirement: &RelationPrivilegeRequirement,
+    privilege: char,
+    column_indices: &[usize],
+) -> Result<bool, ExecError> {
+    if column_indices.is_empty() {
+        relation_acl_allows_as(
+            ctx,
+            requirement.relation_oid,
+            privilege,
+            requirement.check_as_user_oid,
+        )
+    } else {
+        relation_or_all_column_acls_allow_as(
+            ctx,
+            requirement.relation_oid,
+            privilege,
+            column_indices.iter().copied(),
+            requirement.check_as_user_oid,
+        )
+    }
+}
+
+fn check_relation_privilege_requirement(
+    ctx: &ExecutorContext,
+    requirement: &RelationPrivilegeRequirement,
+) -> Result<(), ExecError> {
+    let RelationPrivilegeMask {
+        select,
+        insert,
+        update,
+        delete,
+    } = requirement.required;
+    let checks = [
+        (select, 'r', requirement.selected_columns.as_slice()),
+        (insert, 'a', requirement.inserted_columns.as_slice()),
+        (update, 'w', requirement.updated_columns.as_slice()),
+        (delete, 'd', &[] as &[usize]),
+    ];
+    for (enabled, privilege, columns) in checks {
+        if enabled && !requirement_privilege_allows(ctx, requirement, privilege, columns)? {
+            return Err(relation_permission_denied_for_requirement(requirement));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn check_relation_privilege_requirements(
+    ctx: &ExecutorContext,
+    requirements: &[RelationPrivilegeRequirement],
+) -> Result<(), ExecError> {
+    for requirement in requirements {
+        check_relation_privilege_requirement(ctx, requirement)?;
+    }
+    Ok(())
+}
+
+fn check_relation_privilege_requirements_for_update(
+    ctx: &ExecutorContext,
+    requirements: &[RelationPrivilegeRequirement],
+) -> Result<(), ExecError> {
+    for requirement in requirements {
+        if !requirement_privilege_allows(ctx, requirement, 'w', &[])? {
+            return Err(relation_permission_denied_for_requirement(requirement));
+        }
+    }
+    Ok(())
 }
 
 fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
@@ -5423,14 +5543,11 @@ pub(crate) fn check_plan_relation_privileges(
 fn check_planned_stmt_relation_privileges_except(
     planned_stmt: &PlannedStmt,
     ctx: &ExecutorContext,
-    privilege: char,
     excluded_oids: &BTreeSet<u32>,
 ) -> Result<(), ExecError> {
-    let mut relation_oids = BTreeSet::new();
-    collect_planned_stmt_relation_oids(planned_stmt, &mut relation_oids);
-    for relation_oid in relation_oids {
-        if !excluded_oids.contains(&relation_oid) {
-            check_relation_privilege(ctx, relation_oid, privilege)?;
+    for requirement in &planned_stmt.relation_privileges {
+        if !excluded_oids.contains(&requirement.relation_oid) {
+            check_relation_privilege_requirement(ctx, requirement)?;
         }
     }
     Ok(())
@@ -5455,15 +5572,9 @@ fn check_planned_stmt_select_privileges_inner(
     ctx: &ExecutorContext,
     require_update: bool,
 ) -> Result<(), ExecError> {
-    let mut relation_oids = BTreeSet::new();
-    collect_planned_stmt_relation_oids(planned_stmt, &mut relation_oids);
-    for relation_oid in &relation_oids {
-        check_relation_privilege(ctx, *relation_oid, 'r')?;
-    }
+    check_relation_privilege_requirements(ctx, &planned_stmt.relation_privileges)?;
     if require_update || plan_contains_lock_rows(&planned_stmt.plan_tree) {
-        for relation_oid in relation_oids {
-            check_relation_privilege(ctx, relation_oid, 'w')?;
-        }
+        check_relation_privilege_requirements_for_update(ctx, &planned_stmt.relation_privileges)?;
     }
     Ok(())
 }
@@ -5473,30 +5584,9 @@ fn check_merge_privileges(
     input_plan: &PlannedStmt,
     ctx: &ExecutorContext,
 ) -> Result<(), ExecError> {
-    if !relation_acl_allows(ctx, stmt.relation_oid, 'r')? {
-        return Err(relation_permission_denied(ctx, stmt.relation_oid));
-    }
-    for clause in &stmt.when_clauses {
-        let privilege = match clause.action {
-            BoundMergeAction::DoNothing => None,
-            BoundMergeAction::Insert { .. } => Some('a'),
-            BoundMergeAction::Update { .. } => Some('w'),
-            BoundMergeAction::Delete => Some('d'),
-        };
-        if let Some(privilege) = privilege
-            && !relation_acl_allows(ctx, stmt.relation_oid, privilege)?
-        {
-            return Err(relation_permission_denied(ctx, stmt.relation_oid));
-        }
-    }
-    let mut source_oids = BTreeSet::new();
-    collect_plan_relation_oids(&input_plan.plan_tree, &mut source_oids);
-    source_oids.remove(&stmt.relation_oid);
-    for relation_oid in source_oids {
-        if !relation_acl_allows(ctx, relation_oid, 'r')? {
-            return Err(relation_permission_denied(ctx, relation_oid));
-        }
-    }
+    check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
+    let excluded_oids = BTreeSet::from([stmt.relation_oid]);
+    check_planned_stmt_relation_privileges_except(input_plan, ctx, &excluded_oids)?;
     Ok(())
 }
 
@@ -8025,22 +8115,12 @@ pub fn execute_update_with_waiter(
         .iter()
         .map(|target| target.relation_oid)
         .collect::<BTreeSet<_>>();
-    for target in &stmt.targets {
-        check_relation_column_privileges(
-            ctx,
-            target.relation_oid,
-            'w',
-            target
-                .assignments
-                .iter()
-                .map(|assignment| assignment.column_index),
-        )?;
-    }
+    check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
     for subplan in &stmt.subplans {
         check_plan_relation_privileges(subplan, ctx, 'r')?;
     }
     if let Some(input_plan) = &stmt.input_plan {
-        check_planned_stmt_relation_privileges_except(input_plan, ctx, 'r', &target_oids)?;
+        check_planned_stmt_relation_privileges_except(input_plan, ctx, &target_oids)?;
     }
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
@@ -8676,14 +8756,7 @@ pub fn execute_delete_with_waiter(
     )>,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_delete(stmt, catalog);
-    let target_oids = stmt
-        .targets
-        .iter()
-        .map(|target| target.relation_oid)
-        .collect::<BTreeSet<_>>();
-    for relation_oid in &target_oids {
-        check_relation_privilege(ctx, *relation_oid, 'd')?;
-    }
+    check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
     for subplan in &stmt.subplans {
         check_plan_relation_privileges(subplan, ctx, 'r')?;
     }
