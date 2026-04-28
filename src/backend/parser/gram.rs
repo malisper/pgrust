@@ -4247,7 +4247,14 @@ pub fn parse_expr(sql: &str) -> Result<SqlExpr, ParseError> {
 
 pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
     let sql = strip_sql_comments_preserving_layout(sql);
-    let lowered = sql.trim().to_ascii_lowercase();
+    let trimmed = sql.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.ends_with("%type") || lowered.ends_with("%rowtype") {
+        return Ok(RawTypeName::Named {
+            name: trimmed.to_string(),
+            array_bounds: 0,
+        });
+    }
     match lowered.as_str() {
         "int2vector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int2Vector))),
         "oidvector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::OidVector))),

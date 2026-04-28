@@ -48180,6 +48180,74 @@ fn plpgsql_returned_refcursor_is_fetchable() {
 }
 
 #[test]
+fn plpgsql_partitioned_table_percent_type_signatures() {
+    let dir = temp_dir("plpgsql_partitioned_percent_type");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table pl_percent_parted (a int4, b text) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pl_percent_parted_1 partition of pl_percent_parted for values in (1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pl_percent_parted_2 partition of pl_percent_parted for values in (2)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into pl_percent_parted values (1, 'Row 1'), (2, 'Row 2')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function pl_percent_get(pl_percent_parted.a%type)
+         returns pl_percent_parted language plpgsql as $$
+         declare
+           a_val pl_percent_parted.a%TYPE;
+           result pl_percent_parted%ROWTYPE;
+         begin
+           a_val := $1;
+           select * into result from pl_percent_parted where a = a_val;
+           return result;
+         end
+         $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_percent_get(1) as t"),
+        vec![vec![Value::Int32(1), Value::Text("Row 1".into())]]
+    );
+
+    db.execute(
+        1,
+        "create function pl_percent_list()
+         returns setof public.pl_percent_parted.a%TYPE language plpgsql as $$
+         declare
+           row public.pl_percent_parted%ROWTYPE;
+           a_val public.pl_percent_parted.a%TYPE;
+         begin
+           for row in select * from public.pl_percent_parted order by a loop
+             a_val := row.a;
+             return next a_val;
+           end loop;
+           return;
+         end
+         $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_percent_list() as t"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
 fn drop_function_ignores_argument_names_and_out_only_modes() {
     let dir = temp_dir("drop_function_mode_signature");
     let db = Database::open(&dir, 64).unwrap();

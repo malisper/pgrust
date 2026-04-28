@@ -5914,6 +5914,13 @@ fn parse_record_and_named_type_names() {
             array_bounds: 0,
         }
     );
+    assert_eq!(
+        parse_type_name("public.partitioned_table.a%TYPE").unwrap(),
+        RawTypeName::Named {
+            name: "public.partitioned_table.a%TYPE".into(),
+            array_bounds: 0,
+        }
+    );
 }
 
 #[test]
