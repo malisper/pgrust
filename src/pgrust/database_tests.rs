@@ -17250,6 +17250,48 @@ fn plpgsql_variadic_parameter_is_visible_as_positional_array() {
 }
 
 #[test]
+fn plpgsql_get_diagnostics_pg_routine_oid_reports_current_function() {
+    let base = temp_dir("plpgsql_pg_routine_oid");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_current_routine_oid(arg text) returns regprocedure language plpgsql as $$
+         declare fn_oid regprocedure;
+         begin
+           get diagnostics fn_oid = pg_routine_oid;
+           return fn_oid;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_current_routine_oid('x')::text"),
+        vec![vec![Value::Text(
+            "plpgsql_current_routine_oid(text)".into()
+        )]]
+    );
+
+    clear_notices();
+    db.execute(
+        1,
+        "do $$
+         declare fn_oid oid;
+         begin
+           get diagnostics fn_oid = pg_routine_oid;
+           raise notice 'pg_routine_oid = %', fn_oid;
+         end
+         $$",
+    )
+    .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![String::from("pg_routine_oid = 0")]
+    );
+}
+
+#[test]
 fn comment_on_function_missing_signature_uses_canonical_type_names() {
     let base = temp_dir("comment_on_function_missing_sig");
     let db = Database::open(&base, 16).unwrap();

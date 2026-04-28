@@ -48,6 +48,7 @@ pub(crate) struct CompiledBlock {
 #[derive(Debug, Clone)]
 pub struct CompiledFunction {
     pub(crate) name: String,
+    pub(crate) proc_oid: u32,
     pub(crate) proconfig: Option<Vec<String>>,
     pub(crate) print_strict_params: Option<bool>,
     pub(crate) parameter_slots: Vec<CompiledFunctionSlot>,
@@ -839,6 +840,7 @@ pub(crate) fn compile_do_function(
     let body = compile_block(block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
         name: "inline_code_block".into(),
+        proc_oid: 0,
         proconfig: None,
         print_strict_params: None,
         parameter_slots: Vec::new(),
@@ -968,6 +970,7 @@ pub(crate) fn compile_function_from_proc(
         .collect();
     Ok(CompiledFunction {
         name: row.proname.clone(),
+        proc_oid: row.oid,
         proconfig: row.proconfig.clone(),
         print_strict_params,
         parameter_slots,
@@ -1029,6 +1032,7 @@ pub(crate) fn compile_trigger_function_from_proc(
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
         name: row.proname.clone(),
+        proc_oid: row.oid,
         proconfig: row.proconfig.clone(),
         print_strict_params,
         parameter_slots: Vec::new(),

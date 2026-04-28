@@ -1748,6 +1748,7 @@ fn exec_do_stmt(
                 let value = match item.to_ascii_lowercase().as_str() {
                     "row_count" => Value::Int64(0),
                     "found" => Value::Bool(false),
+                    "pg_routine_oid" => Value::Int64(0),
                     _ => diagnostic_text(None),
                 };
                 values[target.slot] = cast_value(value, target.ty)?;
@@ -2319,7 +2320,7 @@ fn exec_function_stmt(
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::GetDiagnostics { stacked, items } => {
-            exec_function_get_diagnostics(*stacked, items, state)?;
+            exec_function_get_diagnostics(*stacked, items, compiled, state)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::OpenCursor {
@@ -4290,6 +4291,7 @@ fn exec_function_close_cursor(slot: usize, state: &mut FunctionState) -> Result<
 fn exec_function_get_diagnostics(
     stacked: bool,
     items: &[(CompiledSelectIntoTarget, String)],
+    compiled: &CompiledFunction,
     state: &mut FunctionState,
 ) -> Result<(), ExecError> {
     if stacked && state.current_exception.is_none() {
@@ -4321,6 +4323,7 @@ fn exec_function_get_diagnostics(
             match item.as_str() {
                 "row_count" => Value::Int64(0),
                 "found" => Value::Bool(false),
+                "pg_routine_oid" => Value::Int64(compiled.proc_oid as i64),
                 _ => diagnostic_text(None),
             }
         };
