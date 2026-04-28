@@ -33,8 +33,8 @@ use crate::backend::executor::jsonb::{
 };
 use crate::backend::libpq::pqformat::{FloatFormatOptions, format_float4_text, format_float8_text};
 use crate::backend::parser::{
-    CatalogLookup, ParseError, RawTypeName, SqlType, SqlTypeKind, parse_type_name,
-    resolve_raw_type_name,
+    CatalogLookup, DomainConstraintLookupKind, ParseError, RawTypeName, SqlType, SqlTypeKind,
+    parse_type_name, resolve_raw_type_name,
 };
 use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, IntervalStyle};
 use crate::backend::utils::time::date::{
@@ -3789,43 +3789,62 @@ fn enforce_domain_check(
     if matches!(value, Value::Null) {
         return Ok(value);
     }
-    let Some(check) = domain.check.as_deref() else {
+    let mut checks = domain
+        .constraints
+        .iter()
+        .filter(|constraint| {
+            constraint.enforced && matches!(constraint.kind, DomainConstraintLookupKind::Check)
+        })
+        .filter_map(|constraint| {
+            constraint
+                .expr
+                .as_deref()
+                .map(|expr| (constraint.name.clone(), expr))
+        })
+        .collect::<Vec<_>>();
+    if checks.is_empty()
+        && let Some(check) = domain.check.as_deref()
+    {
+        checks.push((format!("{}_check", domain.name), check));
+    }
+    if checks.is_empty() {
         return Ok(value);
     };
-    // :HACK: Dynamic domain checks do not yet lower to reusable executor
-    // expressions in cast-only contexts. Keep the jsonb regression shapes here
-    // until domain constraint evaluation is shared with table insertion.
-    if let Some(limit) = parse_upper_less_than_domain_check(check) {
-        if domain_upper_less_than_limit(&value, limit) {
-            return Ok(value);
+
+    for (constraint_name, check) in checks {
+        // :HACK: Dynamic domain checks do not yet lower to reusable executor
+        // expressions in cast-only contexts. Keep the jsonb regression shapes here
+        // until domain constraint evaluation is shared with table insertion.
+        if let Some(limit) = parse_upper_less_than_domain_check(check) {
+            if domain_upper_less_than_limit(&value, limit) {
+                continue;
+            }
+            return Err(domain_check_violation_named(ty, catalog, &constraint_name));
         }
-        return Err(domain_check_violation(ty, catalog));
-    }
-    if let Some(disallowed) = parse_not_equal_domain_check(check)
-        && !domain_value_equals(&value, &disallowed)
-    {
-        return Ok(value);
-    }
-    if parse_not_equal_domain_check(check).is_some() {
-        return Err(domain_check_violation(ty, catalog));
-    }
-    if let Some(limit) = parse_greater_than_domain_check(check) {
-        if domain_greater_than_limit(&value, limit) {
-            return Ok(value);
+        if let Some(disallowed) = parse_not_equal_domain_check(check) {
+            if !domain_value_equals(&value, &disallowed) {
+                continue;
+            }
+            return Err(domain_check_violation_named(ty, catalog, &constraint_name));
         }
-        return Err(domain_check_violation(ty, catalog));
-    }
-    if let Some((dim, expected)) = parse_array_length_equal_domain_check(check) {
-        if domain_array_length_equals(&value, dim, expected) {
-            return Ok(value);
+        if let Some(limit) = parse_greater_than_domain_check(check) {
+            if domain_greater_than_limit(&value, limit) {
+                continue;
+            }
+            return Err(domain_check_violation_named(ty, catalog, &constraint_name));
         }
-        return Err(domain_check_violation(ty, catalog));
-    }
-    if let Some((left, right)) = parse_composite_field_lte_domain_check(check) {
-        if domain_composite_field_lte(&value, &left, &right) {
-            return Ok(value);
+        if let Some((dim, expected)) = parse_array_length_equal_domain_check(check) {
+            if domain_array_length_equals(&value, dim, expected) {
+                continue;
+            }
+            return Err(domain_check_violation_named(ty, catalog, &constraint_name));
         }
-        return Err(domain_check_violation(ty, catalog));
+        if let Some((left, right)) = parse_composite_field_lte_domain_check(check) {
+            if domain_composite_field_lte(&value, &left, &right) {
+                continue;
+            }
+            return Err(domain_check_violation_named(ty, catalog, &constraint_name));
+        }
     }
     Ok(value)
 }
@@ -3852,9 +3871,25 @@ fn domain_check_violation(ty: SqlType, catalog: &dyn CatalogLookup) -> ExecError
         .type_by_oid(ty.type_oid)
         .map(|row| row.typname)
         .unwrap_or_else(|| ty.type_oid.to_string());
+    domain_check_violation_for_name(&domain_name, &format!("{domain_name}_check"))
+}
+
+fn domain_check_violation_named(
+    ty: SqlType,
+    catalog: &dyn CatalogLookup,
+    constraint_name: &str,
+) -> ExecError {
+    let domain_name = catalog
+        .type_by_oid(ty.type_oid)
+        .map(|row| row.typname)
+        .unwrap_or_else(|| ty.type_oid.to_string());
+    domain_check_violation_for_name(&domain_name, constraint_name)
+}
+
+fn domain_check_violation_for_name(domain_name: &str, constraint_name: &str) -> ExecError {
     ExecError::DetailedError {
         message: format!(
-            "value for domain {domain_name} violates check constraint \"{domain_name}_check\""
+            "value for domain {domain_name} violates check constraint \"{constraint_name}\""
         ),
         detail: None,
         hint: None,

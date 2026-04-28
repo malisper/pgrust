@@ -42185,6 +42185,147 @@ fn dynamic_domain_and_range_creation_after_user_range_table() {
 }
 
 #[test]
+fn alter_domain_constraints_update_catalog_and_enforcement() {
+    let dir = temp_dir("alter_domain_constraints");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create domain things as int").unwrap();
+    db.execute(1, "create table thethings (stuff things)")
+        .unwrap();
+    db.execute(1, "insert into thethings values (55)").unwrap();
+
+    match db.execute(
+        1,
+        "alter domain things add constraint meow check (value < 11)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "column \"stuff\" of table \"thethings\" contains values that violate the new constraint"
+            );
+        }
+        other => panic!("expected domain validation error, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "alter domain things add constraint meow check (value < 11) not valid",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, contype, convalidated, conbin \
+             from pg_constraint \
+             where contypid = 'things'::regtype \
+             order by conname",
+        ),
+        vec![vec![
+            Value::Text("meow".into()),
+            Value::Text("c".into()),
+            Value::Bool(false),
+            Value::Text("value < 11".into()),
+        ]],
+    );
+    match db.execute(1, "insert into thethings values (12)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain things violates check constraint \"meow\""
+            );
+        }
+        other => panic!("expected domain check violation, got {other:?}"),
+    }
+
+    db.execute(1, "update thethings set stuff = 10").unwrap();
+    db.execute(1, "alter domain things validate constraint meow")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select convalidated from pg_constraint where contypid = 'things'::regtype and conname = 'meow'",
+        ),
+        vec![vec![Value::Bool(true)]],
+    );
+
+    db.execute(1, "alter domain things rename constraint meow to bark")
+        .unwrap();
+    db.execute(1, "alter domain things set not null").unwrap();
+    db.execute(1, "alter domain things drop constraint if exists missing")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, contype from pg_constraint \
+             where contypid = 'things'::regtype order by conname",
+        ),
+        vec![
+            vec![Value::Text("bark".into()), Value::Text("c".into())],
+            vec![
+                Value::Text("things_not_null".into()),
+                Value::Text("n".into()),
+            ],
+        ],
+    );
+    match db.execute(1, "insert into thethings values (null)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23502");
+            assert_eq!(message, "domain things does not allow null values");
+        }
+        other => panic!("expected domain not-null violation, got {other:?}"),
+    }
+    match db.execute(1, "update thethings set stuff = null") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23502");
+            assert_eq!(message, "domain things does not allow null values");
+        }
+        other => panic!("expected domain not-null violation on update, got {other:?}"),
+    }
+    db.execute(1, "alter domain things drop not null").unwrap();
+    db.execute(1, "insert into thethings values (null)")
+        .unwrap();
+    db.execute(1, "alter domain things drop constraint bark")
+        .unwrap();
+    db.execute(1, "insert into thethings values (12)").unwrap();
+
+    db.execute(1, "alter domain things set default 7").unwrap();
+    db.execute(1, "alter domain things drop default").unwrap();
+    db.execute(1, "create schema domdst").unwrap();
+    db.execute(1, "alter domain things rename to things2")
+        .unwrap();
+    db.execute(1, "alter domain things2 set schema domdst")
+        .unwrap();
+    db.execute(1, "alter domain domdst.things2 owner to current_user")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select t.typname, n.nspname \
+             from pg_type t join pg_namespace n on n.oid = t.typnamespace \
+             where t.typname = 'things2'",
+        ),
+        vec![vec![
+            Value::Text("things2".into()),
+            Value::Text("domdst".into()),
+        ]],
+    );
+}
+
+#[test]
 fn jsonb_populate_record_enforces_domain_constraints() {
     let dir = temp_dir("jsonb_populate_record_domain_constraints");
     let db = Database::open(&dir, 64).unwrap();

@@ -25,10 +25,10 @@ use crate::backend::parser::{
     BoundInsertStatement, BoundMergeAction, BoundMergeStatement, BoundMergeWhenClause,
     BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey, BoundRelation,
     BoundRelationConstraints, BoundTemporalConstraint, BoundUpdateStatement, BoundUpdateTarget,
-    Catalog, CatalogLookup, CreateTableAsStatement, DropTableStatement, ExplainFormat,
-    ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement, OverridingKind,
-    ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TableAsObjectType,
-    TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table,
+    Catalog, CatalogLookup, CreateTableAsStatement, DomainConstraintLookupKind, DropTableStatement,
+    ExplainFormat, ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement,
+    OverridingKind, ParseError, SelectStatement, SqlType, SqlTypeKind, Statement,
+    TableAsObjectType, TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table,
     bind_expr_with_outer_and_ctes, bind_generated_expr, bind_referenced_by_foreign_keys,
     bind_relation_constraints, bind_scalar_expr_in_scope, bind_update, parse_expr,
     scope_for_relation,
@@ -6090,14 +6090,23 @@ fn apply_overriding_user_identity_defaults(
     Ok(())
 }
 
-fn domain_constraint_violation(domain_name: &str) -> ExecError {
+fn domain_constraint_violation(domain_name: &str, constraint_name: &str) -> ExecError {
     ExecError::DetailedError {
         message: format!(
-            "value for domain {domain_name} violates check constraint \"{domain_name}_check\""
+            "value for domain {domain_name} violates check constraint \"{constraint_name}\""
         ),
         detail: None,
         hint: None,
         sqlstate: "23514",
+    }
+}
+
+fn domain_not_null_violation(domain_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("domain {domain_name} does not allow null values"),
+        detail: None,
+        hint: None,
+        sqlstate: "23502",
     }
 }
 
@@ -6114,7 +6123,7 @@ fn enforce_domain_constraint_for_value(
         return Ok(());
     };
     if domain.not_null && matches!(value, Value::Null) {
-        return Err(domain_constraint_violation(&domain.name));
+        return Err(domain_not_null_violation(&domain.name));
     }
     if matches!(value, Value::Null) {
         return Ok(());
@@ -6135,26 +6144,44 @@ fn enforce_domain_constraint_for_value(
         }
         return Ok(());
     }
-    let Some(check) = domain.check.as_deref() else {
-        return Ok(());
-    };
-    let raw = parse_expr(check).map_err(ExecError::Parse)?;
-    let desc = RelationDesc {
-        columns: vec![column_desc("value", domain.sql_type, true)],
-    };
-    let scope = scope_for_relation(None, &desc);
-    let bound = {
-        let Some(catalog) = ctx.catalog.as_deref() else {
-            return Ok(());
-        };
-        bind_expr_with_outer_and_ctes(&raw, &scope, catalog, &[], None, &[])
-            .map_err(ExecError::Parse)?
-    };
-    let mut slot = TupleSlot::virtual_row(vec![value.clone()]);
-    match eval_expr(&bound, &mut slot, ctx)? {
-        Value::Bool(false) => Err(domain_constraint_violation(&domain.name)),
-        _ => Ok(()),
+    let mut checks = domain
+        .constraints
+        .iter()
+        .filter_map(|constraint| {
+            (constraint.enforced && matches!(constraint.kind, DomainConstraintLookupKind::Check))
+                .then(|| {
+                    constraint
+                        .expr
+                        .as_ref()
+                        .map(|expr| (&constraint.name, expr))
+                })
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    if checks.is_empty()
+        && let Some(check) = domain.check.as_ref()
+    {
+        checks.push((&domain.name, check));
     }
+    for (constraint_name, check) in checks {
+        let raw = parse_expr(check).map_err(ExecError::Parse)?;
+        let desc = RelationDesc {
+            columns: vec![column_desc("value", domain.sql_type, true)],
+        };
+        let scope = scope_for_relation(None, &desc);
+        let bound = {
+            let Some(catalog) = ctx.catalog.as_deref() else {
+                return Ok(());
+            };
+            bind_expr_with_outer_and_ctes(&raw, &scope, catalog, &[], None, &[])
+                .map_err(ExecError::Parse)?
+        };
+        let mut slot = TupleSlot::virtual_row(vec![value.clone()]);
+        if matches!(eval_expr(&bound, &mut slot, ctx)?, Value::Bool(false)) {
+            return Err(domain_constraint_violation(&domain.name, constraint_name));
+        }
+    }
+    Ok(())
 }
 
 fn enforce_insert_domain_constraints(
@@ -6356,6 +6383,8 @@ pub(crate) fn apply_assignment_target(
     }
     .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
     let value = coerce_record_assignment_value(value, assignment_type, ctx)?;
+    enforce_domain_constraint_for_value(&value, assignment_type, ctx)
+        .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
     let resolved_indirection = if target.indirection.is_empty() {
         target
             .subscripts

@@ -131,6 +131,12 @@ pub(super) fn bind_builtin_system_view(
             .type_rows()
             .into_iter()
             .map(|row| {
+                let domain = catalog.domain_by_type_oid(row.oid);
+                let typnotnull = domain.as_ref().is_some_and(|domain| domain.not_null);
+                let typdefault = domain
+                    .as_ref()
+                    .and_then(|domain| domain.default.clone())
+                    .or_else(|| catalog.type_default_sql(row.oid));
                 vec![
                     Value::Int64(i64::from(row.oid)),
                     Value::Text(row.typname.into()),
@@ -155,7 +161,12 @@ pub(super) fn bind_builtin_system_view(
                     Value::InternalChar(row.typdelim as u8),
                     Value::Int64(i64::from(row.typanalyze)),
                     Value::Int64(i64::from(row.typbasetype)),
+                    Value::Int32(row.sql_type.typmod),
                     Value::Int64(i64::from(row.typcollation)),
+                    Value::Bool(typnotnull),
+                    typdefault
+                        .map(|value| Value::Text(value.into()))
+                        .unwrap_or(Value::Null),
                     match row.typacl {
                         Some(values) => Value::Array(
                             values
@@ -165,6 +176,44 @@ pub(super) fn bind_builtin_system_view(
                         ),
                         None => Value::Null,
                     },
+                ]
+            })
+            .collect(),
+        SyntheticSystemViewKind::PgConstraint => catalog
+            .constraint_rows()
+            .into_iter()
+            .map(|row| {
+                vec![
+                    Value::Int64(i64::from(row.oid)),
+                    Value::Text(row.conname.into()),
+                    Value::Int64(i64::from(row.connamespace)),
+                    Value::Text(row.contype.to_string().into()),
+                    Value::Bool(row.condeferrable),
+                    Value::Bool(row.condeferred),
+                    Value::Bool(row.conenforced),
+                    Value::Bool(row.convalidated),
+                    Value::Int64(i64::from(row.conrelid)),
+                    Value::Int64(i64::from(row.contypid)),
+                    Value::Int64(i64::from(row.conindid)),
+                    Value::Int64(i64::from(row.conparentid)),
+                    Value::Int64(i64::from(row.confrelid)),
+                    Value::Text(row.confupdtype.to_string().into()),
+                    Value::Text(row.confdeltype.to_string().into()),
+                    Value::Text(row.confmatchtype.to_string().into()),
+                    nullable_int2_array(row.conkey),
+                    nullable_int2_array(row.confkey),
+                    nullable_oid_array(row.conpfeqop),
+                    nullable_oid_array(row.conppeqop),
+                    nullable_oid_array(row.conffeqop),
+                    nullable_int2_array(row.confdelsetcols),
+                    nullable_oid_array(row.conexclop),
+                    row.conbin
+                        .map(|value| Value::Text(value.into()))
+                        .unwrap_or(Value::Null),
+                    Value::Bool(row.conislocal),
+                    Value::Int16(row.coninhcount),
+                    Value::Bool(row.connoinherit),
+                    Value::Bool(row.conperiod),
                 ]
             })
             .collect(),
@@ -306,6 +355,35 @@ pub(super) fn bind_builtin_system_view(
         }
     };
     build_values_view(name, view.output_columns(), rows)
+}
+
+fn nullable_int2_array(values: Option<Vec<i16>>) -> Value {
+    values
+        .map(|values| {
+            Value::PgArray(
+                crate::include::nodes::datum::ArrayValue::from_1d(
+                    values.into_iter().map(Value::Int16).collect(),
+                )
+                .with_element_type_oid(crate::include::catalog::INT2_TYPE_OID),
+            )
+        })
+        .unwrap_or(Value::Null)
+}
+
+fn nullable_oid_array(values: Option<Vec<u32>>) -> Value {
+    values
+        .map(|values| {
+            Value::PgArray(
+                crate::include::nodes::datum::ArrayValue::from_1d(
+                    values
+                        .into_iter()
+                        .map(|value| Value::Int32(value as i32))
+                        .collect(),
+                )
+                .with_element_type_oid(crate::include::catalog::OID_TYPE_OID),
+            )
+        })
+        .unwrap_or(Value::Null)
 }
 
 fn information_schema_table_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {

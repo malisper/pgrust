@@ -2552,6 +2552,22 @@ pub struct DomainLookup {
     pub default: Option<String>,
     pub check: Option<String>,
     pub not_null: bool,
+    pub constraints: Vec<DomainConstraintLookup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainConstraintLookup {
+    pub name: String,
+    pub kind: DomainConstraintLookupKind,
+    pub expr: Option<String>,
+    pub validated: bool,
+    pub enforced: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DomainConstraintLookupKind {
+    Check,
+    NotNull,
 }
 
 impl CatalogLookup for LiteralDefaultCatalog {

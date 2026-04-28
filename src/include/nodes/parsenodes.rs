@@ -332,6 +332,7 @@ pub enum Statement {
     CreateType(CreateTypeStatement),
     AlterType(AlterTypeStatement),
     AlterTypeOwner(AlterTypeOwnerStatement),
+    AlterDomain(AlterDomainStatement),
     CreateDatabase(CreateDatabaseStatement),
     AlterDatabase(AlterDatabaseStatement),
     CreateSchema(CreateSchemaStatement),
@@ -3886,6 +3887,7 @@ pub struct CreateDomainStatement {
     pub default: Option<String>,
     pub check: Option<String>,
     pub not_null: bool,
+    pub constraints: Vec<DomainConstraintSpec>,
     pub enum_check: Option<DomainCheckConstraint>,
 }
 
@@ -3893,6 +3895,56 @@ pub struct CreateDomainStatement {
 pub struct DomainCheckConstraint {
     pub name: Option<String>,
     pub allowed_values: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainConstraintSpec {
+    pub name: Option<String>,
+    pub kind: DomainConstraintSpecKind,
+    pub not_valid: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DomainConstraintSpecKind {
+    Check { expr: String },
+    NotNull,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterDomainStatement {
+    pub domain_name: String,
+    pub action: AlterDomainAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterDomainAction {
+    SetDefault {
+        default: Option<String>,
+    },
+    SetNotNull,
+    DropNotNull,
+    AddConstraint(DomainConstraintSpec),
+    DropConstraint {
+        constraint_name: String,
+        if_exists: bool,
+        cascade: bool,
+    },
+    ValidateConstraint {
+        constraint_name: String,
+    },
+    RenameDomain {
+        new_name: String,
+    },
+    RenameConstraint {
+        constraint_name: String,
+        new_name: String,
+    },
+    SetSchema {
+        new_schema: String,
+    },
+    OwnerTo {
+        new_owner: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
