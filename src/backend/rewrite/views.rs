@@ -2018,9 +2018,19 @@ fn render_function(func: &FuncExpr, ctx: &ViewDeparseContext<'_>) -> String {
             .map(|row| row.proname)
             .unwrap_or_else(|| format!("proc_{proc_oid}")),
     };
-    format!(
-        "{}({})",
-        name,
+    let rendered_args = if let Some(display_args) = func.display_args.as_deref() {
+        display_args
+            .iter()
+            .map(|arg| match arg.name.as_deref() {
+                Some(name) => format!(
+                    "{} => {}",
+                    quote_identifier_if_needed(name),
+                    render_expr(&arg.expr, ctx)
+                ),
+                None => render_expr(&arg.expr, ctx),
+            })
+            .collect::<Vec<_>>()
+    } else {
         func.args
             .iter()
             .map(|arg| {
@@ -2036,8 +2046,8 @@ fn render_function(func: &FuncExpr, ctx: &ViewDeparseContext<'_>) -> String {
                 }
             })
             .collect::<Vec<_>>()
-            .join(", ")
-    )
+    };
+    format!("{}({})", name, rendered_args.join(", "))
 }
 
 fn render_xml_text_arg(expr: &Expr, ctx: &ViewDeparseContext<'_>) -> String {

@@ -9,7 +9,7 @@ use crate::backend::parser::gram::{
 use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
 };
-use crate::include::catalog::range_type_ref_for_sql_type;
+use crate::include::catalog::{UNKNOWN_TYPE_OID, range_type_ref_for_sql_type};
 use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 
@@ -174,6 +174,34 @@ pub(super) fn infer_sql_expr_type(
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> SqlType {
     infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, &[])
+}
+
+pub(super) fn unknown_sql_type() -> SqlType {
+    SqlType::new(SqlTypeKind::Text).with_identity(UNKNOWN_TYPE_OID, 0)
+}
+
+pub(super) fn is_unknown_literal_expr(expr: &SqlExpr) -> bool {
+    matches!(
+        expr,
+        SqlExpr::Const(Value::Null)
+            | SqlExpr::Const(Value::Text(_))
+            | SqlExpr::Const(Value::TextRef(_, _))
+    )
+}
+
+pub(super) fn infer_sql_expr_function_arg_type_with_ctes(
+    expr: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> SqlType {
+    if is_unknown_literal_expr(expr) {
+        unknown_sql_type()
+    } else {
+        infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
+    }
 }
 
 fn child_outer_scopes(scope: &BoundScope, outer_scopes: &[BoundScope]) -> Vec<BoundScope> {
@@ -887,7 +915,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 .args()
                 .iter()
                 .map(|arg| {
-                    infer_sql_expr_type_with_ctes(
+                    infer_sql_expr_function_arg_type_with_ctes(
                         &arg.value,
                         scope,
                         catalog,
