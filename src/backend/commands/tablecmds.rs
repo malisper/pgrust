@@ -377,6 +377,11 @@ fn finalize_bound_delete(
             predicate: target
                 .predicate
                 .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
+            parent_visible_exprs: target
+                .parent_visible_exprs
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans))
+                .collect(),
             ..target
         })
         .collect();
@@ -10029,6 +10034,9 @@ fn project_update_target_visible_values(
     tid: ItemPointerData,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
+    if target.parent_visible_exprs.is_empty() {
+        return Ok(row_values.to_vec());
+    }
     let mut slot = TupleSlot::virtual_row_with_metadata(
         row_values.to_vec(),
         Some(tid),
@@ -10421,6 +10429,9 @@ fn project_delete_target_visible_values(
     tid: ItemPointerData,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
+    if target.parent_visible_exprs.is_empty() {
+        return Ok(row_values.to_vec());
+    }
     let mut slot = TupleSlot::virtual_row_with_metadata(
         row_values.to_vec(),
         Some(tid),
@@ -10948,12 +10959,18 @@ pub fn execute_delete_with_waiter(
                                 .write()
                                 .note_relation_delete(target.relation_oid);
                             if !stmt.returning.is_empty() {
+                                let returned_values = project_delete_target_visible_values(
+                                    target,
+                                    &current_values,
+                                    current_tid,
+                                    ctx,
+                                )?;
                                 let row = project_returning_row_with_old_new(
                                     &stmt.returning,
-                                    &current_values,
-                                    None,
-                                    None,
-                                    Some(&current_values),
+                                    &returned_values,
+                                    Some(current_tid),
+                                    Some(target.relation_oid),
+                                    Some(&returned_values),
                                     None,
                                     ctx,
                                 )?;

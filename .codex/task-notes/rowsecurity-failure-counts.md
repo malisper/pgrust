@@ -254,3 +254,15 @@ Partitioned INSERT RLS error-name bucket:
 - Latest rowsecurity regression result with a 300s file timeout:
   `682/774` matched, `92` mismatches, `1784` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+DELETE RETURNING tableoid bucket:
+- DELETE RETURNING now binds system columns with a real target relation scope
+  and projects inherited child rows through the parent-visible column layout
+  while preserving the physical child `tableoid` metadata.
+- Added a focused DELETE RETURNING `tableoid::regclass` test covering both a
+  direct table and an inherited child with a dropped parent column.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `684/774` matched, `90` mismatches, `1752` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.

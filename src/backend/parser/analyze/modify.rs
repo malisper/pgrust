@@ -4499,7 +4499,12 @@ pub(crate) fn bind_delete_with_outer_scopes(
     if stmt.using.is_some() {
         return bind_delete_using(stmt, catalog, outer_scopes, &local_ctes, &entry);
     }
-    let scope = scope_for_relation_with_generated(Some(&stmt.table_name), &entry.desc, catalog)?;
+    let scope = scope_for_base_relation_with_generated(
+        &stmt.table_name,
+        &entry.desc,
+        Some(entry.relation_oid),
+        catalog,
+    )?;
     let returning_scope = scope_with_returning_pseudo_rows(scope.clone(), &entry.desc);
     let predicate = stmt
         .where_clause
