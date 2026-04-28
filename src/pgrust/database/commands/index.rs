@@ -1172,7 +1172,7 @@ impl Database {
                     .desc
                     .columns
                     .iter()
-                    .find(|desc| desc.name.eq_ignore_ascii_case(&column.name))
+                    .find(|desc| !desc.dropped && desc.name.eq_ignore_ascii_case(&column.name))
                     .ok_or_else(|| {
                         ExecError::Parse(ParseError::UnknownColumn(column.name.clone()))
                     })?
@@ -2348,6 +2348,15 @@ impl Database {
                 .map_err(ExecError::Parse)?;
                 ensure_index_expression_immutable(&bound_expr, &catalog)?;
                 reject_record_index_column(column)?;
+            } else if !entry
+                .desc
+                .columns
+                .iter()
+                .any(|desc| !desc.dropped && desc.name.eq_ignore_ascii_case(&column.name))
+            {
+                return Err(ExecError::Parse(ParseError::UnknownColumn(
+                    column.name.clone(),
+                )));
             }
         }
         let include_columns = create_stmt
@@ -2361,7 +2370,7 @@ impl Database {
                     .desc
                     .columns
                     .iter()
-                    .any(|column| column.name.eq_ignore_ascii_case(name))
+                    .any(|column| !column.dropped && column.name.eq_ignore_ascii_case(name))
                 {
                     return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
                 }

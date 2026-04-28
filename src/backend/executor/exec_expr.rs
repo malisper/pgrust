@@ -3976,12 +3976,30 @@ fn format_constraintdef_for_catalog(
     catalog: &dyn CatalogLookup,
     row: &crate::include::catalog::PgConstraintRow,
 ) -> Option<String> {
+    fn append_constraint_state(def: &mut String, row: &crate::include::catalog::PgConstraintRow) {
+        if row.connoinherit {
+            def.push_str(" NO INHERIT");
+        }
+        if !row.conenforced {
+            def.push_str(" NOT ENFORCED");
+        }
+        if !row.convalidated {
+            def.push_str(" NOT VALID");
+        }
+    }
+
     match row.contype {
-        CONSTRAINT_NOTNULL => Some("NOT NULL".into()),
+        CONSTRAINT_NOTNULL => {
+            let mut def = "NOT NULL".to_string();
+            append_constraint_state(&mut def, row);
+            Some(def)
+        }
         CONSTRAINT_CHECK => row.conbin.as_deref().map(|expr_sql| {
             let expr_sql = canonicalize_catalog_expr_sql(expr_sql, row.conrelid, catalog)
                 .unwrap_or_else(|| expr_sql.to_string());
-            format!("CHECK ({expr_sql})")
+            let mut def = format!("CHECK ({expr_sql})");
+            append_constraint_state(&mut def, row);
+            def
         }),
         CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE => {
             format_index_backed_constraintdef_for_catalog(catalog, row)

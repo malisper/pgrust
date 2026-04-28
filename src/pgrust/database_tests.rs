@@ -6927,6 +6927,80 @@ fn create_table_partition_validation_matches_postgres_messages() {
 }
 
 #[test]
+fn alter_table_rejects_partition_key_column_drop_and_type_change() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table partitioned (a int4, b int4) partition by range (a, (a + b + 1))",
+        )
+        .unwrap();
+
+    match session.execute(&db, "alter table partitioned drop column a") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message
+            == "cannot drop column \"a\" because it is part of the partition key of relation \"partitioned\""
+            && sqlstate == "42P16" => {}
+        other => panic!("expected partition-key drop rejection, got {other:?}"),
+    }
+    match session.execute(&db, "alter table partitioned alter column b type text") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message
+            == "cannot alter column \"b\" because it is part of the partition key of relation \"partitioned\""
+            && sqlstate == "42P16" => {}
+        other => panic!("expected partition-key type-change rejection, got {other:?}"),
+    }
+    match session.execute(&db, "alter table partitioned set (fillfactor=100)") {
+        Err(ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }) if message == "cannot specify storage parameters for a partitioned table"
+            && hint
+                == Some("Specify storage parameters for its leaf partitions instead.".into())
+            && sqlstate == "0A000" => {}
+        other => panic!("expected partitioned storage-parameter rejection, got {other:?}"),
+    }
+    session
+        .execute(&db, "create table nonpartitioned (a int4, b int4)")
+        .unwrap();
+    match session.execute(&db, "alter table partitioned inherit nonpartitioned") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "cannot change inheritance of partitioned table"
+            && sqlstate == "42P16" => {}
+        other => panic!("expected partitioned child inherit rejection, got {other:?}"),
+    }
+    match session.execute(&db, "alter table nonpartitioned inherit partitioned") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "cannot inherit from partitioned table \"partitioned\""
+            && sqlstate == "42P16" => {}
+        other => panic!("expected partitioned parent inherit rejection, got {other:?}"),
+    }
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select attname, atttypid::regtype::text \
+             from pg_attribute \
+             where attrelid = 'partitioned'::regclass and attnum > 0 and not attisdropped \
+             order by attnum",
+        ),
+        vec![
+            vec![Value::Text("a".into()), Value::Text("integer".into())],
+            vec![Value::Text("b".into()), Value::Text("integer".into())],
+        ]
+    );
+}
+
+#[test]
 fn partition_bound_validation_and_catalog_describe_helpers() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -7019,7 +7093,7 @@ fn partition_bound_validation_and_catalog_describe_helpers() {
     session
         .execute(
             &db,
-            "create table commented_parted (a int, b text) partition by list (a)",
+            "create table commented_parted (a int, b text, unique (a, b)) partition by list (a)",
         )
         .unwrap();
     session
@@ -7032,6 +7106,18 @@ fn partition_bound_validation_and_catalog_describe_helpers() {
         .execute(
             &db,
             "comment on column commented_parted.a is 'partition key'",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "comment on constraint commented_parted_a_b_key on commented_parted is 'partitioned constraint'",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "comment on index commented_parted_a_b_key is 'partitioned index'",
         )
         .unwrap();
     assert_eq!(
@@ -7049,6 +7135,22 @@ fn partition_bound_validation_and_catalog_describe_helpers() {
             "select description from pg_description where objoid = 'commented_parted'::regclass and objsubid = 1"
         ),
         vec![vec![Value::Text("partition key".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select description from pg_description where objoid = (select oid from pg_constraint where conname = 'commented_parted_a_b_key') and classoid = 2606"
+        ),
+        vec![vec![Value::Text("partitioned constraint".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select obj_description('commented_parted_a_b_key'::regclass)"
+        ),
+        vec![vec![Value::Text("partitioned index".into())]]
     );
 
     session
@@ -8900,6 +9002,47 @@ fn inheritance_multi_parent_create_and_drop_clean_up_catalog_rows() {
              order by relname",
         ),
         vec![vec![Value::Bool(false)], vec![Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn create_table_inherits_notices_column_check_constraint_merge() {
+    let dir = temp_dir("inheritance_column_check_merge_notice");
+    let db = Database::open(&dir, 32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parent_merge_notice (a int4 constraint con1 check (a > 0))",
+        )
+        .unwrap();
+    clear_backend_notices();
+    session
+        .execute(
+            &db,
+            "create table child_merge_notice \
+             (a int4 constraint con1 check (a > 0), d int4) \
+             inherits (parent_merge_notice)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![
+            r#"merging column "a" with inherited definition"#.to_string(),
+            r#"merging constraint "con1" with inherited definition"#.to_string(),
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conislocal, coninhcount::int4 \
+             from pg_constraint \
+             where conrelid = 'child_merge_notice'::regclass and conname = 'con1'",
+        ),
+        vec![vec![Value::Bool(false), Value::Int32(1)]]
     );
 }
 
@@ -16986,6 +17129,195 @@ fn alter_index_rename_supports_if_exists_and_rename() {
 }
 
 #[test]
+fn relation_rename_accepts_alter_table_and_index_object_kind_mismatch() {
+    let base = temp_dir("relation_rename_object_kind_mismatch");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table rename_rel (a int4)")
+        .unwrap();
+    session
+        .execute(&db, "create index rename_rel_idx on rename_rel (a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table rename_parted (a int4) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index rename_parted_idx on rename_parted (a)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "alter index rename_rel rename to rename_rel_2")
+        .unwrap();
+    session
+        .execute(&db, "alter index rename_parted rename to rename_parted_2")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname from pg_class \
+             where relname in ('rename_rel_2', 'rename_parted_2') \
+             order by relname",
+        ),
+        vec![
+            vec![Value::Text("rename_parted_2".into())],
+            vec![Value::Text("rename_rel_2".into())],
+        ]
+    );
+
+    session
+        .execute(&db, "alter index rename_rel_idx rename to rename_rel_idx_2")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter index rename_parted_idx rename to rename_parted_idx_2",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table rename_rel_idx_2 rename to rename_rel_idx_3",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table rename_parted_idx_2 rename to rename_parted_idx_3",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname from pg_class \
+             where relname in ('rename_rel_idx_3', 'rename_parted_idx_3') \
+             order by relname",
+        ),
+        vec![
+            vec![Value::Text("rename_parted_idx_3".into())],
+            vec![Value::Text("rename_rel_idx_3".into())],
+        ]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn partitioned_table_and_index_rename_use_distinct_lock_tags() {
+    let base = temp_dir("rename_partitioned_lock_tags");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table lock_parted (a int4) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index lock_parted_idx on lock_parted (a)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "alter index lock_parted rename to lock_parted_2")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relation::regclass::text, mode from pg_locks \
+             where pid = pg_backend_pid() and locktype = 'relation' \
+               and relation::regclass::text like 'lock_parted%' \
+             order by relation::regclass::text",
+        ),
+        vec![vec![
+            Value::Text("lock_parted_2".into()),
+            Value::Text("AccessExclusiveLock".into()),
+        ]]
+    );
+    session.execute(&db, "commit").unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "alter index lock_parted_idx rename to lock_parted_idx_2",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relation::regclass::text, mode from pg_locks \
+             where pid = pg_backend_pid() and locktype = 'relation' \
+               and relation::regclass::text like 'lock_parted%' \
+             order by relation::regclass::text",
+        ),
+        vec![vec![
+            Value::Text("lock_parted_idx_2".into()),
+            Value::Text("ShareUpdateExclusiveLock".into()),
+        ]]
+    );
+    session.execute(&db, "commit").unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "alter table lock_parted_idx_2 rename to lock_parted_idx_3",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relation::regclass::text, mode from pg_locks \
+             where pid = pg_backend_pid() and locktype = 'relation' \
+               and relation::regclass::text like 'lock_parted%' \
+             order by relation::regclass::text",
+        ),
+        vec![vec![
+            Value::Text("lock_parted_idx_3".into()),
+            Value::Text("AccessExclusiveLock".into()),
+        ]]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn alter_table_rename_accepts_views() {
+    let base = temp_dir("alter_table_rename_view");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table rename_view_base (a int4)")
+        .unwrap();
+    db.execute(1, "insert into rename_view_base values (1)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view rename_view_source as select a from rename_view_base",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table rename_view_source rename to rename_view_dest",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select a from rename_view_dest"),
+        vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
 fn alter_index_rename_if_exists_missing_pushes_notice() {
     let base = temp_dir("alter_index_rename_if_exists_missing");
     let db = Database::open(&base, 16).unwrap();
@@ -17458,6 +17790,81 @@ fn alter_table_alter_column_set_default_applies_to_future_rows() {
             vec![Value::Int32(2), Value::Text("hello".into())],
         ]
     );
+}
+
+#[test]
+fn alter_table_view_alter_column_default_updates_view_catalog() {
+    let base = temp_dir("alter_table_view_set_default");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "create view items_view as select id, note from items")
+        .unwrap();
+
+    db.execute(
+        1,
+        "alter table items_view alter column note set default 'hello'",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(adbin, adrelid) \
+             from pg_attrdef where adrelid = 'items_view'::regclass"
+        ),
+        vec![vec![Value::Text("'hello'".into())]]
+    );
+
+    db.execute(1, "alter table items_view alter column note drop default")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_attrdef where adrelid = 'items_view'::regclass"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn alter_table_view_rejects_unsupported_column_actions_with_view_detail() {
+    let base = temp_dir("alter_table_view_unsupported_column_actions");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, note text)")
+        .unwrap();
+    db.execute(1, "create view items_view as select id, note from items")
+        .unwrap();
+
+    for (sql, action) in [
+        (
+            "alter table items_view alter column id drop not null",
+            "ALTER COLUMN ... DROP NOT NULL",
+        ),
+        (
+            "alter table items_view alter column note set not null",
+            "ALTER COLUMN ... SET NOT NULL",
+        ),
+        ("alter table items_view drop column note", "DROP COLUMN"),
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::DetailedError {
+                message,
+                detail,
+                sqlstate,
+                ..
+            }) if message
+                == format!(
+                    "ALTER action {action} cannot be performed on relation \"items_view\""
+                )
+                && detail == Some("This operation is not supported for views.".into())
+                && sqlstate == "42809" => {}
+            other => panic!("expected unsupported view action error for {sql}, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -25667,6 +26074,186 @@ fn create_table_check_not_enforced_skips_write_enforcement_and_cannot_validate()
 }
 
 #[test]
+fn create_table_local_not_valid_check_is_catalog_valid_immediately() {
+    let base = temp_dir("create_check_not_valid_catalog_valid");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table items (id int4, check (false) no inherit not valid)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select convalidated, pg_get_constraintdef(oid) \
+             from pg_constraint where conrelid = 'items'::regclass and conname = 'items_check'"
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Text("CHECK (false) NO INHERIT".into()),
+        ]]
+    );
+}
+
+#[test]
+fn alter_table_add_check_not_enforced_skips_validation_and_write_enforcement() {
+    let base = temp_dir("alter_check_not_enforced");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    db.execute(1, "insert into items values (0)").unwrap();
+    db.execute(
+        1,
+        "alter table items add constraint items_id_check check (id > 0) not enforced",
+    )
+    .unwrap();
+    db.execute(1, "insert into items values (-1)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conenforced, convalidated, pg_get_constraintdef(oid) \
+             from pg_constraint where conname = 'items_id_check'"
+        ),
+        vec![vec![
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Text("CHECK (id > 0) NOT ENFORCED NOT VALID".into()),
+        ]]
+    );
+
+    match db.execute(1, "alter table items validate constraint items_id_check") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "cannot validate NOT ENFORCED constraint" && sqlstate == "0A000" => {}
+        other => panic!("expected validate-not-enforced failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_check_validation_uses_validation_errors_and_checks_children() {
+    let base = temp_dir("alter_check_validation_wording");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table check_parent (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "insert into check_parent values (1, 10), (1, 20)")
+        .unwrap();
+
+    match db.execute(
+        1,
+        "alter table check_parent add constraint b_greater_than_ten check (b > 10)",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        }) if message
+            == "check constraint \"b_greater_than_ten\" of relation \"check_parent\" is violated by some row"
+            && detail.is_none()
+            && sqlstate == "23514" => {}
+        other => panic!("expected DDL check validation failure, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "alter table check_parent add constraint b_greater_than_ten check (b > 10) not valid",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "alter table check_parent validate constraint b_greater_than_ten",
+    ) {
+        Err(ExecError::DetailedError { message, .. })
+            if message
+                == "check constraint \"b_greater_than_ten\" of relation \"check_parent\" is violated by some row" =>
+            {}
+        other => panic!("expected DDL validate check failure, got {other:?}"),
+    }
+
+    db.execute(1, "delete from check_parent where not b > 10")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table check_parent validate constraint b_greater_than_ten",
+    )
+    .unwrap();
+    db.execute(1, "create table check_child () inherits (check_parent)")
+        .unwrap();
+    db.execute(1, "insert into check_child values (6, 30), (7, 16)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table check_parent add constraint b_le_20 check (b <= 20) not valid",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table check_parent validate constraint b_le_20") {
+        Err(ExecError::DetailedError { message, .. })
+            if message
+                == "check constraint \"b_le_20\" of relation \"check_child\" is violated by some row" =>
+            {}
+        other => panic!("expected child DDL validate check failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_check_validation_has_executor_catalog_for_functions() {
+    let base = temp_dir("alter_check_validation_function_catalog");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table func_parent (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "create table func_child1 () inherits (func_parent)")
+        .unwrap();
+    db.execute(1, "create table func_child2 () inherits (func_parent)")
+        .unwrap();
+    db.execute(1, "insert into func_parent values (1, 20)")
+        .unwrap();
+    db.execute(1, "insert into func_child1 values (7, 16)")
+        .unwrap();
+    db.execute(1, "insert into func_child2 values (8, 18)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function boo(int) returns int immutable strict language plpgsql as $$ begin raise notice 'boo: %', $1; return $1; end $$",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(
+        1,
+        "alter table func_child2 add constraint identity check (b = boo(b))",
+    )
+    .unwrap();
+    assert_eq!(take_notice_messages(), vec!["boo: 18".to_string()]);
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "alter table func_parent add constraint identity check (b = boo(b)) not valid",
+    )
+    .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec!["merging constraint \"identity\" with inherited definition".to_string()]
+    );
+
+    clear_notices();
+    db.execute(1, "alter table func_parent validate constraint identity")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec!["boo: 20".to_string(), "boo: 16".to_string()]
+    );
+}
+
+#[test]
 fn update_and_copy_from_enforce_check_and_not_null_constraints() {
     let base = temp_dir("update_and_copy_constraint_checks");
     let db = Database::open(&base, 16).unwrap();
@@ -26468,6 +27055,40 @@ fn alter_table_add_foreign_key_without_constraint_name_accepts_no_space_before_c
             "select confmatchtype, convalidated from pg_constraint where conname = 'children_parent_id_parent_code_fkey'",
         ),
         vec![vec![Value::Text("f".into()), Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn alter_column_type_with_foreign_key_after_referenced_type_change_finishes() {
+    let base = temp_dir("alter_column_type_fk_referenced_type_change");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(
+        1,
+        "create table attbl (p1 int constraint pk_attbl primary key)",
+    )
+    .unwrap();
+    db.execute(1, "create table atref (c1 int references attbl(p1))")
+        .unwrap();
+
+    db.execute(1, "alter table attbl alter column p1 set data type bigint")
+        .unwrap();
+    db.execute(1, "alter table atref alter column c1 set data type bigint")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a.atttypid::regtype::text \
+             from pg_class c join pg_attribute a on a.attrelid = c.oid \
+             where c.relname in ('attbl', 'atref') and a.attname in ('p1', 'c1') \
+             order by c.relname, a.attname"
+        ),
+        vec![
+            vec![Value::Text("bigint".into())],
+            vec![Value::Text("bigint".into())],
+        ]
     );
 }
 
@@ -28429,6 +29050,40 @@ fn alter_table_set_and_drop_not_null_updates_enforcement_and_catalog() {
         ),
         vec![vec![Value::Int64(0)]]
     );
+}
+
+#[test]
+fn alter_table_drop_parent_not_null_removes_inherited_child_constraint() {
+    let base = temp_dir("alter_table_drop_inherited_not_null");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nn_parent (a int4 not null)")
+        .unwrap();
+    db.execute(1, "create table nn_child (b text) inherits (nn_parent)")
+        .unwrap();
+
+    db.execute(1, "alter table nn_parent alter a drop not null")
+        .unwrap();
+    db.execute(1, "insert into nn_parent values (null)")
+        .unwrap();
+    db.execute(1, "insert into nn_child (a, b) values (null, 'ok')")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint
+              where conrelid = 'nn_child'::regclass and contype = 'n'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    match db.execute(1, "alter table nn_child alter a set not null") {
+        Err(ExecError::DetailedError { message, .. })
+            if message == "column \"a\" of relation \"nn_child\" contains null values" => {}
+        other => panic!("expected child SET NOT NULL validation failure, got {other:?}"),
+    }
 }
 
 #[test]

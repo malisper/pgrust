@@ -5826,7 +5826,7 @@ impl CatalogStore {
         let constraint_name = constraint_name.into();
         let (old_entry, _new_entry, constraint_oid, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, control| {
-                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f' | 'v') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -5868,7 +5868,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, _new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f' | 'v') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -6883,7 +6883,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, control| {
-                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f' | 'v') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -6899,13 +6899,19 @@ impl CatalogStore {
                     column.attrdef_oid = None;
                     column.missing_default_value = None;
                 }
-                Ok((
-                    (),
+                let kinds = if entry.relkind == 'v' {
+                    // :HACK: View rewrite dependencies are not yet preserved
+                    // correctly through the relation-entry rewrite helper, but
+                    // ALTER VIEW/ALTER TABLE view SET DEFAULT only needs to
+                    // replace pg_attrdef rows for SQL-visible behavior.
+                    vec![BootstrapCatalogKind::PgAttrdef]
+                } else {
                     vec![
                         BootstrapCatalogKind::PgDepend,
                         BootstrapCatalogKind::PgAttrdef,
-                    ],
-                ))
+                    ]
+                };
+                Ok(((), kinds))
             })?;
 
         let mut effect = CatalogMutationEffect::default();

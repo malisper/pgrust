@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlExpr, SqlType, SqlTypeKind, parse_expr};
 use crate::backend::utils::cache::catcache::sql_type_oid;
@@ -267,6 +268,30 @@ impl GeneratedConstraintName {
     }
 }
 
+fn generated_check_constraint_name(
+    table_name: &str,
+    expr_sql: &str,
+    relation_columns: &[String],
+) -> GeneratedConstraintName {
+    let mut referenced = BTreeSet::new();
+    if let Ok(expr) = parse_expr(expr_sql) {
+        collect_sql_expr_column_names(&expr, &mut referenced);
+    }
+    let mut matched = referenced
+        .iter()
+        .filter_map(|name| {
+            relation_columns
+                .iter()
+                .find(|column| column.eq_ignore_ascii_case(name))
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    matched.sort_by_key(|name| name.to_ascii_lowercase());
+    matched.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    let column_name = (matched.len() == 1).then(|| matched.remove(0));
+    GeneratedConstraintName::new(table_name, column_name, "check")
+}
+
 #[derive(Debug, Clone)]
 struct ResolvedReferencedKey {
     relation: super::BoundRelation,
@@ -465,7 +490,11 @@ pub fn normalize_create_table_constraints(
                 validate_check_attributes(attributes)?;
                 check_constraints.push(PendingCheckConstraint {
                     explicit_name: attributes.name.clone(),
-                    generated_base: GeneratedConstraintName::new(&stmt.table_name, None, "check"),
+                    generated_base: generated_check_constraint_name(
+                        &stmt.table_name,
+                        expr_sql,
+                        &relation_columns,
+                    ),
                     expr_sql: expr_sql.clone(),
                     not_valid: attributes.not_valid,
                     no_inherit: attributes.no_inherit,
@@ -1221,7 +1250,7 @@ pub fn normalize_alter_table_add_constraint(
             validate_check_attributes(attributes)?;
             let constraint_name = assign_constraint_name(
                 attributes.name.clone(),
-                GeneratedConstraintName::new(table_name, None, "check"),
+                generated_check_constraint_name(table_name, expr_sql, &relation_columns),
                 &mut used_names,
             )?;
             Ok(NormalizedAlterTableConstraint::Check(

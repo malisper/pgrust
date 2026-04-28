@@ -10,8 +10,8 @@ use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{BTREE_AM_OID, PG_CATALOG_NAMESPACE_OID, default_btree_opclass_oid};
 use crate::pgrust::database::ddl::{
-    lookup_heap_relation_for_alter_table, reject_column_type_change_with_rule_dependencies,
-    validate_alter_table_alter_column_type,
+    lookup_table_or_partitioned_table_for_alter_table,
+    reject_column_type_change_with_rule_dependencies, validate_alter_table_alter_column_type,
 };
 use std::collections::BTreeSet;
 
@@ -162,6 +162,34 @@ fn relation_name_for_error(catalog: &dyn CatalogLookup, relation_oid: u32) -> St
         .unwrap_or_else(|| relation_oid.to_string())
 }
 
+fn reject_partition_key_type_change(
+    relation: &crate::backend::parser::BoundRelation,
+    relation_name: &str,
+    column_index: usize,
+) -> Result<(), ExecError> {
+    if relation.relkind != 'p' {
+        return Ok(());
+    }
+    let spec =
+        crate::backend::parser::relation_partition_spec(relation).map_err(ExecError::Parse)?;
+    if spec
+        .key_exprs
+        .iter()
+        .any(|expr| crate::backend::parser::expr_references_column(expr, column_index))
+    {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "cannot alter column \"{}\" because it is part of the partition key of relation \"{}\"",
+                relation.desc.columns[column_index].name, relation_name
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+    Ok(())
+}
+
 fn reject_inherited_type_change_conflicts(
     catalog: &dyn CatalogLookup,
     target_relation_oids: &BTreeSet<u32>,
@@ -294,6 +322,23 @@ fn collect_alter_column_type_targets(
             target_relation.relation_oid,
             "ALTER TABLE ALTER COLUMN TYPE on relation without dependent views",
         )?;
+        if let Some(column_index) =
+            target_relation
+                .desc
+                .columns
+                .iter()
+                .enumerate()
+                .find_map(|(index, column)| {
+                    (!column.dropped && column.name.eq_ignore_ascii_case(&alter_stmt.column_name))
+                        .then_some(index)
+                })
+        {
+            reject_partition_key_type_change(
+                &target_relation,
+                &relation_name_for_error(catalog, target_relation.relation_oid),
+                column_index,
+            )?;
+        }
         let plan = validate_alter_table_alter_column_type(
             catalog,
             &target_relation.desc,
@@ -356,7 +401,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -365,7 +410,7 @@ impl Database {
             return Ok(StatementResult::AffectedRows(0));
         };
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            crate::pgrust::database::relation_lock_tag(&relation),
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -385,7 +430,10 @@ impl Database {
             );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(
+            crate::pgrust::database::relation_lock_tag(&relation),
+            client_id,
+        );
         result
     }
 
@@ -401,7 +449,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,

@@ -37,8 +37,7 @@ use crate::pgrust::auth::AuthState;
 use crate::pgrust::autovacuum::{AutovacuumRelationInput, relation_needs_vacanalyze};
 use crate::pgrust::database::ddl::{
     dependent_view_rewrites_for_relation, lookup_analyzable_relation_for_ddl,
-    lookup_heap_relation_for_ddl, lookup_index_relation_for_alter_index,
-    lookup_table_or_partitioned_table_for_alter_table,
+    lookup_index_relation_for_alter_index, lookup_table_or_partitioned_table_for_alter_table,
 };
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
@@ -1456,8 +1455,9 @@ impl Database {
         let relation =
             lookup_index_relation_for_alter_index(&catalog, &comment_stmt.index_name, false)?
                 .expect("index lookup without if_exists should return relation or error");
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            lock_tag,
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -1475,7 +1475,7 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(lock_tag, client_id);
         result
     }
 
@@ -1740,8 +1740,9 @@ impl Database {
                 });
             }
         };
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            lock_tag,
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -1759,7 +1760,7 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(lock_tag, client_id);
         result
     }
 
@@ -1773,8 +1774,9 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let relation =
             lookup_table_or_partitioned_relation_for_comment(&catalog, &comment_stmt.table_name)?;
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            lock_tag,
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -1792,7 +1794,7 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(lock_tag, client_id);
         result
     }
 
@@ -1821,8 +1823,9 @@ impl Database {
                 });
             }
         };
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            lock_tag,
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -1840,7 +1843,7 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(lock_tag, client_id);
         result
     }
 
@@ -1852,9 +1855,11 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &comment_stmt.table_name)?;
+        let relation =
+            lookup_table_or_partitioned_relation_for_comment(&catalog, &comment_stmt.table_name)?;
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            lock_tag,
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -1872,7 +1877,7 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(lock_tag, client_id);
         result
     }
 
@@ -2635,7 +2640,8 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &comment_stmt.table_name)?;
+        let relation =
+            lookup_table_or_partitioned_relation_for_comment(&catalog, &comment_stmt.table_name)?;
         if relation.relpersistence == 't' {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "permanent table for COMMENT ON CONSTRAINT",

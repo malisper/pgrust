@@ -32,6 +32,7 @@ use crate::backend::utils::record::register_anonymous_record_descriptor;
 use crate::include::access::htup::{HeapTuple, TupleValue};
 use crate::include::catalog::range_type_ref_for_sql_type;
 use crate::include::nodes::execnodes::ToastFetchContext;
+use crate::include::nodes::primnodes::ColumnDesc;
 use crate::pgrust::compact_string::CompactString;
 
 mod array;
@@ -215,6 +216,21 @@ pub(crate) fn format_failing_row_detail(
     let body = values
         .iter()
         .map(|value| format_failing_row_value(value, datetime_config))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Failing row contains ({body}).")
+}
+
+pub(crate) fn format_failing_row_detail_for_columns(
+    values: &[Value],
+    columns: &[ColumnDesc],
+    datetime_config: &DateTimeConfig,
+) -> String {
+    let body = columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| (!column.dropped).then(|| values.get(index)))
+        .map(|value| format_failing_row_value(value.unwrap_or(&Value::Null), datetime_config))
         .collect::<Vec<_>>()
         .join(", ");
     format!("Failing row contains ({body}).")

@@ -79,6 +79,29 @@ fn partition_inheritance_row(
         .find(|row| row.inhparent == parent_oid)
 }
 
+fn validate_attach_partition_not_circular(
+    catalog: &dyn CatalogLookup,
+    parent: &BoundRelation,
+    child: &BoundRelation,
+) -> Result<(), ExecError> {
+    if catalog
+        .find_all_inheritors(child.relation_oid)
+        .contains(&parent.relation_oid)
+    {
+        return Err(ExecError::DetailedError {
+            message: "circular inheritance not allowed".into(),
+            detail: Some(format!(
+                "\"{}\" is already a child of \"{}\".",
+                relation_name_for_oid(catalog, parent.relation_oid),
+                relation_name_for_oid(catalog, child.relation_oid),
+            )),
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
+    Ok(())
+}
+
 fn validate_detach_inheritance_state(
     catalog: &dyn CatalogLookup,
     parent: &BoundRelation,
@@ -301,6 +324,7 @@ impl Database {
             &child,
             &stmt.partition_table,
         )?;
+        validate_attach_partition_not_circular(&catalog, &parent, &child)?;
 
         let bound = lower_partition_bound_for_relation(&parent, &stmt.bound, &catalog)
             .map_err(ExecError::Parse)?;
@@ -1252,6 +1276,92 @@ mod tests {
             }
             other => panic!("expected overlap failure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn attach_partition_rejects_circular_inheritance_before_catalog_write() {
+        let base = temp_dir("attach_cycle");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(
+                &db,
+                "create table list_parted2 (a int4, b text) partition by list (a)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create table part_5 (like list_parted2) partition by list (b)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "alter table list_parted2 attach partition part_5 for values in (5)",
+            )
+            .unwrap();
+
+        match session.execute(
+            &db,
+            "alter table part_5 attach partition list_parted2 for values in ('b')",
+        ) {
+            Err(ExecError::DetailedError {
+                message,
+                detail,
+                sqlstate,
+                ..
+            }) => {
+                assert_eq!(message, "circular inheritance not allowed");
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("\"part_5\" is already a child of \"list_parted2\".")
+                );
+                assert_eq!(sqlstate, "42P17");
+            }
+            other => panic!("expected circular attach partition error, got {other:?}"),
+        }
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select count(*) from pg_inherits \
+                 where inhrelid = 'list_parted2'::regclass \
+                   and inhparent = 'part_5'::regclass",
+            ),
+            vec![vec![Value::Int64(0)]]
+        );
+
+        match session.execute(
+            &db,
+            "alter table list_parted2 attach partition list_parted2 for values in (0)",
+        ) {
+            Err(ExecError::DetailedError {
+                message,
+                detail,
+                sqlstate,
+                ..
+            }) => {
+                assert_eq!(message, "circular inheritance not allowed");
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("\"list_parted2\" is already a child of \"list_parted2\".")
+                );
+                assert_eq!(sqlstate, "42P17");
+            }
+            other => panic!("expected self attach partition error, got {other:?}"),
+        }
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select count(*) from pg_inherits \
+                 where inhrelid = 'list_parted2'::regclass \
+                   and inhparent = 'list_parted2'::regclass",
+            ),
+            vec![vec![Value::Int64(0)]]
+        );
     }
 
     #[test]

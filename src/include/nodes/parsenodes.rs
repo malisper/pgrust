@@ -137,7 +137,9 @@ impl fmt::Display for ParseError {
             ParseError::InvalidNumeric(value) => write!(f, "invalid numeric: {value}"),
             ParseError::UnknownTable(name) => write!(f, "relation \"{name}\" does not exist"),
             ParseError::UnknownColumn(name) => {
-                if name.contains('.') {
+                if name.starts_with("........pg.dropped.") {
+                    write!(f, "column \"{name}\" does not exist")
+                } else if name.contains('.') {
                     write!(f, "column {name} does not exist")
                 } else {
                     write!(f, "column \"{name}\" does not exist")

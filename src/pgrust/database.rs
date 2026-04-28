@@ -159,6 +159,23 @@ pub(crate) use foreign_keys::{
 
 pub(crate) const LOGICAL_RELATION_LOCK_SPC_OID: u32 = u32::MAX;
 
+pub(crate) fn relation_lock_tag(
+    relation: &crate::backend::parser::BoundRelation,
+) -> RelFileLocator {
+    if crate::include::catalog::relkind_has_storage(relation.relkind) {
+        return relation.rel;
+    }
+
+    // :HACK: pgrust does not have PostgreSQL heavyweight lock tags separate
+    // from storage locators yet. Use an impossible tablespace OID to represent
+    // relation-OID locks for relkinds without physical storage.
+    RelFileLocator {
+        spc_oid: LOGICAL_RELATION_LOCK_SPC_OID,
+        db_oid: relation.rel.db_oid,
+        rel_number: relation.relation_oid,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DatabaseOpenOptions {
     pub pool_size: usize,

@@ -106,7 +106,7 @@ pub fn lower_create_table_with_catalog(
     synthetic.inherits.clear();
 
     let mut lowered = lower_create_table(&synthetic, catalog)?;
-    mark_inherited_check_actions(&mut lowered, &parents, catalog);
+    mark_inherited_check_actions(&mut lowered, stmt, &parents, catalog);
     for (column, merged) in lowered
         .relation_desc
         .columns
@@ -759,8 +759,32 @@ fn inherited_not_null_count(column: &crate::include::nodes::primnodes::ColumnDes
     (!column.storage.nullable && !column.not_null_constraint_no_inherit) as i16
 }
 
+fn local_column_check_constraint_matches(
+    stmt: &CreateTableStatement,
+    constraint_name: &str,
+    expr_sql: &str,
+) -> bool {
+    stmt.columns().any(|column| {
+        column.constraints.iter().any(|constraint| {
+            let ColumnConstraint::Check {
+                attributes,
+                expr_sql: local_expr_sql,
+            } = constraint
+            else {
+                return false;
+            };
+            attributes
+                .name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(constraint_name))
+                && local_expr_sql.trim().eq_ignore_ascii_case(expr_sql.trim())
+        })
+    })
+}
+
 fn mark_inherited_check_actions(
     lowered: &mut LoweredCreateTable,
+    stmt: &CreateTableStatement,
     parents: &[BoundRelation],
     catalog: &dyn CatalogLookup,
 ) {
@@ -781,6 +805,12 @@ fn mark_inherited_check_actions(
             .collect::<Vec<_>>();
         if matches.is_empty() {
             continue;
+        }
+        if local_column_check_constraint_matches(stmt, &action.constraint_name, &action.expr_sql) {
+            push_notice(format!(
+                "merging constraint \"{}\" with inherited definition",
+                action.constraint_name
+            ));
         }
         action.parent_constraint_oid = matches.first().map(|row| row.oid);
         action.is_local = false;

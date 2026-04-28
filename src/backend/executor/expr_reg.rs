@@ -662,7 +662,9 @@ pub(crate) fn format_regproc_oid(oid: u32, catalog: &dyn CatalogLookup) -> Optio
     if oid == 0 {
         return Some("-".into());
     }
-    catalog.proc_row_by_oid(oid).map(|row| row.proname)
+    catalog
+        .proc_row_by_oid(oid)
+        .map(|row| quote_identifier_if_needed(&row.proname))
 }
 
 pub(crate) fn format_regproc_oid_optional(

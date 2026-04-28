@@ -1,7 +1,6 @@
 use super::super::*;
 use super::alter_table_work_queue::{build_alter_table_work_queue, has_inheritance_children};
 use crate::backend::commands::tablecmds::collect_matching_rows_heap;
-use crate::backend::executor::value_io::format_failing_row_detail;
 use crate::backend::executor::{ExecutorContext, eval_expr};
 use crate::backend::parser::{
     BoundCheckConstraint, BoundExclusionConstraint, BoundForeignKeyConstraint,
@@ -22,6 +21,37 @@ use crate::pgrust::database::ddl::{
 
 fn relation_basename(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
+}
+
+fn lookup_table_partitioned_or_view_for_alter_table(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    if_exists: bool,
+) -> Result<Option<crate::backend::parser::BoundRelation>, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'f' | 'v') => Ok(Some(entry)),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table",
+        })),
+        None if if_exists => {
+            push_notice(format!(r#"relation "{name}" does not exist, skipping"#));
+            Ok(None)
+        }
+        None => Err(ExecError::Parse(ParseError::UnknownTable(name.to_string()))),
+    }
+}
+
+fn unsupported_view_alter_action(action: &str, relation_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "ALTER action {action} cannot be performed on relation \"{}\"",
+            relation_basename(relation_name)
+        ),
+        detail: Some("This operation is not supported for views.".into()),
+        hint: None,
+        sqlstate: "42809",
+    }
 }
 
 fn reject_constraint_with_dependent_rule(
@@ -94,6 +124,17 @@ fn ddl_not_null_contains_null_error(relation_name: &str, column_name: &str) -> E
     }
 }
 
+fn ddl_check_constraint_violation_error(relation_name: &str, constraint_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "check constraint \"{constraint_name}\" of relation \"{relation_name}\" is violated by some row"
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "23514",
+    }
+}
+
 fn incompatible_not_valid_not_null_error(constraint_name: &str, relation_name: &str) -> ExecError {
     ExecError::DetailedError {
         message: format!(
@@ -120,6 +161,17 @@ fn cannot_change_not_null_no_inherit_error(
             "You might need to make the existing constraint inheritable using ALTER TABLE ... ALTER CONSTRAINT ... INHERIT.".into(),
         ),
         sqlstate: "0A000",
+    }
+}
+
+fn cannot_drop_inherited_constraint_error(constraint_name: &str, relation_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "cannot drop inherited constraint \"{constraint_name}\" of relation \"{relation_name}\""
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42P16",
     }
 }
 
@@ -334,13 +386,13 @@ pub(super) fn validate_not_null_rows(
     Ok(())
 }
 
-pub(super) fn validate_check_rows(
+pub(super) fn validate_check_rows<C: CatalogLookup + Clone + 'static>(
     db: &Database,
     relation: &crate::backend::parser::BoundRelation,
     relation_name: &str,
     constraint_name: &str,
     expr_sql: &str,
-    catalog: &dyn CatalogLookup,
+    catalog: &C,
     client_id: ClientId,
     xid: TransactionId,
     cid: CommandId,
@@ -371,20 +423,19 @@ pub(super) fn validate_check_rows(
         &datetime_config,
         interrupts,
     )?;
+    ctx.catalog = Some(crate::backend::executor::executor_catalog(catalog.clone()));
     let rows =
         collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
     for (_, values) in rows {
-        let detail = format_failing_row_detail(&values, &ctx.datetime_config);
         let mut slot =
             TupleSlot::virtual_row_with_metadata(values, None, Some(relation.relation_oid));
         match eval_expr(&check.expr, &mut slot, &mut ctx)? {
             Value::Null | Value::Bool(true) => {}
             Value::Bool(false) => {
-                return Err(ExecError::CheckViolation {
-                    relation: relation_name.to_string(),
-                    constraint: check.constraint_name.clone(),
-                    detail: Some(detail),
-                });
+                return Err(ddl_check_constraint_violation_error(
+                    relation_name,
+                    &check.constraint_name,
+                ));
             }
             _ => {
                 return Err(ExecError::DetailedError {
@@ -649,11 +700,15 @@ fn partition_descendants(
     relation_oid: u32,
 ) -> Result<Vec<crate::backend::parser::BoundRelation>, ExecError> {
     let mut descendants = Vec::new();
+    let mut seen = std::collections::BTreeSet::from([relation_oid]);
     let mut queue = std::collections::VecDeque::from([relation_oid]);
     while let Some(parent_oid) = queue.pop_front() {
         let mut children = catalog.inheritance_children(parent_oid);
         children.sort_by_key(|row| (row.inhseqno, row.inhrelid));
         for child in children.into_iter().filter(|row| !row.inhdetachpending) {
+            if !seen.insert(child.inhrelid) {
+                continue;
+            }
             let relation = catalog.relation_by_oid(child.inhrelid).ok_or_else(|| {
                 ExecError::DetailedError {
                     message: format!("missing partition relation {}", child.inhrelid),
@@ -983,8 +1038,9 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            lock_tag,
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -1903,7 +1959,7 @@ impl Database {
                     &catalog,
                 )
                 .map_err(ExecError::Parse)?;
-                if !action.not_valid {
+                if action.enforced && !action.not_valid {
                     validate_check_rows(
                         self,
                         &relation,
@@ -2720,7 +2776,7 @@ impl Database {
                 &catalog,
             )
             .map_err(ExecError::Parse)?;
-            if !action.not_valid {
+            if action.enforced && !action.not_valid {
                 validate_check_rows(
                     self,
                     &child_relation,
@@ -2760,6 +2816,10 @@ impl Database {
                         ),
                     )));
                 }
+                push_notice(format!(
+                    "merging constraint \"{}\" with inherited definition",
+                    existing.conname
+                ));
                 let effect = self
                     .catalog
                     .write()
@@ -2978,6 +3038,103 @@ impl Database {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn propagate_drop_not_null_constraint_to_inheritors(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent_relation_oid: u32,
+        column_name: &str,
+        recurse: bool,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        for child_relation in direct_inheritance_children(&catalog, parent_relation_oid)? {
+            let child_column_index = relation_column_index_by_name(&child_relation, column_name)?;
+            let child_column_name = child_relation.desc.columns[child_column_index].name.clone();
+            let child_row =
+                not_null_constraint_for_column(&catalog, &child_relation, &child_column_name)?
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "inherited NOT NULL constraint",
+                            actual: format!(
+                                "cache lookup failed for not-null constraint on column \"{}\" of relation {}",
+                                child_column_name, child_relation.relation_oid
+                            ),
+                        })
+                    })?;
+            if child_row.coninhcount <= 0 {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "inherited NOT NULL constraint",
+                    actual: format!(
+                        "relation {} has non-inherited constraint \"{}\"",
+                        child_relation.relation_oid, child_row.conname
+                    ),
+                }));
+            }
+
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: cid.saturating_add(catalog_effects.len() as u32),
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            if recurse && child_row.coninhcount == 1 && !child_row.conislocal {
+                let effect = self
+                    .catalog
+                    .write()
+                    .drop_column_not_null_mvcc(
+                        child_relation.relation_oid,
+                        &child_column_name,
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+                if !child_row.connoinherit {
+                    self.propagate_drop_not_null_constraint_to_inheritors(
+                        client_id,
+                        xid,
+                        cid.saturating_add(1),
+                        child_relation.relation_oid,
+                        &child_column_name,
+                        recurse,
+                        configured_search_path,
+                        catalog_effects,
+                    )?;
+                }
+            } else {
+                let new_inhcount = child_row.coninhcount.saturating_sub(1);
+                let new_is_local = if recurse {
+                    child_row.conislocal
+                } else {
+                    child_row.conislocal || new_inhcount == 0
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .alter_not_null_constraint_state_mvcc(
+                        child_relation.relation_oid,
+                        &child_row.conname,
+                        None,
+                        None,
+                        Some(new_is_local),
+                        Some(new_inhcount),
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn execute_alter_table_drop_constraint_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -2994,8 +3151,9 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            lock_tag,
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -3013,7 +3171,7 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(lock_tag, client_id);
         result
     }
 
@@ -3118,16 +3276,22 @@ impl Database {
                 let attnum = *attnums_from_constraint(&row)?
                     .first()
                     .expect("not null attnum");
-                if let Some(primary) = primary_constraint_for_attnum(&rows, attnum) {
+                if row.coninhcount > 0 {
+                    return Err(cannot_drop_inherited_constraint_error(
+                        &row.conname,
+                        relation_basename(&drop_stmt.table_name),
+                    ));
+                }
+                let column_index = column_index_for_attnum(&relation, attnum)?;
+                if primary_constraint_for_attnum(&rows, attnum).is_some() {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "droppable NOT NULL constraint",
                         actual: format!(
-                            "column is required by PRIMARY KEY constraint \"{}\"",
-                            primary.conname
+                            "column \"{}\" is in a primary key",
+                            relation.desc.columns[column_index].name
                         ),
                     }));
                 }
-                let column_index = column_index_for_attnum(&relation, attnum)?;
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -3147,6 +3311,18 @@ impl Database {
                     )
                     .map_err(map_catalog_error)?;
                 catalog_effects.push(effect);
+                if !row.connoinherit {
+                    self.propagate_drop_not_null_constraint_to_inheritors(
+                        client_id,
+                        xid,
+                        cid.saturating_add(1),
+                        relation.relation_oid,
+                        &relation.desc.columns[column_index].name,
+                        !drop_stmt.only,
+                        configured_search_path,
+                        catalog_effects,
+                    )?;
+                }
             }
             CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE => {
                 if row.conparentid != 0 || row.coninhcount > 0 {
@@ -3283,7 +3459,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+        let Some(relation) = lookup_table_partitioned_or_view_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -3291,8 +3467,9 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            lock_tag,
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -3310,7 +3487,7 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(lock_tag, client_id);
         result
     }
 
@@ -3325,7 +3502,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+        let Some(relation) = lookup_table_partitioned_or_view_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -3333,6 +3510,12 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        if relation.relkind == 'v' {
+            return Err(unsupported_view_alter_action(
+                "ALTER COLUMN ... SET NOT NULL",
+                &alter_stmt.table_name,
+            ));
+        }
         ensure_constraint_relation(self, client_id, &relation, &alter_stmt.table_name)?;
         if is_system_column_name(&alter_stmt.column_name) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -3482,7 +3665,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+        let Some(relation) = lookup_table_partitioned_or_view_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -3490,8 +3673,9 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            lock_tag,
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -3509,7 +3693,7 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(lock_tag, client_id);
         result
     }
 
@@ -3524,7 +3708,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+        let Some(relation) = lookup_table_partitioned_or_view_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -3532,6 +3716,12 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        if relation.relkind == 'v' {
+            return Err(unsupported_view_alter_action(
+                "ALTER COLUMN ... DROP NOT NULL",
+                &alter_stmt.table_name,
+            ));
+        }
         ensure_constraint_relation(self, client_id, &relation, &alter_stmt.table_name)?;
         if is_system_column_name(&alter_stmt.column_name) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -3568,21 +3758,33 @@ impl Database {
         }
         let attnum = (column_index + 1) as i16;
         let existing_constraints = catalog.constraint_rows_for_relation(relation.relation_oid);
-        if let Some(primary) = primary_constraint_for_attnum(&existing_constraints, attnum) {
-            if primary.conperiod {
-                return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "droppable NOT NULL column",
-                    actual: format!(
-                        "column \"{}\" is in a primary key",
-                        relation.desc.columns[column_index].name
-                    ),
-                }));
-            }
+        let not_null_row = not_null_constraint_for_column(
+            &catalog,
+            &relation,
+            &relation.desc.columns[column_index].name,
+        )?
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "droppable NOT NULL constraint",
+                actual: format!(
+                    "cache lookup failed for not-null constraint on column \"{}\" of relation \"{}\"",
+                    relation.desc.columns[column_index].name,
+                    relation_basename(&alter_stmt.table_name)
+                ),
+            })
+        })?;
+        if not_null_row.coninhcount > 0 {
+            return Err(cannot_drop_inherited_constraint_error(
+                &not_null_row.conname,
+                relation_basename(&alter_stmt.table_name),
+            ));
+        }
+        if primary_constraint_for_attnum(&existing_constraints, attnum).is_some() {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "droppable NOT NULL column",
                 actual: format!(
-                    "column is required by PRIMARY KEY constraint \"{}\"",
-                    primary.conname
+                    "column \"{}\" is in a primary key",
+                    relation.desc.columns[column_index].name
                 ),
             }));
         }
@@ -3593,7 +3795,7 @@ impl Database {
             cid,
             client_id,
             waiter: None,
-            interrupts,
+            interrupts: std::sync::Arc::clone(&interrupts),
         };
         let effect = self
             .catalog
@@ -3605,6 +3807,18 @@ impl Database {
             )
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
+        if !not_null_row.connoinherit {
+            self.propagate_drop_not_null_constraint_to_inheritors(
+                client_id,
+                xid,
+                cid.saturating_add(1),
+                relation.relation_oid,
+                &relation.desc.columns[column_index].name,
+                !alter_stmt.only,
+                configured_search_path,
+                catalog_effects,
+            )?;
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -3818,6 +4032,89 @@ impl Database {
                     cid,
                     std::sync::Arc::clone(&interrupts),
                 )?;
+                if !row.connoinherit {
+                    let inheritors = catalog.find_all_inheritors(relation.relation_oid);
+                    if alter_stmt.only && inheritors.iter().any(|oid| *oid != relation.relation_oid)
+                    {
+                        return Err(ExecError::DetailedError {
+                            message: "constraint must be validated on child tables too".into(),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42P16",
+                        });
+                    }
+                    for child_oid in inheritors {
+                        if child_oid == relation.relation_oid {
+                            continue;
+                        }
+                        let child = catalog.lookup_relation_by_oid(child_oid).ok_or_else(|| {
+                            ExecError::Parse(ParseError::UnknownTable(child_oid.to_string()))
+                        })?;
+                        let child_row = catalog
+                            .constraint_rows_for_relation(child.relation_oid)
+                            .into_iter()
+                            .find(|child_row| {
+                                child_row.contype == CONSTRAINT_CHECK
+                                    && child_row.conname.eq_ignore_ascii_case(&row.conname)
+                            })
+                            .ok_or_else(|| {
+                                ExecError::Parse(ParseError::UnexpectedToken {
+                                    expected: "inherited CHECK constraint",
+                                    actual: format!(
+                                        "constraint \"{}\" of relation \"{}\" does not exist",
+                                        row.conname, child_oid
+                                    ),
+                                })
+                            })?;
+                        if child_row.convalidated {
+                            continue;
+                        }
+                        let child_expr_sql = child_row.conbin.clone().ok_or_else(|| {
+                            ExecError::Parse(ParseError::UnexpectedToken {
+                                expected: "stored CHECK constraint expression",
+                                actual: format!(
+                                    "missing expression for constraint {}",
+                                    child_row.conname
+                                ),
+                            })
+                        })?;
+                        let child_name = catalog
+                            .class_row_by_oid(child.relation_oid)
+                            .map(|row| row.relname)
+                            .unwrap_or_else(|| child.relation_oid.to_string());
+                        validate_check_rows(
+                            self,
+                            &child,
+                            &child_name,
+                            &child_row.conname,
+                            &child_expr_sql,
+                            &catalog,
+                            client_id,
+                            xid,
+                            cid,
+                            std::sync::Arc::clone(&interrupts),
+                        )?;
+                        let ctx = CatalogWriteContext {
+                            pool: self.pool.clone(),
+                            txns: self.txns.clone(),
+                            xid,
+                            cid,
+                            client_id,
+                            waiter: None,
+                            interrupts: std::sync::Arc::clone(&interrupts),
+                        };
+                        let effect = self
+                            .catalog
+                            .write()
+                            .validate_check_constraint_mvcc(
+                                child.relation_oid,
+                                &child_row.conname,
+                                &ctx,
+                            )
+                            .map_err(map_catalog_error)?;
+                        catalog_effects.push(effect);
+                    }
+                }
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),

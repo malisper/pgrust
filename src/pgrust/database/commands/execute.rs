@@ -1070,6 +1070,18 @@ impl Database {
                     // this DDL accepted as a no-op for PostgreSQL regression setup.
                     return Ok(StatementResult::AffectedRows(0));
                 }
+                if unsupported_stmt.feature == "ALTER TABLE form" {
+                    let lower = unsupported_stmt.sql.to_ascii_lowercase();
+                    if lower.contains(" set without oids") {
+                        return Ok(StatementResult::AffectedRows(0));
+                    }
+                    if lower.contains(" set with oids") {
+                        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "valid ALTER TABLE form",
+                            actual: "syntax error at or near \"WITH\"".into(),
+                        }));
+                    }
+                }
                 Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                     "{}: {}",
                     unsupported_stmt.feature, unsupported_stmt.sql
