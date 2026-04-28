@@ -119,6 +119,11 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
             StatementResult::Query { rows, .. } => rows
                 .into_iter()
                 .map(|mut row| {
+                    if row.len() == 1
+                        && let Some(Value::Record(record)) = row.pop()
+                    {
+                        row = record.fields;
+                    }
                     if row.len() < output_columns.len() {
                         row.resize(output_columns.len(), Value::Null);
                     }

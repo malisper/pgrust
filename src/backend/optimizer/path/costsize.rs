@@ -7,7 +7,9 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::analyze::predicate_implies_index_predicate;
 use crate::backend::parser::analyze::{bind_expr_with_outer_and_ctes, scope_for_relation};
-use crate::backend::parser::{BoundIndexRelation, CatalogLookup, ParseError, SqlType, SqlTypeKind};
+use crate::backend::parser::{
+    BoundIndexRelation, CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
+};
 use crate::backend::statistics::types::{
     PgDependencyItem, PgMcvItem, PgMcvListPayload, decode_pg_dependencies_payload,
     decode_pg_mcv_list_payload, decode_pg_ndistinct_payload, statistics_value_key,
@@ -2316,8 +2318,10 @@ fn build_join_paths_internal(
         !matches!(kind, JoinType::Full) && (left_uses_immediate_outer ^ right_uses_immediate_outer);
     let lateral_orientation_locked =
         left_depends_on_right || right_depends_on_left || immediate_orientation_locked;
-    let allow_default_orientation =
-        !left_depends_on_right && (!left_uses_immediate_outer || !lateral_orientation_locked);
+    let allow_default_orientation = !left_depends_on_right
+        && (!left_uses_immediate_outer
+            || !lateral_orientation_locked
+            || matches!(kind, JoinType::Right));
     let allow_base_cross_swap = matches!(kind, JoinType::Cross)
         && !lateral_orientation_locked
         && path_relids(&left).len() == 1
@@ -2506,7 +2510,10 @@ fn parameterized_inner_index_path(
         if !restrict_clause_can_parameterize(restrict, outer_relids, inner_relids) {
             continue;
         }
-        let clause = parameterize_outer_vars(restrict.clause.clone(), outer_relids);
+        let clause = parameterized_or_clause_to_scalar_array(parameterize_outer_vars(
+            restrict.clause.clone(),
+            outer_relids,
+        ));
         if expr_contains_runtime_input(&clause) {
             parameterized_clauses.push(clause);
             parameterized_indexes.push(index);
@@ -2594,6 +2601,73 @@ fn restrict_clause_can_parameterize(
             .all(|relid| outer_relids.contains(relid) || inner_relids.contains(relid))
 }
 
+fn parameterized_or_clause_to_scalar_array(expr: Expr) -> Expr {
+    let original = expr.clone();
+    let mut args = Vec::new();
+    flatten_or_args(&expr, &mut args);
+    if args.len() < 2 {
+        return original;
+    }
+
+    let mut key_expr: Option<Expr> = None;
+    let mut elements = Vec::with_capacity(args.len());
+    let mut collation_oid = None;
+    for arg in args {
+        let Expr::Op(op) = strip_casts(&arg) else {
+            return original;
+        };
+        if op.op != OpExprKind::Eq || op.args.len() != 2 {
+            return original;
+        }
+        let left_has_runtime = expr_contains_runtime_input(&op.args[0]);
+        let right_has_runtime = expr_contains_runtime_input(&op.args[1]);
+        let (key, element) = match (left_has_runtime, right_has_runtime) {
+            (false, true) => (strip_casts(&op.args[0]).clone(), op.args[1].clone()),
+            (true, false) => (strip_casts(&op.args[1]).clone(), op.args[0].clone()),
+            _ => return original,
+        };
+        if let Some(existing) = &key_expr {
+            if strip_casts(existing) != strip_casts(&key) {
+                return original;
+            }
+        } else {
+            key_expr = Some(key);
+            collation_oid = op.collation_oid;
+        }
+        elements.push(element);
+    }
+
+    let Some(key_expr) = key_expr else {
+        return original;
+    };
+    let Some(first_element) = elements.first() else {
+        return original;
+    };
+    let array_type = SqlType::array_of(expr_sql_type(first_element));
+    Expr::scalar_array_op_with_collation(
+        SubqueryComparisonOp::Eq,
+        true,
+        key_expr,
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        },
+        collation_oid,
+    )
+}
+
+fn flatten_or_args<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    if let Expr::Bool(bool_expr) = expr
+        && bool_expr.boolop == BoolExprType::Or
+    {
+        for arg in &bool_expr.args {
+            flatten_or_args(arg, out);
+        }
+        return;
+    }
+    out.push(expr);
+}
+
 fn parameterize_outer_vars(expr: Expr, outer_relids: &[usize]) -> Expr {
     match expr {
         Expr::Var(mut var) if var.varlevelsup == 0 && outer_relids.contains(&var.varno) => {
@@ -2659,6 +2733,16 @@ fn parameterize_outer_vars(expr: Expr, outer_relids: &[usize]) -> Expr {
             saop.right = Box::new(parameterize_outer_vars(*saop.right, outer_relids));
             Expr::ScalarArrayOp(saop)
         }
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| parameterize_outer_vars(element, outer_relids))
+                .collect(),
+            array_type,
+        },
         other => other,
     }
 }
@@ -2678,6 +2762,11 @@ fn path_contains_runtime_index_arg(path: &Path) -> bool {
             .iter()
             .chain(order_by_keys.iter())
             .any(|key| matches!(key.argument, IndexScanKeyArgument::Runtime(_))),
+        Path::BitmapIndexScan { keys, .. } => keys
+            .iter()
+            .any(|key| matches!(key.argument, IndexScanKeyArgument::Runtime(_))),
+        Path::BitmapOr { children, .. } => children.iter().any(path_contains_runtime_index_arg),
+        Path::BitmapHeapScan { bitmapqual, .. } => path_contains_runtime_index_arg(bitmapqual),
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
@@ -5471,14 +5560,27 @@ fn scalar_array_eq_selectivity(
     stats: Option<&RelationStats>,
     reltuples: f64,
 ) -> f64 {
-    let Some(array) = const_argument(right).and_then(|value| value.as_array_value()) else {
+    if let Some(array) = const_argument(right).and_then(|value| value.as_array_value()) {
+        return array
+            .elements
+            .iter()
+            .filter(|element| !matches!(element, Value::Null))
+            .map(|element| eq_selectivity(left, &Expr::Const(element.clone()), stats, reltuples))
+            .sum::<f64>()
+            .clamp(0.0, 1.0);
+    }
+    let Expr::ArrayLiteral { elements, .. } = strip_casts(right) else {
         return DEFAULT_BOOL_SEL;
     };
-    array
-        .elements
+    elements
         .iter()
-        .filter(|element| !matches!(element, Value::Null))
-        .map(|element| eq_selectivity(left, &Expr::Const(element.clone()), stats, reltuples))
+        .filter(|element| !matches!(strip_casts(element), Expr::Const(Value::Null)))
+        .map(|element| match strip_casts(element) {
+            Expr::Const(value) => {
+                eq_selectivity(left, &Expr::Const(value.clone()), stats, reltuples)
+            }
+            _ => DEFAULT_EQ_SEL,
+        })
         .sum::<f64>()
         .clamp(0.0, 1.0)
 }
@@ -6573,6 +6675,7 @@ fn runtime_index_argument_expr(expr: &Expr) -> bool {
             runtime_index_argument_expr(inner)
         }
         Expr::Op(op) => op.args.iter().all(runtime_index_argument_expr),
+        Expr::ArrayLiteral { elements, .. } => elements.iter().all(runtime_index_argument_expr),
         _ => false,
     }
 }
@@ -6585,6 +6688,10 @@ fn expr_contains_runtime_input(expr: &Expr) -> bool {
             expr_contains_runtime_input(inner)
         }
         Expr::Op(op) => op.args.iter().any(expr_contains_runtime_input),
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_runtime_input(&saop.left) || expr_contains_runtime_input(&saop.right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_runtime_input),
         _ => false,
     }
 }

@@ -1211,6 +1211,17 @@ pub fn default_opclass_for_am_and_type(
     }
     if matches!(
         input_type.sql_type.kind,
+        crate::backend::parser::SqlTypeKind::Record
+            | crate::backend::parser::SqlTypeKind::Composite
+    ) {
+        return opclasses.into_iter().find(|row| {
+            row.opcmethod == am_oid
+                && row.opcdefault
+                && row.opcintype == crate::include::catalog::RECORD_TYPE_OID
+        });
+    }
+    if matches!(
+        input_type.sql_type.kind,
         crate::backend::parser::SqlTypeKind::Enum
     ) {
         return opclasses.into_iter().find(|row| {

@@ -2854,6 +2854,51 @@ fn planner_places_lock_rows_between_order_by_and_limit() {
 }
 
 #[test]
+fn planner_for_update_of_locks_only_named_relation() {
+    let mut catalog = Catalog::default();
+    for name in ["t1", "t2"] {
+        catalog
+            .create_table(
+                name,
+                RelationDesc {
+                    columns: vec![column_desc("id", int4(), false)],
+                },
+            )
+            .expect("create table");
+    }
+    let stmt = parse_select("select * from t1, t2 for update of t2").expect("parse");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
+    let planned = super::planner(query, &catalog).expect("plan");
+    let Plan::LockRows { row_marks, .. } = strip_projections(&planned.plan_tree) else {
+        panic!("expected lock rows, got {:?}", planned.plan_tree);
+    };
+    assert_eq!(row_marks.len(), 1);
+    assert_eq!(row_marks[0].rtindex, 2);
+}
+
+#[test]
+fn planner_for_update_of_join_alias_rejects_join_target() {
+    let mut catalog = Catalog::default();
+    for name in ["t1", "t2"] {
+        catalog
+            .create_table(
+                name,
+                RelationDesc {
+                    columns: vec![column_desc("id", int4(), false)],
+                },
+            )
+            .expect("create table");
+    }
+    let stmt =
+        parse_select("select * from t1 join t2 using (id) as jt for update of jt").expect("parse");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
+    let err = super::planner(query, &catalog).expect_err("plan should reject join target");
+    assert_eq!(err.to_string(), "FOR UPDATE cannot be applied to a join");
+}
+
+#[test]
 fn planner_keeps_recursive_cte_filter_semantic_until_setrefs() {
     let planned = planned_stmt_for_sql(
         "with recursive t(n) as (values (1) union all select n + 1 from t where n < 3) \
@@ -3570,6 +3615,44 @@ fn planner_uses_runtime_index_key_for_correlated_limit_subplan() {
                 _ => false,
             })
     }));
+    validate_planned_stmt_for_tests(&planned);
+}
+
+#[test]
+fn planner_uses_runtime_scalar_array_index_for_or_join_clause() {
+    fn contains_exec_param(expr: &Expr) -> bool {
+        match expr {
+            Expr::Param(Param {
+                paramkind: ParamKind::Exec,
+                ..
+            }) => true,
+            Expr::Op(op) => op.args.iter().any(contains_exec_param),
+            Expr::ArrayLiteral { elements, .. } => elements.iter().any(contains_exec_param),
+            Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => contains_exec_param(inner),
+            _ => false,
+        }
+    }
+
+    let catalog = catalog_with_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select count(*) from items o, items i where i.id = o.id or i.id = o.id + 1 or i.id = o.id + 2",
+        &catalog,
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| match plan {
+            Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => {
+                keys.iter().any(|key| {
+                    matches!(
+                        &key.argument,
+                        IndexScanKeyArgument::Runtime(expr) if contains_exec_param(expr)
+                    )
+                })
+            }
+            _ => false,
+        }),
+        "expected OR join clause to use runtime scalar-array index scan: {planned:#?}"
+    );
     validate_planned_stmt_for_tests(&planned);
 }
 

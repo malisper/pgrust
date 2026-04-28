@@ -1429,6 +1429,27 @@ fn expr_eval_obeys_null_semantics() {
         Value::Null
     );
     assert_eq!(
+        eval_expr(
+            &Expr::and(
+                Expr::Const(Value::Bool(false)),
+                Expr::Const(Value::Int32(1))
+            ),
+            &mut slot,
+            &mut ctx
+        )
+        .unwrap(),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        eval_expr(
+            &Expr::or(Expr::Const(Value::Bool(true)), Expr::Const(Value::Int32(1))),
+            &mut slot,
+            &mut ctx
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
         eval_expr(&Expr::IsNull(Box::new(local_var(2))), &mut slot, &mut ctx).unwrap(),
         Value::Bool(true)
     );
@@ -4511,6 +4532,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     sublink_type: SubLinkType::ExprSubLink,
                     testexpr: None,
                     first_col_type: Some(int4),
+                    target_width: 1,
                     plan_id: 0,
                     par_param: Vec::new(),
                     args: Vec::new(),
@@ -5695,6 +5717,32 @@ fn group_by_with_count() {
                 vec![
                     vec![Value::Text("a".into()), Value::Int64(2)],
                     vec![Value::Text("b".into()), Value::Int64(1)]
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn count_whole_row_ignores_null_extended_outer_join_rows() {
+    let mut harness = seed_people_and_pets("count_whole_row_outer_join");
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select people.id, count(pets.*) \
+             from people left join pets on pets.owner_id = people.id \
+             group by people.id order by people.id",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int64(2)],
+                    vec![Value::Int32(2), Value::Int64(1)],
+                    vec![Value::Int32(3), Value::Int64(0)]
                 ]
             );
         }
@@ -12564,6 +12612,39 @@ fn lateral_nested_sublink_preserves_outer_values_binding() {
 }
 
 #[test]
+fn lateral_right_join_placeholder_uses_outer_binding_at_join_level() {
+    let base = temp_dir("lateral_right_join_placeholder_outer_binding");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table int4_tbl(f1 int4)").unwrap();
+    db.execute(1, "insert into int4_tbl values (0),(1),(2)")
+        .unwrap();
+    db.execute(1, "create table int8_tbl(q1 int8, q2 int8)")
+        .unwrap();
+    db.execute(1, "insert into int8_tbl values (10,20)")
+        .unwrap();
+
+    let sql = "select * from
+               int4_tbl as i41,
+               lateral
+                 (select 1 as x from
+                   (select i41.f1 as lat,
+                           i42.f1 as loc from
+                      int8_tbl as i81, int4_tbl as i42) as ss1
+                   right join int4_tbl as i43 on (i43.f1 > 1)
+                   where ss1.loc = ss1.lat) as ss2
+             where i41.f1 > 0"
+        .to_string();
+
+    assert_query_rows(
+        db.execute(1, &(sql + " order by i41.f1")).unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(1)],
+            vec![Value::Int32(2), Value::Int32(1)],
+        ],
+    );
+}
+
+#[test]
 fn right_full_join_lateral_cannot_reference_left_side() {
     let base = temp_dir("right_full_lateral_invalid_left_ref");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -12590,6 +12671,27 @@ fn right_full_join_lateral_cannot_reference_left_side() {
     assert!(
         matches!(full_err, ExecError::Parse(ParseError::InvalidFromClauseReference(name)) if name == "a")
     );
+}
+
+#[test]
+fn lateral_duplicate_outer_relation_alias_is_ambiguous() {
+    let base = temp_dir("lateral_duplicate_alias_ambiguous");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table int8_tbl(q1 int8, q2 int8)")
+        .unwrap();
+    db.execute(1, "create table int4_tbl(f1 int4)").unwrap();
+    let err = db
+        .execute(
+            1,
+            "select * from int8_tbl x
+             cross join (int4_tbl x cross join lateral (select x.f1) ss)",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError { message, .. })
+            if message == "table reference \"x\" is ambiguous"
+    ));
 }
 
 #[test]
@@ -22972,6 +23074,35 @@ fn alter_function_signature_accepts_argument_names() {
 }
 
 #[test]
+fn sql_function_scan_expands_named_composite_record_result() {
+    let db = Database::open(temp_dir("sql_function_scan_named_composite"), 16).unwrap();
+    db.execute(1, "create table int8_tbl(q1 int8, q2 int8)")
+        .unwrap();
+    db.execute(1, "create table int4_tbl(f1 int4)").unwrap();
+    db.execute(
+        1,
+        "create function mki8(bigint, bigint) returns int8_tbl as \
+         $$select row($1,$2)::int8_tbl$$ language sql",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function mki4(int) returns int4_tbl as \
+         $$select row($1)::int4_tbl$$ language sql",
+    )
+    .unwrap();
+
+    assert_query_rows(
+        db.execute(1, "select * from mki8(1,2)").unwrap(),
+        vec![vec![Value::Int64(1), Value::Int64(2)]],
+    );
+    assert_query_rows(
+        db.execute(1, "select * from mki4(42)").unwrap(),
+        vec![vec![Value::Int32(42)]],
+    );
+}
+
+#[test]
 fn range_constructor_semantics() {
     let base = temp_dir("range_constructor_accessors");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -23467,6 +23598,42 @@ fn scalar_subquery_multiple_rows_errors() {
     assert!(
         format!("{err:?}")
             .contains("more than one row returned by a subquery used as an expression")
+    );
+}
+
+#[test]
+fn correlated_scalar_subquery_in_join_qual_uses_sql_visible_width() {
+    let mut harness = SeededSqlHarness::new("scalar_subquery_join_qual_width", Catalog::default());
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "create table tenk1(unique1 int4, two int4)",
+        )
+        .unwrap();
+    let xid = harness.txns.begin();
+    harness
+        .execute(xid, "insert into tenk1 values (0,0),(1,1),(2,0),(3,1)")
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
+
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select t1.unique1,t2.unique1 from tenk1 t1
+                 inner join tenk1 t2 on t1.two = t2.two
+                   and t1.unique1 = (select min(unique1) from tenk1
+                                     where t2.unique1=unique1)
+                 where t1.unique1 < 4 and t2.unique1 < 4
+                 order by t1.unique1",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(0), Value::Int32(0)],
+            vec![Value::Int32(1), Value::Int32(1)],
+            vec![Value::Int32(2), Value::Int32(2)],
+            vec![Value::Int32(3), Value::Int32(3)],
+        ],
     );
 }
 

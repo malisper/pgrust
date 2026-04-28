@@ -524,6 +524,21 @@ pub(super) fn resolve_column_with_outer(
         Err(other) => return Err(other),
     }
 
+    if let Some((relation, _)) = name.rsplit_once('.') {
+        let visible_outer_matches = outer_scopes
+            .iter()
+            .filter(|outer_scope| scope_has_visible_relation(outer_scope, relation))
+            .count();
+        if visible_outer_matches > 1 {
+            return Err(ParseError::DetailedError {
+                message: format!("table reference \"{relation}\" is ambiguous"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P09",
+            });
+        }
+    }
+
     for (depth, outer_scope) in outer_scopes.iter().enumerate() {
         match resolve_column(outer_scope, name) {
             Ok(index) => {
@@ -555,6 +570,20 @@ pub(super) fn resolve_column_with_outer(
     }
 
     Err(ParseError::UnknownColumn(name.to_string()))
+}
+
+fn scope_has_visible_relation(scope: &BoundScope, name: &str) -> bool {
+    scope.relations.iter().any(|relation| {
+        relation
+            .relation_names
+            .iter()
+            .any(|relation_name| relation_name.eq_ignore_ascii_case(name))
+    }) || scope.columns.iter().any(|column| {
+        column
+            .relation_names
+            .iter()
+            .any(|relation_name| relation_name.eq_ignore_ascii_case(name))
+    })
 }
 
 pub(super) fn resolve_relation_row_expr_with_outer(
@@ -973,6 +1002,15 @@ pub(super) fn bind_from_item_with_ctes(
                     )?;
                     (plan, scope, false)
                 };
+            if *preserve_source_names
+                && column_aliases.is_empty()
+                && let FromItem::Join {
+                    constraint: JoinConstraint::Using(columns),
+                    ..
+                } = source.as_ref()
+            {
+                return apply_join_using_alias(plan, scope, alias, columns.len());
+            }
             let alias_columns = match column_aliases {
                 AliasColumnSpec::Definitions(_) => &AliasColumnSpec::None,
                 _ => column_aliases,
@@ -4489,6 +4527,45 @@ fn apply_function_rte_alias(plan: &mut AnalyzedFrom, alias: &str, desc: &Relatio
     call.set_output_columns(output_columns.clone());
     plan.output_columns = output_columns;
     true
+}
+
+fn apply_join_using_alias(
+    mut plan: AnalyzedFrom,
+    mut scope: BoundScope,
+    alias: &str,
+    using_column_count: usize,
+) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
+    if scope.relations.iter().any(|relation| {
+        relation
+            .relation_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(alias))
+    }) || scope.columns.iter().any(|column| {
+        column
+            .relation_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(alias))
+    }) {
+        return Err(ParseError::DuplicateTableName(alias.to_string()));
+    }
+
+    for column in scope.columns.iter_mut().take(using_column_count) {
+        if !column
+            .relation_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(alias))
+        {
+            column.relation_names.push(alias.to_string());
+        }
+    }
+    if let Some(rte) = plan.rtable.last_mut()
+        && matches!(rte.kind, RangeTblEntryKind::Join { .. })
+    {
+        rte.alias = Some(alias.to_string());
+        rte.alias_preserves_source_names = true;
+        rte.eref.aliasname = alias.to_string();
+    }
+    Ok((plan, scope))
 }
 
 fn apply_relation_alias(

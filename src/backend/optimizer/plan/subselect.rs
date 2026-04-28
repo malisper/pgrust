@@ -38,6 +38,7 @@ fn lower_sublink_to_subplan(
         .target_list
         .first()
         .map(|target| target.sql_type);
+    let target_width = sublink.subselect.target_list.len();
     let planned_stmt = planner(*sublink.subselect, catalog)
         .expect("locking validation should complete before subplan lowering");
     let par_param = planned_stmt
@@ -55,6 +56,7 @@ fn lower_sublink_to_subplan(
         sublink_type: sublink.sublink_type,
         testexpr,
         first_col_type,
+        target_width,
         plan_id,
         par_param,
         args,
@@ -741,6 +743,7 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
             first_col_type: subplan.first_col_type,
+            target_width: subplan.target_width,
             plan_id: subplan.plan_id + base,
             sublink_type: subplan.sublink_type,
             par_param: subplan.par_param,

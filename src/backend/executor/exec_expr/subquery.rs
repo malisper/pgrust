@@ -3,7 +3,20 @@ use crate::backend::executor::expr_string::eval_like;
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::{ArrayValue, RecordValue};
-use crate::include::nodes::primnodes::{Expr, Var, user_attrno};
+use crate::include::nodes::primnodes::{
+    BoolExprType, Expr, OpExprKind, ParamKind, Var, is_special_varno, user_attrno,
+};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+
+thread_local! {
+    static EXISTS_MEMBERSHIP_CACHE: RefCell<HashMap<usize, HashSet<Value>>> =
+        RefCell::new(HashMap::new());
+}
+
+pub(crate) fn clear_subquery_eval_cache() {
+    EXISTS_MEMBERSHIP_CACHE.with(|cache| cache.borrow_mut().clear());
+}
 
 fn local_var(index: usize) -> Expr {
     Expr::Var(Var {
@@ -30,6 +43,358 @@ fn planned_subquery_plan(
             hint: None,
             sqlstate: "XX000",
         })
+}
+
+fn filter_predicate_is_empty(expr: &Expr) -> bool {
+    match expr {
+        Expr::Const(Value::Bool(false)) | Expr::Const(Value::Null) => true,
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => {
+            bool_expr.args.iter().any(filter_predicate_is_empty)
+        }
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => {
+            !bool_expr.args.is_empty() && bool_expr.args.iter().all(filter_predicate_is_empty)
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            filter_predicate_is_empty(inner)
+        }
+        _ => false,
+    }
+}
+
+fn plan_is_proven_empty(plan: &Plan) -> bool {
+    match plan {
+        Plan::Filter { predicate, .. } => filter_predicate_is_empty(predicate),
+        Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::SubqueryScan { input, .. } => plan_is_proven_empty(input),
+        _ => false,
+    }
+}
+
+fn expr_has_local_tuple_var(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup == 0 && !is_special_varno(var.varno),
+        Expr::Op(op) => op.args.iter().any(expr_has_local_tuple_var),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_has_local_tuple_var),
+        Expr::Func(func) => func.args.iter().any(expr_has_local_tuple_var),
+        Expr::ScalarArrayOp(saop) => {
+            expr_has_local_tuple_var(&saop.left) || expr_has_local_tuple_var(&saop.right)
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_has_local_tuple_var(inner),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_has_local_tuple_var(left) || expr_has_local_tuple_var(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_has_local_tuple_var),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_has_local_tuple_var(expr)),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_has_local_tuple_var(expr)
+                || expr_has_local_tuple_var(pattern)
+                || escape.as_deref().is_some_and(expr_has_local_tuple_var)
+        }
+        _ => false,
+    }
+}
+
+fn expr_has_exec_param(expr: &Expr) -> bool {
+    match expr {
+        Expr::Param(param) => param.paramkind == ParamKind::Exec,
+        Expr::Op(op) => op.args.iter().any(expr_has_exec_param),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_has_exec_param),
+        Expr::Func(func) => func.args.iter().any(expr_has_exec_param),
+        Expr::ScalarArrayOp(saop) => {
+            expr_has_exec_param(&saop.left) || expr_has_exec_param(&saop.right)
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_has_exec_param(inner),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => expr_has_exec_param(left) || expr_has_exec_param(right),
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_has_exec_param),
+        Expr::Row { fields, .. } => fields.iter().any(|(_, expr)| expr_has_exec_param(expr)),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_has_exec_param(expr)
+                || expr_has_exec_param(pattern)
+                || escape.as_deref().is_some_and(expr_has_exec_param)
+        }
+        _ => false,
+    }
+}
+
+fn expr_is_exists_membership_safe(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => true,
+        Expr::Op(op) => op.args.iter().all(expr_is_exists_membership_safe),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().all(expr_is_exists_membership_safe),
+        Expr::ScalarArrayOp(saop) => {
+            expr_is_exists_membership_safe(&saop.left)
+                && expr_is_exists_membership_safe(&saop.right)
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_is_exists_membership_safe(inner),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_is_exists_membership_safe(left) && expr_is_exists_membership_safe(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().all(expr_is_exists_membership_safe),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .all(|(_, expr)| expr_is_exists_membership_safe(expr)),
+        _ => false,
+    }
+}
+
+fn plan_is_exists_membership_safe(plan: &Plan) -> bool {
+    match plan {
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::BitmapOr { .. }
+        | Plan::WorkTableScan { .. } => true,
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => children.iter().all(plan_is_exists_membership_safe),
+        Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => plan_is_exists_membership_safe(input),
+        Plan::BitmapHeapScan {
+            bitmapqual,
+            recheck_qual,
+            filter_qual,
+            ..
+        } => {
+            plan_is_exists_membership_safe(bitmapqual)
+                && recheck_qual.iter().all(expr_is_exists_membership_safe)
+                && filter_qual.iter().all(expr_is_exists_membership_safe)
+        }
+        Plan::Filter {
+            input, predicate, ..
+        } => plan_is_exists_membership_safe(input) && expr_is_exists_membership_safe(predicate),
+        Plan::Projection { input, targets, .. } => {
+            plan_is_exists_membership_safe(input)
+                && targets
+                    .iter()
+                    .all(|target| expr_is_exists_membership_safe(&target.expr))
+        }
+        Plan::SubqueryScan { input, filter, .. } => {
+            plan_is_exists_membership_safe(input)
+                && filter.as_ref().is_none_or(expr_is_exists_membership_safe)
+        }
+        Plan::Values { rows, .. } => rows.iter().flatten().all(expr_is_exists_membership_safe),
+        _ => false,
+    }
+}
+
+fn split_exists_membership_eq(expr: &Expr) -> Option<(Expr, Expr)> {
+    let Expr::Op(op) = expr else {
+        return None;
+    };
+    if op.op != OpExprKind::Eq || op.args.len() != 2 {
+        return None;
+    }
+    let left_has_local = expr_has_local_tuple_var(&op.args[0]);
+    let right_has_local = expr_has_local_tuple_var(&op.args[1]);
+    let left_has_param = expr_has_exec_param(&op.args[0]);
+    let right_has_param = expr_has_exec_param(&op.args[1]);
+    match (
+        left_has_local,
+        right_has_local,
+        left_has_param,
+        right_has_param,
+    ) {
+        (true, false, false, true) => Some((op.args[0].clone(), op.args[1].clone())),
+        (false, true, true, false) => Some((op.args[1].clone(), op.args[0].clone())),
+        _ => None,
+    }
+}
+
+fn exists_membership_spec(plan: &Plan) -> Option<(&Plan, Expr, Expr)> {
+    match plan {
+        Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::SubqueryScan { input, .. } => exists_membership_spec(input),
+        Plan::Filter {
+            input, predicate, ..
+        } if plan_is_exists_membership_safe(input) => split_exists_membership_eq(predicate)
+            .map(|(local, param)| (input.as_ref(), local, param)),
+        _ => None,
+    }
+}
+
+fn build_exists_membership_set(
+    input: &Plan,
+    local_expr: &Expr,
+    ctx: &mut ExecutorContext,
+) -> Result<HashSet<Value>, ExecError> {
+    let mut state = executor_start(input.clone());
+    let mut values = HashSet::new();
+    while let Some(mut inner_slot) = exec_next(&mut state, ctx)? {
+        let value = eval_expr(local_expr, &mut inner_slot, ctx)?;
+        if !matches!(value, Value::Null) {
+            values.insert(value.to_owned_value());
+        }
+    }
+    Ok(values)
+}
+
+fn eval_exists_membership_fast_path(
+    subplan: &crate::include::nodes::primnodes::SubPlan,
+    plan: &Plan,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<Value>, ExecError> {
+    if !matches!(subplan.sublink_type, SubLinkType::ExistsSubLink) {
+        return Ok(None);
+    }
+    let Some((input, local_expr, param_expr)) = exists_membership_spec(plan) else {
+        return Ok(None);
+    };
+    if !expr_is_exists_membership_safe(&local_expr)
+        || !expr_is_exists_membership_safe(&param_expr)
+        || !plan_is_exists_membership_safe(input)
+    {
+        return Ok(None);
+    }
+    let mut dummy = TupleSlot::empty(0);
+    let param_value = eval_expr(&param_expr, &mut dummy, ctx)?;
+    if matches!(param_value, Value::Null) {
+        return Ok(Some(Value::Bool(false)));
+    }
+    let param_value = param_value.to_owned_value();
+    if let Some(result) = EXISTS_MEMBERSHIP_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .get(&subplan.plan_id)
+            .map(|values| values.contains(&param_value))
+    }) {
+        return Ok(Some(Value::Bool(result)));
+    }
+    let values = build_exists_membership_set(input, &local_expr, ctx)?;
+    let result = values.contains(&param_value);
+    EXISTS_MEMBERSHIP_CACHE.with(|cache| {
+        cache.borrow_mut().insert(subplan.plan_id, values);
+    });
+    Ok(Some(Value::Bool(result)))
+}
+
+fn filter_predicate_is_runtime_empty(
+    expr: &Expr,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    match expr {
+        Expr::Const(Value::Bool(false)) | Expr::Const(Value::Null) => Ok(true),
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => {
+            for arg in &bool_expr.args {
+                if filter_predicate_is_runtime_empty(arg, ctx)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => {
+            if bool_expr.args.is_empty() {
+                return Ok(false);
+            }
+            for arg in &bool_expr.args {
+                if !filter_predicate_is_runtime_empty(arg, ctx)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            filter_predicate_is_runtime_empty(inner, ctx)
+        }
+        _ if !expr_has_local_tuple_var(expr) => {
+            let mut dummy = TupleSlot::empty(0);
+            Ok(matches!(
+                eval_expr(expr, &mut dummy, ctx)?,
+                Value::Bool(false) | Value::Null
+            ))
+        }
+        _ => Ok(false),
+    }
+}
+
+fn plan_is_runtime_empty(plan: &Plan, ctx: &mut ExecutorContext) -> Result<bool, ExecError> {
+    match plan {
+        Plan::Filter {
+            predicate, input, ..
+        } => Ok(filter_predicate_is_runtime_empty(predicate, ctx)?
+            || plan_is_runtime_empty(input, ctx)?),
+        Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::SubqueryScan { input, .. } => plan_is_runtime_empty(input, ctx),
+        _ => Ok(false),
+    }
 }
 
 fn bind_subplan_params(
@@ -80,9 +445,8 @@ pub(super) fn eval_scalar_subquery(
         bind_subplan_params(subplan, slot, ctx)?;
         let mut state = executor_start(plan.clone());
         let mut first_value = None;
-        while let Some(inner_slot) = exec_next(&mut state, ctx)? {
-            let mut values = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
-            Value::materialize_all(&mut values);
+        while let Some(mut inner_slot) = exec_next(&mut state, ctx)? {
+            let values = subplan_visible_values(subplan, &mut inner_slot)?;
             if values.len() != 1 {
                 return Err(ExecError::CardinalityViolation {
                     message: "subquery must return only one column".into(),
@@ -125,9 +489,8 @@ pub(super) fn eval_row_compare_subquery(
         bind_subplan_params(subplan, slot, ctx)?;
         let mut state = executor_start(plan.clone());
         let mut first_value = None;
-        while let Some(inner_slot) = exec_next(&mut state, ctx)? {
-            let mut values = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
-            Value::materialize_all(&mut values);
+        while let Some(mut inner_slot) = exec_next(&mut state, ctx)? {
+            let values = subplan_visible_values(subplan, &mut inner_slot)?;
             if first_value.is_some() {
                 return Err(ExecError::CardinalityViolation {
                     message: "more than one row returned by a subquery used as an expression"
@@ -156,9 +519,8 @@ pub(super) fn eval_array_subquery(
         bind_subplan_params(subplan, slot, ctx)?;
         let mut state = executor_start(plan.clone());
         let mut values = Vec::new();
-        while let Some(inner_slot) = exec_next(&mut state, ctx)? {
-            let mut row = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
-            Value::materialize_all(&mut row);
+        while let Some(mut inner_slot) = exec_next(&mut state, ctx)? {
+            let mut row = subplan_visible_values(subplan, &mut inner_slot)?;
             if row.len() != 1 {
                 return Err(ExecError::CardinalityViolation {
                     message: "subquery must return only one column".into(),
@@ -186,6 +548,15 @@ pub(super) fn eval_exists_subquery(
     let plan = planned_subquery_plan(subplan, ctx)?;
     with_scoped_subquery_runtime(ctx, |ctx| {
         bind_subplan_params(subplan, slot, ctx)?;
+        if plan_is_proven_empty(&plan) {
+            return Ok(Value::Bool(false));
+        }
+        if plan_is_runtime_empty(&plan, ctx)? {
+            return Ok(Value::Bool(false));
+        }
+        if let Some(value) = eval_exists_membership_fast_path(subplan, &plan, ctx)? {
+            return Ok(value);
+        }
         let mut state = executor_start(plan.clone());
         Ok(Value::Bool(exec_next(&mut state, ctx)?.is_some()))
     })
@@ -226,10 +597,9 @@ pub(super) fn eval_quantified_subquery(
         let mut state = executor_start(plan.clone());
         let mut saw_row = false;
         let mut saw_null = false;
-        while let Some(inner_slot) = exec_next(&mut state, ctx)? {
+        while let Some(mut inner_slot) = exec_next(&mut state, ctx)? {
             saw_row = true;
-            let mut values = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
-            Value::materialize_all(&mut values);
+            let values = subplan_visible_values(subplan, &mut inner_slot)?;
             let right_value = quantified_subquery_right_value(left_value, values)?;
             match compare_subquery_values(left_value, &right_value, op, collation_oid)? {
                 Value::Bool(result) => {
@@ -252,6 +622,18 @@ pub(super) fn eval_quantified_subquery(
             Ok(Value::Bool(is_all))
         }
     })
+}
+
+fn subplan_visible_values(
+    subplan: &crate::include::nodes::primnodes::SubPlan,
+    slot: &mut TupleSlot,
+) -> Result<Vec<Value>, ExecError> {
+    let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+    if subplan.target_width < values.len() {
+        values.truncate(subplan.target_width);
+    }
+    Value::materialize_all(&mut values);
+    Ok(values)
 }
 
 fn quantified_subquery_right_value(

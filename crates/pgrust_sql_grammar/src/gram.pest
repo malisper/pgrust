@@ -7,10 +7,9 @@ do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~
 do_body = { quoted_string_literal }
 do_language_clause = { kw_language ~ identifier }
 call_stmt = { kw_call ~ identifier ~ ("." ~ identifier)? ~ "(" ~ function_arg_list? ~ ")" }
-prepare_stmt = { kw_prepare ~ identifier ~ prepare_type_list? ~ kw_as ~ select_stmt }
-prepare_type_list = { "(" ~ type_name ~ ("," ~ type_name)* ~ ")" }
-execute_prepared_stmt = { kw_execute ~ identifier ~ execute_arg_list? }
-execute_arg_list = { "(" ~ expr ~ ("," ~ expr)* ~ ")" }
+prepare_stmt = { kw_prepare ~ identifier ~ prepare_arg_types? ~ kw_as ~ select_stmt }
+prepare_arg_types = { "(" ~ type_name ~ ("," ~ type_name)* ~ ")" }
+execute_prepared_stmt = { kw_execute ~ identifier ~ ("(" ~ expr_list? ~ ")")? }
 deallocate_stmt = { kw_deallocate ~ (kw_prepare? ~ identifier | kw_all) }
 
 analyze_stmt = { kw_analyze ~ analyze_option_block? ~ maintenance_target_list? }
@@ -297,7 +296,7 @@ drop_table_stmt = { kw_drop ~ kw_table ~ if_exists_clause? ~ ident_list ~ drop_b
 drop_index_stmt = { kw_drop ~ kw_index ~ kw_concurrently? ~ if_exists_clause? ~ ident_list }
 drop_materialized_view_stmt = { kw_drop ~ kw_materialized ~ kw_view ~ if_exists_clause? ~ ident_list ~ drop_behavior? }
 drop_view_stmt = { kw_drop ~ kw_view ~ if_exists_clause? ~ ident_list ~ drop_behavior? }
-drop_rule_stmt = { kw_drop ~ kw_rule ~ if_exists_clause? ~ identifier ~ kw_on ~ identifier }
+drop_rule_stmt = { kw_drop ~ kw_rule ~ if_exists_clause? ~ identifier ~ kw_on ~ identifier ~ drop_behavior? }
 drop_policy_stmt = { kw_drop ~ kw_policy ~ (!EOI ~ ANY)+ }
 drop_schema_stmt = { kw_drop ~ kw_schema ~ if_exists_clause? ~ ident_list ~ drop_behavior? }
 drop_behavior = { kw_cascade | kw_restrict }
@@ -554,7 +553,7 @@ json_predicate_type = { kw_value | kw_scalar | kw_array | kw_object }
 in_expr_list_suffix = { kw_not? ~ kw_in ~ "(" ~ expr_list ~ ")" }
 in_subquery_suffix = { kw_not? ~ kw_in ~ "(" ~ (select_stmt | values_stmt) ~ ")" }
 quantified_suffix = { quantified_comp_op ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
-quantified_comp_op = { "@@" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "!~" | "~" }
+quantified_comp_op = { "@@" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "!~*" | "~*" | "!~" | "~" }
 quantified_like_suffix = { kw_not? ~ (kw_ilike | kw_like) ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
 quantified_similar_suffix = { kw_not? ~ kw_similar ~ kw_to ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
 like_suffix = { kw_not? ~ (kw_ilike | kw_like) ~ concat_expr ~ escape_clause? }
@@ -562,7 +561,7 @@ similar_suffix = { kw_not? ~ kw_similar ~ kw_to ~ concat_expr ~ escape_clause? }
 escape_clause = { kw_escape ~ concat_expr }
 is_document_suffix = { kw_is ~ kw_not? ~ kw_document }
 json_access_op = { "#>>" | "#>" | "->>" | "->" }
-comp_op = { "<->" | "##" | "?#" | "?||" | "?-|" | "~=" | "~<=~" | "~>=~" | "~<~" | "~>~" | "^@" | "&<|" | "|&>" | "<<|" | "|>>" | "<<=" | ">>=" | "&<" | "&>" | "<^" | ">^" | "<%" | "?-" | "-|-" | "@>" | "<@" | "@?" | "@@" | "?|" | "?&" | "?" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "!~" | "~" }
+comp_op = { "<->" | "##" | "?#" | "?||" | "?-|" | "~=" | "~<=~" | "~>=~" | "~<~" | "~>~" | "^@" | "&<|" | "|&>" | "<<|" | "|>>" | "<<=" | ">>=" | "&<" | "&>" | "<^" | ">^" | "<%" | "?-" | "-|-" | "@>" | "<@" | "@?" | "@@" | "?|" | "?&" | "?" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "!~*" | "~*" | "!~" | "~" }
 unary_expr = { positive_expr | negated_expr | primary_expr }
 postfix_expr = { unary_expr ~ (cast_suffix | subscript_suffix | field_select_suffix | collate_suffix | at_time_zone_suffix | at_local_suffix)* }
 cast_suffix = { "::" ~ cast_type_name }

@@ -1243,6 +1243,24 @@ impl Database {
                 )
                 .or_else(|| {
                     matches!(
+                        sql_type.kind,
+                        crate::backend::parser::SqlTypeKind::Record
+                            | crate::backend::parser::SqlTypeKind::Composite
+                    )
+                    .then(|| {
+                        opclass_rows
+                            .iter()
+                            .find(|row| {
+                                row.opcmethod == access_method.oid
+                                    && row.opcdefault
+                                    && row.opcintype == crate::include::catalog::RECORD_TYPE_OID
+                            })
+                            .cloned()
+                    })
+                    .flatten()
+                })
+                .or_else(|| {
+                    matches!(
                         sql_type.element_type().kind,
                         crate::backend::parser::SqlTypeKind::Enum
                     )

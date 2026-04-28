@@ -36,10 +36,9 @@ use crate::backend::parser::{
     CopyToSource, CopyToStatement, CreateFunctionStatement, CreateTableAsQuery,
     CreateTableAsStatement, CteBody, DeallocateStatement, DetachPartitionMode, DiscardTarget,
     ExecuteStatement, ParseError, ParseOptions, PrepareStatement, PreparedInsert, RawTypeName,
-    SelectStatement, SqlCallArgs, SqlExpr, SqlFunctionArg, Statement, bind_delete, bind_insert,
-    bind_insert_prepared, bind_insert_with_outer_scopes_and_ctes, bind_update,
-    bound_cte_from_query_rows, pg_plan_query_with_config, pg_plan_query_with_outer_scopes_and_ctes,
-    plan_merge,
+    SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared,
+    bind_insert_with_outer_scopes_and_ctes, bind_update, bound_cte_from_query_rows,
+    pg_plan_query_with_config, pg_plan_query_with_outer_scopes_and_ctes, plan_merge,
 };
 use crate::backend::rewrite::relation_has_row_security;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
@@ -56,7 +55,7 @@ use crate::backend::utils::misc::guc_datetime::{
     parse_intervalstyle, parse_timezone,
 };
 use crate::backend::utils::misc::guc_xml::{
-    XmlOptionSetting, format_xmlbinary, format_xmloption, parse_xmlbinary, parse_xmloption,
+    format_xmlbinary, format_xmloption, parse_xmlbinary, parse_xmloption,
 };
 use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterruptGuard};
 use crate::backend::utils::misc::stack_depth::{
@@ -68,7 +67,6 @@ use crate::include::catalog::{
     PG_WRITE_SERVER_FILES_OID, PgProcRow, TEXT_TYPE_OID,
 };
 use crate::include::nodes::execnodes::ScalarType;
-use crate::include::nodes::parsenodes::{RawXmlExpr, RawXmlExprOp};
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pgrust::auth::AuthState;
@@ -76,6 +74,7 @@ use crate::pgrust::autovacuum::is_autovacuum_guc;
 use crate::pgrust::database::commands::privilege::{
     acl_grants_privilege, effective_acl_grantee_names, function_owner_default_acl,
 };
+use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pgrust::database::{
     AsyncListenAction, AsyncListenOp, Database, DynamicTypeSnapshot, PendingNotification,
     SequenceMutationEffect, SessionStatsState, StatsFetchConsistency, TempMutationEffect,
@@ -592,240 +591,9 @@ struct SavepointState {
 
 #[derive(Debug, Clone)]
 struct PreparedSelectStatement {
-    parameter_types: Vec<RawTypeName>,
     query: SelectStatement,
     query_sql: String,
-}
-
-fn substitute_prepared_select_args(
-    query: &SelectStatement,
-    args: &[SqlExpr],
-    parameter_types: &[RawTypeName],
-    xml_option: XmlOptionSetting,
-) -> Result<SelectStatement, ExecError> {
-    if args.len() != parameter_types.len() {
-        return Err(ExecError::Parse(ParseError::DetailedError {
-            message: format!(
-                "wrong number of parameters for prepared statement (expected {}, got {})",
-                parameter_types.len(),
-                args.len()
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "07001",
-        }));
-    }
-    let mut query = query.clone();
-    for target in &mut query.targets {
-        target.expr = substitute_prepared_expr(&target.expr, args, parameter_types, xml_option)?;
-    }
-    if let Some(where_clause) = &mut query.where_clause {
-        *where_clause = substitute_prepared_expr(where_clause, args, parameter_types, xml_option)?;
-    }
-    for expr in &mut query.group_by {
-        *expr = substitute_prepared_expr(expr, args, parameter_types, xml_option)?;
-    }
-    if let Some(having) = &mut query.having {
-        *having = substitute_prepared_expr(having, args, parameter_types, xml_option)?;
-    }
-    for item in &mut query.order_by {
-        item.expr = substitute_prepared_expr(&item.expr, args, parameter_types, xml_option)?;
-    }
-    Ok(query)
-}
-
-fn substitute_prepared_expr(
-    expr: &SqlExpr,
-    args: &[SqlExpr],
-    parameter_types: &[RawTypeName],
-    xml_option: XmlOptionSetting,
-) -> Result<SqlExpr, ExecError> {
-    Ok(match expr {
-        SqlExpr::Parameter(index) => {
-            let Some(arg) = index.checked_sub(1).and_then(|index| args.get(index)) else {
-                return Err(ExecError::Parse(ParseError::DetailedError {
-                    message: format!("there is no parameter ${index}"),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42P02",
-                }));
-            };
-            let Some(ty) = index
-                .checked_sub(1)
-                .and_then(|index| parameter_types.get(index))
-            else {
-                return Ok(arg.clone());
-            };
-            if raw_type_name_is_xml(ty) {
-                return Ok(SqlExpr::Xml(Box::new(RawXmlExpr {
-                    op: RawXmlExprOp::Parse,
-                    name: None,
-                    named_args: Vec::new(),
-                    arg_names: Vec::new(),
-                    args: vec![arg.clone()],
-                    xml_option: Some(match xml_option {
-                        XmlOptionSetting::Document => crate::backend::parser::XmlOption::Document,
-                        XmlOptionSetting::Content => crate::backend::parser::XmlOption::Content,
-                    }),
-                    indent: None,
-                    target_type: None,
-                    standalone: None,
-                    root_version: crate::include::nodes::parsenodes::XmlRootVersion::Omitted,
-                })));
-            }
-            SqlExpr::Cast(Box::new(arg.clone()), ty.clone())
-        }
-        SqlExpr::Cast(inner, ty) => SqlExpr::Cast(
-            Box::new(substitute_prepared_expr(
-                inner,
-                args,
-                parameter_types,
-                xml_option,
-            )?),
-            ty.clone(),
-        ),
-        SqlExpr::FuncCall {
-            name,
-            args: call_args,
-            order_by,
-            within_group,
-            distinct,
-            func_variadic,
-            filter,
-            null_treatment,
-            over,
-        } => SqlExpr::FuncCall {
-            name: name.clone(),
-            args: substitute_prepared_call_args(call_args, args, parameter_types, xml_option)?,
-            order_by: substitute_prepared_order_by(order_by, args, parameter_types, xml_option)?,
-            within_group: within_group
-                .as_ref()
-                .map(|items| substitute_prepared_order_by(items, args, parameter_types, xml_option))
-                .transpose()?,
-            distinct: *distinct,
-            func_variadic: *func_variadic,
-            filter: filter
-                .as_ref()
-                .map(|expr| {
-                    substitute_prepared_expr(expr, args, parameter_types, xml_option).map(Box::new)
-                })
-                .transpose()?,
-            null_treatment: *null_treatment,
-            over: over.clone(),
-        },
-        SqlExpr::Xml(xml) => {
-            let mut xml = (**xml).clone();
-            xml.named_args = xml
-                .named_args
-                .iter()
-                .map(|arg| substitute_prepared_expr(arg, args, parameter_types, xml_option))
-                .collect::<Result<Vec<_>, _>>()?;
-            xml.args = xml
-                .args
-                .iter()
-                .map(|arg| substitute_prepared_expr(arg, args, parameter_types, xml_option))
-                .collect::<Result<Vec<_>, _>>()?;
-            SqlExpr::Xml(Box::new(xml))
-        }
-        SqlExpr::Concat(left, right) => SqlExpr::Concat(
-            Box::new(substitute_prepared_expr(
-                left,
-                args,
-                parameter_types,
-                xml_option,
-            )?),
-            Box::new(substitute_prepared_expr(
-                right,
-                args,
-                parameter_types,
-                xml_option,
-            )?),
-        ),
-        SqlExpr::Add(left, right) => SqlExpr::Add(
-            Box::new(substitute_prepared_expr(
-                left,
-                args,
-                parameter_types,
-                xml_option,
-            )?),
-            Box::new(substitute_prepared_expr(
-                right,
-                args,
-                parameter_types,
-                xml_option,
-            )?),
-        ),
-        SqlExpr::Sub(left, right) => SqlExpr::Sub(
-            Box::new(substitute_prepared_expr(
-                left,
-                args,
-                parameter_types,
-                xml_option,
-            )?),
-            Box::new(substitute_prepared_expr(
-                right,
-                args,
-                parameter_types,
-                xml_option,
-            )?),
-        ),
-        other => other.clone(),
-    })
-}
-
-fn substitute_prepared_call_args(
-    call_args: &SqlCallArgs,
-    args: &[SqlExpr],
-    parameter_types: &[RawTypeName],
-    xml_option: XmlOptionSetting,
-) -> Result<SqlCallArgs, ExecError> {
-    match call_args {
-        SqlCallArgs::Star => Ok(SqlCallArgs::Star),
-        SqlCallArgs::Args(call_args) => Ok(SqlCallArgs::Args(
-            call_args
-                .iter()
-                .map(|arg| {
-                    Ok(SqlFunctionArg {
-                        name: arg.name.clone(),
-                        value: substitute_prepared_expr(
-                            &arg.value,
-                            args,
-                            parameter_types,
-                            xml_option,
-                        )?,
-                    })
-                })
-                .collect::<Result<Vec<_>, ExecError>>()?,
-        )),
-    }
-}
-
-fn substitute_prepared_order_by(
-    items: &[crate::backend::parser::OrderByItem],
-    args: &[SqlExpr],
-    parameter_types: &[RawTypeName],
-    xml_option: XmlOptionSetting,
-) -> Result<Vec<crate::backend::parser::OrderByItem>, ExecError> {
-    items
-        .iter()
-        .map(|item| {
-            let mut item = item.clone();
-            item.expr = substitute_prepared_expr(&item.expr, args, parameter_types, xml_option)?;
-            Ok(item)
-        })
-        .collect()
-}
-
-fn raw_type_name_is_xml(ty: &RawTypeName) -> bool {
-    match ty {
-        RawTypeName::Builtin(sql_type) => {
-            !sql_type.is_array && matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::Xml)
-        }
-        RawTypeName::Named { name, array_bounds } => {
-            *array_bounds == 0 && name.eq_ignore_ascii_case("xml")
-        }
-        RawTypeName::Serial(_) | RawTypeName::Record => false,
-    }
+    parameter_types: Vec<RawTypeName>,
 }
 
 pub struct Session {
@@ -5342,9 +5110,9 @@ impl Session {
         self.prepared_selects.insert(
             name,
             PreparedSelectStatement {
-                parameter_types: prepare_stmt.parameter_types.clone(),
                 query: prepare_stmt.query.clone(),
                 query_sql: prepare_stmt.query_sql.clone(),
+                parameter_types: prepare_stmt.parameter_types.clone(),
             },
         );
         Ok(StatementResult::AffectedRows(0))
@@ -5383,21 +5151,259 @@ impl Session {
             .ok_or_else(|| Self::prepared_statement_error(&name))
     }
 
+    fn prepared_statement_arg_count_error(
+        name: &str,
+        supplied: usize,
+        required: usize,
+    ) -> ExecError {
+        ExecError::Parse(ParseError::DetailedError {
+            message: format!("wrong number of parameters for prepared statement \"{name}\""),
+            detail: Some(format!(
+                "Expected {required} parameters but got {supplied}."
+            )),
+            hint: None,
+            sqlstate: "42601",
+        })
+    }
+
+    fn raw_prepared_parameter_type_sql(raw: &RawTypeName) -> String {
+        match raw {
+            RawTypeName::Builtin(sql_type) => format_sql_type_name(*sql_type),
+            RawTypeName::Serial(kind) => match kind {
+                crate::backend::parser::SerialKind::Small => "smallserial".into(),
+                crate::backend::parser::SerialKind::Regular => "serial".into(),
+                crate::backend::parser::SerialKind::Big => "bigserial".into(),
+            },
+            RawTypeName::Named { name, array_bounds } => {
+                let mut sql = name.clone();
+                for _ in 0..*array_bounds {
+                    sql.push_str("[]");
+                }
+                sql
+            }
+            RawTypeName::Record => "record".into(),
+        }
+    }
+
+    fn highest_prepared_parameter_ref(sql: &str) -> usize {
+        let bytes = sql.as_bytes();
+        let mut highest = 0usize;
+        let mut index = 0usize;
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        while index < bytes.len() {
+            let ch = bytes[index] as char;
+            if in_single_quote {
+                if ch == '\'' {
+                    if index + 1 < bytes.len() && bytes[index + 1] as char == '\'' {
+                        index += 2;
+                        continue;
+                    }
+                    in_single_quote = false;
+                }
+                index += 1;
+                continue;
+            }
+            if in_double_quote {
+                if ch == '"' {
+                    if index + 1 < bytes.len() && bytes[index + 1] as char == '"' {
+                        index += 2;
+                        continue;
+                    }
+                    in_double_quote = false;
+                }
+                index += 1;
+                continue;
+            }
+            match ch {
+                '\'' => {
+                    in_single_quote = true;
+                    index += 1;
+                }
+                '"' => {
+                    in_double_quote = true;
+                    index += 1;
+                }
+                '$' => {
+                    let start = index + 1;
+                    let mut end = start;
+                    while end < bytes.len() && (bytes[end] as char).is_ascii_digit() {
+                        end += 1;
+                    }
+                    if end > start {
+                        if let Ok(parameter) = sql[start..end].parse::<usize>() {
+                            highest = highest.max(parameter);
+                        }
+                        index = end;
+                    } else {
+                        index += 1;
+                    }
+                }
+                _ => index += 1,
+            }
+        }
+        highest
+    }
+
+    fn required_prepared_parameter_count(prepared: &PreparedSelectStatement) -> usize {
+        prepared
+            .parameter_types
+            .len()
+            .max(Self::highest_prepared_parameter_ref(&prepared.query_sql))
+    }
+
+    fn rewrite_prepared_query_sql(
+        prepared: &PreparedSelectStatement,
+        execute_stmt: &ExecuteStatement,
+    ) -> Result<String, ExecError> {
+        let mut out = String::with_capacity(prepared.query_sql.len());
+        let sql = prepared.query_sql.as_str();
+        let bytes = sql.as_bytes();
+        let mut index = 0usize;
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        while index < bytes.len() {
+            let ch = bytes[index] as char;
+            if in_single_quote {
+                out.push(ch);
+                if ch == '\'' {
+                    if index + 1 < bytes.len() && bytes[index + 1] as char == '\'' {
+                        out.push('\'');
+                        index += 2;
+                        continue;
+                    }
+                    in_single_quote = false;
+                }
+                index += 1;
+                continue;
+            }
+            if in_double_quote {
+                out.push(ch);
+                if ch == '"' {
+                    if index + 1 < bytes.len() && bytes[index + 1] as char == '"' {
+                        out.push('"');
+                        index += 2;
+                        continue;
+                    }
+                    in_double_quote = false;
+                }
+                index += 1;
+                continue;
+            }
+            match ch {
+                '\'' => {
+                    in_single_quote = true;
+                    out.push(ch);
+                    index += 1;
+                }
+                '"' => {
+                    in_double_quote = true;
+                    out.push(ch);
+                    index += 1;
+                }
+                '$' => {
+                    let start = index + 1;
+                    let mut end = start;
+                    while end < bytes.len() && (bytes[end] as char).is_ascii_digit() {
+                        end += 1;
+                    }
+                    if end == start {
+                        out.push(ch);
+                        index += 1;
+                        continue;
+                    }
+                    let parameter = sql[start..end].parse::<usize>().map_err(|_| {
+                        ExecError::Parse(ParseError::DetailedError {
+                            message: "prepared statement parameter number is invalid".into(),
+                            detail: Some(sql[index..end].into()),
+                            hint: None,
+                            sqlstate: "42P02",
+                        })
+                    })?;
+                    let Some(arg_index) = parameter.checked_sub(1) else {
+                        return Err(ExecError::Parse(ParseError::DetailedError {
+                            message: "prepared statement parameter $0 is out of range".into(),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42P02",
+                        }));
+                    };
+                    let Some(arg_sql) = execute_stmt.args_sql.get(arg_index) else {
+                        return Err(ExecError::Parse(ParseError::DetailedError {
+                            message: format!(
+                                "prepared statement parameter ${parameter} is out of range"
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42P02",
+                        }));
+                    };
+                    out.push('(');
+                    out.push_str(arg_sql);
+                    out.push(')');
+                    if let Some(raw_type) = prepared.parameter_types.get(arg_index) {
+                        out.push_str("::");
+                        out.push_str(&Self::raw_prepared_parameter_type_sql(raw_type));
+                    }
+                    index = end;
+                }
+                _ => {
+                    out.push(ch);
+                    index += 1;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn prepared_select_for_execute(
+        &self,
+        execute_stmt: &ExecuteStatement,
+    ) -> Result<(SelectStatement, String), ExecError> {
+        let prepared = self.resolve_prepared_select(execute_stmt)?;
+        let required = Self::required_prepared_parameter_count(&prepared);
+        if execute_stmt.args_sql.len() != required {
+            let name = Self::prepared_statement_name(&execute_stmt.name);
+            return Err(Self::prepared_statement_arg_count_error(
+                &name,
+                execute_stmt.args_sql.len(),
+                required,
+            ));
+        }
+        if required == 0 {
+            return Ok((prepared.query, prepared.query_sql));
+        }
+
+        // :HACK: The planner does not yet carry true Param nodes for SQL PREPARE,
+        // so session EXECUTE lowers parameter references to a normal SELECT.
+        let rewritten_sql = Self::rewrite_prepared_query_sql(&prepared, execute_stmt)?;
+        let stmt = crate::backend::parser::parse_statement_with_options(
+            &rewritten_sql,
+            ParseOptions {
+                standard_conforming_strings: self.standard_conforming_strings(),
+                max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
+            },
+        )?;
+        let Statement::Select(select) = stmt else {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "prepared SELECT statement",
+                actual: format!("{stmt:?}"),
+            }));
+        };
+        Ok((select, rewritten_sql))
+    }
+
     fn resolve_create_table_as_statement(
         &self,
         create_stmt: &CreateTableAsStatement,
     ) -> Result<CreateTableAsStatement, ExecError> {
-        let CreateTableAsQuery::Execute(name) = &create_stmt.query else {
+        let CreateTableAsQuery::Execute(execute_stmt) = &create_stmt.query else {
             return Ok(create_stmt.clone());
         };
-        let prepared = self
-            .prepared_selects
-            .get(&Self::prepared_statement_name(name))
-            .cloned()
-            .ok_or_else(|| Self::prepared_statement_error(name))?;
+        let (select, query_sql) = self.prepared_select_for_execute(execute_stmt)?;
         let mut resolved = create_stmt.clone();
-        resolved.query = CreateTableAsQuery::Select(prepared.query);
-        resolved.query_sql = Some(prepared.query_sql);
+        resolved.query = CreateTableAsQuery::Select(select);
+        resolved.query_sql = Some(query_sql);
         Ok(resolved)
     }
 
@@ -5407,24 +5413,18 @@ impl Session {
         execute_stmt: &ExecuteStatement,
         statement_lock_scope_id: Option<u64>,
     ) -> Result<StatementResult, ExecError> {
-        let prepared = self.resolve_prepared_select(execute_stmt)?;
-        let query = substitute_prepared_select_args(
-            &prepared.query,
-            &execute_stmt.args,
-            &prepared.parameter_types,
-            self.datetime_config.xml.option,
-        )?;
+        let (select, _) = self.prepared_select_for_execute(execute_stmt)?;
         if self.active_txn.is_some() {
             return self.execute_in_transaction(
                 db,
-                Statement::Select(query),
+                Statement::Select(select),
                 statement_lock_scope_id,
             );
         }
         let search_path = self.configured_search_path();
         db.execute_statement_with_search_path_datetime_config_gucs_and_planner_config(
             self.client_id,
-            Statement::Select(query),
+            Statement::Select(select),
             search_path.as_deref(),
             &self.datetime_config,
             &self.gucs,
@@ -12816,6 +12816,22 @@ mod tests {
         }
 
         assert!(matches!(
+            session
+                .execute(
+                    &db,
+                    "prepare with_arg(bool) as select case when $1 then 10 else 20 end"
+                )
+                .unwrap(),
+            StatementResult::AffectedRows(0)
+        ));
+        match session.execute(&db, "execute with_arg(false)").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(20)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+
+        assert!(matches!(
             session.execute(&db, "deallocate q").unwrap(),
             StatementResult::AffectedRows(0)
         ));
@@ -12841,6 +12857,48 @@ mod tests {
                 ..
             }) if message == "prepared statement \"q\" does not exist" && sqlstate == "26000"
         ));
+    }
+
+    #[test]
+    fn prepared_exists_join_qual_uses_parameter_values_without_rescanning_inner() {
+        let db = Database::open_ephemeral(32).expect("open ephemeral database");
+        let mut session = Session::new(1);
+        session
+            .execute(
+                &db,
+                "create table tenk1(unique1 int4, unique2 int4, thousand int4)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "insert into tenk1
+                 select g.i, 2047 - g.i, g.i % 1000
+                 from generate_series(0, 2047) as g(i)",
+            )
+            .unwrap();
+        session
+            .execute(&db, "create index tenk1_unique1 on tenk1(unique1)")
+            .unwrap();
+        session.execute(&db, "vacuum analyze tenk1").unwrap();
+        session
+            .execute(
+                &db,
+                "prepare foo(bool) as
+                 select count(*) from tenk1 a left join tenk1 b
+                   on (a.unique2 = b.unique1 and exists
+                       (select 1 from tenk1 c where c.thousand = b.unique2 and $1))",
+            )
+            .unwrap();
+
+        for sql in ["execute foo(true)", "execute foo(false)"] {
+            match session.execute(&db, sql).unwrap() {
+                StatementResult::Query { rows, .. } => {
+                    assert_eq!(rows, vec![vec![Value::Int64(2048)]]);
+                }
+                other => panic!("expected query result, got {other:?}"),
+            }
+        }
     }
 
     #[test]

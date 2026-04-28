@@ -187,6 +187,7 @@ use arrays::{
     eval_array_upper_function, eval_cardinality_function, eval_quantified_array,
     eval_string_to_array_function, eval_trim_array_function, eval_width_bucket_thresholds,
 };
+pub(crate) use subquery::clear_subquery_eval_cache;
 use subquery::{
     eval_array_subquery, eval_exists_subquery, eval_quantified_subquery, eval_row_compare_subquery,
     eval_scalar_subquery,
@@ -6672,6 +6673,9 @@ fn eval_bool_expr(
             let mut result = Value::Bool(true);
             for arg in &bool_expr.args {
                 result = eval_and(result, eval_expr(arg, slot, ctx)?)?;
+                if matches!(result, Value::Bool(false)) {
+                    return Ok(result);
+                }
             }
             Ok(result)
         }
@@ -6679,6 +6683,9 @@ fn eval_bool_expr(
             let mut result = Value::Bool(false);
             for arg in &bool_expr.args {
                 result = eval_or(result, eval_expr(arg, slot, ctx)?)?;
+                if matches!(result, Value::Bool(true)) {
+                    return Ok(result);
+                }
             }
             Ok(result)
         }
@@ -7332,6 +7339,9 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 let mut result = Value::Bool(true);
                 for arg in &bool_expr.args {
                     result = eval_and(result, eval_plpgsql_expr(arg, slot)?)?;
+                    if matches!(result, Value::Bool(false)) {
+                        return Ok(result);
+                    }
                 }
                 Ok(result)
             }
@@ -7339,6 +7349,9 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 let mut result = Value::Bool(false);
                 for arg in &bool_expr.args {
                     result = eval_or(result, eval_plpgsql_expr(arg, slot)?)?;
+                    if matches!(result, Value::Bool(true)) {
+                        return Ok(result);
+                    }
                 }
                 Ok(result)
             }

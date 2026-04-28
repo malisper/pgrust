@@ -2447,6 +2447,7 @@ fn lower_sublink(
         .target_list
         .first()
         .map(|target| target.sql_type);
+    let target_width = sublink.subselect.target_list.len();
     let config = ctx.root.map(|root| root.config).unwrap_or_default();
     let (planned_stmt, next_param_id) =
         planner_with_param_base_and_config(*sublink.subselect, catalog, ctx.next_param_id, config)
@@ -2500,6 +2501,7 @@ fn lower_sublink(
             .testexpr
             .map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
         first_col_type,
+        target_width,
         plan_id,
         par_param,
         args,
@@ -2610,6 +2612,7 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
                 .testexpr
                 .map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
             first_col_type: subplan.first_col_type,
+            target_width: subplan.target_width,
             plan_id: subplan.plan_id,
             par_param: subplan.par_param,
             args: subplan

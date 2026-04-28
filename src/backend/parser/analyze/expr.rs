@@ -991,7 +991,26 @@ fn build_whole_row_expr(fields: Vec<(String, Expr)>, named_row_type: Option<(u32
     } else {
         assign_anonymous_record_descriptor(descriptor_fields)
     };
-    Expr::Row { descriptor, fields }
+    let row_expr = Expr::Row {
+        descriptor: descriptor.clone(),
+        fields: fields.clone(),
+    };
+    let Some(all_fields_null) = fields
+        .iter()
+        .map(|(_, expr)| Expr::IsNull(Box::new(expr.clone())))
+        .reduce(Expr::and)
+    else {
+        return row_expr;
+    };
+    Expr::Case(Box::new(BoundCaseExpr {
+        casetype: descriptor.sql_type(),
+        arg: None,
+        args: vec![BoundCaseWhen {
+            expr: all_fields_null,
+            result: Expr::Const(Value::Null),
+        }],
+        defresult: Box::new(row_expr),
+    }))
 }
 
 fn relation_row_type_identity(

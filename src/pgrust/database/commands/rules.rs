@@ -1437,6 +1437,7 @@ fn materialize_view_rows(
         limit: None,
         offset: None,
         locking_clause: None,
+        locking_targets: Vec::new(),
         set_operation: None,
     };
     let planned = crate::backend::parser::pg_plan_query(&select, catalog)?;

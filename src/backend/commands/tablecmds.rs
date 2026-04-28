@@ -76,8 +76,8 @@ use crate::include::catalog::{
     ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID, BOX_TYPE_OID, BPCHAR_TYPE_OID,
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID, HASH_AM_OID,
     PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PUBLISH_GENCOLS_STORED, PgAmRow,
-    PgOpclassRow, PgPublicationRelRow, PgPublicationRow, SPGIST_AM_OID, TEXT_TYPE_OID,
-    VARCHAR_TYPE_OID, bootstrap_pg_am_rows, builtin_range_name_for_sql_type,
+    PgOpclassRow, PgPublicationRelRow, PgPublicationRow, RECORD_TYPE_OID, SPGIST_AM_OID,
+    TEXT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_am_rows, builtin_range_name_for_sql_type,
     multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
@@ -513,9 +513,12 @@ pub(crate) fn execute_explain(
                         crate::include::nodes::parsenodes::CreateTableAsQuery::Select(query) => {
                             query
                         }
-                        crate::include::nodes::parsenodes::CreateTableAsQuery::Execute(name) => {
+                        crate::include::nodes::parsenodes::CreateTableAsQuery::Execute(execute) => {
                             return Err(ExecError::Parse(ParseError::DetailedError {
-                                message: format!("prepared statement \"{name}\" does not exist"),
+                                message: format!(
+                                    "prepared statement \"{}\" does not exist",
+                                    execute.name
+                                ),
                                 detail: None,
                                 hint: None,
                                 sqlstate: "26000",
@@ -4675,6 +4678,8 @@ fn opclass_accepts_type(opclass: &PgOpclassRow, type_oid: u32, sql_type: SqlType
             && (sql_type.is_multirange() || multirange_type_ref_for_sql_type(sql_type).is_some()))
         || (opclass.opcintype == ANYENUMOID
             && matches!(sql_type.element_type().kind, SqlTypeKind::Enum))
+        || (opclass.opcintype == RECORD_TYPE_OID
+            && matches!(sql_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite))
 }
 
 fn default_opclass_for_catalog_type(
@@ -7061,6 +7066,7 @@ fn execute_insert_project_set_row(
         limit_count: None,
         limit_offset: 0,
         locking_clause: None,
+        locking_targets: Vec::new(),
         row_marks: Vec::new(),
         has_target_srfs: true,
         recursive_union: None,

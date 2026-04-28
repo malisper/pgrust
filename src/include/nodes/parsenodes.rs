@@ -564,6 +564,7 @@ pub struct Query {
     pub limit_count: Option<usize>,
     pub limit_offset: usize,
     pub locking_clause: Option<SelectLockingClause>,
+    pub locking_targets: Vec<String>,
     pub row_marks: Vec<QueryRowMark>,
     pub has_target_srfs: bool,
     pub recursive_union: Option<Box<RecursiveUnionQuery>>,
@@ -1533,6 +1534,7 @@ pub struct SelectStatement {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub locking_clause: Option<SelectLockingClause>,
+    pub locking_targets: Vec<String>,
     pub set_operation: Option<Box<SetOperationStatement>>,
 }
 
@@ -2240,7 +2242,7 @@ pub struct CreateTableAsStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateTableAsQuery {
     Select(SelectStatement),
-    Execute(String),
+    Execute(ExecuteStatement),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2260,7 +2262,7 @@ pub struct PrepareStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecuteStatement {
     pub name: String,
-    pub args: Vec<SqlExpr>,
+    pub args_sql: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
