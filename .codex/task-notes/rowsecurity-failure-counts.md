@@ -155,3 +155,18 @@ COPY TO privilege-order bucket:
 - `scripts/cargo_isolated.sh check` passed.
 - Latest rowsecurity regression result: `658/774` matched, `116` mismatches,
   `2053` diff lines. New diff copied to `/tmp/diffs/rowsecurity.diff`.
+
+Auto-view DML RLS bucket:
+- Auto-updatable view INSERT/UPDATE/DELETE rewrites now rebuild base-table RLS
+  under the base relation's view permission user. Base RLS write checks run
+  before view CHECK OPTION checks, and UPDATE/DELETE view predicates include
+  base target visibility quals.
+- Added a focused test for the `bv1`-style case where INSERT through a
+  security-barrier view must report the base-table RLS error before the view
+  CHECK OPTION error and must reject rows that only violate base RLS.
+- Focused auto-view/RLS test passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `661/774` matched, `113` mismatches, `2033` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.

@@ -3,8 +3,8 @@ use super::query::rewrite_local_vars_for_output_exprs;
 use super::*;
 use crate::backend::rewrite::{
     RlsWriteCheck, ViewDmlEvent, ViewDmlRewriteError, build_target_relation_row_security,
-    pg_rewrite_query, relation_has_row_security, relation_has_security_invoker,
-    resolve_auto_updatable_view_target,
+    build_target_relation_row_security_for_user, pg_rewrite_query, relation_has_row_security,
+    relation_has_security_invoker, resolve_auto_updatable_view_target,
 };
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::PolicyCommand;
@@ -1267,6 +1267,40 @@ fn build_conflict_visibility_checks(visibility_quals: Vec<Expr>) -> Vec<RlsWrite
         visibility_quals,
         crate::backend::rewrite::RlsWriteCheckSource::ConflictUpdateVisibility,
     )
+}
+
+fn auto_view_base_rls_user_oid(
+    resolved: &crate::backend::rewrite::ResolvedAutoViewTarget,
+    catalog: &dyn CatalogLookup,
+) -> u32 {
+    resolved
+        .privilege_contexts
+        .iter()
+        .rev()
+        .find(|context| context.relation.relation_oid == resolved.base_relation.relation_oid)
+        .and_then(|context| context.check_as_user_oid)
+        .unwrap_or_else(|| catalog.current_user_oid())
+}
+
+fn build_auto_view_base_row_security(
+    relation_name: &str,
+    resolved: &crate::backend::rewrite::ResolvedAutoViewTarget,
+    command: PolicyCommand,
+    include_select_visibility: bool,
+    include_select_check: bool,
+    catalog: &dyn CatalogLookup,
+) -> Result<crate::backend::rewrite::TargetRlsState, ViewDmlRewriteError> {
+    build_target_relation_row_security_for_user(
+        relation_name,
+        resolved.base_relation.relation_oid,
+        &resolved.base_relation.desc,
+        command,
+        include_select_visibility,
+        include_select_check,
+        auto_view_base_rls_user_oid(resolved, catalog),
+        catalog,
+    )
+    .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))
 }
 
 fn merge_mutating_event(stmt: &MergeStatement) -> Option<ViewDmlEvent> {
@@ -2938,6 +2972,14 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         )?),
         None => stmt.on_conflict,
     };
+    let base_rls = build_auto_view_base_row_security(
+        &relation_name,
+        &resolved,
+        PolicyCommand::Insert,
+        false,
+        !stmt.returning.is_empty(),
+        catalog,
+    )?;
 
     Ok(BoundInsertStatement {
         relation_name: relation_name.clone(),
@@ -2974,9 +3016,10 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
             &resolved.visible_output_exprs,
             &resolved.base_relation.desc,
         ),
-        rls_write_checks: stmt
-            .rls_write_checks
+        rls_write_checks: base_rls
+            .write_checks
             .into_iter()
+            .chain(stmt.rls_write_checks)
             .chain(
                 resolved
                     .view_check_options
@@ -3073,6 +3116,14 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
             &target.assignments,
         ));
     }
+    let base_rls = build_auto_view_base_row_security(
+        &relation_name,
+        &resolved,
+        PolicyCommand::Update,
+        true,
+        !stmt.returning.is_empty(),
+        catalog,
+    )?;
     let predicate = and_predicates(
         target
             .predicate
@@ -3080,6 +3131,12 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
             .map(|expr| rewrite_local_vars_for_output_exprs(expr.clone(), 1, &input_output_exprs)),
         resolved.combined_predicate.clone(),
     );
+    let predicate = prepend_visibility_quals(base_rls.visibility_quals.clone(), predicate);
+    let rls_write_checks = base_rls
+        .write_checks
+        .into_iter()
+        .chain(target.rls_write_checks.clone())
+        .collect::<Vec<_>>();
 
     let targets = auto_view_base_children(&resolved, catalog)?
         .into_iter()
@@ -3093,7 +3150,7 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
                     &resolved.base_relation.desc,
                     &assignments,
                     predicate.as_ref(),
-                    &target.rls_write_checks,
+                    &rls_write_checks,
                     partition_update_root_oid,
                     allow_partition_routing,
                     &child,
@@ -3105,7 +3162,7 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
                     &resolved.base_relation.desc,
                     &assignments,
                     predicate.as_ref(),
-                    &target.rls_write_checks,
+                    &rls_write_checks,
                     partition_update_root_oid,
                     allow_partition_routing,
                     &child,
@@ -3196,12 +3253,21 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
             context_name,
         ));
     }
+    let base_rls = build_auto_view_base_row_security(
+        &relation_name,
+        &resolved,
+        PolicyCommand::Delete,
+        true,
+        false,
+        catalog,
+    )?;
     let predicate = and_predicates(
         target.predicate.as_ref().map(|expr| {
             rewrite_local_vars_for_output_exprs(expr.clone(), 1, &resolved.visible_output_exprs)
         }),
         resolved.combined_predicate.clone(),
     );
+    let predicate = prepend_visibility_quals(base_rls.visibility_quals.clone(), predicate);
 
     let targets = auto_view_base_children(&resolved, catalog)?
         .into_iter()

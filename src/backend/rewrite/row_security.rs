@@ -149,6 +149,28 @@ pub(crate) fn build_target_relation_row_security(
     include_select_check: bool,
     catalog: &dyn CatalogLookup,
 ) -> Result<TargetRlsState, ParseError> {
+    build_target_relation_row_security_for_user(
+        relation_name,
+        relation_oid,
+        desc,
+        command,
+        include_select_visibility,
+        include_select_check,
+        catalog.current_user_oid(),
+        catalog,
+    )
+}
+
+pub(crate) fn build_target_relation_row_security_for_user(
+    relation_name: &str,
+    relation_oid: u32,
+    desc: &RelationDesc,
+    command: PolicyCommand,
+    include_select_visibility: bool,
+    include_select_check: bool,
+    effective_user_oid: u32,
+    catalog: &dyn CatalogLookup,
+) -> Result<TargetRlsState, ParseError> {
     let mut active_policy_relations = Vec::new();
     build_target_relation_row_security_inner(
         relation_name,
@@ -157,6 +179,7 @@ pub(crate) fn build_target_relation_row_security(
         command,
         include_select_visibility,
         include_select_check,
+        effective_user_oid,
         catalog,
         &mut active_policy_relations,
     )
@@ -169,6 +192,7 @@ fn build_target_relation_row_security_inner(
     command: PolicyCommand,
     include_select_visibility: bool,
     include_select_check: bool,
+    effective_user_oid: u32,
     catalog: &dyn CatalogLookup,
     active_policy_relations: &mut Vec<u32>,
 ) -> Result<TargetRlsState, ParseError> {
@@ -179,7 +203,6 @@ fn build_target_relation_row_security_inner(
             depends_on_row_security: false,
         });
     };
-    let effective_user_oid = catalog.current_user_oid();
     let status = check_enable_rls(&class_row, effective_user_oid, catalog)?;
     let depends_on_row_security = !matches!(status, RlsStatus::None);
     if matches!(status, RlsStatus::None | RlsStatus::NoneEnv) {

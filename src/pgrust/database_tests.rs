@@ -43341,6 +43341,81 @@ fn rls_key_errors_hide_values_when_relation_rows_are_not_visible() {
 }
 
 #[test]
+fn auto_view_dml_enforces_base_rls_before_view_check() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut table_owner = Session::new(1);
+    let mut view_owner = Session::new(2);
+    let mut caller = Session::new(3);
+
+    table_owner
+        .execute(&db, "create role view_base_owner nologin")
+        .unwrap();
+    table_owner
+        .execute(&db, "create role view_owner nologin")
+        .unwrap();
+    table_owner
+        .execute(&db, "create role view_caller nologin")
+        .unwrap();
+    table_owner
+        .execute(&db, "set session authorization view_base_owner")
+        .unwrap();
+    table_owner
+        .execute(&db, "create table base_rls (a int4, b text)")
+        .unwrap();
+    table_owner
+        .execute(&db, "grant all on base_rls to view_owner")
+        .unwrap();
+    table_owner
+        .execute(&db, "create policy p1 on base_rls using (a % 2 = 0)")
+        .unwrap();
+    table_owner
+        .execute(&db, "alter table base_rls enable row level security")
+        .unwrap();
+
+    view_owner
+        .execute(&db, "set session authorization view_owner")
+        .unwrap();
+    view_owner
+        .execute(
+            &db,
+            "create view base_rls_view with (security_barrier) as
+             select * from base_rls where a > 0 with check option",
+        )
+        .unwrap();
+    view_owner
+        .execute(&db, "grant all on base_rls_view to view_caller")
+        .unwrap();
+
+    caller
+        .execute(&db, "set session authorization view_caller")
+        .unwrap();
+    let err = caller
+        .execute(&db, "insert into base_rls_view values (-1, 'blocked')")
+        .unwrap_err();
+    assert_sqlstate(
+        err,
+        "42501",
+        "new row violates row-level security policy for table \"base_rls\"",
+    );
+    let err = caller
+        .execute(&db, "insert into base_rls_view values (11, 'blocked')")
+        .unwrap_err();
+    assert_sqlstate(
+        err,
+        "42501",
+        "new row violates row-level security policy for table \"base_rls\"",
+    );
+
+    caller
+        .execute(&db, "insert into base_rls_view values (12, 'allowed')")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut table_owner, &db, "select a, b from base_rls"),
+        vec![vec![Value::Int32(12), Value::Text("allowed".into())]]
+    );
+}
+
+#[test]
 fn on_conflict_do_update_enforces_rls_update_path_checks() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut owner = Session::new(1);
