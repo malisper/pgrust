@@ -787,6 +787,8 @@ IGNORE_DEPS=false
 SHARD_INDEX=0
 SHARD_TOTAL=1
 DEADLINE_SECS=0
+SHARD_DIAG_PID=""
+SHARD_DIAG_INTERVAL_SECS="${SHARD_DIAG_INTERVAL_SECS:-90}"
 REGRESS_USER="${PGRUST_REGRESS_USER:-${PGUSER:-$(id -un)}}"
 REGRESS_TABLESPACE_DIR=""
 STARTUP_WAIT_SECS="${PGRUST_STARTUP_WAIT_SECS:-300}"
@@ -894,11 +896,49 @@ stop_server() {
     fi
 }
 
+# Periodic resource snapshots emitted to stdout so they land in the GitHub
+# Actions log even if the runner is killed mid-run (uploaded artifacts are
+# skipped on `cancelled` steps). Only enabled when sharded — local runs stay
+# quiet.
+emit_shard_diag_snapshot() {
+    local label="$1"
+    local ts disk_used disk_avail mem_used mem_avail load npgrust
+    ts=$(date -u +%H:%M:%SZ)
+    disk_used=$(df -BM "$HOME" 2>/dev/null | awk 'NR==2 {print $3}' || echo "?")
+    disk_avail=$(df -BM "$HOME" 2>/dev/null | awk 'NR==2 {print $4}' || echo "?")
+    mem_used=$(free -m 2>/dev/null | awk '/^Mem:/ {print $3"M"}' || echo "?")
+    mem_avail=$(free -m 2>/dev/null | awk '/^Mem:/ {print $7"M"}' || echo "?")
+    load=$(awk '{print $1"/"$2"/"$3}' /proc/loadavg 2>/dev/null || echo "?")
+    npgrust=$(pgrep -c pgrust_server 2>/dev/null || echo 0)
+    echo "[shard-diag $label $ts] disk=${disk_used}/${disk_avail} mem=${mem_used}/${mem_avail} load=${load} pgrust=${npgrust}"
+}
+
+start_shard_diagnostics_heartbeat() {
+    [[ "$SHARD_TOTAL" -gt 1 ]] || return 0
+    emit_shard_diag_snapshot startup
+    (
+        while true; do
+            sleep "$SHARD_DIAG_INTERVAL_SECS"
+            emit_shard_diag_snapshot heartbeat
+        done
+    ) &
+    SHARD_DIAG_PID=$!
+}
+
+stop_shard_diagnostics_heartbeat() {
+    if [[ -n "$SHARD_DIAG_PID" ]] && kill -0 "$SHARD_DIAG_PID" 2>/dev/null; then
+        kill "$SHARD_DIAG_PID" 2>/dev/null || true
+        wait "$SHARD_DIAG_PID" 2>/dev/null || true
+    fi
+    SHARD_DIAG_PID=""
+}
+
 cleanup() {
     if [[ "${SUMMARY_READY:-false}" == true && "${SUMMARY_WRITTEN:-false}" == false ]] && declare -F write_summary >/dev/null; then
         write_summary "aborted"
     fi
 
+    stop_shard_diagnostics_heartbeat
     stop_server
 }
 trap cleanup EXIT
@@ -1358,6 +1398,8 @@ echo "Schedule shard: ${SHARD_INDEX}/${SHARD_TOTAL}"
 if [[ "$DEADLINE_SECS" -gt 0 ]]; then
     echo "Shard scheduling deadline: ${DEADLINE_SECS}s"
 fi
+
+start_shard_diagnostics_heartbeat
 
 if [[ "$ISOLATED_PARALLEL" == true ]]; then
     echo "Parallel isolation: each concurrent test gets its own pgrust server, port, data dir, and tablespace."
