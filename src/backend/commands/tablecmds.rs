@@ -45,9 +45,10 @@ use crate::pl::plpgsql::TriggerOperation;
 
 use super::copyto::{capture_copy_to_dml_notices, capture_copy_to_dml_returning_row};
 use super::explain::{
-    format_buffer_usage, format_explain_lines_with_costs, format_explain_lines_with_options,
-    format_explain_plan_with_subplans, format_verbose_explain_plan_json_with_catalog,
-    format_verbose_explain_plan_with_catalog, push_explain_line,
+    apply_runtime_pruning_for_explain_plan, format_buffer_usage, format_explain_lines_with_costs,
+    format_explain_lines_with_options, format_explain_plan_with_subplans,
+    format_verbose_explain_plan_json_with_catalog, format_verbose_explain_plan_with_catalog,
+    push_explain_line,
 };
 use super::partition::{
     exec_find_partition, exec_setup_partition_tuple_routing, partition_root_oid,
@@ -593,7 +594,8 @@ pub(crate) fn execute_explain(
             lines.push(format!("Result Rows: {}", row_count));
         }
     } else {
-        let plan_tree = query_desc.planned_stmt.plan_tree;
+        let plan_tree =
+            apply_runtime_pruning_for_explain_plan(query_desc.planned_stmt.plan_tree, ctx);
         let subplans = query_desc.planned_stmt.subplans;
         if let Some(target_name) = merge_target_name {
             let state = executor_start(plan_tree);

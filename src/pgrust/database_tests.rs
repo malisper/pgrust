@@ -7675,6 +7675,74 @@ fn satisfies_hash_partition_matches_postgres_validation_and_hashing() {
 }
 
 #[test]
+fn runtime_hash_pruning_uses_custom_opclass_support_proc() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function part_hashint4_noop(value int4, seed int8) returns int8 as $$ select value + seed; $$ language sql strict immutable parallel safe",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create operator class part_test_int4_ops for type int4 using hash as operator 1 =, function 2 part_hashint4_noop(int4, int8)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function part_hashtext_length(value text, seed int8) returns int8 as $$ select length(coalesce(value, ''))::int8 $$ language sql strict immutable parallel safe",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create operator class part_test_text_ops for type text using hash as operator 1 =, function 2 part_hashtext_length(text, int8)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp_custom_rt (a int4, b text) partition by hash (a part_test_int4_ops, b part_test_text_ops)",
+        )
+        .unwrap();
+    for remainder in 0..4 {
+        session
+            .execute(
+                &db,
+                &format!(
+                    "create table hp_custom_rt_{remainder} partition of hp_custom_rt for values with (modulus 4, remainder {remainder})"
+                ),
+            )
+            .unwrap();
+    }
+    session
+        .execute(
+            &db,
+            "prepare hp_custom_lookup(text) as select * from hp_custom_rt where a is null and b = $1",
+        )
+        .unwrap();
+
+    let StatementResult::Query { rows, .. } = session
+        .execute(&db, "explain (costs off) execute hp_custom_lookup('xxx')")
+        .unwrap()
+    else {
+        panic!("expected EXPLAIN query result");
+    };
+    let plan = rows
+        .iter()
+        .filter_map(|row| row.first())
+        .map(|value| value.as_text().unwrap_or_default().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plan.contains("Subplans Removed: 3"), "{plan}");
+    assert!(plan.contains("Seq Scan on hp_custom_rt_2"), "{plan}");
+}
+
+#[test]
 fn partitioned_primary_keys_support_rename_flow_and_index_tree_metadata() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -35316,6 +35384,52 @@ fn execute_prepared_select_uses_external_params() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(plan.contains("$1"), "{plan}");
+
+    session
+        .execute(
+            &db,
+            "create table prep_part (id int4 not null) partition by range (id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table prep_part_1 partition of prep_part for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table prep_part_2 partition of prep_part for values from (10) to (20)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table prep_part_3 partition of prep_part for values from (20) to (30)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "prepare read_part(int4) as select id from prep_part where id = $1",
+        )
+        .unwrap();
+
+    let StatementResult::Query { rows, .. } = session
+        .execute(&db, "explain (costs off) execute read_part(15)")
+        .unwrap()
+    else {
+        panic!("expected EXPLAIN query result");
+    };
+    let plan = rows
+        .iter()
+        .filter_map(|row| row.first())
+        .map(|value| value.as_text().unwrap_or_default().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plan.contains("Subplans Removed: 2"), "{plan}");
+    assert_eq!(plan.matches("Seq Scan on prep_part_").count(), 1, "{plan}");
 }
 
 #[test]

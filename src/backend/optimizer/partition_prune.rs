@@ -97,13 +97,14 @@ pub(crate) fn partition_may_satisfy_filter_with_runtime_values(
     bound: Option<&PartitionBoundSpec>,
     sibling_bounds: &[PartitionBoundSpec],
     filter: &Expr,
+    catalog: Option<&dyn CatalogLookup>,
     mut eval_runtime_value: impl FnMut(&Expr) -> Option<Value>,
 ) -> bool {
     let Some(bound) = bound else {
         return true;
     };
     let filter = substitute_runtime_prune_values(filter, &mut eval_runtime_value);
-    expr_may_match_bound(&filter, spec, bound, sibling_bounds, None, None, None)
+    expr_may_match_bound(&filter, spec, bound, sibling_bounds, None, catalog, None)
 }
 
 fn substitute_runtime_prune_values(

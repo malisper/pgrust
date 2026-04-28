@@ -17,6 +17,8 @@ Implementation slices completed:
 - Added Append/MergeAppend partition-prune metadata through path, plan, setrefs, subselect finalization, executor startup, and executor EXPLAIN state.
 - Added executor startup pruning over stored child bounds using runtime-evaluable clauses; static planner-pruned children are no longer reported as `Subplans Removed`.
 - Tightened nested/default pruning with relation-own ancestor bound checks, single-key default-domain intersection, conservative multi-key default proof, and ancestor-aware list child pruning.
+- Added non-ANALYZE `EXPLAIN EXECUTE` startup pruning for external prepared params without executing scans, and kept one-child Append nodes visible when they need to print `Subplans Removed`.
+- Passed the executor catalog into runtime partition-prune hash proofs so custom hash partition opclass support functions choose the same child as PostgreSQL.
 
 Files touched:
 crates/pgrust_sql_grammar/src/gram.pest
@@ -44,6 +46,7 @@ src/backend/optimizer/path/costsize.rs
 src/backend/optimizer/plan/subselect.rs
 src/backend/optimizer/setrefs.rs
 src/backend/optimizer/partitionwise.rs
+src/backend/executor/mod.rs
 
 Tests run:
 scripts/cargo_isolated.sh check
@@ -55,16 +58,20 @@ scripts/cargo_isolated.sh test --lib --quiet execute_prepared_select_uses_extern
 scripts/cargo_isolated.sh test --lib --quiet plpgsql_dynamic_explain_execute_uses_session_prepared_statement
 scripts/cargo_isolated.sh test --lib --quiet partition_bounds_accept_array_hash_enum_and_composite_keys
 scripts/cargo_isolated.sh test --lib --quiet streaming_select_installs_prepared_context_for_plpgsql_dynamic_execute
+scripts/cargo_isolated.sh test --lib --quiet runtime_hash_pruning_uses_custom_opclass_support_proc
 scripts/run_regression.sh --test partition_prune --timeout 60 --port 65452
 PGRUST_STATEMENT_TIMEOUT=30 PGRUST_REGRESS_BASE_SETUP_TIMEOUT=600 scripts/run_regression.sh --test partition_prune --timeout 180 --port 65452
+PGRUST_STATEMENT_TIMEOUT=30 PGRUST_REGRESS_BASE_SETUP_TIMEOUT=600 scripts/run_regression.sh --test partition_prune --timeout 300 --port 65452
 
 Remaining:
 Committed implementation as c1d59343b.
-Current uncommitted slice is at 621/750 queries matched, 129 mismatched queries, 68 diff hunks, 2886 diff lines. Latest diff copied to /tmp/diffs/partition_prune.diff.
+Committed implementation as e8145e080.
+Current uncommitted slice is at 623/750 queries matched, 127 mismatched queries, 66 diff hunks, 2817 diff lines. Latest diff copied to /tmp/diffs/partition_prune.diff.
 Prepared external params now work through normal `EXPLAIN EXECUTE` and through PL/pgSQL dynamic SQL in the server streaming SELECT path. The previous 4 `unsupported statement` failures from `explain_parallel_append('execute ab_q4/ab_q5 ...')` are gone; they are now ordinary runtime pruning/plan shape mismatches.
+Non-ANALYZE `EXPLAIN EXECUTE hp_q1('xxx')` now prunes to `hp2` and prints `Subplans Removed: 3`, matching PostgreSQL for the custom hash opclass case.
 Array hash partition support, enum/record bound serialization, composite text casts, and partition-prune constant cast folding have focused coverage, but the full regression still shows enum/record query comparisons rendered as text and not pruned, so binding/type preservation remains the next issue there.
 Main remaining categories:
-- Runtime Append/MergeAppend pruning/explain state remains the largest blocker: 38 `Subplans Removed` mentions and 117 `never executed` mentions in the diff. The metadata/executor path exists and prepared external params are preserved, but non-ANALYZE `EXPLAIN EXECUTE` still does not initialize runtime pruning state, InitPlan params are duplicated per child in some paths, and nested-loop/parallel-shaped plans still do not preserve PostgreSQL's visible pruned child state.
+- Runtime Append/MergeAppend pruning/explain state remains the largest blocker: 37 `Subplans Removed` mentions and 117 `never executed` mentions in the diff. The non-ANALYZE prepared external-param path is fixed, but EXPLAIN ANALYZE still needs PostgreSQL-style visible pruned child state for InitPlan/nested-loop/parallel-shaped plans.
 - Static nested/default pruning is reduced but not gone. Remaining notable cases are PostgreSQL-conservative OR/range behavior around `rlp` and multi-key `mc3p`; pgrust is sometimes keeping too many child ranges/defaults.
 - PL/pgSQL CONTINUE is fixed. Remaining PL/pgSQL-related hunks are plan-shape/runtime-pruning output, not syntax errors.
 - EXPLAIN ANALYZE UPDATE is partly wired, but partitioned UPDATE/view rewrite paths still differ.

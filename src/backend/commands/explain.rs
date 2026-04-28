@@ -3,10 +3,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::backend::executor::jsonb::render_jsonb_bytes;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
-    executor_start, render_explain_expr, render_index_order_by,
+    ExecutorContext, executor_start, render_explain_expr, render_index_order_by,
     render_index_scan_condition_with_key_names,
     render_index_scan_condition_with_key_names_and_runtime_renderer,
-    render_verbose_range_support_expr, set_returning_call_label,
+    render_verbose_range_support_expr, runtime_pruned_startup_child_indexes,
+    set_returning_call_label,
 };
 use crate::backend::parser::CatalogLookup;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
@@ -114,6 +115,212 @@ pub(crate) fn format_explain_plan_with_subplans(
         &VerboseExplainContext::default(),
         lines,
     );
+}
+
+pub(crate) fn apply_runtime_pruning_for_explain_plan(
+    mut plan: Plan,
+    ctx: &mut ExecutorContext,
+) -> Plan {
+    match &mut plan {
+        Plan::Append {
+            partition_prune,
+            children,
+            ..
+        }
+        | Plan::MergeAppend {
+            partition_prune,
+            children,
+            ..
+        } => {
+            *children = prune_runtime_explain_children(std::mem::take(children), ctx);
+            if let Some(partition_prune) = partition_prune
+                && expr_contains_external_param(&partition_prune.filter)
+            {
+                let (startup_visible, removed) =
+                    runtime_pruned_startup_child_indexes(partition_prune, ctx);
+                if removed > 0 {
+                    partition_prune.subplans_removed += removed;
+                    let existing_children = std::mem::take(children);
+                    *children = startup_visible
+                        .into_iter()
+                        .filter_map(|index| existing_children.get(index).cloned())
+                        .collect();
+                }
+            }
+        }
+        Plan::BitmapOr { children, .. } | Plan::SetOp { children, .. } => {
+            *children = prune_runtime_explain_children(std::mem::take(children), ctx);
+        }
+        Plan::BitmapHeapScan { bitmapqual, .. } => prune_runtime_explain_box(bitmapqual, ctx),
+        Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Filter { input, .. } => prune_runtime_explain_box(input, ctx),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            prune_runtime_explain_box(left, ctx);
+            prune_runtime_explain_box(right, ctx);
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            prune_runtime_explain_box(anchor, ctx);
+            prune_runtime_explain_box(recursive, ctx);
+        }
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. }
+        | Plan::Values { .. } => {}
+    }
+    plan
+}
+
+fn prune_runtime_explain_children(children: Vec<Plan>, ctx: &mut ExecutorContext) -> Vec<Plan> {
+    children
+        .into_iter()
+        .map(|child| apply_runtime_pruning_for_explain_plan(child, ctx))
+        .collect()
+}
+
+fn prune_runtime_explain_box(input: &mut Box<Plan>, ctx: &mut ExecutorContext) {
+    let old = std::mem::replace(
+        input,
+        Box::new(Plan::Result {
+            plan_info: PlanEstimate::default(),
+        }),
+    );
+    *input = Box::new(apply_runtime_pruning_for_explain_plan(*old, ctx));
+}
+
+fn expr_contains_external_param(expr: &Expr) -> bool {
+    match expr {
+        Expr::Param(param) => param.paramkind == ParamKind::External,
+        Expr::Var(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+        Expr::Aggref(aggref) => {
+            aggref.direct_args.iter().any(expr_contains_external_param)
+                || aggref.args.iter().any(expr_contains_external_param)
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|item| expr_contains_external_param(&item.expr))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_contains_external_param)
+        }
+        Expr::WindowFunc(window_func) => window_func.args.iter().any(expr_contains_external_param),
+        Expr::Op(op) => op.args.iter().any(expr_contains_external_param),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_external_param),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|arg| expr_contains_external_param(arg))
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_external_param(&arm.expr)
+                        || expr_contains_external_param(&arm.result)
+                })
+                || expr_contains_external_param(&case_expr.defresult)
+        }
+        Expr::Func(func) => func.args.iter().any(expr_contains_external_param),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(expr_contains_external_param),
+        Expr::SetReturning(set_returning) => set_returning_call_exprs(&set_returning.call)
+            .into_iter()
+            .any(expr_contains_external_param),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_ref()
+            .is_some_and(|expr| expr_contains_external_param(expr)),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_ref()
+                .is_some_and(|expr| expr_contains_external_param(expr))
+                || subplan.args.iter().any(expr_contains_external_param)
+        }
+        Expr::ScalarArrayOp(scalar) => {
+            expr_contains_external_param(&scalar.left)
+                || expr_contains_external_param(&scalar.right)
+        }
+        Expr::Xml(xml) => xml.child_exprs().any(expr_contains_external_param),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_contains_external_param(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_external_param(expr)
+                || expr_contains_external_param(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|escape| expr_contains_external_param(escape))
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_external_param(left) || expr_contains_external_param(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_external_param),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, field)| expr_contains_external_param(field)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_external_param(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_external_param)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_external_param)
+                })
+        }
+    }
 }
 
 pub(crate) fn format_verbose_explain_plan_with_subplans(
@@ -539,7 +746,17 @@ fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
         {
             Some(input.as_ref())
         }
-        Plan::Append { children, .. } if children.len() == 1 => children.first(),
+        Plan::Append {
+            children,
+            partition_prune,
+            ..
+        } if children.len() == 1
+            && partition_prune
+                .as_ref()
+                .is_none_or(|info| info.subplans_removed == 0) =>
+        {
+            children.first()
+        }
         _ => None,
     }
 }

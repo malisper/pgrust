@@ -124,7 +124,7 @@ pub(crate) use nodes::{
     render_explain_expr, render_explain_join_expr, render_explain_projection_expr_with_qualifier,
     render_index_order_by, render_index_scan_condition_with_key_names,
     render_index_scan_condition_with_key_names_and_runtime_renderer,
-    render_verbose_range_support_expr,
+    render_verbose_range_support_expr, runtime_pruned_startup_child_indexes,
 };
 pub use random::PgPrngState;
 pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_positional_args};

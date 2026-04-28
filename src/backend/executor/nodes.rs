@@ -1187,17 +1187,14 @@ fn ensure_append_runtime_pruned(
     let Some(partition_prune) = partition_prune else {
         return Ok(());
     };
+    let (startup_visible, startup_removed) =
+        runtime_pruned_startup_child_indexes(partition_prune, ctx);
     let child_count = partition_prune
         .child_domains
         .len()
         .max(partition_prune.child_bounds.len());
-    let mut startup_visible = Vec::new();
     let mut active = Vec::new();
     for index in 0..child_count {
-        if partition_prune_child_may_satisfy(partition_prune, index, RuntimePruneMode::Startup, ctx)
-        {
-            startup_visible.push(index);
-        }
         if partition_prune_child_may_satisfy(
             partition_prune,
             index,
@@ -1207,10 +1204,32 @@ fn ensure_append_runtime_pruned(
             active.push(index);
         }
     }
-    *subplans_removed += child_count.saturating_sub(startup_visible.len());
+    *subplans_removed += startup_removed;
     *visible_children = Some(startup_visible);
     *active_children = Some(active);
     Ok(())
+}
+
+pub(crate) fn runtime_pruned_startup_child_indexes(
+    partition_prune: &PartitionPrunePlan,
+    ctx: &mut ExecutorContext,
+) -> (Vec<usize>, usize) {
+    let child_count = partition_prune
+        .child_domains
+        .len()
+        .max(partition_prune.child_bounds.len());
+    let startup_visible = (0..child_count)
+        .filter(|index| {
+            partition_prune_child_may_satisfy(
+                partition_prune,
+                *index,
+                RuntimePruneMode::Startup,
+                ctx,
+            )
+        })
+        .collect::<Vec<_>>();
+    let removed = child_count.saturating_sub(startup_visible.len());
+    (startup_visible, removed)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1249,11 +1268,13 @@ fn partition_prune_child_may_satisfy(
     };
     domains.iter().all(|domain| {
         let mut eval_slot = TupleSlot::empty(0);
+        let catalog = ctx.catalog.clone();
         partition_may_satisfy_filter_with_runtime_values(
             &domain.spec,
             domain.bound.as_ref(),
             &domain.sibling_bounds,
             &partition_prune.filter,
+            catalog.as_deref(),
             |expr| {
                 if mode == RuntimePruneMode::Startup && !startup_prune_expr_is_evaluable(expr) {
                     return None;
