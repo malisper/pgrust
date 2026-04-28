@@ -2272,7 +2272,14 @@ fn parse_xmlelement_expression() {
     let Statement::Select(select) = stmt else {
         panic!("expected select");
     };
-    assert!(matches!(select.targets[0].expr, SqlExpr::Xml(_)));
+    let SqlExpr::Xml(xml) = &select.targets[0].expr else {
+        panic!("expected XML expression");
+    };
+    assert_eq!(xml.name.as_deref(), Some("employee"));
+    assert_eq!(xml.named_args.len(), 1);
+    assert_eq!(xml.arg_names, vec!["id"]);
+    assert_eq!(xml.args.len(), 1);
+    assert_eq!(select.targets[0].output_name, "xmlelement");
 }
 
 #[test]

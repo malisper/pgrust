@@ -109,7 +109,7 @@ use super::expr_string::{
 use super::expr_txid::eval_txid_builtin_function;
 use super::expr_xml::{
     eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function,
-    unsupported_xml_feature_error,
+    eval_xpath_exists_function, eval_xpath_function, unsupported_xml_feature_error,
 };
 use super::node_types::*;
 use super::pg_regex::{
@@ -7121,6 +7121,8 @@ fn eval_plpgsql_builtin_function(
             crate::backend::utils::misc::guc_xml::XmlOptionSetting::Content,
             None,
         ),
+        BuiltinScalarFunction::XPath => eval_xpath_function(&values),
+        BuiltinScalarFunction::XPathExists => eval_xpath_exists_function(&values),
         BuiltinScalarFunction::TsMatch => eval_ts_match_values(&values, None, None),
         BuiltinScalarFunction::TsQueryAnd => match values.as_slice() {
             [Value::TsQuery(left), Value::TsQuery(right)] => Ok(Value::TsQuery(
@@ -9142,6 +9144,8 @@ pub(crate) fn eval_builtin_function(
             crate::backend::utils::misc::guc_xml::XmlOptionSetting::Content,
             Some(ctx),
         ),
+        BuiltinScalarFunction::XPath => eval_xpath_function(&values),
+        BuiltinScalarFunction::XPathExists => eval_xpath_exists_function(&values),
         BuiltinScalarFunction::TsMatch => eval_ts_match_values(
             &values,
             ctx.gucs

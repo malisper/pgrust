@@ -3,6 +3,8 @@ use super::expr_casts::{cast_value_with_config, cast_value_with_source_type_cata
 use super::{ExecError, ExecutorContext, TupleSlot, format_array_value_text};
 use crate::backend::utils::misc::guc_xml::XmlBinaryFormat;
 use crate::backend::utils::misc::guc_xml::XmlOptionSetting;
+use crate::backend::utils::misc::notices::push_warning;
+use crate::include::catalog::XML_TYPE_OID;
 use crate::include::nodes::datetime::{DateADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::datum::{ArrayValue, Value};
 use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
@@ -55,6 +57,14 @@ fn xml_validation_error_for_option(
         XmlOptionSetting::Content => ("invalid XML content", "2200N"),
     };
     xml_input_error(text, message, Some(detail), sqlstate)
+}
+
+fn xml_declaration_error(text: &str, option: XmlOptionSetting) -> ExecError {
+    let (message, sqlstate) = match option {
+        XmlOptionSetting::Document => ("invalid XML document: invalid XML declaration", "2200M"),
+        XmlOptionSetting::Content => ("invalid XML content: invalid XML declaration", "2200N"),
+    };
+    xml_input_error(text, message, None, sqlstate)
 }
 
 fn parse_xml_decl_attributes(body: &str) -> Result<Vec<(String, String)>, String> {
@@ -113,26 +123,122 @@ fn validate_xml_declaration(text: &str, option: XmlOptionSetting) -> Result<(), 
         .strip_prefix("<?xml")
         .and_then(|rest| rest.strip_suffix("?>"))
         .map(str::trim)
-        .ok_or_else(|| {
-            xml_validation_error_for_option(text, option, "malformed XML declaration".into())
-        })?;
-    let attrs = parse_xml_decl_attributes(body)
-        .map_err(|detail| xml_validation_error_for_option(text, option, detail))?;
+        .ok_or_else(|| xml_declaration_error(text, option))?;
+    let attrs = parse_xml_decl_attributes(body).map_err(|_| xml_declaration_error(text, option))?;
     for (name, value) in attrs {
         if name == "standalone" && value != "yes" && value != "no" {
-            return Err(xml_validation_error_for_option(
-                text,
-                option,
-                "invalid standalone value in XML declaration".into(),
-            ));
+            return Err(xml_declaration_error(text, option));
         }
     }
     Ok(())
 }
 
+fn xml_declared_entity_names(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = text;
+    while let Some(offset) = rest.find("<!ENTITY") {
+        rest = &rest[offset + "<!ENTITY".len()..];
+        let mut candidate = rest.trim_start();
+        if let Some(after_percent) = candidate.strip_prefix('%') {
+            candidate = after_percent.trim_start();
+        }
+        let name: String = candidate
+            .chars()
+            .take_while(|ch| !ch.is_whitespace() && *ch != '>')
+            .collect();
+        if !name.is_empty() {
+            names.push(name);
+        }
+    }
+    names
+}
+
+fn doctype_has_external_subset(text: &str) -> bool {
+    let Some(offset) = text.find("<!DOCTYPE") else {
+        return false;
+    };
+    let after_doctype = &text[offset + "<!DOCTYPE".len()..];
+    let head_end = after_doctype
+        .find(|ch| matches!(ch, '[' | '>'))
+        .unwrap_or(after_doctype.len());
+    let head = &after_doctype[..head_end];
+    head.split_whitespace()
+        .any(|token| matches!(token, "SYSTEM" | "PUBLIC"))
+}
+
+fn xml_entity_ref_allowed(name: &str, declared_entities: &[String], allow_external: bool) -> bool {
+    matches!(name, "amp" | "lt" | "gt" | "apos" | "quot")
+        || declared_entities.iter().any(|declared| declared == name)
+        || allow_external
+}
+
+fn xml_extra_content_error(text: &str, option: XmlOptionSetting) -> ExecError {
+    xml_validation_error_for_option(
+        text,
+        option,
+        "line 1: Extra content at the end of the document".into(),
+    )
+}
+
+fn xml_invalid_start_tag_error(text: &str, option: XmlOptionSetting) -> ExecError {
+    xml_validation_error_for_option(
+        text,
+        option,
+        "line 1: StartTag: invalid element name".into(),
+    )
+}
+
+fn xml_undefined_entity_error(text: &str, option: XmlOptionSetting, name: &str) -> ExecError {
+    xml_validation_error_for_option(text, option, format!("line 1: Entity '{name}' not defined"))
+}
+
+fn first_start_tag_name(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    let rest = trimmed.strip_prefix('<')?;
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|ch| matches!(ch, '!' | '?' | '/'))
+    {
+        return None;
+    }
+    let end = rest
+        .find(|ch: char| ch.is_whitespace() || matches!(ch, '>' | '/'))
+        .unwrap_or(rest.len());
+    (end > 0).then_some(&rest[..end])
+}
+
+fn postgres_xml_detail_for_quick_xml_error(text: &str, err: &str) -> Option<String> {
+    if err.contains("tag not closed")
+        && let Some(name) = first_start_tag_name(text)
+    {
+        return Some(format!(
+            "line 1: Couldn't find end of Start Tag {name} line 1"
+        ));
+    }
+    if err.contains("entity or character reference not closed") {
+        return Some("line 1: xmlParseEntityRef: no name".into());
+    }
+    if let Some(rest) = err.strip_prefix("ill-formed document: expected `</")
+        && let Some((opened, rest)) = rest.split_once(">`, but `</")
+        && let Some((closed, _)) = rest.split_once(">` was found")
+    {
+        return Some(format!(
+            "line 1: Opening and ending tag mismatch: {opened} line 1 and {closed}"
+        ));
+    }
+    None
+}
+
 pub(crate) fn validate_xml_input(text: &str, option: XmlOptionSetting) -> Result<(), ExecError> {
     validate_xml_declaration(text, option)?;
 
+    if text.trim() == "<>" {
+        return Err(xml_invalid_start_tag_error(text, option));
+    }
+
+    let declared_entities = xml_declared_entity_names(text);
+    let allow_external_entities = doctype_has_external_subset(text);
     let mut reader = Reader::from_str(text);
     reader.config_mut().trim_text(false);
 
@@ -140,35 +246,34 @@ pub(crate) fn validate_xml_input(text: &str, option: XmlOptionSetting) -> Result
     let mut seen_document_element = false;
     let mut after_document_element = false;
     let mut seen_doctype = false;
+    let mut seen_non_misc_before_doctype = false;
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(_)) => {
-                if depth == 0 && matches!(option, XmlOptionSetting::Document) {
-                    if after_document_element || seen_document_element {
-                        return Err(xml_input_error(
-                            text,
-                            "invalid XML document",
-                            Some("XML document must have exactly one top-level element".into()),
-                            "2200M",
-                        ));
+                if depth == 0 {
+                    if matches!(option, XmlOptionSetting::Document) || seen_doctype {
+                        if after_document_element || seen_document_element {
+                            return Err(xml_extra_content_error(text, option));
+                        }
+                        seen_document_element = true;
+                    } else if matches!(option, XmlOptionSetting::Content) {
+                        seen_non_misc_before_doctype = true;
                     }
-                    seen_document_element = true;
                 }
                 depth += 1;
             }
             Ok(Event::Empty(_)) => {
-                if depth == 0 && matches!(option, XmlOptionSetting::Document) {
-                    if after_document_element || seen_document_element {
-                        return Err(xml_input_error(
-                            text,
-                            "invalid XML document",
-                            Some("XML document must have exactly one top-level element".into()),
-                            "2200M",
-                        ));
+                if depth == 0 {
+                    if matches!(option, XmlOptionSetting::Document) || seen_doctype {
+                        if after_document_element || seen_document_element {
+                            return Err(xml_extra_content_error(text, option));
+                        }
+                        seen_document_element = true;
+                        after_document_element = true;
+                    } else if matches!(option, XmlOptionSetting::Content) {
+                        seen_non_misc_before_doctype = true;
                     }
-                    seen_document_element = true;
-                    after_document_element = true;
                 }
             }
             Ok(Event::End(_)) => {
@@ -186,19 +291,27 @@ pub(crate) fn validate_xml_input(text: &str, option: XmlOptionSetting) -> Result
                 }
             }
             Ok(Event::Text(text_event)) => {
-                if depth == 0
-                    && matches!(option, XmlOptionSetting::Document)
-                    && !is_xml_whitespace(text_event.as_ref())
-                {
-                    return Err(xml_input_error(
-                        text,
-                        "invalid XML document",
-                        Some(
-                            "non-whitespace text is not allowed outside the document element"
-                                .into(),
-                        ),
-                        "2200M",
-                    ));
+                if depth == 0 && !is_xml_whitespace(text_event.as_ref()) {
+                    if matches!(option, XmlOptionSetting::Document) {
+                        return Err(xml_input_error(
+                            text,
+                            "invalid XML document",
+                            Some(
+                                "non-whitespace text is not allowed outside the document element"
+                                    .into(),
+                            ),
+                            "2200M",
+                        ));
+                    }
+                    if seen_doctype {
+                        if after_document_element || seen_document_element {
+                            return Err(xml_extra_content_error(text, option));
+                        }
+                        return Err(xml_invalid_start_tag_error(text, option));
+                    }
+                    if matches!(option, XmlOptionSetting::Content) {
+                        seen_non_misc_before_doctype = true;
+                    }
                 }
             }
             Ok(Event::CData(text_event)) => {
@@ -215,32 +328,32 @@ pub(crate) fn validate_xml_input(text: &str, option: XmlOptionSetting) -> Result
                 }
             }
             Ok(Event::DocType(_)) => {
-                if matches!(option, XmlOptionSetting::Document) {
-                    if seen_doctype || seen_document_element || after_document_element {
-                        return Err(xml_input_error(
-                            text,
-                            "invalid XML document",
-                            Some("DOCTYPE must appear before the document element".into()),
-                            "2200M",
-                        ));
-                    }
-                    seen_doctype = true;
+                if seen_doctype {
+                    return Err(xml_invalid_start_tag_error(text, option));
+                }
+                if seen_document_element || after_document_element || seen_non_misc_before_doctype {
+                    return Err(xml_invalid_start_tag_error(text, option));
+                }
+                seen_doctype = true;
+            }
+            Ok(Event::Decl(_)) | Ok(Event::PI(_)) | Ok(Event::Comment(_)) => {}
+            Ok(Event::GeneralRef(entity)) => {
+                let name = String::from_utf8_lossy(entity.as_ref());
+                if !xml_entity_ref_allowed(&name, &declared_entities, allow_external_entities) {
+                    return Err(xml_undefined_entity_error(text, option, &name));
                 }
             }
-            Ok(Event::Decl(_))
-            | Ok(Event::PI(_))
-            | Ok(Event::Comment(_))
-            | Ok(Event::GeneralRef(_)) => {}
             Ok(Event::Eof) => break,
             Err(err) => {
                 let (message, sqlstate) = match option {
                     XmlOptionSetting::Document => ("invalid XML document", "2200M"),
                     XmlOptionSetting::Content => ("invalid XML content", "2200N"),
                 };
+                let err = err.to_string();
                 return Err(xml_input_error(
                     text,
                     message,
-                    Some(err.to_string()),
+                    Some(postgres_xml_detail_for_quick_xml_error(text, &err).unwrap_or(err)),
                     sqlstate,
                 ));
             }
@@ -1232,6 +1345,80 @@ pub(crate) fn eval_xml_expr(
     }
 }
 
+pub(crate) fn eval_xpath_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(path_value) = values.first() else {
+        return malformed_xpath_call("xpath");
+    };
+    let Some(document_value) = values.get(1) else {
+        return malformed_xpath_call("xpath");
+    };
+    if matches!(path_value, Value::Null) || matches!(document_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let path = path_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "xpath",
+            left: path_value.clone(),
+            right: Value::Text("".into()),
+        })?;
+    let document = document_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "xpath",
+            left: document_value.clone(),
+            right: Value::Xml("".into()),
+        })?;
+    let namespaces = xpath_namespaces(values.get(2))?;
+    let results = eval_xpath(document, path, &namespaces)?;
+    let values = results
+        .into_iter()
+        .map(|result| Value::Xml(CompactString::from_owned(result.into_xml_text())))
+        .collect();
+    Ok(Value::PgArray(
+        ArrayValue::from_1d(values).with_element_type_oid(XML_TYPE_OID),
+    ))
+}
+
+pub(crate) fn eval_xpath_exists_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(path_value) = values.first() else {
+        return malformed_xpath_call("xpath_exists");
+    };
+    let Some(document_value) = values.get(1) else {
+        return malformed_xpath_call("xpath_exists");
+    };
+    if matches!(path_value, Value::Null) || matches!(document_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let path = path_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "xpath_exists",
+            left: path_value.clone(),
+            right: Value::Text("".into()),
+        })?;
+    let document = document_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "xpath_exists",
+            left: document_value.clone(),
+            right: Value::Xml("".into()),
+        })?;
+    let namespaces = xpath_namespaces(values.get(2))?;
+    Ok(Value::Bool(
+        !eval_xpath(document, path, &namespaces)?.is_empty(),
+    ))
+}
+
+fn malformed_xpath_call(function_name: &'static str) -> Result<Value, ExecError> {
+    Err(ExecError::DetailedError {
+        message: format!("{function_name} expects two or three arguments"),
+        detail: None,
+        hint: None,
+        sqlstate: "42883",
+    })
+}
+
 pub(crate) fn eval_sql_xml_table(
     table: &SqlXmlTable,
     slot: &mut TupleSlot,
@@ -1705,6 +1892,691 @@ fn render_xml_table_node(node: &XmlNode, out: &mut String) {
     }
 }
 
+#[derive(Debug)]
+enum XPathValue {
+    Node(String),
+    Text(String),
+    Bool(bool),
+    Number(i64),
+}
+
+impl XPathValue {
+    fn into_xml_text(self) -> String {
+        match self {
+            XPathValue::Node(text) => text,
+            XPathValue::Text(text) => xml_escape(&text, false),
+            XPathValue::Bool(value) => value.to_string(),
+            XPathValue::Number(value) => value.to_string(),
+        }
+    }
+}
+
+fn xpath_error(message: impl Into<String>, sqlstate: &'static str) -> ExecError {
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate,
+    }
+}
+
+fn xpath_parse_error(detail: Option<String>) -> ExecError {
+    ExecError::DetailedError {
+        message: "could not parse XML document".into(),
+        detail,
+        hint: None,
+        sqlstate: "2200M",
+    }
+}
+
+// :HACK: This is a regression-focused XPath subset. Replace it with a real
+// libxml-compatible XPath engine when pgrust grows one.
+fn eval_xpath(
+    document_text: &str,
+    path: &str,
+    namespaces: &[(String, String)],
+) -> Result<Vec<XPathValue>, ExecError> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err(xpath_error("empty XPath expression", "2203B"));
+    }
+    let (_, nodes) = parse_xml_nodes(document_text).map_err(|err| match err {
+        ExecError::DetailedError { detail, .. } | ExecError::XmlInput { detail, .. } => {
+            xpath_parse_error(detail)
+        }
+        other => other,
+    })?;
+    let document_namespaces = xpath_document_namespaces(&nodes);
+    let matching_namespaces = xpath_matching_namespaces(namespaces, &document_namespaces);
+    validate_xpath_namespaces(&nodes, document_text)?;
+    warn_for_relative_xpath_namespaces(document_text, &document_namespaces);
+
+    if let Some(text) = xpath_string_literal(path) {
+        return Ok(vec![XPathValue::Text(text)]);
+    }
+    if let Some(inner) = path
+        .strip_prefix("count(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        return Ok(vec![XPathValue::Number(
+            eval_xpath_node_path(&nodes, inner, &matching_namespaces).len() as i64,
+        )]);
+    }
+    if let Some((left, right)) = split_xpath_count_comparison(path) {
+        let expected = right.parse::<i64>().unwrap_or_default();
+        let count = eval_xpath_node_path(&nodes, left, &matching_namespaces).len() as i64;
+        return Ok(vec![XPathValue::Bool(count == expected)]);
+    }
+    if let Some(inner) = path
+        .strip_prefix("name(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let name = eval_xpath_node_path(&nodes, inner, &matching_namespaces)
+            .first()
+            .and_then(|node| match node {
+                XmlNode::Element { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        return Ok(vec![XPathValue::Text(name)]);
+    }
+
+    if path == "//text()" {
+        return Ok(xpath_descendant_text(&nodes)
+            .into_iter()
+            .filter(|text| !text.is_empty())
+            .map(XPathValue::Text)
+            .collect());
+    }
+    if path == "text()" {
+        return Ok(nodes
+            .iter()
+            .flat_map(xml_table_direct_text_values)
+            .filter(|text| !text.is_empty())
+            .map(XPathValue::Text)
+            .collect());
+    }
+    if let Some(attr_name) = path.strip_prefix("//@") {
+        return Ok(
+            xpath_descendant_attributes(&nodes, attr_name, &matching_namespaces)
+                .into_iter()
+                .map(XPathValue::Text)
+                .collect(),
+        );
+    }
+    if let Some((element_path, attr_name)) = path.strip_prefix("//").and_then(|rest| {
+        rest.rsplit_once("/@")
+            .map(|(element_path, attr_name)| (element_path, attr_name))
+    }) {
+        return Ok(
+            xpath_descendant_elements(&nodes, element_path, &matching_namespaces)
+                .into_iter()
+                .filter_map(|node| xpath_node_attribute(node, attr_name, &matching_namespaces))
+                .map(XPathValue::Text)
+                .collect(),
+        );
+    }
+
+    Ok(eval_xpath_node_path(&nodes, path, &matching_namespaces)
+        .into_iter()
+        .map(|node| {
+            let mut out = String::new();
+            render_xpath_node(node, &document_namespaces, namespaces, &mut out);
+            XPathValue::Node(out)
+        })
+        .collect())
+}
+
+fn split_xpath_count_comparison(path: &str) -> Option<(&str, &str)> {
+    let rest = path.strip_prefix("count(")?;
+    let (inner, right) = rest.split_once(")=")?;
+    Some((inner.trim(), right.trim()))
+}
+
+fn xpath_string_literal(path: &str) -> Option<String> {
+    if path.len() >= 2 {
+        let bytes = path.as_bytes();
+        if (bytes[0] == b'\'' && bytes[path.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[path.len() - 1] == b'"')
+        {
+            return Some(
+                path[1..path.len() - 1]
+                    .replace("''", "'")
+                    .replace("\"\"", "\""),
+            );
+        }
+    }
+    None
+}
+
+fn eval_xpath_node_path<'a>(
+    document: &'a [XmlNode],
+    path: &str,
+    namespaces: &[(String, String)],
+) -> Vec<&'a XmlNode> {
+    let path = path.trim();
+    if path == "/*" {
+        return document
+            .iter()
+            .filter(|node| matches!(node, XmlNode::Element { .. }))
+            .collect();
+    }
+    if path == "//*" {
+        return xpath_descendant_elements(document, "*", namespaces);
+    }
+    if let Some(step) = path.strip_prefix("//") {
+        return xpath_descendant_elements(document, step, namespaces);
+    }
+
+    let trimmed = path.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return document
+            .iter()
+            .filter(|node| matches!(node, XmlNode::Element { .. }))
+            .collect();
+    }
+    let mut current: Vec<&XmlNode> = document
+        .iter()
+        .filter(|node| matches!(node, XmlNode::Element { .. }))
+        .collect();
+    for (index, step) in trimmed
+        .split('/')
+        .filter(|step| !step.is_empty())
+        .enumerate()
+    {
+        let absolute_first = index == 0;
+        current = xpath_step(current, step, namespaces, absolute_first);
+        if current.is_empty() {
+            break;
+        }
+    }
+    current
+}
+
+fn xpath_descendant_elements<'a>(
+    document: &'a [XmlNode],
+    step: &str,
+    namespaces: &[(String, String)],
+) -> Vec<&'a XmlNode> {
+    let mut out = Vec::new();
+    for node in document {
+        collect_xpath_descendant_elements(node, step, namespaces, &mut out);
+    }
+    out
+}
+
+fn collect_xpath_descendant_elements<'a>(
+    node: &'a XmlNode,
+    step: &str,
+    namespaces: &[(String, String)],
+    out: &mut Vec<&'a XmlNode>,
+) {
+    if xpath_step_matches(node, step, namespaces) {
+        out.push(node);
+    }
+    if let XmlNode::Element { children, .. } = node {
+        for child in children {
+            collect_xpath_descendant_elements(child, step, namespaces, out);
+        }
+    }
+}
+
+fn xpath_step<'a>(
+    nodes: Vec<&'a XmlNode>,
+    step: &str,
+    namespaces: &[(String, String)],
+    absolute_first_step: bool,
+) -> Vec<&'a XmlNode> {
+    nodes
+        .into_iter()
+        .flat_map(|node| {
+            let candidates = if absolute_first_step {
+                vec![node]
+            } else {
+                xml_table_element_children(node)
+            };
+            candidates
+                .into_iter()
+                .filter(|candidate| xpath_step_matches(candidate, step, namespaces))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn xpath_step_matches(node: &XmlNode, raw_step: &str, namespaces: &[(String, String)]) -> bool {
+    let (step_name, predicate) = split_xml_table_step_predicate(raw_step);
+    xpath_node_name_matches(node, step_name, namespaces)
+        && predicate
+            .as_deref()
+            .is_none_or(|predicate| xpath_predicate_matches(node, predicate, namespaces))
+}
+
+fn xpath_node_name_matches(
+    node: &XmlNode,
+    expected: &str,
+    namespaces: &[(String, String)],
+) -> bool {
+    match node {
+        XmlNode::Element { name, .. } => xpath_name_matches(name, expected, namespaces),
+        _ => false,
+    }
+}
+
+fn xpath_name_matches(actual: &str, expected: &str, namespaces: &[(String, String)]) -> bool {
+    if expected == "*" {
+        return true;
+    }
+    let Some((expected_prefix, expected_local)) = expected.split_once(':') else {
+        return actual == expected;
+    };
+    let Some(expected_uri) = xpath_namespace_uri(namespaces, expected_prefix) else {
+        return actual == expected;
+    };
+    if actual == expected {
+        return true;
+    }
+    let (actual_prefix, actual_local) = actual.split_once(':').unwrap_or(("", actual));
+    actual_local == expected_local
+        && xpath_namespace_uri(namespaces, actual_prefix).as_deref() == Some(expected_uri.as_str())
+}
+
+fn xpath_predicate_matches(
+    node: &XmlNode,
+    predicate: &str,
+    namespaces: &[(String, String)],
+) -> bool {
+    let Some((left, right)) = predicate.split_once('=') else {
+        return false;
+    };
+    let expected = right.trim().trim_matches('"').trim_matches('\'');
+    let left = left.trim();
+    if left == "text()" {
+        return xml_table_node_text(node) == expected;
+    }
+    if let Some(child_name) = left.strip_suffix("/text()") {
+        return xpath_child_text(node, child_name.trim(), namespaces).as_deref() == Some(expected);
+    }
+    xpath_child_text(node, left, namespaces).as_deref() == Some(expected)
+}
+
+fn xpath_child_text(
+    node: &XmlNode,
+    child_name: &str,
+    namespaces: &[(String, String)],
+) -> Option<String> {
+    xml_table_element_children(node)
+        .into_iter()
+        .find(|child| xpath_node_name_matches(child, child_name, namespaces))
+        .map(xml_table_node_text)
+}
+
+fn xpath_node_attribute(
+    node: &XmlNode,
+    attr_name: &str,
+    namespaces: &[(String, String)],
+) -> Option<String> {
+    match node {
+        XmlNode::Element { attrs, .. } => attrs
+            .iter()
+            .find(|(name, _)| xpath_name_matches(name, attr_name, namespaces))
+            .map(|(_, value)| decode_xml_entities(value)),
+        _ => None,
+    }
+}
+
+fn xpath_descendant_attributes(
+    document: &[XmlNode],
+    attr_name: &str,
+    namespaces: &[(String, String)],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for node in document {
+        collect_xpath_descendant_attributes(node, attr_name, namespaces, &mut out);
+    }
+    out
+}
+
+fn collect_xpath_descendant_attributes(
+    node: &XmlNode,
+    attr_name: &str,
+    namespaces: &[(String, String)],
+    out: &mut Vec<String>,
+) {
+    if let Some(value) = xpath_node_attribute(node, attr_name, namespaces) {
+        out.push(value);
+    }
+    if let XmlNode::Element { children, .. } = node {
+        for child in children {
+            collect_xpath_descendant_attributes(child, attr_name, namespaces, out);
+        }
+    }
+}
+
+fn xpath_descendant_text(document: &[XmlNode]) -> Vec<String> {
+    let mut out = Vec::new();
+    for node in document {
+        collect_xpath_descendant_text(node, &mut out);
+    }
+    out
+}
+
+fn collect_xpath_descendant_text(node: &XmlNode, out: &mut Vec<String>) {
+    match node {
+        XmlNode::Element { children, .. } => {
+            for child in children {
+                collect_xpath_descendant_text(child, out);
+            }
+        }
+        XmlNode::Text(text) | XmlNode::CData(text) => out.push(decode_xml_entities(text)),
+        XmlNode::Comment(_) | XmlNode::Pi(_) | XmlNode::Doctype(_) => {}
+    }
+}
+
+fn xpath_namespaces(value: Option<&Value>) -> Result<Vec<(String, String)>, ExecError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Vec::new());
+    }
+    let values = match value {
+        Value::PgArray(array) => {
+            if array.dimensions.is_empty() {
+                return Ok(Vec::new());
+            }
+            if array.dimensions.len() != 2 || array.dimensions[1].length != 2 {
+                return Err(ExecError::DetailedError {
+                    message: "invalid array for XML namespace mapping".into(),
+                    detail: Some(
+                        "The array must be two-dimensional with length of the second axis equal to 2."
+                            .into(),
+                    ),
+                    hint: None,
+                    sqlstate: "22000",
+                });
+            }
+            array.elements.clone()
+        }
+        Value::Array(rows) => rows
+            .iter()
+            .flat_map(|row| match row {
+                Value::Array(values) => values.clone(),
+                Value::PgArray(array) => array.elements.clone(),
+                value => vec![value.clone()],
+            })
+            .collect(),
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "xpath",
+                left: other.clone(),
+                right: Value::Array(Vec::new()),
+            });
+        }
+    };
+    if values.len() % 2 != 0 {
+        return Err(ExecError::DetailedError {
+            message: "invalid array for XML namespace mapping".into(),
+            detail: Some(
+                "The array must be two-dimensional with length of the second axis equal to 2."
+                    .into(),
+            ),
+            hint: None,
+            sqlstate: "22000",
+        });
+    }
+    let mut namespaces = Vec::new();
+    for pair in values.chunks(2) {
+        let [name, uri] = pair else {
+            continue;
+        };
+        if matches!(name, Value::Null) || matches!(uri, Value::Null) {
+            return Err(ExecError::DetailedError {
+                message: "neither namespace name nor URI may be null".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22004",
+            });
+        }
+        let Some(name) = name.as_text() else {
+            return Err(ExecError::TypeMismatch {
+                op: "xpath",
+                left: name.clone(),
+                right: Value::Text("".into()),
+            });
+        };
+        let Some(uri) = uri.as_text() else {
+            return Err(ExecError::TypeMismatch {
+                op: "xpath",
+                left: uri.clone(),
+                right: Value::Text("".into()),
+            });
+        };
+        namespaces.push((name.to_string(), uri.to_string()));
+    }
+    Ok(namespaces)
+}
+
+fn xpath_document_namespaces(document: &[XmlNode]) -> Vec<(String, String)> {
+    document
+        .iter()
+        .find_map(|node| match node {
+            XmlNode::Element { attrs, .. } => Some(xpath_namespaces_from_attrs(attrs)),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn xpath_matching_namespaces(
+    explicit_namespaces: &[(String, String)],
+    document_namespaces: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut namespaces = explicit_namespaces.to_vec();
+    for (prefix, uri) in document_namespaces {
+        if !namespaces.iter().any(|(candidate, _)| candidate == prefix) {
+            namespaces.push((prefix.clone(), uri.clone()));
+        }
+    }
+    namespaces
+}
+
+fn xpath_namespace_uri(namespaces: &[(String, String)], prefix: &str) -> Option<String> {
+    namespaces
+        .iter()
+        .find(|(candidate, _)| candidate == prefix)
+        .map(|(_, uri)| uri.clone())
+}
+
+fn xpath_namespaces_from_attrs(attrs: &[(String, String)]) -> Vec<(String, String)> {
+    attrs
+        .iter()
+        .filter_map(|(name, value)| {
+            if name == "xmlns" {
+                Some(("".into(), decode_xml_entities(value)))
+            } else {
+                name.strip_prefix("xmlns:")
+                    .map(|prefix| (prefix.to_string(), decode_xml_entities(value)))
+            }
+        })
+        .collect()
+}
+
+fn validate_xpath_namespaces(document: &[XmlNode], document_text: &str) -> Result<(), ExecError> {
+    let mut scope = Vec::new();
+    for node in document {
+        validate_xpath_node_namespaces(node, document_text, &mut scope)?;
+    }
+    Ok(())
+}
+
+fn validate_xpath_node_namespaces(
+    node: &XmlNode,
+    document_text: &str,
+    inherited: &mut Vec<(String, String)>,
+) -> Result<(), ExecError> {
+    let XmlNode::Element {
+        name,
+        attrs,
+        children,
+    } = node
+    else {
+        return Ok(());
+    };
+    let original_len = inherited.len();
+    for (prefix, uri) in xpath_namespaces_from_attrs(attrs) {
+        if uri.contains('<') {
+            return Err(xpath_parse_error(None));
+        }
+        inherited.push((prefix, uri));
+    }
+    if let Some((prefix, _)) = name.split_once(':')
+        && !inherited.iter().any(|(name, _)| name == prefix)
+    {
+        return Err(xpath_parse_error(Some(format!(
+            "line 1: Namespace prefix {prefix} on tag is not defined\n{}",
+            xpath_document_caret_detail(document_text)
+        ))));
+    }
+    for (attr_name, _) in attrs {
+        if attr_name == "xmlns" || attr_name.starts_with("xmlns:") {
+            continue;
+        }
+        if let Some((prefix, _)) = attr_name.split_once(':')
+            && !inherited.iter().any(|(name, _)| name == prefix)
+        {
+            return Err(xpath_parse_error(Some(format!(
+                "line 1: Namespace prefix {prefix} for attribute {attr_name} on {name} is not defined\n{}",
+                xpath_document_caret_detail(document_text)
+            ))));
+        }
+    }
+    for child in children {
+        validate_xpath_node_namespaces(child, document_text, inherited)?;
+    }
+    inherited.truncate(original_len);
+    Ok(())
+}
+
+fn warn_for_relative_xpath_namespaces(document_text: &str, namespaces: &[(String, String)]) {
+    for (_, uri) in namespaces {
+        if !uri.is_empty() && !uri.contains(':') {
+            push_warning(format!(
+                "line 1: xmlns: URI {uri} is not absolute\n{}",
+                xpath_document_caret_detail(document_text)
+            ));
+        }
+    }
+}
+
+fn xpath_document_caret_detail(document_text: &str) -> String {
+    let caret_index = document_text
+        .find("/>")
+        .or_else(|| document_text.find('>'))
+        .unwrap_or(document_text.len().saturating_sub(1));
+    format!("{document_text}\n{}^", " ".repeat(caret_index))
+}
+
+fn render_xpath_node(
+    node: &XmlNode,
+    document_namespaces: &[(String, String)],
+    explicit_namespaces: &[(String, String)],
+    out: &mut String,
+) {
+    match node {
+        XmlNode::Element {
+            name,
+            attrs,
+            children,
+        } => {
+            out.push('<');
+            out.push_str(name);
+            for (key, value) in attrs
+                .iter()
+                .filter(|(key, _)| key == "xmlns" || key.starts_with("xmlns:"))
+            {
+                render_xml_attr(out, key, value);
+            }
+            let mut extra_namespaces = Vec::new();
+            if let Some((prefix, _)) = name.split_once(':')
+                && !attrs
+                    .iter()
+                    .any(|(key, _)| key == &format!("xmlns:{prefix}"))
+                && let Some((_, uri)) = explicit_namespaces
+                    .iter()
+                    .chain(document_namespaces.iter())
+                    .find(|(candidate, _)| candidate == prefix)
+            {
+                extra_namespaces.push((format!("xmlns:{prefix}"), uri.clone()));
+            }
+            if xpath_subtree_has_unprefixed_element(children)
+                && !attrs.iter().any(|(key, _)| key == "xmlns")
+                && let Some((_, uri)) = document_namespaces
+                    .iter()
+                    .find(|(candidate, _)| candidate.is_empty())
+            {
+                extra_namespaces.push(("xmlns".into(), uri.clone()));
+            }
+            for (key, value) in extra_namespaces {
+                render_xml_attr(out, &key, &value);
+            }
+            for (key, value) in attrs
+                .iter()
+                .filter(|(key, _)| key != "xmlns" && !key.starts_with("xmlns:"))
+            {
+                render_xml_attr(out, key, value);
+            }
+            if children.is_empty() {
+                out.push_str("/>");
+            } else {
+                out.push('>');
+                for child in children {
+                    render_xpath_node(child, document_namespaces, explicit_namespaces, out);
+                }
+                out.push_str("</");
+                out.push_str(name);
+                out.push('>');
+            }
+        }
+        XmlNode::Text(text) => out.push_str(&xml_escape(&decode_xml_entities(text), false)),
+        XmlNode::CData(text) => {
+            out.push_str("<![CDATA[");
+            out.push_str(text);
+            out.push_str("]]>");
+        }
+        XmlNode::Comment(text) => {
+            out.push_str("<!--");
+            out.push_str(text);
+            out.push_str("-->");
+        }
+        XmlNode::Pi(text) => {
+            out.push_str("<?");
+            out.push_str(text);
+            out.push_str("?>");
+        }
+        XmlNode::Doctype(text) => {
+            out.push_str("<!DOCTYPE ");
+            out.push_str(text);
+            out.push('>');
+        }
+    }
+}
+
+fn render_xml_attr(out: &mut String, key: &str, value: &str) {
+    out.push(' ');
+    out.push_str(key);
+    out.push_str("=\"");
+    out.push_str(value);
+    out.push('"');
+}
+
+fn xpath_subtree_has_unprefixed_element(children: &[XmlNode]) -> bool {
+    children.iter().any(|child| match child {
+        XmlNode::Element { name, children, .. } => {
+            !name.contains(':') || xpath_subtree_has_unprefixed_element(children)
+        }
+        _ => false,
+    })
+}
+
 fn quoted_xml_table_literal(path: &str) -> Option<String> {
     if path.len() >= 2 && path.starts_with('"') && path.ends_with('"') {
         return Some(path[1..path.len() - 1].replace("\"\"", "\""));
@@ -1732,6 +2604,57 @@ mod tests {
         assert!(validate_xml_input("<a/><b/>", XmlOptionSetting::Document).is_err());
         assert!(validate_xml_input("hello", XmlOptionSetting::Content).is_ok());
         assert!(validate_xml_input("hello", XmlOptionSetting::Document).is_err());
+    }
+
+    #[test]
+    fn validates_entity_references_like_libxml() {
+        assert!(validate_xml_input("<a>&amp;</a>", XmlOptionSetting::Document).is_ok());
+        let err = validate_xml_input("<a>&undefined;</a>", XmlOptionSetting::Content).unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::XmlInput {
+                detail: Some(ref detail),
+                ..
+            } if detail.contains("Entity 'undefined' not defined")
+        ));
+        assert!(
+            validate_xml_input(
+                "<!DOCTYPE a [<!ENTITY local \"ok\">]><a>&local;</a>",
+                XmlOptionSetting::Document
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_xml_input(
+                "<!DOCTYPE chapter PUBLIC \"-//OASIS//DTD DocBook XML V4.1.2//EN\" \"docbookx.dtd\"><chapter>&nbsp;</chapter>",
+                XmlOptionSetting::Document,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn doctype_content_must_be_document_shaped() {
+        assert!(validate_xml_input("<a/><b/>", XmlOptionSetting::Content).is_ok());
+        assert!(validate_xml_input("<!DOCTYPE a><a/>", XmlOptionSetting::Content).is_ok());
+        let err =
+            validate_xml_input("<!DOCTYPE a><a/><b/>", XmlOptionSetting::Content).unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::XmlInput {
+                detail: Some(ref detail),
+                ..
+            } if detail.contains("Extra content")
+        ));
+        let err =
+            validate_xml_input("text <!DOCTYPE a><a/>", XmlOptionSetting::Content).unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::XmlInput {
+                detail: Some(ref detail),
+                ..
+            } if detail.contains("StartTag: invalid element name")
+        ));
     }
 
     #[test]
@@ -1916,5 +2839,56 @@ mod tests {
             "<foo>bar</foo",
             XmlOptionSetting::Content
         ));
+    }
+
+    fn xpath_result_texts(
+        document: &str,
+        path: &str,
+        namespaces: &[(String, String)],
+    ) -> Vec<String> {
+        eval_xpath(document, path, namespaces)
+            .unwrap()
+            .into_iter()
+            .map(XPathValue::into_xml_text)
+            .collect()
+    }
+
+    #[test]
+    fn xpath_relative_name_matches_document_element() {
+        assert_eq!(xpath_result_texts("<root/>", "root", &[]), vec!["<root/>"]);
+    }
+
+    #[test]
+    fn xpath_unprefixed_names_do_not_match_namespaced_elements() {
+        let document = concat!(
+            "<menu>",
+            "<beers/>",
+            "<myns:beers xmlns:myns=\"http://myns.com\"/>",
+            "</menu>"
+        );
+
+        assert_eq!(
+            xpath_result_texts(document, "/menu/beers", &[]),
+            vec!["<beers/>"]
+        );
+    }
+
+    #[test]
+    fn xpath_prefixed_alias_renders_namespace_before_attrs() {
+        let document = concat!(
+            "<local:data xmlns:local=\"http://127.0.0.1\">",
+            "<local:piece id=\"1\">number one</local:piece>",
+            "<local:piece id=\"2\"/>",
+            "</local:data>"
+        );
+        let namespaces = [("loc".into(), "http://127.0.0.1".into())];
+
+        assert_eq!(
+            xpath_result_texts(document, "//loc:piece", &namespaces),
+            vec![
+                "<local:piece xmlns:local=\"http://127.0.0.1\" id=\"1\">number one</local:piece>",
+                "<local:piece xmlns:local=\"http://127.0.0.1\" id=\"2\"/>",
+            ]
+        );
     }
 }

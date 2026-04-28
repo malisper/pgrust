@@ -1430,6 +1430,9 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::XmlIsWellFormed
             | BuiltinScalarFunction::XmlIsWellFormedDocument
             | BuiltinScalarFunction::XmlIsWellFormedContent => args.len() == 1,
+            BuiltinScalarFunction::XPath | BuiltinScalarFunction::XPathExists => {
+                matches!(args.len(), 2 | 3)
+            }
             BuiltinScalarFunction::Pi => args.is_empty(),
             BuiltinScalarFunction::Random | BuiltinScalarFunction::RandomNormal => {
                 matches!(args.len(), 0 | 2)
@@ -2226,6 +2229,12 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         }
         BuiltinScalarFunction::ParseIdent => {
             return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)));
+        }
+        BuiltinScalarFunction::XPath => {
+            return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Xml)));
+        }
+        BuiltinScalarFunction::XPathExists => {
+            return Some(SqlType::new(SqlTypeKind::Bool));
         }
         _ => {}
     }
@@ -3895,6 +3904,9 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "xml_is_well_formed_content",
             BuiltinScalarFunction::XmlIsWellFormedContent,
         ),
+        ("xpath", BuiltinScalarFunction::XPath),
+        ("xpath_exists", BuiltinScalarFunction::XPathExists),
+        ("xmlexists", BuiltinScalarFunction::XPathExists),
         ("pg_input_is_valid", BuiltinScalarFunction::PgInputIsValid),
         (
             "pg_input_error_message",
@@ -4517,6 +4529,8 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::XmlIsWellFormed
             | BuiltinScalarFunction::XmlIsWellFormedDocument
             | BuiltinScalarFunction::XmlIsWellFormedContent
+            | BuiltinScalarFunction::XPath
+            | BuiltinScalarFunction::XPathExists
             | BuiltinScalarFunction::PgInputIsValid
             | BuiltinScalarFunction::PgInputErrorMessage
             | BuiltinScalarFunction::PgInputErrorDetail
