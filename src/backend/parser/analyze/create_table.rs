@@ -148,6 +148,14 @@ pub fn lower_create_table(
                     crate::backend::parser::RawTypeName::Serial(kind) => Some(kind),
                     _ => None,
                 };
+                if (serial_kind.is_some() || column.identity.is_some())
+                    && not_null.is_some_and(|constraint| constraint.no_inherit)
+                {
+                    return Err(ParseError::InvalidTableDefinition(format!(
+                        "conflicting NO INHERIT declaration for not-null constraint on column \"{}\"",
+                        column.name
+                    )));
+                }
                 if column.generated.is_some() && column.default_expr.is_some() {
                     return Err(ParseError::UnexpectedToken {
                         expected: "generated column without DEFAULT",

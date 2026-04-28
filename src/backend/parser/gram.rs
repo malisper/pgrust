@@ -22066,7 +22066,7 @@ fn build_alter_table_alter_constraint(
     let mut table_name = None;
     let mut constraint_name = None;
     let mut not_valid = false;
-    let mut no_inherit = false;
+    let mut inheritability = None;
     let mut deferrable = None;
     let mut initially_deferred = None;
     let mut enforced = None;
@@ -22087,7 +22087,22 @@ fn build_alter_table_alter_constraint(
                 for inner in part.into_inner() {
                     match inner.as_rule() {
                         Rule::not_valid_constraint_attribute => not_valid = true,
-                        Rule::no_inherit_constraint_attribute => no_inherit = true,
+                        Rule::inherit_constraint_attribute => {
+                            if inheritability.replace(true).is_some() {
+                                return Err(ParseError::UnexpectedToken {
+                                    expected: "one INHERIT/NO INHERIT constraint attribute",
+                                    actual: "conflicting INHERIT declarations".into(),
+                                });
+                            }
+                        }
+                        Rule::no_inherit_constraint_attribute => {
+                            if inheritability.replace(false).is_some() {
+                                return Err(ParseError::UnexpectedToken {
+                                    expected: "one INHERIT/NO INHERIT constraint attribute",
+                                    actual: "conflicting INHERIT declarations".into(),
+                                });
+                            }
+                        }
                         Rule::deferrable_constraint_attribute => {
                             set_deferrable_attribute(&mut deferrable, initially_deferred, true)?
                         }
@@ -22127,7 +22142,7 @@ fn build_alter_table_alter_constraint(
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         constraint_name: constraint_name.ok_or(ParseError::UnexpectedEof)?,
         not_valid,
-        no_inherit,
+        inheritability,
         deferrable,
         initially_deferred,
         enforced,

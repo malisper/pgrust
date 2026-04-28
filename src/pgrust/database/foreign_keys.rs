@@ -110,6 +110,7 @@ pub(crate) fn alter_table_add_constraint_lock_requests(
     )
     .map_err(ExecError::Parse)?;
     match normalized {
+        crate::backend::parser::NormalizedAlterTableConstraint::Noop => {}
         crate::backend::parser::NormalizedAlterTableConstraint::ForeignKey(action) => {
             let referenced_relation = catalog
                 .lookup_relation_by_oid(action.referenced_relation_oid)
@@ -123,6 +124,24 @@ pub(crate) fn alter_table_add_constraint_lock_requests(
             );
         }
         crate::backend::parser::NormalizedAlterTableConstraint::Check(action)
+            if !stmt.only && !action.no_inherit =>
+        {
+            for child_oid in catalog.find_all_inheritors(relation.relation_oid) {
+                if child_oid == relation.relation_oid {
+                    continue;
+                }
+                let child_relation =
+                    catalog.lookup_relation_by_oid(child_oid).ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnknownTable(child_oid.to_string()))
+                    })?;
+                add_lock_request(
+                    &mut requests,
+                    child_relation.rel,
+                    TableLockMode::AccessExclusive,
+                );
+            }
+        }
+        crate::backend::parser::NormalizedAlterTableConstraint::NotNull(action)
             if !stmt.only && !action.no_inherit =>
         {
             for child_oid in catalog.find_all_inheritors(relation.relation_oid) {
