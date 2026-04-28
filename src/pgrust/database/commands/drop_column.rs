@@ -1,6 +1,10 @@
 use std::collections::BTreeSet;
 
 use super::super::*;
+use super::alter_table_work_queue::{
+    AlterTableWorkItem, build_alter_table_work_queue, direct_inheritance_children,
+    has_inheritance_children,
+};
 use super::typed_table::reject_typed_table_ddl;
 use crate::backend::parser::{BoundRelation, bind_generated_expr, expr_references_column};
 use crate::backend::utils::misc::notices::push_notice;
@@ -87,6 +91,33 @@ fn relation_basename(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
+fn visible_column_index(relation: &BoundRelation, column_name: &str) -> Option<usize> {
+    relation
+        .desc
+        .columns
+        .iter()
+        .enumerate()
+        .find_map(|(index, column)| {
+            (!column.dropped && column.name.eq_ignore_ascii_case(column_name)).then_some(index)
+        })
+}
+
+fn cannot_drop_inherited_column_error(column_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("cannot drop inherited column \"{column_name}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "42P16",
+    }
+}
+
+fn relation_column_by_name<'a>(
+    relation: &'a BoundRelation,
+    column_name: &str,
+) -> Option<&'a crate::backend::executor::ColumnDesc> {
+    visible_column_index(relation, column_name).map(|index| &relation.desc.columns[index])
+}
+
 impl Database {
     pub(crate) fn execute_alter_table_drop_column_stmt_with_search_path(
         &self,
@@ -103,8 +134,19 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        self.table_locks
-            .lock_table(relation.rel, TableLockMode::AccessExclusive, client_id);
+        let lock_queue = build_alter_table_work_queue(&catalog, &relation, drop_stmt.only)?;
+        let lock_requests = lock_queue
+            .iter()
+            .map(|item| (item.relation.rel, TableLockMode::AccessExclusive))
+            .collect::<Vec<_>>();
+        crate::backend::storage::lmgr::lock_table_requests_interruptible(
+            &self.table_locks,
+            client_id,
+            &lock_requests,
+            self.interrupt_state(client_id).as_ref(),
+        )?;
+        let locked_rels =
+            crate::pgrust::database::foreign_keys::table_lock_relations(&lock_requests);
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
@@ -118,7 +160,9 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        for rel in locked_rels {
+            self.table_locks.unlock_table(rel, client_id);
+        }
         result
     }
 
@@ -155,42 +199,44 @@ impl Database {
         }
         reject_typed_table_ddl(&relation, "drop column from")?;
         ensure_relation_owner(self, client_id, &relation, &drop_stmt.table_name)?;
-        reject_inheritance_tree_ddl(
-            &catalog,
-            relation.relation_oid,
-            "ALTER TABLE DROP COLUMN on inheritance tree members is not supported yet",
-        )?;
         if is_system_column_name(&drop_stmt.column_name) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "user column name for DROP COLUMN",
                 actual: drop_stmt.column_name.clone(),
             }));
         }
-        let column_index =
-            match relation
-                .desc
-                .columns
-                .iter()
-                .enumerate()
-                .find_map(|(index, column)| {
-                    (!column.dropped && column.name.eq_ignore_ascii_case(&drop_stmt.column_name))
-                        .then_some(index)
-                }) {
-                Some(index) => index,
-                None if drop_stmt.missing_ok => {
-                    push_notice(format!(
-                        "column \"{}\" of relation \"{}\" does not exist, skipping",
-                        drop_stmt.column_name,
-                        relation_basename(&drop_stmt.table_name)
-                    ));
-                    return Ok(StatementResult::AffectedRows(0));
-                }
-                None => {
-                    return Err(ExecError::Parse(ParseError::UnknownColumn(
-                        drop_stmt.column_name.clone(),
-                    )));
-                }
-            };
+        let work_queue = build_alter_table_work_queue(&catalog, &relation, drop_stmt.only)?;
+        let column_index = match visible_column_index(&relation, &drop_stmt.column_name) {
+            Some(index) => index,
+            None if drop_stmt.missing_ok => {
+                push_notice(format!(
+                    "column \"{}\" of relation \"{}\" does not exist, skipping",
+                    drop_stmt.column_name,
+                    relation_basename(&drop_stmt.table_name)
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            None => {
+                return Err(ExecError::Parse(ParseError::UnknownColumn(
+                    drop_stmt.column_name.clone(),
+                )));
+            }
+        };
+        if relation.desc.columns[column_index].attinhcount > 0 {
+            return Err(cannot_drop_inherited_column_error(&drop_stmt.column_name));
+        }
+        if drop_stmt.only
+            && relation.relkind == 'p'
+            && has_inheritance_children(&catalog, relation.relation_oid)
+        {
+            return Err(ExecError::DetailedError {
+                message: "cannot drop column from only the partitioned table when partitions exist"
+                    .into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
         let dependent_generated_indices =
             generated_columns_to_drop_for_column(&catalog, &relation, column_index)?;
         let relation_display_name = display_relation_name(&catalog, &relation);
@@ -301,6 +347,112 @@ impl Database {
                     }),
                 })?
                 .1;
+            catalog_effects.push(effect);
+            next_cid = next_cid.saturating_add(1);
+        }
+        let inheritance_targets = if drop_stmt.only {
+            direct_inheritance_children(&catalog, relation.relation_oid)
+                .into_iter()
+                .filter_map(|relation_oid| catalog.lookup_relation_by_oid(relation_oid))
+                .map(|relation| AlterTableWorkItem {
+                    relation,
+                    recursing: true,
+                    expected_parents: 1,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            work_queue
+                .into_iter()
+                .filter(|item| item.recursing)
+                .collect::<Vec<_>>()
+        };
+        let mut dropped_inheritance_oids = BTreeSet::from([relation.relation_oid]);
+        for item in inheritance_targets {
+            let Some(column) = relation_column_by_name(&item.relation, &drop_stmt.column_name)
+            else {
+                continue;
+            };
+            let expected_parents = if drop_stmt.only {
+                item.expected_parents
+            } else {
+                catalog
+                    .inheritance_parents(item.relation.relation_oid)
+                    .into_iter()
+                    .filter(|parent| {
+                        !parent.inhdetachpending
+                            && dropped_inheritance_oids.contains(&parent.inhparent)
+                    })
+                    .count()
+                    .min(i16::MAX as usize) as i16
+            };
+            if expected_parents == 0 {
+                continue;
+            }
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid,
+                client_id,
+                waiter: None,
+                interrupts: interrupts.clone(),
+            };
+            let effect = if drop_stmt.only {
+                let new_attinhcount = column.attinhcount.saturating_sub(expected_parents);
+                let not_null_inhcount = column.not_null_constraint_oid.map(|_| {
+                    column
+                        .not_null_constraint_inhcount
+                        .saturating_sub(expected_parents)
+                });
+                self.catalog
+                    .write()
+                    .update_relation_column_inheritance_mvcc(
+                        item.relation.relation_oid,
+                        &drop_stmt.column_name,
+                        new_attinhcount,
+                        true,
+                        not_null_inhcount,
+                        column.not_null_constraint_oid.map(|_| true),
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?
+            } else if column.attinhcount <= expected_parents && !column.attislocal {
+                self.catalog
+                    .write()
+                    .alter_table_drop_column_mvcc(
+                        item.relation.relation_oid,
+                        &drop_stmt.column_name,
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?
+            } else {
+                let new_attinhcount = column.attinhcount.saturating_sub(expected_parents);
+                let new_attislocal = column.attislocal || new_attinhcount == 0;
+                let not_null_inhcount = column.not_null_constraint_oid.map(|_| {
+                    column
+                        .not_null_constraint_inhcount
+                        .saturating_sub(expected_parents)
+                });
+                let not_null_is_local = column
+                    .not_null_constraint_oid
+                    .map(|_| column.not_null_constraint_is_local || not_null_inhcount == Some(0));
+                self.catalog
+                    .write()
+                    .update_relation_column_inheritance_mvcc(
+                        item.relation.relation_oid,
+                        &drop_stmt.column_name,
+                        new_attinhcount,
+                        new_attislocal,
+                        not_null_inhcount,
+                        not_null_is_local,
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?
+            };
+            if !drop_stmt.only && column.attinhcount <= expected_parents && !column.attislocal {
+                dropped_inheritance_oids.insert(item.relation.relation_oid);
+            }
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
             catalog_effects.push(effect);
             next_cid = next_cid.saturating_add(1);
         }

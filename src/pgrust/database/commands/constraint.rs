@@ -1,4 +1,5 @@
 use super::super::*;
+use super::alter_table_work_queue::{build_alter_table_work_queue, has_inheritance_children};
 use crate::backend::commands::tablecmds::collect_matching_rows_heap;
 use crate::backend::executor::value_io::format_failing_row_detail;
 use crate::backend::executor::{ExecutorContext, eval_expr};
@@ -1245,12 +1246,24 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        self.table_locks.lock_table_interruptible(
-            relation.rel,
-            TableLockMode::AccessExclusive,
+        let rows = catalog.constraint_rows_for_relation(relation.relation_oid);
+        let lock_descendants = !alter_stmt.only
+            && find_constraint_row(&rows, &alter_stmt.constraint_name).is_some_and(|row| {
+                matches!(row.contype, CONSTRAINT_CHECK | CONSTRAINT_NOTNULL) && !row.connoinherit
+            });
+        let lock_queue = build_alter_table_work_queue(&catalog, &relation, !lock_descendants)?;
+        let lock_requests = lock_queue
+            .iter()
+            .map(|item| (item.relation.rel, TableLockMode::AccessExclusive))
+            .collect::<Vec<_>>();
+        crate::backend::storage::lmgr::lock_table_requests_interruptible(
+            &self.table_locks,
             client_id,
+            &lock_requests,
             interrupts.as_ref(),
         )?;
+        let locked_rels =
+            crate::pgrust::database::foreign_keys::table_lock_relations(&lock_requests);
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
@@ -1265,7 +1278,9 @@ impl Database {
             );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        for rel in locked_rels {
+            self.table_locks.unlock_table(rel, client_id);
+        }
         result
     }
 
@@ -1290,21 +1305,38 @@ impl Database {
         };
         ensure_constraint_relation(self, client_id, &relation, &alter_stmt.table_name)?;
         let rows = catalog.constraint_rows_for_relation(relation.relation_oid);
-        find_constraint_row(&rows, &alter_stmt.constraint_name).ok_or_else(|| {
-            ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "existing table constraint",
-                actual: format!(
-                    "constraint \"{}\" does not exist",
-                    alter_stmt.constraint_name
-                ),
-            })
-        })?;
+        let constraint =
+            find_constraint_row(&rows, &alter_stmt.constraint_name).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "existing table constraint",
+                    actual: format!(
+                        "constraint \"{}\" does not exist",
+                        alter_stmt.constraint_name
+                    ),
+                })
+            })?;
         let new_constraint_name =
             normalize_constraint_rename_target_name(&alter_stmt.new_constraint_name)?;
         if find_constraint_row(&rows, &new_constraint_name).is_some() {
             return Err(ExecError::Parse(ParseError::TableAlreadyExists(
                 new_constraint_name,
             )));
+        }
+        let propagates = matches!(constraint.contype, CONSTRAINT_CHECK | CONSTRAINT_NOTNULL)
+            && !constraint.connoinherit;
+        if propagates
+            && alter_stmt.only
+            && has_inheritance_children(&catalog, relation.relation_oid)
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "inherited constraint \"{}\" must be renamed in child tables too",
+                    alter_stmt.constraint_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
         }
 
         let ctx = CatalogWriteContext {
@@ -1316,17 +1348,51 @@ impl Database {
             waiter: None,
             interrupts,
         };
-        let effect = self
-            .catalog
-            .write()
-            .rename_relation_constraint_mvcc(
-                relation.relation_oid,
-                &alter_stmt.constraint_name,
-                &alter_stmt.new_constraint_name,
-                &ctx,
-            )
-            .map_err(map_catalog_error)?;
-        catalog_effects.push(effect);
+        let work_queue = if propagates {
+            build_alter_table_work_queue(&catalog, &relation, alter_stmt.only)?
+        } else {
+            build_alter_table_work_queue(&catalog, &relation, true)?
+        };
+        for item in work_queue.into_iter().rev() {
+            let rows = catalog.constraint_rows_for_relation(item.relation.relation_oid);
+            let row = find_constraint_row(&rows, &alter_stmt.constraint_name).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "existing table constraint",
+                    actual: format!(
+                        "constraint \"{}\" does not exist",
+                        alter_stmt.constraint_name
+                    ),
+                })
+            })?;
+            if row.coninhcount > item.expected_parents {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "cannot rename inherited constraint \"{}\"",
+                        alter_stmt.constraint_name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P16",
+                });
+            }
+            if find_constraint_row(&rows, &new_constraint_name).is_some() {
+                return Err(ExecError::Parse(ParseError::TableAlreadyExists(
+                    new_constraint_name.clone(),
+                )));
+            }
+            let effect = self
+                .catalog
+                .write()
+                .rename_relation_constraint_mvcc(
+                    item.relation.relation_oid,
+                    &alter_stmt.constraint_name,
+                    &alter_stmt.new_constraint_name,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 
