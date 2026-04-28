@@ -2756,6 +2756,33 @@ fn assert_sqlstate(err: ExecError, expected_sqlstate: &str, expected_message_par
     }
 }
 
+fn exec_error_context_contains(err: &ExecError, needle: &str) -> bool {
+    match err {
+        ExecError::WithContext { source, context } => {
+            context.contains(needle) || exec_error_context_contains(source, needle)
+        }
+        _ => false,
+    }
+}
+
+fn exec_error_is_or_wraps_division_by_zero(err: &ExecError) -> bool {
+    match err {
+        ExecError::WithContext { source, .. } => exec_error_is_or_wraps_division_by_zero(source),
+        ExecError::DivisionByZero(_) => true,
+        _ => false,
+    }
+}
+
+fn exec_error_detailed_message_sqlstate(err: &ExecError) -> Option<(&str, &'static str)> {
+    match err {
+        ExecError::WithContext { source, .. } => exec_error_detailed_message_sqlstate(source),
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => Some((message.as_str(), *sqlstate)),
+        _ => None,
+    }
+}
+
 fn set_large_test_max_stack_depth(session: &mut Session, db: &Database, requested_kb: u32) {
     let safe_kb = crate::backend::utils::misc::stack_depth::max_stack_depth_limit_kb()
         .map(|limit_kb| requested_kb.min(limit_kb))
@@ -16990,6 +17017,142 @@ fn plpgsql_keyword_vars_and_comment_on_function_body() {
         ),
         vec![vec![Value::Text("body comment".into())]]
     );
+}
+
+#[test]
+fn plpgsql_get_stacked_diagnostics_reports_exception_fields() {
+    let base = temp_dir("plpgsql_stacked_diagnostics");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_zero_divide_diag() returns int4 language plpgsql as $$
+         declare v int4 := 0;
+         begin
+           return 10 / v;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_stacked_context_diag() returns void language plpgsql as $$
+         declare
+           _sqlstate text;
+           _message text;
+           _context text;
+         begin
+           perform plpgsql_zero_divide_diag();
+         exception when others then
+           get stacked diagnostics
+             _sqlstate = returned_sqlstate,
+             _message = message_text,
+             _context = pg_exception_context;
+           raise notice 'sqlstate: %, message: %, context: [%]',
+             _sqlstate, _message, replace(_context, E'\\n', ' <- ');
+         end
+         $$",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "select plpgsql_stacked_context_diag()")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![String::from(
+            "sqlstate: 22012, message: division by zero, context: [PL/pgSQL function plpgsql_zero_divide_diag() line 4 at RETURN <- SQL statement \"SELECT plpgsql_zero_divide_diag()\" <- PL/pgSQL function plpgsql_stacked_context_diag() line 7 at PERFORM]"
+        )]
+    );
+
+    db.execute(
+        1,
+        "create or replace function plpgsql_raise_diag() returns void language plpgsql as $$
+         begin
+           raise exception 'custom exception'
+             using detail = 'some detail',
+                   hint = 'some hint',
+                   column = 'some column',
+                   constraint = 'some constraint',
+                   datatype = 'some datatype',
+                   table = 'some table',
+                   schema = 'some schema';
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_stacked_fields_diag() returns void language plpgsql as $$
+         declare
+           _message text;
+           _detail text;
+           _hint text;
+           _column text;
+           _constraint text;
+           _datatype text;
+           _table text;
+           _schema text;
+         begin
+           perform plpgsql_raise_diag();
+         exception when others then
+           get stacked diagnostics
+             _message = message_text,
+             _detail = pg_exception_detail,
+             _hint = pg_exception_hint,
+             _column = column_name,
+             _constraint = constraint_name,
+             _datatype = pg_datatype_name,
+             _table = table_name,
+             _schema = schema_name;
+           raise notice '%|%|%|%|%|%|%|%',
+             _message, _detail, _hint, _column, _constraint, _datatype, _table, _schema;
+         end
+         $$",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "select plpgsql_stacked_fields_diag()")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![String::from(
+            "custom exception|some detail|some hint|some column|some constraint|some datatype|some table|some schema"
+        )]
+    );
+}
+
+#[test]
+fn plpgsql_get_stacked_diagnostics_requires_exception_handler() {
+    let base = temp_dir("plpgsql_stacked_diagnostics_outside");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_stacked_diag_outside() returns void language plpgsql as $$
+         declare _message text;
+         begin
+           get stacked diagnostics _message = message_text;
+         end
+         $$",
+    )
+    .unwrap();
+
+    match db.execute(1, "select plpgsql_stacked_diag_outside()") {
+        Err(err) => {
+            assert!(exec_error_context_contains(&err, "GET STACKED DIAGNOSTICS"));
+            let Some((message, sqlstate)) = exec_error_detailed_message_sqlstate(&err) else {
+                panic!("expected detailed error, got {err:?}");
+            };
+            assert_eq!(
+                message,
+                "GET STACKED DIAGNOSTICS cannot be used outside an exception handler"
+            );
+            assert_eq!(sqlstate, "0Z002");
+        }
+        other => panic!("expected stacked diagnostics error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -48319,7 +48482,8 @@ fn plpgsql_runtime_errors_include_statement_context() {
         ExecError::WithContext { source, context } => {
             assert!(context.contains("PL/pgSQL function fail_context"));
             assert!(context.contains("at PERFORM"));
-            assert!(matches!(*source, ExecError::DivisionByZero(_)));
+            assert!(exec_error_context_contains(&source, "SQL statement"));
+            assert!(exec_error_is_or_wraps_division_by_zero(&source));
         }
         other => panic!("expected PL/pgSQL context, got {other:?}"),
     }

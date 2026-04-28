@@ -313,6 +313,11 @@ pub(crate) enum CompiledStmt {
         detail_expr: Option<CompiledExpr>,
         hint_expr: Option<CompiledExpr>,
         errcode_expr: Option<CompiledExpr>,
+        column_expr: Option<CompiledExpr>,
+        constraint_expr: Option<CompiledExpr>,
+        datatype_expr: Option<CompiledExpr>,
+        table_expr: Option<CompiledExpr>,
+        schema_expr: Option<CompiledExpr>,
         params: Vec<CompiledExpr>,
         line: usize,
     },
@@ -339,6 +344,7 @@ pub(crate) enum CompiledStmt {
     Perform {
         plan: PlannedStmt,
         line: usize,
+        sql: Option<String>,
     },
     DynamicExecute {
         sql_expr: CompiledExpr,
@@ -1578,6 +1584,11 @@ fn compile_raise_stmt(
     let mut detail_expr = None::<String>;
     let mut hint_expr = None::<String>;
     let mut errcode_expr = None::<String>;
+    let mut column_expr = None::<String>;
+    let mut constraint_expr = None::<String>;
+    let mut datatype_expr = None::<String>;
+    let mut table_expr = None::<String>;
+    let mut schema_expr = None::<String>;
     for option in using_options {
         match option.name.to_ascii_lowercase().as_str() {
             "message" => {
@@ -1603,6 +1614,36 @@ fn compile_raise_stmt(
                     return duplicate_raise_option("ERRCODE");
                 }
                 errcode_expr = Some(option.expr.clone());
+            }
+            "column" | "column_name" => {
+                if column_expr.is_some() {
+                    return duplicate_raise_option("COLUMN");
+                }
+                column_expr = Some(option.expr.clone());
+            }
+            "constraint" | "constraint_name" => {
+                if constraint_expr.is_some() {
+                    return duplicate_raise_option("CONSTRAINT");
+                }
+                constraint_expr = Some(option.expr.clone());
+            }
+            "datatype" | "datatype_name" => {
+                if datatype_expr.is_some() {
+                    return duplicate_raise_option("DATATYPE");
+                }
+                datatype_expr = Some(option.expr.clone());
+            }
+            "table" | "table_name" => {
+                if table_expr.is_some() {
+                    return duplicate_raise_option("TABLE");
+                }
+                table_expr = Some(option.expr.clone());
+            }
+            "schema" | "schema_name" => {
+                if schema_expr.is_some() {
+                    return duplicate_raise_option("SCHEMA");
+                }
+                schema_expr = Some(option.expr.clone());
             }
             _ => {}
         }
@@ -1651,6 +1692,26 @@ fn compile_raise_stmt(
             .map(|expr| compile_expr_text(expr, catalog, env))
             .transpose()?,
         errcode_expr: errcode_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        column_expr: column_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        constraint_expr: constraint_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        datatype_expr: datatype_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        table_expr: table_expr
+            .as_deref()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .transpose()?,
+        schema_expr: schema_expr
             .as_deref()
             .map(|expr| compile_expr_text(expr, catalog, env))
             .transpose()?,
@@ -1968,6 +2029,7 @@ fn compile_perform_stmt(
     Ok(CompiledStmt::Perform {
         plan: planned,
         line,
+        sql: Some(format!("SELECT {}", sql.trim())),
     })
 }
 
@@ -2229,10 +2291,12 @@ fn compile_exec_sql_stmt(
                 &env.local_ctes,
             )?,
             line: 1,
+            sql: Some(rewritten_sql.clone()),
         }),
         Statement::Values(stmt) => Ok(CompiledStmt::Perform {
             plan: plan_values_for_env(&stmt, catalog, env)?,
             line: 1,
+            sql: Some(rewritten_sql.clone()),
         }),
         Statement::Insert(stmt) => Ok(CompiledStmt::ExecInsert {
             stmt: bind_insert_with_outer_scopes(

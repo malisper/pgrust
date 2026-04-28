@@ -806,6 +806,17 @@ pub enum ExecError {
         hint: Option<String>,
         sqlstate: &'static str,
     },
+    DiagnosticError {
+        message: String,
+        detail: Option<String>,
+        hint: Option<String>,
+        sqlstate: &'static str,
+        column_name: Option<String>,
+        constraint_name: Option<String>,
+        datatype_name: Option<String>,
+        table_name: Option<String>,
+        schema_name: Option<String>,
+    },
     StringDataRightTruncation {
         ty: String,
     },

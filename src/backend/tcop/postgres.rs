@@ -72,7 +72,9 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::Regex(err) => err.sqlstate,
         ExecError::JsonInput { sqlstate, .. } => sqlstate,
         ExecError::XmlInput { sqlstate, .. } => sqlstate,
-        ExecError::DetailedError { sqlstate, .. } => sqlstate,
+        ExecError::DetailedError { sqlstate, .. } | ExecError::DiagnosticError { sqlstate, .. } => {
+            sqlstate
+        }
         ExecError::InvalidStorageValue { column, details }
             if column == "jsonpath" && is_jsonpath_parse_error(details) =>
         {
@@ -217,7 +219,9 @@ fn exec_error_detail(e: &ExecError) -> Option<&str> {
         ExecError::Regex(err) => err.detail.as_deref(),
         ExecError::JsonInput { detail, .. } => detail.as_deref(),
         ExecError::XmlInput { detail, .. } => detail.as_deref(),
-        ExecError::DetailedError { detail, .. } => detail.as_deref(),
+        ExecError::DetailedError { detail, .. } | ExecError::DiagnosticError { detail, .. } => {
+            detail.as_deref()
+        }
         ExecError::UniqueViolation { detail, .. } => detail.as_deref(),
         ExecError::NotNullViolation { detail, .. } => detail.as_deref(),
         ExecError::CheckViolation { detail, .. } => detail.as_deref(),

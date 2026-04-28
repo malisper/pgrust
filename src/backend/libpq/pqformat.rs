@@ -65,7 +65,9 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::Regex(err) => err.message.clone(),
         ExecError::JsonInput { message, .. } => message.clone(),
         ExecError::XmlInput { message, .. } => message.clone(),
-        ExecError::DetailedError { message, .. } => message.clone(),
+        ExecError::DetailedError { message, .. } | ExecError::DiagnosticError { message, .. } => {
+            message.clone()
+        }
         ExecError::RaiseException(message) => message.clone(),
         ExecError::InvalidRegex(message) => message.clone(),
         ExecError::CardinalityViolation { message, .. } => message.clone(),
@@ -194,7 +196,9 @@ pub(crate) fn format_exec_error_hint(e: &ExecError) -> Option<String> {
         {
             Some("For a single \"%\" use \"%%\".".into())
         }
-        ExecError::DetailedError { hint, .. } => hint.clone(),
+        ExecError::DetailedError { hint, .. } | ExecError::DiagnosticError { hint, .. } => {
+            hint.clone()
+        }
         ExecError::CardinalityViolation { hint, .. } => hint.clone(),
         _ => None,
     }

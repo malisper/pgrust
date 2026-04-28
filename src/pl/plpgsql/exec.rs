@@ -185,6 +185,31 @@ struct PlpgsqlExceptionData {
     detail: Option<String>,
     hint: Option<String>,
     sqlstate: &'static str,
+    context: Option<String>,
+    column_name: Option<String>,
+    constraint_name: Option<String>,
+    datatype_name: Option<String>,
+    table_name: Option<String>,
+    schema_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PlpgsqlErrorFields {
+    column_name: Option<String>,
+    constraint_name: Option<String>,
+    datatype_name: Option<String>,
+    table_name: Option<String>,
+    schema_name: Option<String>,
+}
+
+impl PlpgsqlErrorFields {
+    fn is_empty(&self) -> bool {
+        self.column_name.is_none()
+            && self.constraint_name.is_none()
+            && self.datatype_name.is_none()
+            && self.table_name.is_none()
+            && self.schema_name.is_none()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1625,6 +1650,11 @@ fn exec_do_stmt(
             detail_expr,
             hint_expr,
             errcode_expr,
+            column_expr,
+            constraint_expr,
+            datatype_expr,
+            table_expr,
+            schema_expr,
             params,
             ..
         } => {
@@ -1648,6 +1678,13 @@ fn exec_do_stmt(
                 .as_ref()
                 .map(|expr| eval_do_expr(expr, values).map(render_raise_option_value))
                 .transpose()?;
+            let fields = PlpgsqlErrorFields {
+                column_name: eval_do_raise_field(column_expr.as_ref(), values)?,
+                constraint_name: eval_do_raise_field(constraint_expr.as_ref(), values)?,
+                datatype_name: eval_do_raise_field(datatype_expr.as_ref(), values)?,
+                table_name: eval_do_raise_field(table_expr.as_ref(), values)?,
+                schema_name: eval_do_raise_field(schema_expr.as_ref(), values)?,
+            };
             finish_raise(
                 level,
                 dynamic_sqlstate.as_deref().or(sqlstate.as_deref()),
@@ -1655,6 +1692,7 @@ fn exec_do_stmt(
                 &param_values,
                 detail,
                 hint,
+                fields,
             )?;
             Ok(DoControl::Continue)
         }
@@ -1678,12 +1716,21 @@ fn exec_do_stmt(
             };
             Err(assert_failure(message))
         }
-        CompiledStmt::GetDiagnostics { items, .. } => {
+        CompiledStmt::GetDiagnostics { stacked, items } => {
+            if *stacked {
+                return Err(ExecError::DetailedError {
+                    message: "GET STACKED DIAGNOSTICS cannot be used outside an exception handler"
+                        .into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0Z002",
+                });
+            }
             for (target, item) in items {
                 let value = match item.to_ascii_lowercase().as_str() {
                     "row_count" => Value::Int64(0),
                     "found" => Value::Bool(false),
-                    _ => Value::Text(String::new().into()),
+                    _ => diagnostic_text(None),
                 };
                 values[target.slot] = cast_value(value, target.ty)?;
             }
@@ -2099,6 +2146,11 @@ fn exec_function_stmt(
             detail_expr,
             hint_expr,
             errcode_expr,
+            column_expr,
+            constraint_expr,
+            datatype_expr,
+            table_expr,
+            schema_expr,
             params,
             ..
         } => {
@@ -2132,6 +2184,21 @@ fn exec_function_stmt(
                     eval_function_expr(expr, &state.values, ctx).map(render_raise_option_value)
                 })
                 .transpose()?;
+            let fields = PlpgsqlErrorFields {
+                column_name: eval_function_raise_field(column_expr.as_ref(), &state.values, ctx)?,
+                constraint_name: eval_function_raise_field(
+                    constraint_expr.as_ref(),
+                    &state.values,
+                    ctx,
+                )?,
+                datatype_name: eval_function_raise_field(
+                    datatype_expr.as_ref(),
+                    &state.values,
+                    ctx,
+                )?,
+                table_name: eval_function_raise_field(table_expr.as_ref(), &state.values, ctx)?,
+                schema_name: eval_function_raise_field(schema_expr.as_ref(), &state.values, ctx)?,
+            };
             finish_raise(
                 level,
                 dynamic_sqlstate.as_deref().or(sqlstate.as_deref()),
@@ -2139,6 +2206,7 @@ fn exec_function_stmt(
                 &param_values,
                 detail,
                 hint,
+                fields,
             )?;
             Ok(FunctionControl::Continue)
         }
@@ -2189,8 +2257,8 @@ fn exec_function_stmt(
             exec_function_return_query(source, compiled, expected_record_shape, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
-        CompiledStmt::Perform { plan, .. } => {
-            exec_function_perform(plan, compiled, state, ctx)?;
+        CompiledStmt::Perform { plan, sql, .. } => {
+            exec_function_perform(plan, sql.as_deref(), compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::DynamicExecute {
@@ -2497,11 +2565,13 @@ fn exec_function_return_query(
 
 fn exec_function_perform(
     plan: &crate::include::nodes::plannodes::PlannedStmt,
+    sql: Option<&str>,
     compiled: &CompiledFunction,
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
-    let result = execute_function_query_result(plan, compiled, state, ctx)?;
+    let result = execute_function_query_result(plan, compiled, state, ctx)
+        .map_err(|err| with_sql_statement_context(err, sql))?;
     state.values[compiled.found_slot] = Value::Bool(!result.rows.is_empty());
     Ok(())
 }
@@ -4196,19 +4266,49 @@ fn exec_function_close_cursor(slot: usize, state: &mut FunctionState) -> Result<
 }
 
 fn exec_function_get_diagnostics(
-    _stacked: bool,
+    stacked: bool,
     items: &[(CompiledSelectIntoTarget, String)],
     state: &mut FunctionState,
 ) -> Result<(), ExecError> {
+    if stacked && state.current_exception.is_none() {
+        return Err(ExecError::DetailedError {
+            message: "GET STACKED DIAGNOSTICS cannot be used outside an exception handler".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0Z002",
+        });
+    }
     for (target, item) in items {
-        let value = match item.to_ascii_lowercase().as_str() {
-            "row_count" => Value::Int64(0),
-            "found" => Value::Bool(false),
-            _ => Value::Text(String::new().into()),
+        let item = item.to_ascii_lowercase();
+        let value = if stacked {
+            let current = state.current_exception.as_ref().expect("checked above");
+            match item.as_str() {
+                "returned_sqlstate" => diagnostic_text(Some(current.sqlstate)),
+                "message_text" => diagnostic_text(Some(&current.message)),
+                "pg_exception_detail" => diagnostic_text(current.detail.as_deref()),
+                "pg_exception_hint" => diagnostic_text(current.hint.as_deref()),
+                "pg_exception_context" => diagnostic_text(current.context.as_deref()),
+                "column_name" => diagnostic_text(current.column_name.as_deref()),
+                "constraint_name" => diagnostic_text(current.constraint_name.as_deref()),
+                "pg_datatype_name" => diagnostic_text(current.datatype_name.as_deref()),
+                "table_name" => diagnostic_text(current.table_name.as_deref()),
+                "schema_name" => diagnostic_text(current.schema_name.as_deref()),
+                _ => diagnostic_text(None),
+            }
+        } else {
+            match item.as_str() {
+                "row_count" => Value::Int64(0),
+                "found" => Value::Bool(false),
+                _ => diagnostic_text(None),
+            }
         };
         state.values[target.slot] = cast_value(value, target.ty)?;
     }
     Ok(())
+}
+
+fn diagnostic_text(value: Option<&str>) -> Value {
+    Value::Text(value.unwrap_or_default().to_string().into())
 }
 
 fn assign_query_row_to_targets(
@@ -5472,7 +5572,9 @@ fn exec_error_sqlstate(err: &ExecError) -> &'static str {
         | ExecError::WithInternalQueryContext { source, .. } => exec_error_sqlstate(source),
         ExecError::RaiseException(_) => "P0001",
         ExecError::DivisionByZero(_) => "22012",
-        ExecError::DetailedError { sqlstate, .. } => sqlstate,
+        ExecError::DetailedError { sqlstate, .. } | ExecError::DiagnosticError { sqlstate, .. } => {
+            sqlstate
+        }
         ExecError::Parse(ParseError::DetailedError { sqlstate, .. }) => sqlstate,
         ExecError::Parse(ParseError::FeatureNotSupported(_))
         | ExecError::Parse(ParseError::FeatureNotSupportedMessage(_))
@@ -5499,13 +5601,21 @@ fn exception_data_from_error(err: &ExecError) -> PlpgsqlExceptionData {
         detail: exec_error_detail_owned(err),
         hint: format_exec_error_hint(err),
         sqlstate: exec_error_sqlstate(err),
+        context: exec_error_context_owned(err),
+        column_name: exec_error_column_name_owned(err),
+        constraint_name: exec_error_constraint_name_owned(err),
+        datatype_name: exec_error_datatype_name_owned(err),
+        table_name: exec_error_table_name_owned(err),
+        schema_name: exec_error_schema_name_owned(err),
     }
 }
 
 fn exec_error_detail_owned(err: &ExecError) -> Option<String> {
     match err {
         ExecError::WithContext { source, .. } => exec_error_detail_owned(source),
-        ExecError::DetailedError { detail, .. } => detail.clone(),
+        ExecError::DetailedError { detail, .. } | ExecError::DiagnosticError { detail, .. } => {
+            detail.clone()
+        }
         ExecError::Parse(ParseError::DetailedError { detail, .. }) => detail.clone(),
         ExecError::JsonInput { detail, .. }
         | ExecError::XmlInput { detail, .. }
@@ -5517,9 +5627,91 @@ fn exec_error_detail_owned(err: &ExecError) -> Option<String> {
     }
 }
 
+fn exec_error_context_owned(err: &ExecError) -> Option<String> {
+    match err {
+        ExecError::WithContext { source, context } => match exec_error_context_owned(source) {
+            Some(inner) => Some(format!("{inner}\n{context}")),
+            None => Some(context.clone()),
+        },
+        ExecError::JsonInput { context, .. } | ExecError::XmlInput { context, .. } => {
+            context.clone()
+        }
+        ExecError::Regex(err) => err.context.clone(),
+        _ => None,
+    }
+}
+
+fn exec_error_column_name_owned(err: &ExecError) -> Option<String> {
+    match err {
+        ExecError::WithContext { source, .. } => exec_error_column_name_owned(source),
+        ExecError::DiagnosticError { column_name, .. } => column_name.clone(),
+        ExecError::NotNullViolation { column, .. } => Some(column.clone()),
+        _ => None,
+    }
+}
+
+fn exec_error_constraint_name_owned(err: &ExecError) -> Option<String> {
+    match err {
+        ExecError::WithContext { source, .. } => exec_error_constraint_name_owned(source),
+        ExecError::DiagnosticError {
+            constraint_name, ..
+        } => constraint_name.clone(),
+        ExecError::UniqueViolation { constraint, .. }
+        | ExecError::NotNullViolation { constraint, .. }
+        | ExecError::CheckViolation { constraint, .. }
+        | ExecError::ForeignKeyViolation { constraint, .. } => Some(constraint.clone()),
+        _ => None,
+    }
+}
+
+fn exec_error_datatype_name_owned(err: &ExecError) -> Option<String> {
+    match err {
+        ExecError::WithContext { source, .. } => exec_error_datatype_name_owned(source),
+        ExecError::DiagnosticError { datatype_name, .. } => datatype_name.clone(),
+        _ => None,
+    }
+}
+
+fn exec_error_table_name_owned(err: &ExecError) -> Option<String> {
+    match err {
+        ExecError::WithContext { source, .. } => exec_error_table_name_owned(source),
+        ExecError::DiagnosticError { table_name, .. } => table_name.clone(),
+        ExecError::NotNullViolation { relation, .. }
+        | ExecError::CheckViolation { relation, .. } => Some(relation.clone()),
+        _ => None,
+    }
+}
+
+fn exec_error_schema_name_owned(err: &ExecError) -> Option<String> {
+    match err {
+        ExecError::WithContext { source, .. } => exec_error_schema_name_owned(source),
+        ExecError::DiagnosticError { schema_name, .. } => schema_name.clone(),
+        _ => None,
+    }
+}
+
 fn exception_data_to_error(err: PlpgsqlExceptionData) -> ExecError {
-    if err.sqlstate == "P0001" && err.detail.is_none() && err.hint.is_none() {
+    let fields = PlpgsqlErrorFields {
+        column_name: err.column_name,
+        constraint_name: err.constraint_name,
+        datatype_name: err.datatype_name,
+        table_name: err.table_name,
+        schema_name: err.schema_name,
+    };
+    if err.sqlstate == "P0001" && err.detail.is_none() && err.hint.is_none() && fields.is_empty() {
         ExecError::RaiseException(err.message)
+    } else if !fields.is_empty() {
+        ExecError::DiagnosticError {
+            message: err.message,
+            detail: err.detail,
+            hint: err.hint,
+            sqlstate: err.sqlstate,
+            column_name: fields.column_name,
+            constraint_name: fields.constraint_name,
+            datatype_name: fields.datatype_name,
+            table_name: fields.table_name,
+            schema_name: fields.schema_name,
+        }
     } else {
         ExecError::DetailedError {
             message: err.message,
@@ -5555,6 +5747,7 @@ fn finish_raise(
     params: &[Value],
     detail: Option<String>,
     hint: Option<String>,
+    fields: PlpgsqlErrorFields,
 ) -> Result<(), ExecError> {
     let rendered = render_raise_message(message, params)?;
     let resolved_sqlstate = match level {
@@ -5566,8 +5759,24 @@ fn finish_raise(
     };
     match level {
         RaiseLevel::Exception => {
-            if resolved_sqlstate == "P0001" && detail.is_none() && hint.is_none() {
+            if resolved_sqlstate == "P0001"
+                && detail.is_none()
+                && hint.is_none()
+                && fields.is_empty()
+            {
                 Err(ExecError::RaiseException(rendered))
+            } else if !fields.is_empty() {
+                Err(ExecError::DiagnosticError {
+                    message: rendered,
+                    detail,
+                    hint,
+                    sqlstate: resolved_sqlstate,
+                    column_name: fields.column_name,
+                    constraint_name: fields.constraint_name,
+                    datatype_name: fields.datatype_name,
+                    table_name: fields.table_name,
+                    schema_name: fields.schema_name,
+                })
             } else {
                 Err(ExecError::DetailedError {
                     message: rendered,
@@ -5651,6 +5860,23 @@ fn render_raise_option_value(value: Value) -> String {
         Value::Null => String::new(),
         other => render_raise_value(&other),
     }
+}
+
+fn eval_do_raise_field(
+    expr: Option<&CompiledExpr>,
+    values: &[Value],
+) -> Result<Option<String>, ExecError> {
+    expr.map(|expr| eval_do_expr(expr, values).map(render_raise_option_value))
+        .transpose()
+}
+
+fn eval_function_raise_field(
+    expr: Option<&CompiledExpr>,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Option<String>, ExecError> {
+    expr.map(|expr| eval_function_expr(expr, values, ctx).map(render_raise_option_value))
+        .transpose()
 }
 
 fn render_raise_value(value: &Value) -> String {
@@ -5826,6 +6052,16 @@ fn compiled_context_name(compiled: &CompiledFunction) -> String {
     format!("{}({args})", compiled.name)
 }
 
+fn with_sql_statement_context(err: ExecError, sql: Option<&str>) -> ExecError {
+    match sql {
+        Some(sql) if !sql.is_empty() => ExecError::WithContext {
+            source: Box::new(err),
+            context: format!("SQL statement \"{sql}\""),
+        },
+        _ => err,
+    }
+}
+
 fn with_plpgsql_context_if_missing(
     err: ExecError,
     compiled: &CompiledFunction,
@@ -5907,6 +6143,7 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
         CompiledStmt::DynamicExecute { .. } => "EXECUTE",
         CompiledStmt::SetGuc { .. } => "SQL statement",
         CompiledStmt::CommentOnFunction { .. } => "SQL statement",
+        CompiledStmt::GetDiagnostics { stacked: true, .. } => "GET STACKED DIAGNOSTICS",
         CompiledStmt::GetDiagnostics { .. } => "GET DIAGNOSTICS",
         CompiledStmt::OpenCursor { .. } => "OPEN",
         CompiledStmt::FetchCursor { .. } => "FETCH",

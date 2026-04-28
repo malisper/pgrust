@@ -3516,7 +3516,9 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         } => "22003",
         ExecError::StringDataRightTruncation { .. } => "22001",
         ExecError::InvalidFloatInput { .. } => "22P02",
-        ExecError::DetailedError { sqlstate, .. } => sqlstate,
+        ExecError::DetailedError { sqlstate, .. } | ExecError::DiagnosticError { sqlstate, .. } => {
+            sqlstate
+        }
         _ => "XX000",
     }
 }
