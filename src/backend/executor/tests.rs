@@ -6573,6 +6573,24 @@ fn generate_series_basic() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn generate_series_accepts_pg_catalog_qualification() {
+    let base = temp_dir("gen_series_pg_catalog");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from pg_catalog.generate_series(1, 2)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
+    );
+}
+
 #[test]
 fn generate_series_with_step() {
     let base = temp_dir("gen_series_step");

@@ -334,14 +334,15 @@ pub(crate) fn root_call_returns_set(
     let Ok(lowered_args) = lower_named_table_function_args(name, args) else {
         return false;
     };
-    let normalized = name.to_ascii_lowercase();
+    let lowered_name = name.to_ascii_lowercase();
+    let normalized = normalize_builtin_function_name(&lowered_name);
     if matches!(
-        normalized.as_str(),
+        normalized,
         "generate_series" | "generate_subscripts" | "unnest"
-    ) || resolve_json_table_function(&normalized).is_some()
-        || resolve_json_record_function(&normalized).is_some_and(|kind| kind.is_set_returning())
-        || resolve_regex_table_function(&normalized).is_some()
-        || resolve_string_table_function(&normalized).is_some()
+    ) || resolve_json_table_function(normalized).is_some()
+        || resolve_json_record_function(normalized).is_some_and(|kind| kind.is_set_returning())
+        || resolve_regex_table_function(normalized).is_some()
+        || resolve_string_table_function(normalized).is_some()
     {
         return true;
     }
@@ -378,7 +379,8 @@ fn bind_select_list_srf_call(
         .as_ref()
         .map(|call| call.func_variadic)
         .unwrap_or(func_variadic);
-    match name.to_ascii_lowercase().as_str() {
+    let lowered_name = name.to_ascii_lowercase();
+    match normalize_builtin_function_name(&lowered_name) {
         "generate_series" => {
             if args.len() < 2 || args.len() > 4 {
                 return Err(ParseError::UnexpectedToken {

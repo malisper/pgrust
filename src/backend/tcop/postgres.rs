@@ -11946,6 +11946,57 @@ ORDER BY 1, 2;";
     }
 
     #[test]
+    fn psql_publication_detail_tables_query_reports_column_lists() {
+        let db = Database::open(temp_dir("describe_publication_detail_columns"), 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int4, note text)")
+            .unwrap();
+        session
+            .execute(&db, "create publication pub for table widgets (id)")
+            .unwrap();
+        let publication_oid = db
+            .backend_catcache(1, None)
+            .unwrap()
+            .publication_row_by_name("pub")
+            .map(|row| row.oid)
+            .unwrap();
+
+        let tables_sql = format!(
+            "SELECT n.nspname, c.relname, \
+                 pg_get_expr(pr.prqual, c.oid), \
+                 (CASE WHEN pr.prattrs IS NOT NULL THEN \
+                     pg_catalog.array_to_string( \
+                       ARRAY(SELECT attname \
+                               FROM pg_catalog.generate_series(0, pg_catalog.array_upper(pr.prattrs::pg_catalog.int2[], 1)) s, \
+                                    pg_catalog.pg_attribute \
+                              WHERE attrelid = c.oid AND attnum = prattrs[s]), ', ') \
+                  ELSE NULL END) \
+             FROM pg_catalog.pg_class c, \
+                  pg_catalog.pg_namespace n, \
+                  pg_catalog.pg_publication_rel pr \
+             WHERE c.relnamespace = n.oid \
+               AND c.oid = pr.prrelid \
+               AND pr.prpubid = '{}' \
+             ORDER BY 1,2",
+            publication_oid
+        );
+        let table_rows = match session.execute(&db, &tables_sql).unwrap() {
+            StatementResult::Query { rows, .. } => rows,
+            other => panic!("expected query result, got {other:?}"),
+        };
+        assert_eq!(
+            table_rows,
+            vec![vec![
+                Value::Text("public".into()),
+                Value::Text("widgets".into()),
+                Value::Null,
+                Value::Text("id".into()),
+            ]]
+        );
+    }
+
+    #[test]
     fn publication_obj_description_query_reads_pg_description() {
         let db = Database::open(temp_dir("describe_publication_comment"), 16).unwrap();
         let mut session = Session::new(1);

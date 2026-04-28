@@ -825,7 +825,7 @@ pub(super) fn resolve_json_record_function(name: &str) -> Option<JsonRecordFunct
     }
 }
 
-fn normalize_builtin_function_name(name: &str) -> &str {
+pub(super) fn normalize_builtin_function_name(name: &str) -> &str {
     name.strip_prefix("pg_catalog.").unwrap_or(name)
 }
 
@@ -2784,6 +2784,7 @@ fn scalar_named_arg_signature(func: BuiltinScalarFunction) -> Option<NamedArgSig
 }
 
 fn table_function_named_arg_signature(name: &str) -> Option<NamedArgSignature> {
+    let name = normalize_builtin_function_name(name);
     if name.eq_ignore_ascii_case("parse_ident") {
         return Some(NamedArgSignature {
             params: &["str", "strict"],
