@@ -55,6 +55,9 @@ fn validate_jsonpath_text(text: &str) -> Result<(), ExecError> {
 }
 
 fn jsonpath_input_error(text: &str, err: ExecError) -> ExecError {
+    if matches!(err, ExecError::Regex(_) | ExecError::DetailedError { .. }) {
+        return err;
+    }
     if let ExecError::InvalidStorageValue { details, .. } = &err
         && is_jsonpath_parse_error(details)
     {
@@ -73,6 +76,8 @@ fn is_jsonpath_syntax_error(details: &str) -> bool {
 fn is_jsonpath_parse_error(details: &str) -> bool {
     is_jsonpath_syntax_error(details)
         || details == "syntax error at end of jsonpath input"
+        || details == "LAST is allowed only in array subscripts"
+        || details == "@ is not allowed in root expressions"
         || details.starts_with("trailing junk after numeric literal at or near ")
             && details.ends_with(" of jsonpath input")
         || details.starts_with("invalid numeric literal at or near ")

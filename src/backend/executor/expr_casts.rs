@@ -3485,6 +3485,8 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
 
 fn is_jsonpath_parse_error_details(details: &str) -> bool {
     details == "syntax error at end of jsonpath input"
+        || details == "LAST is allowed only in array subscripts"
+        || details == "@ is not allowed in root expressions"
         || details.starts_with("syntax error at or near ")
             && details.ends_with(" of jsonpath input")
         || details.starts_with("trailing junk after numeric literal at or near ")

@@ -976,6 +976,8 @@ fn map_fast_regex_error(error: regex::Error) -> ExecError {
         "invalid escape \\ sequence".to_string()
     } else if rendered.contains("backreferences are not supported") {
         "invalid backreference number".to_string()
+    } else if rendered.contains("unclosed group") {
+        "parentheses () not balanced".to_string()
     } else {
         rendered
             .lines()
@@ -1017,36 +1019,52 @@ fn parse_pg_regex_flags(flags: &str) -> Result<PgRegexFlags, ExecError> {
 }
 
 fn parse_jsonpath_like_regex_flags(flags: &str) -> Result<PgRegexFlags, ExecError> {
+    let mut case_insensitive = false;
     let mut dot_all = false;
     let mut multiline = false;
-    let mut mapped = String::new();
+    let mut expanded = false;
+    let mut quote = false;
     for flag in flags.chars() {
         match flag {
-            'i' => mapped.push('i'),
+            'i' => case_insensitive = true,
             's' => dot_all = true,
             'm' => multiline = true,
-            'q' => mapped.push('q'),
-            'x' => {
-                return Err(regex_invalid(
-                    "XQuery \"x\" flag (expanded regular expressions) is not implemented",
-                ));
-            }
+            'q' => quote = true,
+            'x' => expanded = true,
             other => {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "jsonpath".to_string(),
-                    details: format!(
+                return Err(ExecError::DetailedError {
+                    message: "invalid input syntax for type jsonpath".into(),
+                    detail: Some(format!(
                         "Unrecognized flag character \"{other}\" in LIKE_REGEX predicate."
-                    ),
+                    )),
+                    hint: None,
+                    sqlstate: "42601",
                 });
             }
         }
     }
-    mapped.push(match (dot_all, multiline) {
-        (false, false) => 'p',
-        (false, true) => 'm',
-        (true, false) => 's',
-        (true, true) => 'w',
-    });
+
+    if expanded && !quote {
+        return Err(regex_plain_error(
+            "0A000",
+            "XQuery \"x\" flag (expanded regular expressions) is not implemented",
+        ));
+    }
+
+    let mut mapped = String::new();
+    if case_insensitive {
+        mapped.push('i');
+    }
+    if quote {
+        mapped.push('q');
+    } else {
+        mapped.push(match (dot_all, multiline) {
+            (false, false) => 'p',
+            (false, true) => 'm',
+            (true, false) => 's',
+            (true, true) => 'w',
+        });
+    }
     parse_pg_regex_flags(&mapped)
 }
 

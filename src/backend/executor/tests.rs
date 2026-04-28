@@ -20518,7 +20518,7 @@ fn jsonpath_numeric_method_calls_parse() {
                 vec![vec![
                     Value::JsonPath("$.number()".into()),
                     Value::JsonPath("$.integer()".into()),
-                    Value::JsonPath("$.decimal(4, 2)".into()),
+                    Value::JsonPath("$.decimal(4,2)".into()),
                 ]]
             );
         }
@@ -21070,6 +21070,116 @@ fn jsonpath_numeric_pg_input_error_info() {
             Value::Text("42601".into()),
         ]],
     );
+}
+
+#[test]
+fn jsonpath_canonical_renderer_work() {
+    for (input, expected) in [
+        ("$.g ? ($.a == 1)", "$.\"g\"?($.\"a\" == 1)"),
+        (
+            "$.g ? (@.a == 1 || @.a == 4 && @.b == 7)",
+            "$.\"g\"?(@.\"a\" == 1 || @.\"a\" == 4 && @.\"b\" == 7)",
+        ),
+        (
+            "$.g ? (exists (@.x ? (@ == 14)))",
+            "$.\"g\"?(exists (@.\"x\"?(@ == 14)))",
+        ),
+        ("$ ? (@.a < 1e1)", "$?(@.\"a\" < 10)"),
+        ("1?(2>3)", "(1)?(2 > 3)"),
+        ("$.a[1,2, 3 to 16]", "$.\"a\"[1,2,3 to 16]"),
+        ("$zip", "$\"zip\""),
+        ("$.g ? (@.zip == $zip)", "$.\"g\"?(@.\"zip\" == $\"zip\")"),
+        ("$.a.**.b", "$.\"a\".**.\"b\""),
+        ("1.2.type()", "(1.2).type()"),
+        ("$+1", "($ + 1)"),
+        ("$--+1", "($ - -1)"),
+        ("1 * 2 + 4 % -3 != false", "(1 * 2 + 4 % -3 != false)"),
+        (
+            "$ ? (@ like_regex \"pattern\" flag \"isim\")",
+            "$?(@ like_regex \"pattern\" flag \"ism\")",
+        ),
+        (
+            "$ ? (@ like_regex \"pattern\" flag \"smixq\")",
+            "$?(@ like_regex \"pattern\" flag \"ismxq\")",
+        ),
+    ] {
+        assert_eq!(jsonpath::canonicalize_jsonpath(input).unwrap(), expected);
+    }
+}
+
+#[test]
+fn jsonpath_remaining_regression_cases_work() {
+    for (input, expected) in [
+        (r#""\b\f\r\n\t\v\"\'\\""#, r#""\b\f\r\n\t\u000b\"'\\""#),
+        (r#""\x50\u0067\u{53}\u{051}\u{00004C}""#, r#""PgSQL""#),
+        (
+            r#"$.foo\x50\u0067\u{53}\u{051}\u{00004C}\t\"bar"#,
+            r##"$."fooPgSQL\t\"bar""##,
+        ),
+        (r#""\z""#, r#""z""#),
+    ] {
+        assert_eq!(jsonpath::canonicalize_jsonpath(input).unwrap(), expected);
+    }
+
+    for (input, expected) in [
+        ("last", "LAST is allowed only in array subscripts"),
+        ("$ ? (last > 0)", "LAST is allowed only in array subscripts"),
+        ("@ + 1", "@ is not allowed in root expressions"),
+    ] {
+        match jsonpath::canonicalize_jsonpath(input).unwrap_err() {
+            ExecError::InvalidStorageValue { column, details } => {
+                assert_eq!(column, "jsonpath");
+                assert_eq!(details, expected);
+            }
+            other => panic!("expected jsonpath storage error, got {other:?}"),
+        }
+    }
+
+    match jsonpath::canonicalize_jsonpath(r#"$ ? (@ like_regex "(invalid pattern")"#).unwrap_err() {
+        ExecError::Regex(RegexError {
+            sqlstate, message, ..
+        }) => {
+            assert_eq!(sqlstate, "2201B");
+            assert_eq!(
+                message,
+                "invalid regular expression: parentheses () not balanced"
+            );
+        }
+        other => panic!("expected regex error, got {other:?}"),
+    }
+
+    match jsonpath::canonicalize_jsonpath(r#"$ ? (@ like_regex "pattern" flag "xsms")"#)
+        .unwrap_err()
+    {
+        ExecError::Regex(RegexError {
+            sqlstate, message, ..
+        }) => {
+            assert_eq!(sqlstate, "0A000");
+            assert_eq!(
+                message,
+                "XQuery \"x\" flag (expanded regular expressions) is not implemented"
+            );
+        }
+        other => panic!("expected regex feature error, got {other:?}"),
+    }
+
+    let flag_info =
+        expr_casts::soft_input_error_info(r#"$ ? (@ like_regex "pattern" flag "a")"#, "jsonpath")
+            .unwrap()
+            .unwrap();
+    assert_eq!(flag_info.sqlstate, "42601");
+    assert_eq!(flag_info.message, "invalid input syntax for type jsonpath");
+    assert_eq!(
+        flag_info.detail.as_deref(),
+        Some("Unrecognized flag character \"a\" in LIKE_REGEX predicate.")
+    );
+
+    let current_info = expr_casts::soft_input_error_info("@ + 1", "jsonpath")
+        .unwrap()
+        .unwrap();
+    assert_eq!(current_info.sqlstate, "42601");
+    assert_eq!(current_info.message, "@ is not allowed in root expressions");
+    assert_eq!(current_info.detail, None);
 }
 
 #[test]

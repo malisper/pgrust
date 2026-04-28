@@ -2972,11 +2972,25 @@ fn render_jsonpath(path: &JsonPath) -> String {
     if matches!(path.mode, PathMode::Strict) {
         out.push_str("strict ");
     }
-    render_expr(&path.expr, &mut out);
+    render_expr_with_brackets(&path.expr, &mut out, true);
     out
 }
 
 fn render_expr(expr: &Expr, out: &mut String) {
+    render_expr_with_brackets(expr, out, false);
+}
+
+fn render_expr_with_brackets(expr: &Expr, out: &mut String, print_brackets: bool) {
+    if let Some(value) = folded_unary_numeric(expr) {
+        out.push_str(&value.render());
+        return;
+    }
+
+    let wrap = print_brackets && is_bracketed_operation(expr);
+    if wrap {
+        out.push('(');
+    }
+
     match expr {
         Expr::Literal(value) => render_literal(value, out),
         Expr::Last => out.push_str("last"),
@@ -2987,7 +3001,7 @@ fn render_expr(expr: &Expr, out: &mut String) {
             }
         }
         Expr::Compare { op, left, right } => {
-            render_operand(left, out);
+            render_binary_left(expr, left, out);
             out.push_str(match op {
                 CompareOp::Eq => " == ",
                 CompareOp::NotEq => " != ",
@@ -2996,28 +3010,29 @@ fn render_expr(expr: &Expr, out: &mut String) {
                 CompareOp::Gt => " > ",
                 CompareOp::GtEq => " >= ",
             });
-            render_operand(right, out);
+            render_binary_right(expr, right, out);
         }
         Expr::StartsWith { left, right } => {
-            render_operand(left, out);
+            render_binary_left(expr, left, out);
             out.push_str(" starts with ");
-            render_operand(right, out);
+            render_binary_right(expr, right, out);
         }
         Expr::LikeRegex {
-            expr,
+            expr: regex_expr,
             pattern,
             flags,
         } => {
-            render_operand(expr, out);
+            render_binary_left(expr, regex_expr, out);
             out.push_str(" like_regex ");
             render_quoted_string(pattern, out);
+            let flags = normalize_like_regex_flags(flags);
             if !flags.is_empty() {
                 out.push_str(" flag ");
-                render_quoted_string(flags, out);
+                render_quoted_string(&flags, out);
             }
         }
         Expr::Arithmetic { op, left, right } => {
-            render_operand(left, out);
+            render_binary_left(expr, left, out);
             out.push_str(match op {
                 ArithmeticOp::Add => " + ",
                 ArithmeticOp::Sub => " - ",
@@ -3025,75 +3040,110 @@ fn render_expr(expr: &Expr, out: &mut String) {
                 ArithmeticOp::Div => " / ",
                 ArithmeticOp::Mod => " % ",
             });
-            render_operand(right, out);
+            render_binary_right(expr, right, out);
         }
         Expr::Unary { op, inner } => {
             out.push(match op {
                 UnaryOp::Plus => '+',
                 UnaryOp::Minus => '-',
             });
-            render_operand(inner, out);
+            render_child_expr(expr, inner, out);
         }
         Expr::MethodCall { inner, method } => {
-            render_operand(inner, out);
+            render_chain_base(inner, out);
             render_method(method, out);
         }
         Expr::Access { inner, step } => {
-            render_access_base(inner, out);
+            render_chain_base(inner, out);
             render_step(step, out);
         }
         Expr::Filter { inner, predicate } => {
-            render_operand(inner, out);
-            out.push_str(" ? (");
-            render_expr(predicate, out);
-            out.push(')');
+            render_chain_base(inner, out);
+            render_filter_suffix(predicate, out);
         }
         Expr::Exists(inner) => {
-            out.push_str("exists(");
+            out.push_str("exists (");
             render_expr(inner, out);
             out.push(')');
         }
         Expr::And(left, right) => {
-            render_operand(left, out);
+            render_binary_left(expr, left, out);
             out.push_str(" && ");
-            render_operand(right, out);
+            render_binary_right(expr, right, out);
         }
         Expr::Or(left, right) => {
-            render_operand(left, out);
+            render_binary_left(expr, left, out);
             out.push_str(" || ");
-            render_operand(right, out);
+            render_binary_right(expr, right, out);
         }
         Expr::Not(inner) => {
-            out.push('!');
-            render_operand(inner, out);
+            out.push_str("!(");
+            render_expr(inner, out);
+            out.push(')');
         }
         Expr::IsUnknown(inner) => {
-            render_operand(inner, out);
-            out.push_str(" is unknown");
+            out.push('(');
+            render_expr(inner, out);
+            out.push_str(") is unknown");
         }
+    }
+
+    if wrap {
+        out.push(')');
     }
 }
 
-fn render_operand(expr: &Expr, out: &mut String) {
+fn is_bracketed_operation(expr: &Expr) -> bool {
     match expr {
         Expr::Compare { .. }
         | Expr::StartsWith { .. }
         | Expr::LikeRegex { .. }
         | Expr::Arithmetic { .. }
-        | Expr::Filter { .. }
         | Expr::And(..)
-        | Expr::Or(..) => {
-            out.push('(');
-            render_expr(expr, out);
-            out.push(')');
-        }
-        _ => render_expr(expr, out),
+        | Expr::Or(..)
+        | Expr::Unary { .. } => true,
+        _ => false,
     }
 }
 
-fn render_access_base(expr: &Expr, out: &mut String) {
+fn expr_priority(expr: &Expr) -> i32 {
     match expr {
-        Expr::Path { .. } | Expr::Access { .. } => render_expr(expr, out),
+        Expr::Or(..) => 0,
+        Expr::And(..) => 1,
+        Expr::Compare { .. } | Expr::StartsWith { .. } | Expr::LikeRegex { .. } => 2,
+        Expr::Arithmetic {
+            op: ArithmeticOp::Add | ArithmeticOp::Sub,
+            ..
+        } => 3,
+        Expr::Arithmetic {
+            op: ArithmeticOp::Mul | ArithmeticOp::Div | ArithmeticOp::Mod,
+            ..
+        } => 4,
+        Expr::Unary { .. } => 5,
+        _ => 6,
+    }
+}
+
+fn render_binary_left(parent: &Expr, child: &Expr, out: &mut String) {
+    render_child_expr(parent, child, out);
+}
+
+fn render_binary_right(parent: &Expr, child: &Expr, out: &mut String) {
+    render_child_expr(parent, child, out);
+}
+
+fn render_child_expr(parent: &Expr, child: &Expr, out: &mut String) {
+    render_expr_with_brackets(child, out, expr_priority(child) <= expr_priority(parent));
+}
+
+fn render_chain_base(expr: &Expr, out: &mut String) {
+    match expr {
+        Expr::Path { .. } | Expr::Access { .. } | Expr::MethodCall { .. } | Expr::Filter { .. } => {
+            render_expr(expr, out)
+        }
+        Expr::Literal(JsonbValue::String(_))
+        | Expr::Literal(JsonbValue::Bool(_))
+        | Expr::Literal(JsonbValue::Null) => render_expr(expr, out),
         _ => {
             out.push('(');
             render_expr(expr, out);
@@ -3102,13 +3152,34 @@ fn render_access_base(expr: &Expr, out: &mut String) {
     }
 }
 
+fn folded_unary_numeric(expr: &Expr) -> Option<NumericValue> {
+    match expr {
+        Expr::Literal(JsonbValue::Numeric(value)) => Some(value.clone()),
+        Expr::Unary {
+            op: UnaryOp::Plus,
+            inner,
+        } => folded_unary_numeric(inner),
+        Expr::Unary {
+            op: UnaryOp::Minus,
+            inner,
+        } => folded_unary_numeric(inner).map(|value| value.negate()),
+        _ => None,
+    }
+}
+
+fn render_filter_suffix(predicate: &Expr, out: &mut String) {
+    out.push_str("?(");
+    render_expr(predicate, out);
+    out.push(')');
+}
+
 fn render_base(base: &Base, out: &mut String) {
     match base {
         Base::Root => out.push('$'),
         Base::Current => out.push('@'),
         Base::Var(name) => {
             out.push('$');
-            out.push_str(name);
+            render_quoted_string(name, out);
         }
     }
 }
@@ -3127,7 +3198,7 @@ fn render_step(step: &Step, out: &mut String) {
             out.push_str(".**");
             if !matches!(
                 (min_depth, max_depth),
-                (RecursiveBound::Int(1), RecursiveBound::Last)
+                (RecursiveBound::Int(0), RecursiveBound::Last)
             ) {
                 out.push('{');
                 render_recursive_bound(*min_depth, out);
@@ -3142,7 +3213,7 @@ fn render_step(step: &Step, out: &mut String) {
             out.push('[');
             for (idx, selection) in selections.iter().enumerate() {
                 if idx > 0 {
-                    out.push_str(", ");
+                    out.push(',');
                 }
                 render_subscript_selection(selection, out);
             }
@@ -3150,11 +3221,7 @@ fn render_step(step: &Step, out: &mut String) {
         }
         Step::IndexWildcard => out.push_str("[*]"),
         Step::Method(method) => render_method(method, out),
-        Step::Filter(expr) => {
-            out.push_str(" ? (");
-            render_expr(expr, out);
-            out.push(')');
-        }
+        Step::Filter(expr) => render_filter_suffix(expr, out),
     }
 }
 
@@ -3190,7 +3257,6 @@ fn render_method(method: &Method, out: &mut String) {
     for (index, arg) in method.args.iter().enumerate() {
         if index > 0 {
             out.push(',');
-            out.push(' ');
         }
         match arg {
             MethodArg::Numeric(value) => out.push_str(&value.render()),
@@ -3280,11 +3346,46 @@ fn render_subscript_expr(expr: &SubscriptExpr, out: &mut String) {
         SubscriptExpr::Expr(expr) => render_expr(expr, out),
         SubscriptExpr::Filter { expr, predicate } => {
             render_expr(expr, out);
-            out.push_str(" ? (");
-            render_expr(predicate, out);
-            out.push(')');
+            render_filter_suffix(predicate, out);
         }
     }
+}
+
+fn normalize_like_regex_flags(flags: &str) -> String {
+    let mut case_insensitive = false;
+    let mut dot_all = false;
+    let mut multiline = false;
+    let mut expanded = false;
+    let mut quote = false;
+
+    for flag in flags.chars() {
+        match flag {
+            'i' => case_insensitive = true,
+            's' => dot_all = true,
+            'm' => multiline = true,
+            'x' => expanded = true,
+            'q' => quote = true,
+            _ => {}
+        }
+    }
+
+    let mut out = String::new();
+    if case_insensitive {
+        out.push('i');
+    }
+    if dot_all {
+        out.push('s');
+    }
+    if multiline {
+        out.push('m');
+    }
+    if expanded {
+        out.push('x');
+    }
+    if quote {
+        out.push('q');
+    }
+    out
 }
 
 fn render_literal(value: &JsonbValue, out: &mut String) {
@@ -3596,6 +3697,8 @@ struct Parser<'a> {
     input: &'a str,
     offset: usize,
     allow_postfix_filter: bool,
+    allow_current: bool,
+    allow_last: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -3604,6 +3707,8 @@ impl<'a> Parser<'a> {
             input,
             offset: 0,
             allow_postfix_filter: true,
+            allow_current: false,
+            allow_last: false,
         }
     }
 
@@ -3809,7 +3914,7 @@ impl<'a> Parser<'a> {
             if self.allow_postfix_filter && self.consume("?") {
                 self.skip_ws();
                 self.expect("(")?;
-                let predicate = self.parse_or_expr()?;
+                let predicate = self.parse_filter_predicate()?;
                 self.skip_ws();
                 self.expect(")")?;
                 expr = Expr::Filter {
@@ -3842,7 +3947,7 @@ impl<'a> Parser<'a> {
                     };
                     continue;
                 }
-                if let Some(ident) = self.parse_ident() {
+                if let Some(ident) = self.parse_unquoted_string()? {
                     if self.consume("(") {
                         let method = self.parse_method(&ident)?;
                         expr = Expr::MethodCall {
@@ -3890,6 +3995,9 @@ impl<'a> Parser<'a> {
             return self.parse_path(base);
         }
         if self.peek() == Some('@') {
+            if !self.allow_current {
+                return Err(exec_jsonpath_error("@ is not allowed in root expressions"));
+            }
             self.bump();
             return self.parse_path(Base::Current);
         }
@@ -3902,6 +4010,11 @@ impl<'a> Parser<'a> {
             return Ok(Expr::Exists(Box::new(expr)));
         }
         if self.consume_keyword("last") {
+            if !self.allow_last {
+                return Err(exec_jsonpath_error(
+                    "LAST is allowed only in array subscripts",
+                ));
+            }
             return Ok(Expr::Last);
         }
         if self.consume_keyword("true") {
@@ -3941,7 +4054,7 @@ impl<'a> Parser<'a> {
                         steps.push(Step::MemberWildcard);
                     }
                 } else {
-                    if let Some(ident) = self.parse_ident() {
+                    if let Some(ident) = self.parse_unquoted_string()? {
                         if self.consume("(") {
                             steps.push(Step::Method(self.parse_method(&ident)?));
                         } else {
@@ -3959,7 +4072,7 @@ impl<'a> Parser<'a> {
             } else if self.consume("?") {
                 self.skip_ws();
                 self.expect("(")?;
-                let expr = self.parse_or_expr()?;
+                let expr = self.parse_filter_predicate()?;
                 self.skip_ws();
                 self.expect(")")?;
                 steps.push(Step::Filter(Box::new(expr)));
@@ -4006,9 +4119,12 @@ impl<'a> Parser<'a> {
             if self.consume_keyword("to") {
                 self.skip_ws();
                 let allow_postfix_filter = self.allow_postfix_filter;
+                let allow_last = self.allow_last;
                 self.allow_postfix_filter = false;
+                self.allow_last = true;
                 let end = self.parse_additive_expr();
                 self.allow_postfix_filter = allow_postfix_filter;
+                self.allow_last = allow_last;
                 let end = end?;
                 selections.push(SubscriptSelection::Range(
                     subscript_expr_to_expr(start)?,
@@ -4036,7 +4152,9 @@ impl<'a> Parser<'a> {
 
     fn parse_subscript_expr(&mut self) -> Result<SubscriptExpr, ExecError> {
         let allow_postfix_filter = self.allow_postfix_filter;
+        let allow_last = self.allow_last;
         self.allow_postfix_filter = false;
+        self.allow_last = true;
         let expr = self.parse_additive_expr();
         self.allow_postfix_filter = allow_postfix_filter;
         let expr = expr?;
@@ -4044,15 +4162,25 @@ impl<'a> Parser<'a> {
         if self.consume("?") {
             self.skip_ws();
             self.expect("(")?;
-            let predicate = self.parse_or_expr()?;
+            let predicate = self.parse_filter_predicate()?;
             self.skip_ws();
             self.expect(")")?;
+            self.allow_last = allow_last;
             return Ok(SubscriptExpr::Filter {
                 expr: Box::new(expr),
                 predicate: Box::new(predicate),
             });
         }
+        self.allow_last = allow_last;
         Ok(SubscriptExpr::Expr(Box::new(expr)))
+    }
+
+    fn parse_filter_predicate(&mut self) -> Result<Expr, ExecError> {
+        let allow_current = self.allow_current;
+        self.allow_current = true;
+        let predicate = self.parse_or_expr();
+        self.allow_current = allow_current;
+        predicate
     }
 
     fn method_kind(&self, ident: &str) -> Result<MethodKind, ExecError> {
@@ -4256,7 +4384,7 @@ impl<'a> Parser<'a> {
     fn parse_escape_sequence(&mut self, out: &mut String) -> Result<(), ExecError> {
         let escaped = self
             .peek()
-            .ok_or_else(|| exec_jsonpath_error("unterminated jsonpath string"))?;
+            .ok_or_else(|| jsonpath_syntax_error_near("\\"))?;
         self.bump();
         match escaped {
             '\\' => out.push('\\'),
@@ -4268,57 +4396,95 @@ impl<'a> Parser<'a> {
             'n' => out.push('\n'),
             'r' => out.push('\r'),
             't' => out.push('\t'),
-            'u' => {
-                let codepoint = self.parse_unicode_escape()?;
-                if (0xD800..=0xDBFF).contains(&codepoint) {
-                    self.expect("\\u")?;
-                    let low = self.parse_unicode_escape()?;
-                    if !(0xDC00..=0xDFFF).contains(&low) {
-                        return Err(exec_jsonpath_error(
-                            "invalid low surrogate in jsonpath string",
-                        ));
-                    }
-                    let scalar =
-                        0x10000 + (((codepoint - 0xD800) as u32) << 10) + (low - 0xDC00) as u32;
-                    let ch = char::from_u32(scalar).ok_or_else(|| {
-                        exec_jsonpath_error("invalid Unicode scalar value in jsonpath string")
-                    })?;
-                    out.push(ch);
-                } else if (0xDC00..=0xDFFF).contains(&codepoint) {
-                    return Err(exec_jsonpath_error(
-                        "invalid low surrogate in jsonpath string",
-                    ));
-                } else if codepoint == 0 {
-                    return Err(exec_jsonpath_error("unsupported Unicode escape sequence"));
-                } else {
-                    let ch = char::from_u32(codepoint as u32).ok_or_else(|| {
-                        exec_jsonpath_error("invalid Unicode scalar value in jsonpath string")
-                    })?;
-                    out.push(ch);
-                }
-            }
-            _ => {
-                return Err(exec_jsonpath_error(
-                    "invalid escape sequence in jsonpath string",
-                ));
-            }
+            'v' => out.push('\u{000B}'),
+            'u' => self.parse_unicode_escape(out)?,
+            'x' => out.push(self.parse_hex_escape()?),
+            other => out.push(other),
         }
         Ok(())
     }
 
-    fn parse_unicode_escape(&mut self) -> Result<u16, ExecError> {
+    fn parse_unicode_escape(&mut self, out: &mut String) -> Result<(), ExecError> {
+        if self.consume("{") {
+            let mut value = 0u32;
+            let mut digits = 0usize;
+            while !self.consume("}") {
+                if digits >= 6 {
+                    return Err(exec_jsonpath_error("invalid Unicode escape sequence"));
+                }
+                value = (value << 4) | self.parse_hex_digit("invalid Unicode escape sequence")?;
+                digits += 1;
+            }
+            if digits == 0 {
+                return Err(exec_jsonpath_error("invalid Unicode escape sequence"));
+            }
+            out.push(
+                char::from_u32(value)
+                    .ok_or_else(|| exec_jsonpath_error("invalid Unicode escape sequence"))?,
+            );
+            return Ok(());
+        }
+
+        let high = self.parse_four_hex_digits()?;
+        if (0xD800..=0xDBFF).contains(&high) {
+            if !self.consume("\\u") {
+                return Err(exec_jsonpath_error("invalid Unicode escape sequence"));
+            }
+            let low = self.parse_four_hex_digits()?;
+            if !(0xDC00..=0xDFFF).contains(&low) {
+                return Err(exec_jsonpath_error("invalid Unicode escape sequence"));
+            }
+            let scalar = 0x10000 + (((high - 0xD800) as u32) << 10) + (low - 0xDC00) as u32;
+            out.push(
+                char::from_u32(scalar)
+                    .ok_or_else(|| exec_jsonpath_error("invalid Unicode escape sequence"))?,
+            );
+        } else if (0xDC00..=0xDFFF).contains(&high) {
+            return Err(exec_jsonpath_error("invalid Unicode escape sequence"));
+        } else {
+            out.push(
+                char::from_u32(high as u32)
+                    .ok_or_else(|| exec_jsonpath_error("invalid Unicode escape sequence"))?,
+            );
+        }
+        Ok(())
+    }
+
+    fn parse_four_hex_digits(&mut self) -> Result<u16, ExecError> {
         let mut value = 0u16;
         for _ in 0..4 {
-            let ch = self
-                .peek()
-                .ok_or_else(|| exec_jsonpath_error("invalid Unicode escape sequence"))?;
-            self.bump();
-            let digit = ch
-                .to_digit(16)
-                .ok_or_else(|| exec_jsonpath_error("invalid Unicode escape sequence"))?;
-            value = (value << 4) | digit as u16;
+            value = (value << 4) | self.parse_hex_digit("invalid Unicode escape sequence")? as u16;
         }
         Ok(value)
+    }
+
+    fn parse_hex_escape(&mut self) -> Result<char, ExecError> {
+        let high = self.parse_hex_digit("invalid hexadecimal character sequence")?;
+        let low = self.parse_hex_digit("invalid hexadecimal character sequence")?;
+        char::from_u32((high << 4) | low)
+            .ok_or_else(|| exec_jsonpath_error("invalid hexadecimal character sequence"))
+    }
+
+    fn parse_hex_digit(&mut self, message: &'static str) -> Result<u32, ExecError> {
+        let ch = self.peek().ok_or_else(|| exec_jsonpath_error(message))?;
+        self.bump();
+        ch.to_digit(16).ok_or_else(|| exec_jsonpath_error(message))
+    }
+
+    fn parse_unquoted_string(&mut self) -> Result<Option<String>, ExecError> {
+        let mut out = String::new();
+        while let Some(ch) = self.peek() {
+            if ch == '\\' {
+                self.bump();
+                self.parse_escape_sequence(&mut out)?;
+            } else if is_jsonpath_other_char(ch) {
+                self.bump();
+                out.push(ch);
+            } else {
+                break;
+            }
+        }
+        Ok((!out.is_empty()).then_some(out))
     }
 
     fn take_while(&mut self, predicate: impl Fn(char) -> bool) -> Option<&'a str> {
