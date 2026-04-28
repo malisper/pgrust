@@ -141,10 +141,11 @@ impl Database {
             unreachable!("if_exists is false");
         };
         ensure_relation_owner(self, client_id, &relation, &stmt.table_name)?;
-        let existing = catalog
-            .policy_rows_for_relation(relation.relation_oid)
-            .into_iter()
+        let policies = catalog.policy_rows_for_relation(relation.relation_oid);
+        let existing = policies
+            .iter()
             .find(|row| row.polname.eq_ignore_ascii_case(&stmt.policy_name))
+            .cloned()
             .ok_or_else(|| ExecError::DetailedError {
                 message: format!(
                     "policy \"{}\" for table \"{}\" does not exist",
@@ -156,10 +157,26 @@ impl Database {
             })?;
 
         let updated = match &stmt.action {
-            AlterPolicyAction::Rename { new_name } => PgPolicyRow {
-                polname: new_name.to_ascii_lowercase(),
-                ..existing.clone()
-            },
+            AlterPolicyAction::Rename { new_name } => {
+                if policies
+                    .iter()
+                    .any(|row| row.polname.eq_ignore_ascii_case(new_name))
+                {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "policy \"{}\" for table \"{}\" already exists",
+                            new_name, stmt.table_name
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42710",
+                    });
+                }
+                PgPolicyRow {
+                    polname: new_name.to_ascii_lowercase(),
+                    ..existing.clone()
+                }
+            }
             AlterPolicyAction::Update {
                 role_names,
                 using_expr,

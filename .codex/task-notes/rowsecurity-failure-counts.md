@@ -221,3 +221,13 @@ EXPLAIN DELETE bucket:
 - Latest rowsecurity regression result with a 300s file timeout:
   `677/774` matched, `97` mismatches, `1825` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+Policy rename bucket:
+- `ALTER POLICY ... RENAME TO` now rejects duplicate target names on the same
+  relation, including self-renames, with PostgreSQL-compatible duplicate-object
+  SQLSTATE `42710`.
+- Focused policy catalog test passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `678/774` matched, `96` mismatches, `1817` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.

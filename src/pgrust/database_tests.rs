@@ -43141,6 +43141,15 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
         ]]
     );
 
+    let err = session
+        .execute(&db, "alter policy p1 on items rename to p1")
+        .unwrap_err();
+    assert_sqlstate(
+        err,
+        "42710",
+        "policy \"p1\" for table \"items\" already exists",
+    );
+
     session
         .execute(&db, "alter policy p1 on items rename to p2")
         .unwrap();
