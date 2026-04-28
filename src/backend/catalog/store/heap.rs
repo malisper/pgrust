@@ -49,13 +49,14 @@ use crate::include::catalog::{
     CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
     PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_AUTHID_RELATION_OID,
     PG_CAST_RELATION_OID, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
-    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_FOREIGN_SERVER_RELATION_OID,
-    PG_NAMESPACE_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
-    PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID,
-    PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID,
-    PG_STATISTIC_EXT_RELATION_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
-    PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow, PgDescriptionRow,
+    PG_EVENT_TRIGGER_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+    PG_FOREIGN_SERVER_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_OPERATOR_RELATION_OID,
+    PG_OPFAMILY_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
+    PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
+    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID,
+    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow, PgAmopRow, PgAmprocRow,
+    PgAttrdefRow, PgAttributeRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
+    PgConversionRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgEventTriggerRow,
     PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgInheritsRow, PgLanguageRow,
     PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow,
     PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
@@ -3035,6 +3036,107 @@ impl CatalogStore {
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_oid(&mut effect.relation_oids, relation_oid);
         Ok((old_trigger, effect))
+    }
+
+    pub fn create_event_trigger_mvcc(
+        &mut self,
+        mut row: PgEventTriggerRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        if event_trigger_row_by_name_mvcc(self, ctx, &row.evtname)?.is_some() {
+            return Err(CatalogError::UniqueViolation(
+                "pg_event_trigger_evtname_index".into(),
+            ));
+        }
+        let mut control = self.control_state()?;
+        if row.oid == 0 {
+            row.oid = control.next_oid;
+        }
+        control.next_oid = control.next_oid.max(row.oid.saturating_add(1));
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+
+        let kinds = [BootstrapCatalogKind::PgEventTrigger];
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                event_triggers: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        self.control = control;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.oid);
+        Ok((row.oid, effect))
+    }
+
+    pub fn replace_event_trigger_mvcc(
+        &mut self,
+        old_name: &str,
+        mut row: PgEventTriggerRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let old_row = event_trigger_row_by_name_mvcc(self, ctx, old_name)?
+            .ok_or_else(|| CatalogError::UnknownTable(old_name.to_string()))?;
+        if let Some(existing) = event_trigger_row_by_name_mvcc(self, ctx, &row.evtname)?
+            && existing.oid != old_row.oid
+        {
+            return Err(CatalogError::UniqueViolation(
+                "pg_event_trigger_evtname_index".into(),
+            ));
+        }
+        row.oid = old_row.oid;
+        let kinds = [BootstrapCatalogKind::PgEventTrigger];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                event_triggers: vec![old_row],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                event_triggers: vec![row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.oid);
+        Ok((row.oid, effect))
+    }
+
+    pub fn drop_event_trigger_mvcc(
+        &mut self,
+        trigger_name: &str,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(PgEventTriggerRow, CatalogMutationEffect), CatalogError> {
+        let old_row = event_trigger_row_by_name_mvcc(self, ctx, trigger_name)?
+            .ok_or_else(|| CatalogError::UnknownTable(trigger_name.to_string()))?;
+        let kinds = [BootstrapCatalogKind::PgEventTrigger];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                event_triggers: vec![old_row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, old_row.oid);
+        Ok((old_row, effect))
     }
 
     pub fn create_publication_mvcc(
@@ -8028,6 +8130,15 @@ impl CatalogStore {
         self.comment_shared_object_mvcc(trigger_oid, PG_TRIGGER_RELATION_OID, comment, ctx)
     }
 
+    pub fn comment_event_trigger_mvcc(
+        &mut self,
+        trigger_oid: u32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.comment_shared_object_mvcc(trigger_oid, PG_EVENT_TRIGGER_RELATION_OID, comment, ctx)
+    }
+
     pub fn comment_constraint_mvcc(
         &mut self,
         constraint_oid: u32,
@@ -10217,6 +10328,24 @@ fn trigger_row_by_oid_mvcc(
         .into_iter()
         .find_map(|tuple| match tuple {
             SysCacheTuple::Trigger(row) => Some(row),
+            _ => None,
+        }))
+}
+
+fn event_trigger_row_by_name_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    trigger_name: &str,
+) -> Result<Option<PgEventTriggerRow>, CatalogError> {
+    Ok(store
+        .search_sys_cache1(
+            ctx,
+            SysCacheId::EventTriggerName,
+            Value::Text(trigger_name.to_ascii_lowercase().into()),
+        )?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::EventTrigger(row) => Some(row),
             _ => None,
         }))
 }

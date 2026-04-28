@@ -7,13 +7,14 @@ use crate::include::catalog::{
     BootstrapCatalogKind, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PgAggregateRow, PgAmRow,
     PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
     PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow,
-    PgDescriptionRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow,
-    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
-    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow, PgStatisticExtRow,
-    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
-    PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow, bootstrap_composite_type_rows,
-    builtin_type_row_by_oid, composite_array_type_row, composite_type_row,
+    PgDescriptionRow, PgEventTriggerRow, PgForeignDataWrapperRow, PgForeignServerRow,
+    PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
+    PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    PgUserMappingRow, bootstrap_composite_type_rows, builtin_type_row_by_oid,
+    composite_array_type_row, composite_type_row,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -34,6 +35,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub rewrites: Vec<PgRewriteRow>,
     pub sequences: Vec<PgSequenceRow>,
     pub triggers: Vec<PgTriggerRow>,
+    pub event_triggers: Vec<PgEventTriggerRow>,
     pub policies: Vec<PgPolicyRow>,
     pub publications: Vec<PgPublicationRow>,
     pub publication_rels: Vec<PgPublicationRelRow>,
@@ -196,6 +198,7 @@ pub(crate) fn extend_physical_catalog_rows(
     target.rewrites.extend(source.rewrites);
     target.sequences.extend(source.sequences);
     target.triggers.extend(source.triggers);
+    target.event_triggers.extend(source.event_triggers);
     target.publications.extend(source.publications);
     target.publication_rels.extend(source.publication_rels);
     target
@@ -251,6 +254,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         rewrites: catcache.rewrite_rows(),
         sequences: catcache.sequence_rows(),
         triggers: catcache.trigger_rows(),
+        event_triggers: catcache.event_trigger_rows(),
         policies: catcache.policy_rows(),
         publications: catcache.publication_rows(),
         publication_rels: catcache.publication_rel_rows(),

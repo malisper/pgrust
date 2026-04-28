@@ -1,4 +1,8 @@
 use super::agg::{AccumState, AggregateRuntime, CustomAggregateRuntime};
+use super::exec_expr::{
+    eval_pg_describe_object, eval_pg_get_object_address, eval_pg_identify_object,
+    eval_pg_identify_object_as_address,
+};
 use super::expr_casts::cast_value;
 use super::expr_ops::{add_values, div_values, sub_values};
 use super::sqlfunc::execute_user_defined_sql_scalar_function_values;
@@ -120,6 +124,21 @@ pub(crate) fn execute_scalar_function_value_call(
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     if let Some(func) = builtin_scalar_function_for_proc_oid(proc_oid) {
+        match func {
+            BuiltinScalarFunction::PgDescribeObject => {
+                return eval_pg_describe_object(arg_values, ctx);
+            }
+            BuiltinScalarFunction::PgIdentifyObject => {
+                return eval_pg_identify_object(arg_values, ctx);
+            }
+            BuiltinScalarFunction::PgIdentifyObjectAsAddress => {
+                return eval_pg_identify_object_as_address(arg_values, ctx);
+            }
+            BuiltinScalarFunction::PgGetObjectAddress => {
+                return eval_pg_get_object_address(arg_values, ctx);
+            }
+            _ => {}
+        }
         return execute_builtin_scalar_function_value_call(func, arg_values);
     }
 

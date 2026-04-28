@@ -300,6 +300,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         Rule::for_stmt => build_for_stmt(inner),
         Rule::raise_stmt => build_raise_stmt(inner),
         Rule::assert_stmt => build_assert_stmt(inner),
+        Rule::continue_stmt => Ok(Stmt::Continue),
         Rule::return_stmt => build_return_stmt(inner),
         Rule::return_next_stmt => build_return_next_stmt(inner),
         Rule::return_query_stmt => build_return_query_stmt(inner),
@@ -502,6 +503,7 @@ fn build_while_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
 }
 
 fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let line = pair.as_span().start_pos().line_col().0;
     let raw = pair.as_str().to_string();
     let mut level = RaiseLevel::Exception;
     let mut message = None;
@@ -591,6 +593,7 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         sqlstate,
         message: message.ok_or(ParseError::UnexpectedEof)?,
         params,
+        line,
     })
 }
 
@@ -727,6 +730,7 @@ fn build_perform_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
 }
 
 fn build_dynamic_execute_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let line = pair.as_span().start_pos().line_col().0;
     let raw = pair
         .into_inner()
         .find(|part| part.as_rule() == Rule::exec_sql_text)
@@ -738,6 +742,7 @@ fn build_dynamic_execute_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> 
         sql_expr,
         into_targets,
         using_exprs,
+        line,
     })
 }
 
@@ -1563,6 +1568,7 @@ mod tests {
             sql_expr,
             into_targets,
             using_exprs,
+            ..
         } = &block.statements[1]
         else {
             panic!("expected dynamic EXECUTE statement");

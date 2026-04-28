@@ -482,6 +482,8 @@ fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::Void, true) => unreachable!("void arrays are unsupported"),
         (SqlTypeKind::Trigger, false) => crate::include::catalog::TRIGGER_TYPE_OID,
         (SqlTypeKind::Trigger, true) => unreachable!("trigger arrays are unsupported"),
+        (SqlTypeKind::EventTrigger, false) => crate::include::catalog::EVENT_TRIGGER_TYPE_OID,
+        (SqlTypeKind::EventTrigger, true) => unreachable!("event_trigger arrays are unsupported"),
         (SqlTypeKind::FdwHandler, false) => crate::include::catalog::FDW_HANDLER_TYPE_OID,
         (SqlTypeKind::FdwHandler, true) => unreachable!("fdw_handler arrays are unsupported"),
         (SqlTypeKind::Int8, false) => INT8_TYPE_OID,

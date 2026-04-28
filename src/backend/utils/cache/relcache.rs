@@ -1397,6 +1397,7 @@ mod tests {
             rows.rewrites,
             rows.sequences,
             rows.triggers,
+            rows.event_triggers,
             rows.policies,
             rows.publications,
             rows.publication_rels,

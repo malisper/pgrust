@@ -1688,6 +1688,7 @@ fn visible_catalog_without_text_input_cast(
         base.rewrite_rows(),
         base.sequence_rows(),
         base.trigger_rows(),
+        base.event_trigger_rows(),
         base.policy_rows(),
         base.publication_rows(),
         base.publication_rel_rows(),
@@ -1753,6 +1754,7 @@ fn visible_catalog_without_operator(
         base.rewrite_rows(),
         base.sequence_rows(),
         base.trigger_rows(),
+        base.event_trigger_rows(),
         base.policy_rows(),
         base.publication_rows(),
         base.publication_rel_rows(),
@@ -1835,6 +1837,7 @@ fn visible_catalog_with_extra_opclasses(
         base.rewrite_rows(),
         base.sequence_rows(),
         base.trigger_rows(),
+        base.event_trigger_rows(),
         base.policy_rows(),
         base.publication_rows(),
         base.publication_rel_rows(),
@@ -10527,6 +10530,9 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names, .. }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])
     );
     assert!(
+        matches!(parse_statement("drop table if exists audit_tbls.\"schema_one_table two\"").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names, .. }) if table_names == vec!["audit_tbls.schema_one_table two"])
+    );
+    assert!(
         matches!(parse_statement("drop index tenant_idx").unwrap(), Statement::DropIndex(DropIndexStatement { concurrently: false, if_exists: false, index_names }) if index_names == vec!["tenant_idx"])
     );
     assert!(
@@ -18463,6 +18469,29 @@ fn parse_compound_alter_table_drop_add_using_index() {
             assert!(matches!(
                 stmt.actions[1],
                 Statement::AlterTableAddConstraint(_)
+            ));
+        }
+        other => panic!("expected compound alter table, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_compound_alter_table_drop_identity_and_type() {
+    let stmt = parse_statement(
+        "alter table evttrig.id alter column col_d drop identity, \
+         alter column col_d set data type int",
+    )
+    .unwrap();
+    match stmt {
+        Statement::AlterTableCompound(stmt) => {
+            assert_eq!(stmt.actions.len(), 2);
+            assert!(matches!(
+                stmt.actions[0],
+                Statement::AlterTableAlterColumnIdentity(_)
+            ));
+            assert!(matches!(
+                stmt.actions[1],
+                Statement::AlterTableAlterColumnType(_)
             ));
         }
         other => panic!("expected compound alter table, got {other:?}"),

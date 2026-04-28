@@ -113,6 +113,29 @@ fn drop_quote_identifier_if_needed(identifier: &str) -> String {
     }
 }
 
+fn push_missing_relation_notice(
+    catalog: &dyn CatalogLookup,
+    relation_name: &str,
+    object_kind: &str,
+) {
+    if let Some((schema_name, _)) = relation_name.split_once('.') {
+        let schema_name = schema_name.trim_matches('"').replace("\"\"", "\"");
+        if !catalog
+            .namespace_rows()
+            .into_iter()
+            .any(|row| row.nspname.eq_ignore_ascii_case(&schema_name))
+        {
+            push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+            return;
+        }
+    }
+    let display_name = relation_name.rsplit('.').next().unwrap_or(relation_name);
+    let display_name = display_name.trim_matches('"').replace("\"\"", "\"");
+    push_notice(format!(
+        "{object_kind} \"{display_name}\" does not exist, skipping"
+    ));
+}
+
 fn cast_drop_notice(
     catalog: &dyn crate::backend::parser::CatalogLookup,
     row: &PgCastRow,
@@ -620,6 +643,40 @@ fn drop_schema_display_object_name(
     drop_format_name(catcache, namespace_oid, object_name)
 }
 
+fn drop_schema_display_relation_name(
+    catcache: &CatCache,
+    visible_namespaces: &BTreeSet<u32>,
+    namespace_oid: u32,
+    relation_name: &str,
+) -> String {
+    if visible_namespaces.contains(&namespace_oid) {
+        return drop_quote_identifier_if_needed(relation_name);
+    }
+    drop_format_name(catcache, namespace_oid, relation_name)
+}
+
+fn drop_schema_display_signature_name(
+    catcache: &CatCache,
+    visible_namespaces: &BTreeSet<u32>,
+    namespace_oid: u32,
+    signature: &str,
+) -> String {
+    if visible_namespaces.contains(&namespace_oid) {
+        return signature.to_string();
+    }
+    let schema_name = catcache
+        .namespace_by_oid(namespace_oid)
+        .map(|row| row.nspname.clone())
+        .unwrap_or_else(|| "public".to_string());
+    match schema_name.as_str() {
+        "public" | "pg_catalog" => signature.to_string(),
+        _ => format!(
+            "{}.{signature}",
+            drop_quote_identifier_if_needed(&schema_name)
+        ),
+    }
+}
+
 fn drop_schema_display_operator_name(
     catalog: &dyn CatalogLookup,
     catcache: &CatCache,
@@ -632,7 +689,7 @@ fn drop_schema_display_operator_name(
         .collect::<Vec<_>>()
         .join(",");
     let name = format!("{}({args})", row.oprname);
-    drop_schema_display_object_name(catcache, visible_namespaces, row.oprnamespace, &name)
+    drop_schema_display_signature_name(catcache, visible_namespaces, row.oprnamespace, &name)
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
@@ -1950,7 +2007,15 @@ impl Database {
                         },
                     }));
                 }
-                None if drop_stmt.if_exists => continue,
+                None if drop_stmt.if_exists => {
+                    let object_kind = if drop_stmt.foreign_table {
+                        "foreign table"
+                    } else {
+                        "table"
+                    };
+                    push_missing_relation_notice(&catalog, relation_name, object_kind);
+                    continue;
+                }
                 None => {
                     return Err(ExecError::Parse(ParseError::TableDoesNotExist(
                         relation_name.clone(),
@@ -2412,6 +2477,7 @@ impl Database {
             .backend_catcache(client_id, Some((xid, cid)))
             .map_err(map_catalog_error)?;
         let mut dropped = 0usize;
+        let mut cascade_notice_groups = Vec::new();
         for schema_name in &drop_stmt.schema_names {
             let maybe_schema = catcache
                 .namespace_by_name(schema_name)
@@ -2485,6 +2551,29 @@ impl Database {
                     &auth_catalog,
                 );
 
+                let mut relation_notice_rows = relation_rows
+                    .iter()
+                    .filter(|row| {
+                        (!row.relispartition
+                            || !partition_has_parent_in_schema(&catcache, row.oid, schema.oid))
+                            && matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'v')
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                relation_notice_rows.sort_by_key(|row| row.oid);
+                for relation in relation_notice_rows {
+                    notices.push(format!(
+                        "drop cascades to {} {}",
+                        drop_table_relation_kind_name(relation.relkind),
+                        drop_schema_display_relation_name(
+                            &catcache,
+                            &visible_namespaces,
+                            relation.relnamespace,
+                            &relation.relname
+                        )
+                    ));
+                }
+
                 let mut proc_rows = catcache
                     .proc_rows()
                     .into_iter()
@@ -2495,7 +2584,7 @@ impl Database {
                     let signature = drop_proc_signature_text(&proc_row, &catalog);
                     notices.push(format!(
                         "drop cascades to function {}",
-                        drop_schema_display_object_name(
+                        drop_schema_display_signature_name(
                             &catcache,
                             &visible_namespaces,
                             proc_row.pronamespace,
@@ -2564,33 +2653,6 @@ impl Database {
                             .get(&row.opfmethod)
                             .map(String::as_str)
                             .unwrap_or("unknown")
-                    ));
-                }
-
-                let mut relation_notice_rows = relation_rows
-                    .iter()
-                    .filter(|row| {
-                        (!row.relispartition
-                            || !partition_has_parent_in_schema(&catcache, row.oid, schema.oid))
-                            && matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'S' | 'v')
-                            && (row.relkind != 'S'
-                                || !sequence_is_owned_by_relation_in_schema(
-                                    &catcache, row.oid, schema.oid,
-                                ))
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                relation_notice_rows.sort_by_key(|row| row.oid);
-                for relation in relation_notice_rows {
-                    notices.push(format!(
-                        "drop cascades to {} {}",
-                        drop_table_relation_kind_name(relation.relkind),
-                        drop_schema_display_object_name(
-                            &catcache,
-                            &visible_namespaces,
-                            relation.relnamespace,
-                            &relation.relname
-                        )
                     ));
                 }
 
@@ -2666,13 +2728,8 @@ impl Database {
                     ));
                 }
 
-                match notices.as_slice() {
-                    [] => {}
-                    [notice] => push_notice(notice.clone()),
-                    notices => push_notice_with_detail(
-                        format!("drop cascades to {} other objects", notices.len()),
-                        notices.join("\n"),
-                    ),
+                if !notices.is_empty() {
+                    cascade_notice_groups.push(notices);
                 }
             }
             let mut namespace_cid = cid;
@@ -2707,6 +2764,19 @@ impl Database {
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
             dropped += 1;
+        }
+        let cascade_notices = cascade_notice_groups
+            .into_iter()
+            .rev()
+            .flatten()
+            .collect::<Vec<_>>();
+        match cascade_notices.as_slice() {
+            [] => {}
+            [notice] => push_notice(notice.clone()),
+            notices => push_notice_with_detail(
+                format!("drop cascades to {} other objects", notices.len()),
+                notices.join("\n"),
+            ),
         }
         Ok(StatementResult::AffectedRows(dropped))
     }
@@ -2958,15 +3028,7 @@ impl Database {
                     }));
                 }
                 None if if_exists => {
-                    push_notice(format!(
-                        "{} \"{}\" does not exist, skipping",
-                        expected_name,
-                        relation_name
-                            .rsplit('.')
-                            .next()
-                            .unwrap_or(relation_name)
-                            .trim_matches('"')
-                    ));
+                    push_missing_relation_notice(&catalog, relation_name, expected_name);
                     continue;
                 }
                 None => {

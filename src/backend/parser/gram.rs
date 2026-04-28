@@ -118,6 +118,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_drop_function_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_drop_table_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_alter_routine_statement(&sql)? {
         return Ok(stmt);
     }
@@ -134,6 +137,9 @@ fn parse_statement_with_options_inner(
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_operator_statement(&sql)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_event_trigger_statement(&sql)? {
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_trigger_statement(&sql)? {
@@ -157,9 +163,6 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_sequence_statement(&sql)? {
         return Ok(stmt);
     }
-    if let Some(stmt) = try_parse_alter_table_identity_statement(&sql)? {
-        return Ok(stmt);
-    }
     if let Some(stmt) = try_parse_copy_statement(&sql, options)? {
         return Ok(stmt);
     }
@@ -178,6 +181,12 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_statistics_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_materialized_view_access_method_statement(&sql, options)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_schema_qualified_quoted_create_table(&sql, options)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_partition_statement(&sql, options)? {
         return Ok(stmt);
     }
@@ -191,6 +200,9 @@ fn parse_statement_with_options_inner(
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_alter_table_multi_action_statement(&sql, options)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_alter_table_identity_statement(&sql)? {
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_alter_table_replica_identity_statement(&sql)? {
@@ -692,17 +704,13 @@ fn try_parse_alter_table_multi_action_statement(
             },
         )));
     }
-    if parsed_statements.iter().any(|stmt| {
-        matches!(
-            stmt,
-            Statement::AlterTableDropConstraint(_) | Statement::AlterTableAddConstraint(_)
-        )
-    }) && parsed_statements.iter().all(|stmt| {
-        matches!(
-            stmt,
-            Statement::AlterTableDropConstraint(_) | Statement::AlterTableAddConstraint(_)
-        )
-    }) {
+    if parsed_statements
+        .iter()
+        .any(alter_table_action_can_run_as_compound)
+        && parsed_statements
+            .iter()
+            .all(alter_table_action_can_run_as_compound)
+    {
         return Ok(Some(Statement::AlterTableCompound(
             AlterTableCompoundStatement {
                 actions: parsed_statements,
@@ -710,6 +718,16 @@ fn try_parse_alter_table_multi_action_statement(
         )));
     }
     Ok(Some(Statement::AlterTableMulti(statements)))
+}
+
+fn alter_table_action_can_run_as_compound(stmt: &Statement) -> bool {
+    matches!(
+        stmt,
+        Statement::AlterTableDropConstraint(_)
+            | Statement::AlterTableAddConstraint(_)
+            | Statement::AlterTableAlterColumnIdentity(_)
+            | Statement::AlterTableAlterColumnType(_)
+    )
 }
 
 fn parse_alter_table_target_sql(input: &str) -> Result<(bool, bool, String, &str), ParseError> {
@@ -1901,6 +1919,56 @@ fn try_parse_partition_statement(
     Ok(None)
 }
 
+fn try_parse_schema_qualified_quoted_create_table(
+    sql: &str,
+    options: ParseOptions,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("create table ") || !trimmed.contains(".\"") {
+        return Ok(None);
+    }
+    let mut rest = trimmed["create table ".len()..].trim_start();
+    let if_not_exists = if keyword_at_start(rest, "if not exists") {
+        rest = consume_keyword(rest, "if not exists").trim_start();
+        true
+    } else {
+        false
+    };
+    let ((Some(schema_name), table_name), tail) = parse_qualified_sql_name(rest)? else {
+        return Ok(None);
+    };
+    if !tail.trim_start().starts_with('(') {
+        return Ok(None);
+    }
+    let rewritten = format!(
+        "create table {}{} {}",
+        if if_not_exists { "if not exists " } else { "" },
+        quote_sql_identifier_for_reparse(&table_name),
+        tail.trim_start()
+    );
+    let mut stmt = parse_statement_with_options_inner(rewritten, options)?;
+    if let Statement::CreateTable(create_stmt) = &mut stmt {
+        create_stmt.schema_name = Some(schema_name);
+        Ok(Some(stmt))
+    } else {
+        Ok(None)
+    }
+}
+
+fn quote_sql_identifier_for_reparse(identifier: &str) -> String {
+    let needs_quotes = identifier.is_empty()
+        || identifier.chars().enumerate().any(|(index, ch)| {
+            !(ch == '_' || ch.is_ascii_alphanumeric()) || (index == 0 && ch.is_ascii_digit())
+        })
+        || identifier != identifier.to_ascii_lowercase();
+    if needs_quotes {
+        format!("\"{}\"", identifier.replace('"', "\"\""))
+    } else {
+        identifier.to_string()
+    }
+}
+
 fn build_partition_create_table_statement(
     sql: &str,
     options: ParseOptions,
@@ -2510,6 +2578,279 @@ fn try_parse_trigger_statement(sql: &str) -> Result<Option<Statement>, ParseErro
             .map(|stmt| Some(Statement::CreateTrigger(stmt)));
     }
     Ok(None)
+}
+
+fn try_parse_event_trigger_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create event trigger ") {
+        return build_create_event_trigger_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateEventTrigger(stmt)));
+    }
+    if lowered.starts_with("alter event trigger ") {
+        return build_alter_event_trigger_statement(trimmed).map(Some);
+    }
+    if lowered.starts_with("drop event trigger ") {
+        return build_drop_event_trigger_statement(trimmed)
+            .map(|stmt| Some(Statement::DropEventTrigger(stmt)));
+    }
+    if lowered.starts_with("comment on event trigger ") {
+        return build_comment_on_event_trigger_statement(trimmed)
+            .map(|stmt| Some(Statement::CommentOnEventTrigger(stmt)));
+    }
+    Ok(None)
+}
+
+fn build_create_event_trigger_statement(
+    sql: &str,
+) -> Result<CreateEventTriggerStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "create").trim_start();
+    rest = consume_keyword(rest, "event").trim_start();
+    rest = consume_keyword(rest, "trigger").trim_start();
+    let (trigger_name, next) = parse_sql_identifier(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "on").trim_start();
+    let (event_name, next) = parse_sql_identifier(rest)?;
+    rest = next.trim_start();
+
+    let mut when_clauses = Vec::new();
+    if keyword_at_start(rest, "when") {
+        rest = consume_keyword(rest, "when").trim_start();
+        loop {
+            let (variable, next) = parse_sql_identifier(rest)?;
+            rest = next.trim_start();
+            if !keyword_at_start(rest, "in") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "IN",
+                    actual: rest.into(),
+                });
+            }
+            rest = consume_keyword(rest, "in").trim_start();
+            let (values_sql, next) = take_parenthesized_segment(rest)?;
+            let values = split_top_level_items(&values_sql, ',')?
+                .into_iter()
+                .map(|item| {
+                    let item = item.trim();
+                    let len =
+                        scan_string_literal_token_len(item).ok_or(ParseError::UnexpectedToken {
+                            expected: "quoted string",
+                            actual: item.into(),
+                        })?;
+                    if !item[len..].trim().is_empty() {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "quoted string",
+                            actual: item.into(),
+                        });
+                    }
+                    decode_string_literal(&item[..len])
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            when_clauses.push(EventTriggerWhenClause { variable, values });
+            rest = next.trim_start();
+            if keyword_at_start(rest, "and") {
+                rest = consume_keyword(rest, "and").trim_start();
+                continue;
+            }
+            break;
+        }
+    }
+
+    if !keyword_at_start(rest, "execute") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "EXECUTE FUNCTION",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "execute").trim_start();
+    if keyword_at_start(rest, "function") {
+        rest = consume_keyword(rest, "function").trim_start();
+    } else if keyword_at_start(rest, "procedure") {
+        rest = consume_keyword(rest, "procedure").trim_start();
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "FUNCTION or PROCEDURE",
+            actual: rest.into(),
+        });
+    }
+    let ((function_schema_name, function_name), next) = parse_qualified_sql_name(rest)?;
+    let (args_sql, rest) = take_parenthesized_segment(next.trim_start())?;
+    if !args_sql.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "no event trigger arguments",
+            actual: format!("syntax error at or near \"{}\"", args_sql.trim()),
+        });
+    }
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of CREATE EVENT TRIGGER statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CreateEventTriggerStatement {
+        trigger_name,
+        event_name,
+        when_clauses,
+        function_schema_name,
+        function_name,
+    })
+}
+
+fn build_alter_event_trigger_statement(sql: &str) -> Result<Statement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "event").trim_start();
+    rest = consume_keyword(rest, "trigger").trim_start();
+    let (trigger_name, next) = parse_sql_identifier(rest)?;
+    rest = next.trim_start();
+    if keyword_at_start(rest, "owner") {
+        rest = consume_keyword(rest, "owner").trim_start();
+        rest = consume_keyword(rest, "to").trim_start();
+        let (new_owner, rest) = parse_sql_identifier(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER EVENT TRIGGER",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(Statement::AlterEventTriggerOwner(
+            AlterEventTriggerOwnerStatement {
+                trigger_name,
+                new_owner,
+            },
+        ));
+    }
+    if keyword_at_start(rest, "rename") {
+        rest = consume_keyword(rest, "rename").trim_start();
+        rest = consume_keyword(rest, "to").trim_start();
+        let (new_trigger_name, rest) = parse_sql_identifier(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER EVENT TRIGGER",
+                actual: rest.trim().into(),
+            });
+        }
+        return Ok(Statement::AlterEventTriggerRename(
+            AlterEventTriggerRenameStatement {
+                trigger_name,
+                new_trigger_name,
+            },
+        ));
+    }
+    let mode = if keyword_at_start(rest, "enable") {
+        rest = consume_keyword(rest, "enable").trim_start();
+        if keyword_at_start(rest, "always") {
+            rest = consume_keyword(rest, "always").trim_start();
+            AlterTableTriggerMode::EnableAlways
+        } else if keyword_at_start(rest, "replica") {
+            rest = consume_keyword(rest, "replica").trim_start();
+            AlterTableTriggerMode::EnableReplica
+        } else {
+            AlterTableTriggerMode::EnableOrigin
+        }
+    } else if keyword_at_start(rest, "disable") {
+        rest = consume_keyword(rest, "disable").trim_start();
+        AlterTableTriggerMode::Disable
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ENABLE, DISABLE, OWNER TO, or RENAME TO",
+            actual: rest.into(),
+        });
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER EVENT TRIGGER",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(Statement::AlterEventTrigger(AlterEventTriggerStatement {
+        trigger_name,
+        mode,
+    }))
+}
+
+fn build_drop_event_trigger_statement(sql: &str) -> Result<DropEventTriggerStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "drop").trim_start();
+    rest = consume_keyword(rest, "event").trim_start();
+    rest = consume_keyword(rest, "trigger").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        rest = consume_keyword(rest, "if").trim_start();
+        rest = consume_keyword(rest, "exists").trim_start();
+        if_exists = true;
+    }
+    let (trigger_name, rest) = parse_sql_identifier(rest)?;
+    let rest = rest.trim_start();
+    let cascade = if rest.is_empty() {
+        false
+    } else if keyword_at_start(rest, "cascade") {
+        if !consume_keyword(rest, "cascade").trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of DROP EVENT TRIGGER",
+                actual: rest.into(),
+            });
+        }
+        true
+    } else if keyword_at_start(rest, "restrict") {
+        if !consume_keyword(rest, "restrict").trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of DROP EVENT TRIGGER",
+                actual: rest.into(),
+            });
+        }
+        false
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CASCADE, RESTRICT, or end of statement",
+            actual: rest.into(),
+        });
+    };
+    Ok(DropEventTriggerStatement {
+        if_exists,
+        trigger_name,
+        cascade,
+    })
+}
+
+fn build_comment_on_event_trigger_statement(
+    sql: &str,
+) -> Result<CommentOnEventTriggerStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "comment").trim_start();
+    rest = consume_keyword(rest, "on").trim_start();
+    rest = consume_keyword(rest, "event").trim_start();
+    rest = consume_keyword(rest, "trigger").trim_start();
+    let (trigger_name, next) = parse_sql_identifier(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "is") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "IS",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "is").trim_start();
+    let (comment, rest) = if keyword_at_start(rest, "null") {
+        (None, consume_keyword(rest, "null"))
+    } else {
+        let len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+            expected: "quoted string or NULL",
+            actual: rest.into(),
+        })?;
+        (Some(decode_string_literal(&rest[..len])?), &rest[len..])
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of COMMENT ON EVENT TRIGGER",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CommentOnEventTriggerStatement {
+        trigger_name,
+        comment,
+    })
 }
 
 fn try_parse_alter_table_trigger_state_statement(
@@ -3903,6 +4244,11 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
             });
         }
         "trigger" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Trigger))),
+        "event_trigger" => {
+            return Ok(RawTypeName::Builtin(SqlType::new(
+                SqlTypeKind::EventTrigger,
+            )));
+        }
         "void" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void))),
         "cstring" | "pg_catalog.cstring" => {
             return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Cstring)));
@@ -4816,6 +5162,75 @@ fn try_parse_view_statement(sql: &str) -> Result<Option<Statement>, ParseError> 
     }
     Ok(None)
 }
+
+fn try_parse_materialized_view_access_method_statement(
+    sql: &str,
+    options: ParseOptions,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create materialized view ") {
+        let Some(using_pos) = lowered.find(" using ") else {
+            return Ok(None);
+        };
+        let Some(as_rel_pos) = lowered[using_pos + 7..].find(" as ") else {
+            return Ok(None);
+        };
+        let as_pos = using_pos + 7 + as_rel_pos;
+        let method_sql = trimmed[using_pos + 7..as_pos].trim();
+        let (_method, tail) = parse_sql_identifier(method_sql)?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "materialized view access method",
+                actual: method_sql.into(),
+            });
+        }
+        // :HACK: pgrust currently stores heap table access metadata implicitly.
+        // Strip the PostgreSQL access-method clause before feeding the existing
+        // CREATE MATERIALIZED VIEW parser; relam can become explicit when heap
+        // access methods are modeled for normal relations.
+        let rewritten = format!(
+            "{} {}",
+            trimmed[..using_pos].trim_end(),
+            trimmed[as_pos..].trim_start()
+        );
+        return parse_statement_with_options_inner(rewritten, options).map(Some);
+    }
+    if !lowered.starts_with("alter materialized view ") {
+        return Ok(None);
+    }
+    let mut rest = consume_keyword(trimmed, "alter").trim_start();
+    rest = consume_keyword(rest, "materialized").trim_start();
+    rest = consume_keyword(rest, "view").trim_start();
+    let (parts, tail) = parse_qualified_identifier_parts(rest)?;
+    let mut tail = tail.trim_start();
+    if !keyword_at_start(tail, "set") {
+        return Ok(None);
+    }
+    tail = consume_keyword(tail, "set").trim_start();
+    if !keyword_at_start(tail, "access") {
+        return Ok(None);
+    }
+    tail = consume_keyword(tail, "access").trim_start();
+    if !keyword_at_start(tail, "method") {
+        return Ok(None);
+    }
+    tail = consume_keyword(tail, "method").trim_start();
+    let (access_method, tail) = parse_sql_identifier(tail)?;
+    if !tail.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER MATERIALIZED VIEW SET ACCESS METHOD",
+            actual: tail.trim().into(),
+        });
+    }
+    Ok(Some(Statement::AlterMaterializedViewSetAccessMethod(
+        AlterMaterializedViewSetAccessMethodStatement {
+            relation_name: parts.join("."),
+            access_method,
+        },
+    )))
+}
+
 fn try_parse_domain_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -6248,6 +6663,55 @@ fn try_parse_drop_function_statement(sql: &str) -> Result<Option<Statement>, Par
     Ok(Some(Statement::DropFunction(
         build_drop_function_statement(trimmed)?,
     )))
+}
+
+fn try_parse_drop_table_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("drop table ") {
+        return Ok(None);
+    }
+
+    let mut rest = consume_keyword(trimmed, "drop").trim_start();
+    rest = consume_keyword(rest, "table").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        if keyword_at_start(after_if, "exists") {
+            if_exists = true;
+            rest = consume_keyword(after_if, "exists").trim_start();
+        }
+    }
+
+    let rest_lowered = rest.to_ascii_lowercase();
+    let (names_sql, cascade) = if rest_lowered.ends_with(" cascade") {
+        (&rest[..rest.len() - " cascade".len()], true)
+    } else if rest_lowered.ends_with(" restrict") {
+        (&rest[..rest.len() - " restrict".len()], false)
+    } else {
+        (rest, false)
+    };
+    let mut table_names = Vec::new();
+    for item in split_top_level_items(names_sql, ',')? {
+        let (parts, trailing) = parse_qualified_identifier_parts(&item)?;
+        if !trailing.trim().is_empty() {
+            return Ok(None);
+        }
+        match parts.as_slice() {
+            [name] => table_names.push(name.clone()),
+            [schema, name] => table_names.push(format!("{schema}.{name}")),
+            _ => return Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
+        }
+    }
+    if table_names.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(Some(Statement::DropTable(DropTableStatement {
+        if_exists,
+        table_names,
+        cascade,
+        foreign_table: false,
+    })))
 }
 
 fn try_parse_alter_routine_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -8603,6 +9067,15 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     while !rest.trim_start().is_empty() {
         rest = rest.trim_start();
         if keyword_at_start(rest, "returns") {
+            let maybe_null = consume_keyword(rest, "returns").trim_start();
+            if keyword_at_start(maybe_null, "null") {
+                let next = consume_keyword(maybe_null, "null").trim_start();
+                let next = consume_keyword(next, "on").trim_start();
+                let next = consume_keyword(next, "null").trim_start();
+                rest = consume_keyword(next, "input");
+                strict = true;
+                continue;
+            }
             if return_spec.is_some() {
                 return Err(ParseError::UnexpectedToken {
                     expected: "single RETURNS clause",
@@ -8700,6 +9173,14 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         if keyword_at_start(rest, "strict") {
             strict = true;
             rest = consume_keyword(rest, "strict");
+            continue;
+        }
+        if keyword_at_start(rest, "called") {
+            let next = consume_keyword(rest, "called").trim_start();
+            let next = consume_keyword(next, "on").trim_start();
+            let next = consume_keyword(next, "null").trim_start();
+            rest = consume_keyword(next, "input");
+            strict = false;
             continue;
         }
         if keyword_at_start(rest, "leakproof") {
@@ -21691,6 +22172,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Composite => "record",
         SqlTypeKind::Shell => "shell",
         SqlTypeKind::Trigger => "trigger",
+        SqlTypeKind::EventTrigger => "event_trigger",
         SqlTypeKind::Void => "void",
         SqlTypeKind::Cstring => "cstring",
         SqlTypeKind::FdwHandler => "fdw_handler",

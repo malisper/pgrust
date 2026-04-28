@@ -191,6 +191,7 @@ impl Database {
         cid: CommandId,
         catalog: &dyn CatalogLookup,
         dependencies: &[PgConstraintRow],
+        emit_notice: bool,
         interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<CommandId, ExecError> {
@@ -206,11 +207,13 @@ impl Database {
             let constraint_relation = catalog.relation_by_oid(row.conrelid).ok_or_else(|| {
                 ExecError::Parse(ParseError::UnknownTable(row.conrelid.to_string()))
             })?;
-            push_notice(format!(
-                "drop cascades to constraint {} on table {}",
-                row.conname,
-                relation_name_for_oid(catalog, row.conrelid)
-            ));
+            if emit_notice {
+                push_notice(format!(
+                    "drop cascades to constraint {} on table {}",
+                    row.conname,
+                    relation_name_for_oid(catalog, row.conrelid)
+                ));
+            }
             if constraint_relation.relkind == 'p' {
                 next_cid = self.drop_partition_child_foreign_key_constraints_in_transaction(
                     client_id,
@@ -398,8 +401,12 @@ impl Database {
         }
         let foreign_key_dependencies =
             foreign_key_column_dependencies(&catalog, relation.relation_oid, target_attnum);
-        if !foreign_key_dependencies.is_empty() && !drop_stmt.cascade {
-            let row = &foreign_key_dependencies[0];
+        let (local_foreign_key_dependencies, external_foreign_key_dependencies): (Vec<_>, Vec<_>) =
+            foreign_key_dependencies
+                .into_iter()
+                .partition(|row| row.conrelid == relation.relation_oid);
+        if !external_foreign_key_dependencies.is_empty() && !drop_stmt.cascade {
+            let row = &external_foreign_key_dependencies[0];
             return Err(ExecError::DetailedError {
                 message: format!(
                     "cannot drop column {} of table {} because other objects depend on it",
@@ -424,13 +431,26 @@ impl Database {
             target_attnum,
         )?;
         let mut next_cid = cid;
+        if !local_foreign_key_dependencies.is_empty() {
+            next_cid = self.drop_foreign_key_dependencies_for_column_in_transaction(
+                client_id,
+                xid,
+                next_cid,
+                &catalog,
+                &local_foreign_key_dependencies,
+                false,
+                interrupts.clone(),
+                catalog_effects,
+            )?;
+        }
         if drop_stmt.cascade {
             next_cid = self.drop_foreign_key_dependencies_for_column_in_transaction(
                 client_id,
                 xid,
                 next_cid,
                 &catalog,
-                &foreign_key_dependencies,
+                &external_foreign_key_dependencies,
+                true,
                 interrupts.clone(),
                 catalog_effects,
             )?;

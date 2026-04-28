@@ -721,10 +721,6 @@ fn merge_partition_column_override(
     if merged.attinhcount == 0 {
         return Err(ParseError::UnknownColumn(override_.name.clone()));
     }
-    push_notice(format!(
-        "merging column \"{}\" with inherited definition",
-        merged.column.name
-    ));
     merged.attislocal = true;
     if let Some(attributes) = override_not_null_constraint_attributes(override_) {
         merged.not_null_is_local = true;

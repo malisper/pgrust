@@ -364,6 +364,7 @@ fn catalog_row_identity_key(kind: BootstrapCatalogKind, values: &[Value]) -> Cat
         | BootstrapCatalogKind::PgType
         | BootstrapCatalogKind::PgAttrdef
         | BootstrapCatalogKind::PgTrigger
+        | BootstrapCatalogKind::PgEventTrigger
         | BootstrapCatalogKind::PgPolicy
         | BootstrapCatalogKind::PgStatisticExt
         | BootstrapCatalogKind::PgConversion
@@ -436,6 +437,7 @@ fn physical_catalog_rows_empty(rows: &PhysicalCatalogRows) -> bool {
         && rows.rewrites.is_empty()
         && rows.sequences.is_empty()
         && rows.triggers.is_empty()
+        && rows.event_triggers.is_empty()
         && rows.ams.is_empty()
         && rows.amops.is_empty()
         && rows.amprocs.is_empty()
@@ -473,6 +475,7 @@ fn catalog_row_identity_matches(
         | BootstrapCatalogKind::PgType
         | BootstrapCatalogKind::PgAttrdef
         | BootstrapCatalogKind::PgTrigger
+        | BootstrapCatalogKind::PgEventTrigger
         | BootstrapCatalogKind::PgPolicy
         | BootstrapCatalogKind::PgStatisticExt
         | BootstrapCatalogKind::PgConversion

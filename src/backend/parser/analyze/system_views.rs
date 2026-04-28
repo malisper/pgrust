@@ -245,6 +245,7 @@ pub(super) fn bind_builtin_system_view(
                 ]
             })
             .collect(),
+        SyntheticSystemViewKind::PgTables => catalog.pg_tables_rows(),
         SyntheticSystemViewKind::PgViews => catalog.pg_views_rows(),
         SyntheticSystemViewKind::PgMatviews => catalog.pg_matviews_rows(),
         SyntheticSystemViewKind::PgIndexes => catalog.pg_indexes_rows(),

@@ -21,7 +21,7 @@ use crate::backend::catalog::rowcodec::{
     pg_attribute_row_from_values, pg_auth_members_row_from_values, pg_authid_row_from_values,
     pg_cast_row_from_values, pg_class_row_from_values, pg_collation_row_from_values,
     pg_constraint_row_from_values, pg_conversion_row_from_values, pg_database_row_from_values,
-    pg_depend_row_from_values, pg_description_row_from_values,
+    pg_depend_row_from_values, pg_description_row_from_values, pg_event_trigger_row_from_values,
     pg_foreign_data_wrapper_row_from_values, pg_foreign_server_row_from_values,
     pg_foreign_table_row_from_values, pg_index_row_from_values, pg_inherits_row_from_values,
     pg_language_row_from_values, pg_opclass_row_from_values, pg_operator_row_from_values,
@@ -136,6 +136,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
     let inherit_rows = rows.inherits;
     let rewrite_rows = rows.rewrites;
     let trigger_rows = rows.triggers;
+    let event_trigger_rows = rows.event_triggers;
     let policy_rows = rows.policies;
     let publication_rows = rows.publications;
     let publication_rel_rows = rows.publication_rels;
@@ -244,6 +245,13 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 }),
         )
         .max(
+            event_trigger_rows
+                .iter()
+                .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
+                    next_oid.max(row.oid.saturating_add(1))
+                }),
+        )
+        .max(
             policy_rows
                 .iter()
                 .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
@@ -320,6 +328,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
         inherits: inherit_rows,
         rewrites: Vec::new(),
         triggers: Vec::new(),
+        event_triggers: Vec::new(),
         policies: policy_rows.clone(),
         partitioned_tables: partitioned_table_rows,
         publications: publication_rows,
@@ -509,6 +518,8 @@ pub(crate) fn catalog_from_physical_rows_scoped(
     crate::include::catalog::sort_pg_rewrite_rows(&mut catalog.rewrites);
     catalog.triggers = trigger_rows;
     crate::include::catalog::sort_pg_trigger_rows(&mut catalog.triggers);
+    catalog.event_triggers = event_trigger_rows;
+    crate::include::catalog::sort_pg_event_trigger_rows(&mut catalog.event_triggers);
     catalog.policies = policy_rows.clone();
     crate::include::catalog::sort_pg_policy_rows(&mut catalog.policies);
     crate::backend::catalog::sort_pg_statistic_ext_rows(&mut catalog.statistics_ext);
@@ -1009,6 +1020,12 @@ fn append_catalog_kind_rows(
             rows.triggers = values
                 .into_iter()
                 .map(pg_trigger_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgEventTrigger => {
+            rows.event_triggers = values
+                .into_iter()
+                .map(pg_event_trigger_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
         BootstrapCatalogKind::PgPolicy => {
@@ -1733,6 +1750,7 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         rewrites: rewrite_rows,
         sequences: sequence_rows,
         triggers: Vec::new(),
+        event_triggers: Vec::new(),
         policies: policy_rows,
         publications: Vec::new(),
         publication_rels: Vec::new(),
@@ -2469,6 +2487,7 @@ fn load_physical_catalog_rows_visible_legacy(
         rewrites: rewrite_rows,
         sequences: sequence_rows,
         triggers: Vec::new(),
+        event_triggers: Vec::new(),
         policies: policy_rows,
         publications: Vec::new(),
         publication_rels: Vec::new(),

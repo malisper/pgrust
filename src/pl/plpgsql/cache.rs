@@ -19,12 +19,17 @@ pub(crate) enum PlpgsqlFunctionCacheKey {
         relation_shape: RelationShape,
         transition_tables: Vec<TransitionTableShape>,
     },
+    EventTrigger {
+        proc_oid: u32,
+    },
 }
 
 impl PlpgsqlFunctionCacheKey {
     fn proc_oid(&self) -> u32 {
         match self {
-            Self::Routine { proc_oid, .. } | Self::Trigger { proc_oid, .. } => *proc_oid,
+            Self::Routine { proc_oid, .. }
+            | Self::Trigger { proc_oid, .. }
+            | Self::EventTrigger { proc_oid } => *proc_oid,
         }
     }
 }

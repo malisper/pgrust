@@ -763,6 +763,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterMaterializedViewSetAccessMethod(ref alter_stmt) => self
+                .execute_alter_materialized_view_set_access_method_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterIndexAlterColumnStatistics(ref alter_stmt) => self
                 .execute_alter_index_alter_column_statistics_stmt_with_search_path(
                     client_id,
@@ -840,6 +846,7 @@ impl Database {
                     client_id,
                     alter_stmt,
                     configured_search_path,
+                    &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 ),
             Statement::AlterTableAlterColumnDefault(ref alter_stmt) => self
                 .execute_alter_table_alter_column_default_stmt_with_search_path(
@@ -1351,6 +1358,12 @@ impl Database {
                 ),
             Statement::CommentOnTrigger(ref comment_stmt) => self
                 .execute_comment_on_trigger_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    configured_search_path,
+                ),
+            Statement::CommentOnEventTrigger(ref comment_stmt) => self
+                .execute_comment_on_event_trigger_stmt_with_search_path(
                     client_id,
                     comment_stmt,
                     configured_search_path,
@@ -2151,14 +2164,38 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateEventTrigger(ref create_stmt) => self
+                .execute_create_event_trigger_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableTriggerState(ref alter_stmt) => self
                 .execute_alter_table_trigger_state_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterEventTrigger(ref alter_stmt) => self
+                .execute_alter_event_trigger_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterEventTriggerOwner(ref alter_stmt) => self
+                .execute_alter_event_trigger_owner_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTriggerRename(ref alter_stmt) => self
                 .execute_alter_trigger_rename_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterEventTriggerRename(ref alter_stmt) => self
+                .execute_alter_event_trigger_rename_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,
@@ -2312,6 +2349,12 @@ impl Database {
                 ),
             Statement::DropTrigger(ref drop_stmt) => self
                 .execute_drop_trigger_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
+            Statement::DropEventTrigger(ref drop_stmt) => self
+                .execute_drop_event_trigger_stmt_with_search_path(
                     client_id,
                     drop_stmt,
                     configured_search_path,

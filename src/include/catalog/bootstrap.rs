@@ -44,6 +44,7 @@ pub const PG_STATISTIC_RELATION_OID: u32 = 2619;
 pub const PG_STATISTIC_EXT_RELATION_OID: u32 = 3381;
 pub const PG_STATISTIC_EXT_DATA_RELATION_OID: u32 = 3429;
 pub const PG_TRIGGER_RELATION_OID: u32 = 2620;
+pub const PG_EVENT_TRIGGER_RELATION_OID: u32 = 3466;
 pub const PG_POLICY_RELATION_OID: u32 = 3256;
 pub const PG_LANGUAGE_RELATION_OID: u32 = 2612;
 pub const PG_NAMESPACE_RELATION_OID: u32 = 2615;
@@ -70,6 +71,7 @@ pub const PG_STATISTIC_ROWTYPE_OID: u32 = 10029;
 pub const PG_STATISTIC_EXT_ROWTYPE_OID: u32 = 10031;
 pub const PG_STATISTIC_EXT_DATA_ROWTYPE_OID: u32 = 10033;
 pub const PG_TRIGGER_ROWTYPE_OID: u32 = 0;
+pub const PG_EVENT_TRIGGER_ROWTYPE_OID: u32 = 0;
 pub const PG_PUBLICATION_ROWTYPE_OID: u32 = 0;
 pub const PG_PUBLICATION_REL_ROWTYPE_OID: u32 = 0;
 pub const PG_PUBLICATION_NAMESPACE_ROWTYPE_OID: u32 = 0;
@@ -148,6 +150,7 @@ pub const CSTRING_TYPE_OID: u32 = 2275;
 pub const CSTRING_ARRAY_TYPE_OID: u32 = 1263;
 pub const VOID_TYPE_OID: u32 = 2278;
 pub const TRIGGER_TYPE_OID: u32 = 2279;
+pub const EVENT_TRIGGER_TYPE_OID: u32 = 3838;
 pub const INTERNAL_TYPE_OID: u32 = 2281;
 pub const FDW_HANDLER_TYPE_OID: u32 = 3115;
 pub const INDEX_AM_HANDLER_TYPE_OID: u32 = 325;
@@ -344,6 +347,7 @@ pub enum BootstrapCatalogKind {
     PgOpclass,
     PgOpfamily,
     PgAggregate,
+    PgEventTrigger,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,6 +403,7 @@ impl BootstrapCatalogKind {
             Self::PgStatisticExt => PG_STATISTIC_EXT_RELATION_OID,
             Self::PgStatisticExtData => PG_STATISTIC_EXT_DATA_RELATION_OID,
             Self::PgTrigger => PG_TRIGGER_RELATION_OID,
+            Self::PgEventTrigger => PG_EVENT_TRIGGER_RELATION_OID,
             Self::PgPolicy => PG_POLICY_RELATION_OID,
             Self::PgPublication => PG_PUBLICATION_RELATION_OID,
             Self::PgPublicationRel => PG_PUBLICATION_REL_RELATION_OID,
@@ -454,6 +459,7 @@ impl BootstrapCatalogKind {
             Self::PgStatisticExt => "pg_statistic_ext",
             Self::PgStatisticExtData => "pg_statistic_ext_data",
             Self::PgTrigger => "pg_trigger",
+            Self::PgEventTrigger => "pg_event_trigger",
             Self::PgPolicy => "pg_policy",
             Self::PgPublication => "pg_publication",
             Self::PgPublicationRel => "pg_publication_rel",
@@ -509,6 +515,7 @@ impl BootstrapCatalogKind {
             Self::PgStatisticExt => PG_STATISTIC_EXT_ROWTYPE_OID,
             Self::PgStatisticExtData => PG_STATISTIC_EXT_DATA_ROWTYPE_OID,
             Self::PgTrigger => PG_TRIGGER_ROWTYPE_OID,
+            Self::PgEventTrigger => PG_EVENT_TRIGGER_ROWTYPE_OID,
             Self::PgPolicy => 0,
             Self::PgPublication => PG_PUBLICATION_ROWTYPE_OID,
             Self::PgPublicationRel => PG_PUBLICATION_REL_ROWTYPE_OID,
@@ -570,6 +577,7 @@ impl BootstrapCatalogKind {
             Self::PgStatisticExtData => 3430,
             Self::PgTablespace => 4185,
             Self::PgTrigger => 2336,
+            Self::PgEventTrigger => 4145,
             Self::PgTsDict => 4169,
             Self::PgType => 4171,
             _ => 0,
@@ -577,7 +585,7 @@ impl BootstrapCatalogKind {
     }
 }
 
-pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 50] = [
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 51] = [
     BootstrapCatalogKind::PgNamespace,
     BootstrapCatalogKind::PgType,
     BootstrapCatalogKind::PgProc,
@@ -628,9 +636,10 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 50] = [
     BootstrapCatalogKind::PgPublicationRel,
     BootstrapCatalogKind::PgPublicationNamespace,
     BootstrapCatalogKind::PgAggregate,
+    BootstrapCatalogKind::PgEventTrigger,
 ];
 
-pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 50] {
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 51] {
     CORE_BOOTSTRAP_KINDS
 }
 
@@ -680,6 +689,7 @@ pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
         BootstrapCatalogKind::PgStatisticExt => pg_statistic_ext_desc(),
         BootstrapCatalogKind::PgStatisticExtData => pg_statistic_ext_data_desc(),
         BootstrapCatalogKind::PgTrigger => pg_trigger_desc(),
+        BootstrapCatalogKind::PgEventTrigger => pg_event_trigger_desc(),
         BootstrapCatalogKind::PgPolicy => pg_policy_desc(),
         BootstrapCatalogKind::PgPublication => pg_publication_desc(),
         BootstrapCatalogKind::PgPublicationRel => pg_publication_rel_desc(),
@@ -693,7 +703,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 50] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 51] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",
@@ -894,6 +904,10 @@ pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 50] = [
         oid: PG_AGGREGATE_RELATION_OID,
         name: "pg_aggregate",
     },
+    BootstrapCatalogRelation {
+        oid: PG_EVENT_TRIGGER_RELATION_OID,
+        name: "pg_event_trigger",
+    },
 ];
 
 #[cfg(test)]
@@ -1000,6 +1014,10 @@ mod tests {
             PG_PUBLICATION_NAMESPACE_RELATION_OID
         );
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[49].oid, PG_AGGREGATE_RELATION_OID);
+        assert_eq!(
+            CORE_BOOTSTRAP_RELATIONS[50].oid,
+            PG_EVENT_TRIGGER_RELATION_OID
+        );
     }
 
     #[test]
@@ -1061,6 +1079,7 @@ mod tests {
                 "pg_publication_rel",
                 "pg_publication_namespace",
                 "pg_aggregate",
+                "pg_event_trigger",
             ]
         );
     }
@@ -1082,14 +1101,14 @@ use super::{
     pg_aggregate_desc, pg_am_desc, pg_amop_desc, pg_amproc_desc, pg_attrdef_desc,
     pg_attribute_desc, pg_auth_members_desc, pg_authid_desc, pg_cast_desc, pg_class_desc,
     pg_collation_desc, pg_constraint_desc, pg_conversion_desc, pg_database_desc, pg_depend_desc,
-    pg_description_desc, pg_foreign_data_wrapper_desc, pg_foreign_server_desc,
-    pg_foreign_table_desc, pg_index_desc, pg_inherits_desc, pg_language_desc, pg_largeobject_desc,
-    pg_largeobject_metadata_desc, pg_namespace_desc, pg_opclass_desc, pg_operator_desc,
-    pg_opfamily_desc, pg_partitioned_table_desc, pg_policy_desc, pg_proc_desc, pg_publication_desc,
-    pg_publication_namespace_desc, pg_publication_rel_desc, pg_replication_origin_desc,
-    pg_rewrite_desc, pg_sequence_desc, pg_shdepend_desc, pg_statistic_desc,
-    pg_statistic_ext_data_desc, pg_statistic_ext_desc, pg_tablespace_desc, pg_trigger_desc,
-    pg_ts_config_desc, pg_ts_config_map_desc, pg_ts_dict_desc, pg_ts_parser_desc,
+    pg_description_desc, pg_event_trigger_desc, pg_foreign_data_wrapper_desc,
+    pg_foreign_server_desc, pg_foreign_table_desc, pg_index_desc, pg_inherits_desc,
+    pg_language_desc, pg_largeobject_desc, pg_largeobject_metadata_desc, pg_namespace_desc,
+    pg_opclass_desc, pg_operator_desc, pg_opfamily_desc, pg_partitioned_table_desc, pg_policy_desc,
+    pg_proc_desc, pg_publication_desc, pg_publication_namespace_desc, pg_publication_rel_desc,
+    pg_replication_origin_desc, pg_rewrite_desc, pg_sequence_desc, pg_shdepend_desc,
+    pg_statistic_desc, pg_statistic_ext_data_desc, pg_statistic_ext_desc, pg_tablespace_desc,
+    pg_trigger_desc, pg_ts_config_desc, pg_ts_config_map_desc, pg_ts_dict_desc, pg_ts_parser_desc,
     pg_ts_template_desc, pg_type_desc, pg_user_mapping_desc,
 };
 use crate::backend::executor::RelationDesc;

@@ -23,9 +23,9 @@ use crate::backend::utils::misc::notices::{
 };
 use crate::include::catalog::{
     ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
-    BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_C_OID,
-    PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PgAggregateRow,
-    PgAuthIdRow, PgAuthMembersRow, PgProcRow, RECORD_TYPE_OID, VOID_TYPE_OID,
+    BYTEA_TYPE_OID, EVENT_TRIGGER_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID,
+    PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgProcRow, RECORD_TYPE_OID, VOID_TYPE_OID,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
@@ -3188,6 +3188,30 @@ impl Database {
             proargmodes.as_deref(),
             &callable_arg_oids,
         )?;
+        if prorettype == EVENT_TRIGGER_TYPE_OID {
+            if !callable_arg_oids.is_empty() {
+                return Err(ExecError::WithContext {
+                    source: Box::new(ExecError::DetailedError {
+                        message: "event trigger functions cannot have declared arguments".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P13",
+                    }),
+                    context: format!(
+                        "compilation of PL/pgSQL function \"{}\" near line 1",
+                        create_stmt.function_name
+                    ),
+                });
+            }
+            if language_row.oid == PG_LANGUAGE_SQL_OID {
+                return Err(ExecError::DetailedError {
+                    message: "SQL functions cannot return type event_trigger".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                });
+            }
+        }
         if language_row.oid == PG_LANGUAGE_PLPGSQL_OID {
             validate_create_function_body(&create_stmt.body, !output_args.is_empty())
                 .map_err(ExecError::Parse)?;

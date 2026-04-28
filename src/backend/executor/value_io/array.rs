@@ -547,7 +547,7 @@ fn array_element_layout(
             });
         }
         SqlTypeKind::Cstring => (-2, AttributeAlign::Char),
-        SqlTypeKind::Trigger => {
+        SqlTypeKind::Trigger | SqlTypeKind::EventTrigger => {
             return Err(ExecError::InvalidStorageValue {
                 column: column.into(),
                 details: "trigger arrays are unsupported".into(),
@@ -913,7 +913,7 @@ fn decode_array_element_value(
             column: column.into(),
             details: "shell type arrays are unsupported".into(),
         }),
-        SqlTypeKind::Trigger => Err(ExecError::InvalidStorageValue {
+        SqlTypeKind::Trigger | SqlTypeKind::EventTrigger => Err(ExecError::InvalidStorageValue {
             column: column.into(),
             details: "trigger arrays are unsupported".into(),
         }),

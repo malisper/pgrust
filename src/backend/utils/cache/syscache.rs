@@ -11,11 +11,11 @@ use crate::backend::catalog::rowcodec::{
     pg_attribute_row_from_values, pg_auth_members_row_from_values, pg_authid_row_from_values,
     pg_cast_row_from_values, pg_class_row_from_values, pg_collation_row_from_values,
     pg_constraint_row_from_values, pg_depend_row_from_values, pg_description_row_from_values,
-    pg_index_row_from_values, pg_inherits_row_from_values, pg_language_row_from_values,
-    pg_opclass_row_from_values, pg_operator_row_from_values, pg_opfamily_row_from_values,
-    pg_partitioned_table_row_from_values, pg_policy_row_from_values, pg_proc_row_from_values,
-    pg_publication_namespace_row_from_values, pg_publication_rel_row_from_values,
-    pg_publication_row_from_values, pg_rewrite_row_from_values,
+    pg_event_trigger_row_from_values, pg_index_row_from_values, pg_inherits_row_from_values,
+    pg_language_row_from_values, pg_opclass_row_from_values, pg_operator_row_from_values,
+    pg_opfamily_row_from_values, pg_partitioned_table_row_from_values, pg_policy_row_from_values,
+    pg_proc_row_from_values, pg_publication_namespace_row_from_values,
+    pg_publication_rel_row_from_values, pg_publication_row_from_values, pg_rewrite_row_from_values,
     pg_statistic_ext_data_row_from_values, pg_statistic_ext_row_from_values,
     pg_statistic_row_from_values, pg_trigger_row_from_values, pg_type_row_from_values,
 };
@@ -32,11 +32,12 @@ use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
     PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow,
-    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
-    bootstrap_composite_type_rows, builtin_type_rows, system_catalog_index_by_oid,
+    PgConstraintRow, PgDependRow, PgDescriptionRow, PgEventTriggerRow, PgIndexRow, PgInheritsRow,
+    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
+    PgTriggerRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
+    system_catalog_index_by_oid,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
@@ -101,6 +102,8 @@ const PG_STATISTIC_EXT_NAME_INDEX_OID: u32 = 3997;
 const PG_STATISTIC_EXT_DATA_STXOID_INH_INDEX_OID: u32 = 3433;
 const PG_TRIGGER_RELID_NAME_INDEX_OID: u32 = 2701;
 const PG_TRIGGER_OID_INDEX_OID: u32 = 2702;
+const PG_EVENT_TRIGGER_EVTNAME_INDEX_OID: u32 = 3467;
+const PG_EVENT_TRIGGER_OID_INDEX_OID: u32 = 3468;
 const PG_TYPE_OID_INDEX_OID: u32 = 2703;
 const PG_TYPE_TYPNAME_NSP_INDEX_OID: u32 = 2704;
 
@@ -214,6 +217,10 @@ pub enum SysCacheId {
     TriggerRelidName,
     // PostgreSQL systable scan index: TriggerOidIndexId.
     TriggerOid,
+    // PostgreSQL syscache name: EVENTTRIGGERNAME.
+    EventTriggerName,
+    // PostgreSQL syscache name: EVENTTRIGGEROID.
+    EventTriggerOid,
     // PostgreSQL syscache name: STATRELATTINH.
     StatRelAttInh,
     // PostgreSQL syscache name: STATEXTOID.
@@ -292,6 +299,8 @@ impl SysCacheId {
             Self::StatisticExtDataStxoidInh => PG_STATISTIC_EXT_DATA_STXOID_INH_INDEX_OID,
             Self::TriggerRelidName => PG_TRIGGER_RELID_NAME_INDEX_OID,
             Self::TriggerOid => PG_TRIGGER_OID_INDEX_OID,
+            Self::EventTriggerName => PG_EVENT_TRIGGER_EVTNAME_INDEX_OID,
+            Self::EventTriggerOid => PG_EVENT_TRIGGER_OID_INDEX_OID,
             Self::TypeOid => PG_TYPE_OID_INDEX_OID,
             Self::TypeNameNsp => PG_TYPE_TYPNAME_NSP_INDEX_OID,
         }
@@ -334,6 +343,8 @@ impl SysCacheId {
             | Self::RelOid
             | Self::RewriteOid
             | Self::TriggerOid
+            | Self::EventTriggerName
+            | Self::EventTriggerOid
             | Self::TypeOid => 1,
             Self::AttrDefault
             | Self::AttrName
@@ -400,6 +411,7 @@ pub enum SysCacheTuple {
     StatisticExt(PgStatisticExtRow),
     StatisticExtData(PgStatisticExtDataRow),
     Trigger(PgTriggerRow),
+    EventTrigger(PgEventTriggerRow),
     Type(PgTypeRow),
 }
 
@@ -575,6 +587,9 @@ fn sys_cache_tuple_from_values(
         SysCacheId::TriggerRelidName | SysCacheId::TriggerOid => {
             pg_trigger_row_from_values(values).map(SysCacheTuple::Trigger)
         }
+        SysCacheId::EventTriggerName | SysCacheId::EventTriggerOid => {
+            pg_event_trigger_row_from_values(values).map(SysCacheTuple::EventTrigger)
+        }
         SysCacheId::TypeOid | SysCacheId::TypeNameNsp => {
             pg_type_row_from_values(values).map(SysCacheTuple::Type)
         }
@@ -730,6 +745,7 @@ fn merge_catcaches(shared: CatCache, local: CatCache) -> CatCache {
         local.rewrite_rows(),
         local.sequence_rows(),
         local.trigger_rows(),
+        local.event_trigger_rows(),
         local.policy_rows(),
         local.publication_rows(),
         local.publication_rel_rows(),
