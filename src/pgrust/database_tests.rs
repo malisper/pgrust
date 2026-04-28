@@ -6917,6 +6917,12 @@ fn partition_bounds_accept_array_hash_enum_and_composite_keys() {
     session
         .execute(
             &db,
+            "create table enum_part_green partition of enum_part for values in ('green')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
             "create table enum_part_blue partition of enum_part for values in ('blue')",
         )
         .unwrap();
@@ -6932,6 +6938,19 @@ fn partition_bounds_accept_array_hash_enum_and_composite_keys() {
     assert!(rows.iter().any(|row| {
         matches!(row.first(), Some(Value::Text(line)) if line.contains("enum_part_blue"))
     }));
+    let enum_plan = rows
+        .iter()
+        .filter_map(|row| row.first())
+        .map(|value| value.as_text().unwrap_or_default().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rows.iter().all(|row| {
+            !matches!(row.first(), Some(Value::Text(line)) if line.contains("enum_part_green"))
+        }),
+        "{enum_plan}"
+    );
+    assert!(enum_plan.contains("'blue'::part_color"), "{enum_plan}");
 
     session
         .execute(&db, "create type part_pair as (a int4, b int4)")
@@ -6948,6 +6967,12 @@ fn partition_bounds_accept_array_hash_enum_and_composite_keys() {
             "create table rec_part_11 partition of rec_part for values in ('(1,1)')",
         )
         .unwrap();
+    session
+        .execute(
+            &db,
+            "create table rec_part_23 partition of rec_part for values in ('(2,3)')",
+        )
+        .unwrap();
     let StatementResult::Query { rows, .. } = session
         .execute(
             &db,
@@ -6960,6 +6985,30 @@ fn partition_bounds_accept_array_hash_enum_and_composite_keys() {
     assert!(rows.iter().any(|row| {
         matches!(row.first(), Some(Value::Text(line)) if line.contains("rec_part_11"))
     }));
+    let record_plan = rows
+        .iter()
+        .filter_map(|row| row.first())
+        .map(|value| value.as_text().unwrap_or_default().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rows.iter().all(|row| {
+            !matches!(row.first(), Some(Value::Text(line)) if line.contains("rec_part_23"))
+        }),
+        "{record_plan}"
+    );
+    assert!(record_plan.contains("'(1,1)'::part_pair"), "{record_plan}");
+    let lines = explain_lines(
+        &db,
+        1,
+        "(costs off) select * from rec_part where a = '(1,2)'::part_pair",
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("One-Time Filter: false")),
+        "expected composite miss to prune to Result, got {lines:?}"
+    );
 }
 
 #[test]

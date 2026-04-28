@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::backend::executor::jsonb::render_jsonb_bytes;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
-    ExecutorContext, executor_start, render_explain_expr, render_index_order_by,
-    render_index_scan_condition_with_key_names,
+    ExecutorContext, executor_start, render_explain_expr, render_explain_literal,
+    render_index_order_by, render_index_scan_condition_with_key_names,
     render_index_scan_condition_with_key_names_and_runtime_renderer,
     render_verbose_range_support_expr, runtime_pruned_startup_child_indexes,
     set_returning_call_label,
@@ -114,6 +114,23 @@ pub(crate) fn format_explain_plan_with_subplans(
         false,
         &VerboseExplainContext::default(),
         lines,
+    );
+}
+
+pub(crate) fn format_explain_plan_with_subplans_and_catalog(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    catalog: &dyn CatalogLookup,
+    lines: &mut Vec<String>,
+) {
+    let ctx = VerboseExplainContext {
+        type_names: collect_explain_type_names(plan, subplans, catalog),
+        ..VerboseExplainContext::default()
+    };
+    format_explain_plan_with_subplans_inner(
+        plan, subplans, indent, show_costs, false, false, false, &ctx, lines,
     );
 }
 
@@ -882,6 +899,20 @@ fn push_nonverbose_plan_details(
 ) -> bool {
     let prefix = explain_detail_prefix(indent);
     match plan {
+        Plan::Filter {
+            input, predicate, ..
+        } => {
+            if let Some(rendered) = render_nonverbose_expr_with_dynamic_type_names(
+                predicate,
+                &input.column_names(),
+                ctx,
+            ) {
+                lines.push(format!("{prefix}Filter: {rendered}"));
+                true
+            } else {
+                false
+            }
+        }
         Plan::OrderBy {
             input,
             items,
@@ -2340,6 +2371,19 @@ fn collect_plan_type_names(
     catalog: &dyn CatalogLookup,
     type_names: &mut BTreeMap<u32, String>,
 ) {
+    match plan {
+        Plan::Append { desc, .. }
+        | Plan::MergeAppend { desc, .. }
+        | Plan::SeqScan { desc, .. }
+        | Plan::IndexOnlyScan { desc, .. }
+        | Plan::IndexScan { desc, .. }
+        | Plan::BitmapHeapScan { desc, .. } => {
+            for column in &desc.columns {
+                collect_sql_type_name(column.sql_type, catalog, type_names);
+            }
+        }
+        _ => {}
+    }
     if let Plan::FunctionScan { call, .. } = plan {
         for column in call.output_columns() {
             collect_sql_type_name(column.sql_type, catalog, type_names);
@@ -3915,6 +3959,9 @@ fn render_verbose_join_expr(
             strip_outer_parens(&render_explain_expr(&Expr::Const(value.clone()), &[]))
         }
         Expr::Cast(inner, ty) => {
+            if let Some(rendered) = render_verbose_const_cast(inner, *ty, ctx) {
+                return rendered;
+            }
             let inner = render_verbose_join_expr(inner, left_names, right_names, ctx);
             format!("({inner})::{}", render_type_name(*ty, ctx))
         }
@@ -4036,6 +4083,9 @@ fn render_verbose_expr(
             strip_outer_parens(&render_explain_expr(&Expr::Const(value.clone()), &[]))
         }
         Expr::Cast(inner, ty) => {
+            if let Some(rendered) = render_verbose_const_cast(inner, *ty, ctx) {
+                return rendered;
+            }
             let inner = render_verbose_expr(inner, column_names, ctx);
             format!("({inner})::{}", render_type_name(*ty, ctx))
         }
@@ -4137,6 +4187,132 @@ fn strip_outer_parens(text: &str) -> String {
         .and_then(|value| value.strip_suffix(')'))
         .unwrap_or(text)
         .to_string()
+}
+
+fn render_nonverbose_expr_with_dynamic_type_names(
+    expr: &Expr,
+    column_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    let mut replacements = Vec::new();
+    collect_dynamic_const_cast_replacements(expr, ctx, &mut replacements);
+    if replacements.is_empty() {
+        return None;
+    }
+    let mut rendered = render_explain_expr(expr, column_names);
+    replacements.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+    replacements.dedup();
+    for (from, to) in replacements {
+        rendered = rendered.replace(&from, &to);
+    }
+    Some(rendered)
+}
+
+fn collect_dynamic_const_cast_replacements(
+    expr: &Expr,
+    ctx: &VerboseExplainContext,
+    replacements: &mut Vec<(String, String)>,
+) {
+    match expr {
+        Expr::Cast(inner, ty)
+            if ty.type_oid != 0
+                && ctx.type_names.contains_key(&ty.type_oid)
+                && matches!(inner.as_ref(), Expr::Const(_)) =>
+        {
+            let old = render_explain_expr(expr, &[]);
+            let new = render_verbose_const_cast(inner, *ty, ctx)
+                .expect("dynamic constant cast checked above");
+            replacements.push((old, new));
+            if let Expr::Const(value) = inner.as_ref() {
+                replacements.push((
+                    format!("{}::text", render_explain_literal(value)),
+                    render_verbose_const_cast(inner, *ty, ctx)
+                        .expect("dynamic constant cast checked above"),
+                ));
+            }
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => {
+            collect_dynamic_const_cast_replacements(inner, ctx, replacements);
+        }
+        Expr::Op(op) => {
+            for arg in &op.args {
+                collect_dynamic_const_cast_replacements(arg, ctx, replacements);
+            }
+        }
+        Expr::Bool(bool_expr) => {
+            for arg in &bool_expr.args {
+                collect_dynamic_const_cast_replacements(arg, ctx, replacements);
+            }
+        }
+        Expr::ScalarArrayOp(saop) => {
+            collect_dynamic_const_cast_replacements(&saop.left, ctx, replacements);
+            collect_dynamic_const_cast_replacements(&saop.right, ctx, replacements);
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            collect_dynamic_const_cast_replacements(left, ctx, replacements);
+            collect_dynamic_const_cast_replacements(right, ctx, replacements);
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            for element in elements {
+                collect_dynamic_const_cast_replacements(element, ctx, replacements);
+            }
+        }
+        Expr::Row { fields, .. } => {
+            for (_, field) in fields {
+                collect_dynamic_const_cast_replacements(field, ctx, replacements);
+            }
+        }
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_dynamic_const_cast_replacements(arg, ctx, replacements);
+            }
+            for arm in &case_expr.args {
+                collect_dynamic_const_cast_replacements(&arm.expr, ctx, replacements);
+                collect_dynamic_const_cast_replacements(&arm.result, ctx, replacements);
+            }
+            collect_dynamic_const_cast_replacements(&case_expr.defresult, ctx, replacements);
+        }
+        Expr::Func(func) => {
+            for arg in &func.args {
+                collect_dynamic_const_cast_replacements(arg, ctx, replacements);
+            }
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_dynamic_const_cast_replacements(array, ctx, replacements);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_dynamic_const_cast_replacements(lower, ctx, replacements);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_dynamic_const_cast_replacements(upper, ctx, replacements);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn render_verbose_const_cast(
+    inner: &Expr,
+    ty: crate::backend::parser::SqlType,
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    if ty.type_oid == 0 || !ctx.type_names.contains_key(&ty.type_oid) {
+        return None;
+    }
+    let Expr::Const(value) = inner else {
+        return None;
+    };
+    Some(format!(
+        "{}::{}",
+        render_explain_literal(value),
+        render_type_name(ty, ctx)
+    ))
 }
 
 fn render_type_name(ty: crate::backend::parser::SqlType, ctx: &VerboseExplainContext) -> String {

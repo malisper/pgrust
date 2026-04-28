@@ -47,8 +47,8 @@ use super::copyto::{capture_copy_to_dml_notices, capture_copy_to_dml_returning_r
 use super::explain::{
     apply_runtime_pruning_for_explain_plan, format_buffer_usage, format_explain_lines_with_costs,
     format_explain_lines_with_options, format_explain_plan_with_subplans,
-    format_verbose_explain_plan_json_with_catalog, format_verbose_explain_plan_with_catalog,
-    push_explain_line,
+    format_explain_plan_with_subplans_and_catalog, format_verbose_explain_plan_json_with_catalog,
+    format_verbose_explain_plan_with_catalog, push_explain_line,
 };
 use super::partition::{
     exec_find_partition, exec_setup_partition_tuple_routing, partition_root_oid,
@@ -618,7 +618,9 @@ pub(crate) fn execute_explain(
                     &plan_tree, &subplans, 0, costs, catalog, &mut lines,
                 );
             } else {
-                format_explain_plan_with_subplans(&plan_tree, &subplans, 0, costs, &mut lines);
+                format_explain_plan_with_subplans_and_catalog(
+                    &plan_tree, &subplans, 0, costs, catalog, &mut lines,
+                );
             }
         }
     }

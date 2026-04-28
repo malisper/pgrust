@@ -913,25 +913,20 @@ fn const_value_for_partition_key(
             const_value_for_partition_key(inner, key_type, catalog)
         }
         Expr::Cast(inner, target_type) => {
-            let value = const_value_for_partition_key(inner, None, catalog)?;
-            if partition_prune_should_fold_const_cast(*target_type) {
-                let source_type = expr_sql_type_hint(inner).or_else(|| value.sql_type_hint())?;
-                return catalog
-                    .and_then(|catalog| {
-                        cast_value_with_source_type_catalog_and_config(
-                            value.clone(),
-                            Some(source_type),
-                            *target_type,
-                            Some(catalog),
-                            &DateTimeConfig::default(),
-                        )
-                        .ok()
-                    })
-                    .or_else(|| {
-                        coerce_const_for_partition_key(value, Some(*target_type), catalog)
-                    });
+            let key_type = key_type?;
+            if *target_type != key_type {
+                return None;
             }
-            Some(value)
+            let value = const_value(inner)?;
+            let source_type = expr_sql_type_hint(inner).or_else(|| value.sql_type_hint())?;
+            cast_value_with_source_type_catalog_and_config(
+                value,
+                Some(source_type),
+                key_type,
+                catalog,
+                &DateTimeConfig::default(),
+            )
+            .ok()
         }
         _ => None,
     }

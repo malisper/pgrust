@@ -5258,7 +5258,7 @@ fn render_explain_join_cast(
     format!("({inner})::{}", render_explain_sql_type_name(ty))
 }
 
-fn render_explain_literal(value: &Value) -> String {
+pub(crate) fn render_explain_literal(value: &Value) -> String {
     match value {
         Value::Text(_) | Value::TextRef(_, _) => {
             format!("'{}'", value.as_text().unwrap().replace('\'', "''"))
