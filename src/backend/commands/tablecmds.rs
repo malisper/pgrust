@@ -9879,13 +9879,25 @@ pub fn execute_update_with_waiter(
                                 .write()
                                 .note_relation_update(target.relation_oid);
                             if !stmt.returning.is_empty() {
+                                let old_visible_values = project_update_target_visible_values(
+                                    target,
+                                    &current_old_values,
+                                    current_tid,
+                                    ctx,
+                                )?;
+                                let new_visible_values = project_update_target_visible_values(
+                                    target,
+                                    &triggered_values,
+                                    _new_tid,
+                                    ctx,
+                                )?;
                                 let row = project_returning_row_with_old_new(
                                     &stmt.returning,
-                                    &triggered_values,
-                                    None,
-                                    None,
-                                    Some(&current_old_values),
-                                    Some(&triggered_values),
+                                    &new_visible_values,
+                                    Some(_new_tid),
+                                    Some(target.relation_oid),
+                                    Some(&old_visible_values),
+                                    Some(&new_visible_values),
                                     ctx,
                                 )?;
                                 capture_copy_to_dml_returning_row(row.clone());

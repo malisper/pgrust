@@ -4382,6 +4382,58 @@ fn delete_returning_tableoid_uses_deleted_relation() {
 }
 
 #[test]
+fn update_returning_tableoid_projects_inherited_parent_columns() {
+    let dir = temp_dir("update_returning_tableoid_inherits");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table update_returning_parent (id int4, a int4, junk text, b text)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "alter table update_returning_parent drop column junk")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table update_returning_child (c float4) inherits (update_returning_parent)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into update_returning_child(id, a, b, c) values (10, 20, 'child', 2.2)",
+        )
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "update update_returning_parent
+             set b = b || '_updated'
+             returning tableoid::regclass::text, id, a, b",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("update_returning_child".into()),
+                    Value::Int32(10),
+                    Value::Int32(20),
+                    Value::Text("child_updated".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn dml_returning_old_new_pseudo_rows() {
     let dir = temp_dir("dml_returning_old_new_pseudo_rows");
     let db = Database::open(&dir, 128).unwrap();

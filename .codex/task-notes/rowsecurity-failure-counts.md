@@ -417,3 +417,19 @@ Writable UPDATE CTE bucket:
 - Latest rowsecurity regression result with a 300s file timeout:
   `693/774` matched, `81` mismatches, `1350` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+Inherited UPDATE RETURNING bucket:
+- Normal UPDATE RETURNING now projects updated child rows through the parent
+  visible column layout and passes the physical child `tableoid` metadata to
+  RETURNING expression evaluation.
+- Added focused coverage for inherited UPDATE RETURNING
+  `tableoid::regclass::text` with a dropped parent column.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  update_returning_tableoid_projects_inherited_parent_columns` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `696/774` matched, `78` mismatches, `1310` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.
+- Remaining UPDATE-related gaps are mostly UPDATE FROM joined-input RLS filters,
+  EXPLAIN plan shape/indentation, and notice ordering.
