@@ -47034,6 +47034,35 @@ fn create_function_setof_scalar_works_in_from_and_project_set() {
 }
 
 #[test]
+fn create_plpgsql_function_assigns_composite_array_field_subscript() {
+    let dir = temp_dir("create_plpgsql_function_array_field_subscript");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type plpgsql_array_row as (id int4, ar text[])")
+        .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_arrayassign1() returns text[] language plpgsql as $$
+         declare r plpgsql_array_row;
+         begin
+           r := row(1, array['foo','bar','baz']);
+           r.ar[2] := 'replace';
+           return r.ar;
+         end$$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_arrayassign1()"),
+        vec![vec![Value::PgArray(ArrayValue::from_1d(vec![
+            Value::Text("foo".into()),
+            Value::Text("replace".into()),
+            Value::Text("baz".into()),
+        ]))]]
+    );
+}
+
+#[test]
 fn create_function_supports_void_returns_and_regprocedure_oid_lookup() {
     let dir = temp_dir("create_function_void_regprocedure");
     let db = Database::open(&dir, 64).unwrap();

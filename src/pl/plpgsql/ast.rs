@@ -77,7 +77,20 @@ pub struct RaiseUsingOption {
 pub enum AssignTarget {
     Name(String),
     Parameter(usize),
-    Field { relation: String, field: String },
+    Field {
+        relation: String,
+        field: String,
+    },
+    Indirect {
+        base: Box<AssignTarget>,
+        indirection: Vec<AssignIndirection>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignIndirection {
+    Field(String),
+    Subscript(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

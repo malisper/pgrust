@@ -26,7 +26,11 @@ stmt = { nested_block_stmt | null_stmt | if_stmt | while_stmt | loop_stmt | fore
 nested_block_stmt = { block ~ semi }
 null_stmt = { kw_null ~ semi }
 assign_stmt = { assign_target ~ assign_op ~ expr_until_semi ~ semi }
-assign_target = { positional_param | ident ~ ("." ~ ident)? }
+assign_target = { positional_param | ident ~ assign_indirection* }
+assign_indirection = { field_indirection | subscript_indirection }
+field_indirection = { "." ~ ident }
+subscript_indirection = { "[" ~ subscript_expr ~ "]" }
+subscript_expr = @{ subscript_chunk+ }
 if_stmt = { kw_if ~ expr_until_then ~ kw_then ~ stmt* ~ elsif_clause* ~ else_clause? ~ kw_end ~ kw_if ~ semi }
 while_stmt = { kw_while ~ expr_until_loop ~ kw_loop ~ stmt* ~ kw_end ~ kw_loop ~ semi }
 loop_stmt = { kw_loop ~ stmt* ~ kw_end ~ kw_loop ~ semi }
@@ -162,6 +166,14 @@ expr_raise_param_chunk = _{
     | "(" ~ expr_until_comma_or_using_or_semi? ~ ")"
     | "[" ~ expr_until_comma_or_using_or_semi? ~ "]"
     | !comma ~ !semi ~ !kw_using ~ ANY
+}
+
+subscript_chunk = _{
+    sql_string
+    | quoted_ident
+    | "(" ~ subscript_expr? ~ ")"
+    | "[" ~ subscript_expr? ~ "]"
+    | !"]" ~ ANY
 }
 
 kw_begin = _{ kw_begin_atom }

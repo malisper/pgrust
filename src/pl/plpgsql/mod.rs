@@ -766,9 +766,6 @@ pub fn execute_do_with_gucs(
                 actual: format!("LANGUAGE {}", stmt.language.as_deref().unwrap_or("plpgsql")),
             }));
         }
-        if let Some(err) = arrays_regression_huge_subscript_assignment_error(&stmt.code) {
-            return Err(err);
-        }
         exec::clear_notices();
         let block = parse_block(&stmt.code)?;
         let compiled = compile::compile_do_block(&block, &Catalog::default())?;
@@ -793,28 +790,10 @@ pub(crate) fn execute_do_with_context(
                 actual: format!("LANGUAGE {}", stmt.language.as_deref().unwrap_or("plpgsql")),
             }));
         }
-        if let Some(err) = arrays_regression_huge_subscript_assignment_error(&stmt.code) {
-            return Err(err);
-        }
         exec::clear_notices();
         let block = parse_block(&stmt.code)?;
         let compiled = compile::compile_do_function(&block, catalog)?;
         exec::execute_do_function(&compiled, ctx)
-    })
-}
-
-fn arrays_regression_huge_subscript_assignment_error(code: &str) -> Option<ExecError> {
-    let normalized = code.split_whitespace().collect::<Vec<_>>().join(" ");
-    // :HACK: PL/pgSQL does not yet support array-element assignment targets.
-    // Preserve PostgreSQL's arrays regression behavior for the overflow case
-    // until PL/pgSQL assignments are lowered through the array subscript path.
-    (normalized.contains("[-2147483648:-2147483647]={1,2}")
-        && normalized.contains("a[2147483647] := 42"))
-    .then(|| ExecError::DetailedError {
-        message: "array size exceeds the maximum allowed".into(),
-        detail: None,
-        hint: None,
-        sqlstate: "54000",
     })
 }
 
@@ -1221,6 +1200,29 @@ mod tests {
         });
     }
 
+    fn execute_do_assigns_array_subscript() {
+        run_plpgsql_test("execute_do_assigns_array_subscript", || {
+            let stmt = DoStatement {
+                language: None,
+                code: r#"
+                    declare
+                        vals int4[] := array[1,2,3];
+                    begin
+                        vals[2] := 7;
+                        raise notice '%', vals;
+                    end
+                "#
+                .into(),
+            };
+
+            assert_eq!(execute_do(&stmt).unwrap(), StatementResult::AffectedRows(0));
+            assert_eq!(
+                take_notices(),
+                vec![PlpgsqlNotice::new(RaiseLevel::Notice, "{1,7,3}")]
+            );
+        });
+    }
+
     #[test]
     fn execute_do_runs_continue_in_loop() {
         run_plpgsql_test("execute_do_runs_continue_in_loop", || {
@@ -1246,10 +1248,7 @@ mod tests {
             assert_eq!(result, StatementResult::AffectedRows(0));
             assert_eq!(
                 take_notices(),
-                vec![PlpgsqlNotice {
-                    level: RaiseLevel::Notice,
-                    message: "8".into(),
-                }]
+                vec![PlpgsqlNotice::new(RaiseLevel::Notice, "8")]
             );
         });
     }

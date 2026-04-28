@@ -44,10 +44,11 @@ use crate::pgrust::session::{ByteaOutputFormat, resolve_thread_prepared_statemen
 use super::ast::{CursorDirection, ExceptionCondition, RaiseLevel};
 use super::cache::{PlpgsqlFunctionCacheKey, RelationShape, TransitionTableShape};
 use super::compile::{
-    CompiledBlock, CompiledCursorOpenSource, CompiledExceptionHandler, CompiledExpr,
-    CompiledForQuerySource, CompiledForQueryTarget, CompiledFunction, CompiledSelectIntoTarget,
-    CompiledStmt, CompiledStrictParam, DeclaredCursorParam, FunctionReturnContract, QueryCompareOp,
-    TriggerReturnedRow, compile_event_trigger_function_from_proc, compile_function_from_proc,
+    CompiledAssignIndirection, CompiledBlock, CompiledCursorOpenSource, CompiledExceptionHandler,
+    CompiledExpr, CompiledForQuerySource, CompiledForQueryTarget, CompiledFunction,
+    CompiledIndirectAssignTarget, CompiledSelectIntoTarget, CompiledStmt, CompiledStrictParam,
+    DeclaredCursorParam, FunctionReturnContract, QueryCompareOp, TriggerReturnedRow,
+    compile_event_trigger_function_from_proc, compile_function_from_proc,
     compile_trigger_function_from_proc,
 };
 
@@ -1518,6 +1519,16 @@ fn exec_do_stmt(
             values[*slot] = cast_value(eval_do_expr(expr, values)?, *ty)?;
             Ok(DoControl::Continue)
         }
+        CompiledStmt::AssignIndirect { target, expr } => {
+            let replacement = eval_do_expr(expr, values)?;
+            let current = values[target.slot].clone();
+            let indirection = eval_assign_indirection_do(target, values)?;
+            values[target.slot] = cast_value(
+                assign_indirect_value(current, target.ty, &indirection, replacement, None)?,
+                target.ty,
+            )?;
+            Ok(DoControl::Continue)
+        }
         CompiledStmt::Null => Ok(DoControl::Continue),
         CompiledStmt::If {
             branches,
@@ -1933,6 +1944,15 @@ fn exec_function_stmt(
             let value = eval_function_expr(expr, &state.values, ctx)?;
             state.values[*slot] =
                 cast_function_value(value, compiled_expr_sql_type_hint(expr), *ty, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::AssignIndirect { target, expr } => {
+            let replacement = eval_function_expr(expr, &state.values, ctx)?;
+            let current = state.values[target.slot].clone();
+            let indirection = eval_assign_indirection_function(target, &state.values, ctx)?;
+            let updated =
+                assign_indirect_value(current, target.ty, &indirection, replacement, Some(&*ctx))?;
+            state.values[target.slot] = cast_function_value(updated, None, target.ty, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::Null => Ok(FunctionControl::Continue),
@@ -4251,6 +4271,322 @@ fn record_descriptor_for_query_target(
     Ok(anonymous_record_descriptor_for_columns(columns))
 }
 
+#[derive(Debug, Clone)]
+enum RuntimeAssignIndirection {
+    Field(String),
+    Subscript(Value),
+}
+
+fn eval_assign_indirection_do(
+    target: &CompiledIndirectAssignTarget,
+    values: &[Value],
+) -> Result<Vec<RuntimeAssignIndirection>, ExecError> {
+    target
+        .indirection
+        .iter()
+        .map(|step| match step {
+            CompiledAssignIndirection::Field(field) => {
+                Ok(RuntimeAssignIndirection::Field(field.clone()))
+            }
+            CompiledAssignIndirection::Subscript(expr) => Ok(RuntimeAssignIndirection::Subscript(
+                eval_do_expr(expr, values)?,
+            )),
+        })
+        .collect()
+}
+
+fn eval_assign_indirection_function(
+    target: &CompiledIndirectAssignTarget,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<RuntimeAssignIndirection>, ExecError> {
+    target
+        .indirection
+        .iter()
+        .map(|step| match step {
+            CompiledAssignIndirection::Field(field) => {
+                Ok(RuntimeAssignIndirection::Field(field.clone()))
+            }
+            CompiledAssignIndirection::Subscript(expr) => Ok(RuntimeAssignIndirection::Subscript(
+                eval_function_expr(expr, values, ctx)?,
+            )),
+        })
+        .collect()
+}
+
+fn assign_indirect_value(
+    current: Value,
+    current_ty: SqlType,
+    indirection: &[RuntimeAssignIndirection],
+    replacement: Value,
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let Some((step, rest)) = indirection.split_first() else {
+        return cast_value(replacement, current_ty);
+    };
+    match step {
+        RuntimeAssignIndirection::Field(field) => {
+            let mut record = assignment_record_value_for_field(current, current_ty, field, ctx)?;
+            let (field_index, field_ty) = record
+                .descriptor
+                .fields
+                .iter()
+                .enumerate()
+                .find(|(_, candidate)| candidate.name.eq_ignore_ascii_case(field))
+                .map(|(index, candidate)| (index, candidate.sql_type))
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("record has no field \"{field}\""),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42703",
+                })?;
+            record.fields[field_index] = assign_indirect_value(
+                record.fields[field_index].clone(),
+                field_ty,
+                rest,
+                replacement,
+                ctx,
+            )?;
+            Ok(Value::Record(record))
+        }
+        RuntimeAssignIndirection::Subscript(index_value) => {
+            let index = assignment_subscript_index(index_value)?;
+            assign_array_index(current, current_ty, index, rest, replacement, ctx)
+        }
+    }
+}
+
+fn assignment_record_value_for_field(
+    current: Value,
+    sql_type: SqlType,
+    field: &str,
+    ctx: Option<&ExecutorContext>,
+) -> Result<RecordValue, ExecError> {
+    match current {
+        Value::Record(record) => {
+            if record
+                .descriptor
+                .fields
+                .iter()
+                .any(|candidate| candidate.name.eq_ignore_ascii_case(field))
+            {
+                return Ok(record);
+            }
+            if let Ok(descriptor) = assignment_record_descriptor(sql_type, ctx)
+                && descriptor.fields.len() == record.fields.len()
+            {
+                return Ok(RecordValue::from_descriptor(descriptor, record.fields));
+            }
+            Ok(record)
+        }
+        Value::Null => {
+            let descriptor = assignment_record_descriptor(sql_type, ctx)?;
+            Ok(RecordValue::from_descriptor(
+                descriptor.clone(),
+                vec![Value::Null; descriptor.fields.len()],
+            ))
+        }
+        _ => Err(ExecError::DetailedError {
+            message: format!("cannot assign to field \"{field}\" of non-record value"),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        }),
+    }
+}
+
+fn assignment_record_descriptor(
+    sql_type: SqlType,
+    ctx: Option<&ExecutorContext>,
+) -> Result<RecordDescriptor, ExecError> {
+    if matches!(sql_type.kind, SqlTypeKind::Composite) && sql_type.typrelid != 0 {
+        let catalog =
+            ctx.and_then(|ctx| ctx.catalog.as_deref())
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: "named composite assignment requires catalog context".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                })?;
+        let relation = catalog
+            .lookup_relation_by_oid(sql_type.typrelid)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("unknown composite relation oid {}", sql_type.typrelid),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            })?;
+        return Ok(RecordDescriptor::named(
+            sql_type.type_oid,
+            sql_type.typrelid,
+            sql_type.typmod,
+            relation
+                .desc
+                .columns
+                .iter()
+                .filter(|column| !column.dropped)
+                .map(|column| (column.name.clone(), column.sql_type))
+                .collect(),
+        ));
+    }
+
+    if matches!(sql_type.kind, SqlTypeKind::Record)
+        && sql_type.typmod > 0
+        && let Some(descriptor) = lookup_anonymous_record_descriptor(sql_type.typmod)
+    {
+        return Ok(descriptor);
+    }
+
+    Err(ExecError::DetailedError {
+        message: format!(
+            "cannot assign to field of type {} because it is not a composite value",
+            sql_type_name(sql_type)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42804",
+    })
+}
+
+fn assignment_subscript_index(value: &Value) -> Result<i32, ExecError> {
+    match value {
+        Value::Int16(value) => Ok(i32::from(*value)),
+        Value::Int32(value) => Ok(*value),
+        Value::Int64(value) => i32::try_from(*value).map_err(|_| array_assignment_limit_error()),
+        Value::Null => Err(ExecError::InvalidStorageValue {
+            column: "<array>".into(),
+            details: "array subscript in assignment must not be null".into(),
+        }),
+        other => Err(ExecError::TypeMismatch {
+            op: "array assignment",
+            left: other.clone(),
+            right: Value::Int32(1),
+        }),
+    }
+}
+
+fn assign_array_index(
+    current: Value,
+    array_ty: SqlType,
+    index: i32,
+    rest: &[RuntimeAssignIndirection],
+    replacement: Value,
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    if !array_ty.is_array && !matches!(current, Value::Array(_) | Value::PgArray(_) | Value::Null) {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "cannot subscript type {} because it does not support subscripting",
+                sql_type_name(array_ty)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+
+    let element_ty = assignment_array_element_type(array_ty);
+    let (mut lower_bound, mut elements, element_type_oid, prefer_pg_array) = match current {
+        Value::PgArray(array) => (
+            array.lower_bound(0).unwrap_or(index),
+            array.elements,
+            array.element_type_oid,
+            true,
+        ),
+        Value::Array(elements) => (1, elements, None, false),
+        Value::Null => (index, Vec::new(), None, true),
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "array assignment",
+                left: other,
+                right: replacement,
+            });
+        }
+    };
+
+    if elements.is_empty() {
+        lower_bound = index;
+    }
+    if index < lower_bound {
+        let prepend = usize::try_from(i64::from(lower_bound) - i64::from(index))
+            .map_err(|_| array_assignment_limit_error())?;
+        checked_assignment_array_item_count(
+            elements
+                .len()
+                .checked_add(prepend)
+                .ok_or_else(array_assignment_limit_error)?,
+        )?;
+        let mut expanded = vec![Value::Null; prepend];
+        expanded.extend(elements);
+        elements = expanded;
+        lower_bound = index;
+    }
+    let upper_bound = lower_bound
+        .checked_add(i32::try_from(elements.len()).map_err(|_| array_assignment_limit_error())?)
+        .and_then(|upper| upper.checked_sub(1))
+        .ok_or_else(array_assignment_limit_error)?;
+    if index > upper_bound {
+        let append = usize::try_from(i64::from(index) - i64::from(upper_bound))
+            .map_err(|_| array_assignment_limit_error())?;
+        let new_len = elements
+            .len()
+            .checked_add(append)
+            .ok_or_else(array_assignment_limit_error)?;
+        checked_assignment_array_item_count(new_len)?;
+        elements.extend(std::iter::repeat_n(Value::Null, append));
+    }
+    let item_index = usize::try_from(i64::from(index) - i64::from(lower_bound))
+        .map_err(|_| array_assignment_limit_error())?;
+    elements[item_index] = assign_indirect_value(
+        elements[item_index].clone(),
+        element_ty,
+        rest,
+        replacement,
+        ctx,
+    )?;
+
+    if prefer_pg_array || lower_bound != 1 {
+        let mut array = ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound,
+                length: elements.len(),
+            }],
+            elements,
+        );
+        array.element_type_oid = element_type_oid;
+        Ok(Value::PgArray(array))
+    } else {
+        Ok(Value::Array(elements))
+    }
+}
+
+const MAX_ASSIGNMENT_ARRAY_ITEMS: usize = i32::MAX as usize;
+
+fn checked_assignment_array_item_count(count: usize) -> Result<usize, ExecError> {
+    if count > MAX_ASSIGNMENT_ARRAY_ITEMS {
+        Err(array_assignment_limit_error())
+    } else {
+        Ok(count)
+    }
+}
+
+fn assignment_array_element_type(array_ty: SqlType) -> SqlType {
+    let mut element_ty = array_ty.element_type();
+    if array_ty.is_array {
+        element_ty.type_oid = 0;
+    }
+    element_ty
+}
+
+fn array_assignment_limit_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "array size exceeds the maximum allowed".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "54000",
+    }
+}
+
 fn substitute_dynamic_query_params(
     sql: &str,
     params: &[Value],
@@ -5389,7 +5725,7 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
     match stmt {
         CompiledStmt::WithLine { stmt, .. } => stmt_context_action(stmt),
         CompiledStmt::Block(_) => "statement block",
-        CompiledStmt::Assign { .. } => "assignment",
+        CompiledStmt::Assign { .. } | CompiledStmt::AssignIndirect { .. } => "assignment",
         CompiledStmt::Null => "NULL",
         CompiledStmt::If { .. } => "IF",
         CompiledStmt::While { .. } => "WHILE",

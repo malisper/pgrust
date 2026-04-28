@@ -8,9 +8,9 @@ use crate::backend::parser::{
 use crate::include::catalog::RECORD_TYPE_OID;
 
 use super::ast::{
-    AliasDecl, AliasTarget, AssignTarget, Block, CursorArg, CursorDecl, CursorDirection,
-    CursorParamDecl, Decl, ExceptionCondition, ExceptionHandler, ForQuerySource, ForTarget,
-    OpenCursorSource, RaiseCondition, RaiseLevel, RaiseUsingOption, Stmt, VarDecl,
+    AliasDecl, AliasTarget, AssignIndirection, AssignTarget, Block, CursorArg, CursorDecl,
+    CursorDirection, CursorParamDecl, Decl, ExceptionCondition, ExceptionHandler, ForQuerySource,
+    ForTarget, OpenCursorSource, RaiseCondition, RaiseLevel, RaiseUsingOption, Stmt, VarDecl,
 };
 
 pub fn parse_block(sql: &str) -> Result<Block, ParseError> {
@@ -485,32 +485,63 @@ fn build_assign_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
 
 fn build_assign_target(pair: Pair<'_, Rule>) -> Result<AssignTarget, ParseError> {
     let raw = pair.as_str().to_string();
-    let parts = pair
-        .into_inner()
-        .filter_map(|part| match part.as_rule() {
-            Rule::ident => Some(build_ident(part)),
-            Rule::positional_param => Some(part.as_str().to_string()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    match parts.as_slice() {
-        [param] if param.starts_with('$') => {
-            let index = param[1..]
+    let mut inner = pair.into_inner();
+    let first = inner.next().ok_or(ParseError::UnexpectedEof)?;
+    if first.as_rule() == Rule::positional_param {
+        let index =
+            first.as_str()[1..]
                 .parse::<usize>()
                 .map_err(|_| ParseError::UnexpectedToken {
                     expected: "positional parameter assignment target",
                     actual: raw.clone(),
                 })?;
-            Ok(AssignTarget::Parameter(index))
-        }
-        [name] => Ok(AssignTarget::Name(name.clone())),
-        [relation, field] => Ok(AssignTarget::Field {
-            relation: relation.clone(),
-            field: field.clone(),
-        }),
-        _ => Err(ParseError::UnexpectedToken {
+        return Ok(AssignTarget::Parameter(index));
+    }
+    if first.as_rule() != Rule::ident {
+        return Err(ParseError::UnexpectedToken {
             expected: "assignment target",
             actual: raw,
+        });
+    }
+    let base_name = build_ident(first);
+    let mut indirection = Vec::new();
+    for part in inner {
+        let child = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+        match child.as_rule() {
+            Rule::field_indirection => {
+                let field = child
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::ident)
+                    .map(build_ident)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                indirection.push(AssignIndirection::Field(field));
+            }
+            Rule::subscript_indirection => {
+                let expr = child
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::subscript_expr)
+                    .map(|part| part.as_str().trim().to_string())
+                    .filter(|expr| !expr.is_empty())
+                    .ok_or(ParseError::UnexpectedEof)?;
+                indirection.push(AssignIndirection::Subscript(expr));
+            }
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "assignment target indirection",
+                    actual: child.as_str().into(),
+                });
+            }
+        }
+    }
+    match indirection.as_slice() {
+        [] => Ok(AssignTarget::Name(base_name)),
+        [AssignIndirection::Field(field)] => Ok(AssignTarget::Field {
+            relation: base_name,
+            field: field.clone(),
+        }),
+        _ => Ok(AssignTarget::Indirect {
+            base: Box::new(AssignTarget::Name(base_name)),
+            indirection,
         }),
     }
 }
@@ -2307,6 +2338,44 @@ mod tests {
         };
         assert_eq!(target, &AssignTarget::Parameter(1));
         assert_eq!(expr, "-1");
+    }
+
+    #[test]
+    fn parse_subscripted_assignment_target() {
+        let block = parse_block(
+            "
+            begin
+                r.ar[2] := 'replace';
+                res[array_upper(res, 1)] := 3;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::Assign { target, .. } = unline(&block.statements[0]) else {
+            panic!("expected assignment statement");
+        };
+        assert_eq!(
+            target,
+            &AssignTarget::Indirect {
+                base: Box::new(AssignTarget::Name("r".into())),
+                indirection: vec![
+                    AssignIndirection::Field("ar".into()),
+                    AssignIndirection::Subscript("2".into()),
+                ],
+            }
+        );
+
+        let Stmt::Assign { target, .. } = unline(&block.statements[1]) else {
+            panic!("expected assignment statement");
+        };
+        assert_eq!(
+            target,
+            &AssignTarget::Indirect {
+                base: Box::new(AssignTarget::Name("res".into())),
+                indirection: vec![AssignIndirection::Subscript("array_upper(res, 1)".into())],
+            }
+        );
     }
 
     #[test]

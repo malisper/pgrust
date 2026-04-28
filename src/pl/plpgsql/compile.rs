@@ -25,9 +25,9 @@ use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, Var, user_attrno};
 
 use super::ast::{
-    AliasTarget, AssignTarget, Block, CursorArg, CursorDecl, CursorDirection, Decl,
-    ExceptionCondition, ForQuerySource, ForTarget, OpenCursorSource, RaiseCondition, RaiseLevel,
-    RaiseUsingOption, Stmt, VarDecl,
+    AliasTarget, AssignIndirection, AssignTarget, Block, CursorArg, CursorDecl, CursorDirection,
+    Decl, ExceptionCondition, ForQuerySource, ForTarget, OpenCursorSource, RaiseCondition,
+    RaiseLevel, RaiseUsingOption, Stmt, VarDecl,
 };
 use super::gram::parse_block;
 
@@ -121,6 +121,19 @@ pub(crate) enum QueryCompareOp {
 pub(crate) struct CompiledSelectIntoTarget {
     pub(crate) slot: usize,
     pub(crate) ty: SqlType,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledIndirectAssignTarget {
+    pub(crate) slot: usize,
+    pub(crate) ty: SqlType,
+    pub(crate) indirection: Vec<CompiledAssignIndirection>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CompiledAssignIndirection {
+    Field(String),
+    Subscript(CompiledExpr),
 }
 
 #[derive(Debug, Clone)]
@@ -253,6 +266,10 @@ pub(crate) enum CompiledStmt {
     Assign {
         slot: usize,
         ty: SqlType,
+        expr: CompiledExpr,
+    },
+    AssignIndirect {
+        target: CompiledIndirectAssignTarget,
         expr: CompiledExpr,
     },
     Null,
@@ -1321,11 +1338,19 @@ fn compile_stmt(
             CompiledStmt::Block(compile_block(block, catalog, env, return_contract)?)
         }
         Stmt::Assign { target, expr } => {
-            let (slot, ty) = resolve_assign_target(target, env)?;
-            CompiledStmt::Assign {
-                slot,
-                ty,
-                expr: compile_assignment_expr_text(expr, catalog, env)?,
+            match compile_indirect_assign_target(target, catalog, env)? {
+                Some(target) => CompiledStmt::AssignIndirect {
+                    target,
+                    expr: compile_assignment_expr_text(expr, catalog, env)?,
+                },
+                None => {
+                    let (slot, ty) = resolve_assign_target(target, env)?;
+                    CompiledStmt::Assign {
+                        slot,
+                        ty,
+                        expr: compile_assignment_expr_text(expr, catalog, env)?,
+                    }
+                }
             }
         }
         Stmt::Null => CompiledStmt::Null,
@@ -3431,17 +3456,49 @@ fn compile_expr_sql(
     env: &CompileEnv,
 ) -> Result<CompiledExpr, ParseError> {
     let parsed = normalize_plpgsql_expr(parse_expr(sql)?, env);
-    let (expr, sql_type) = bind_scalar_expr_in_named_slot_scope(
+    let (expr, sql_type) = match bind_scalar_expr_in_named_slot_scope(
         &parsed,
         &env.relation_slot_scopes(),
         &env.slot_columns(),
         catalog,
         &env.local_ctes,
-    )?;
+    ) {
+        Ok(bound) => bound,
+        Err(err) => {
+            if let Some(expr) = bind_dynamic_record_field_expr(&parsed, env) {
+                (expr, SqlType::new(SqlTypeKind::Text))
+            } else {
+                return Err(err);
+            }
+        }
+    };
     let _ = sql_type;
     let mut subplans = Vec::new();
     let expr = finalize_expr_subqueries(expr, catalog, &mut subplans);
     Ok(CompiledExpr::Scalar { expr, subplans })
+}
+
+fn bind_dynamic_record_field_expr(expr: &SqlExpr, env: &CompileEnv) -> Option<Expr> {
+    let SqlExpr::FieldSelect { expr, field } = expr else {
+        return None;
+    };
+    let SqlExpr::Column(name) = expr.as_ref() else {
+        return None;
+    };
+    let var = env.get_var(name)?;
+    if !matches!(var.ty.kind, SqlTypeKind::Record) || var.ty.typmod > 0 {
+        return None;
+    }
+    Some(Expr::FieldSelect {
+        expr: Box::new(Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(var.slot),
+            varlevelsup: 0,
+            vartype: var.ty,
+        })),
+        field: field.clone(),
+        field_type: SqlType::new(SqlTypeKind::Text),
+    })
 }
 
 fn compile_condition_text(
@@ -4670,7 +4727,35 @@ fn resolve_assign_target(
             .get_relation_field(relation, field)
             .map(|column| (column.slot, column.sql_type))
             .ok_or_else(|| ParseError::UnknownColumn(format!("{relation}.{field}"))),
+        AssignTarget::Indirect { .. } => Err(ParseError::FeatureNotSupported(
+            "indirect assignment target is only supported for assignment statements".into(),
+        )),
     }
+}
+
+fn compile_indirect_assign_target(
+    target: &AssignTarget,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<Option<CompiledIndirectAssignTarget>, ParseError> {
+    let AssignTarget::Indirect { base, indirection } = target else {
+        return Ok(None);
+    };
+    let (slot, ty) = resolve_assign_target(base, env)?;
+    let indirection = indirection
+        .iter()
+        .map(|step| match step {
+            AssignIndirection::Field(field) => Ok(CompiledAssignIndirection::Field(field.clone())),
+            AssignIndirection::Subscript(expr) => Ok(CompiledAssignIndirection::Subscript(
+                compile_expr_text(expr, catalog, env)?,
+            )),
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    Ok(Some(CompiledIndirectAssignTarget {
+        slot,
+        ty,
+        indirection,
+    }))
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
