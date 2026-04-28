@@ -12,7 +12,7 @@
 
 [**Original launch write-up.**](https://malisper.me/pgrust-rebuilding-postgres-in-rust-with-ai)
 
-[**Latest update: 67% Postgres compatibility and accelerating.**](TBD_BLOG_URL)
+[**Latest update: 67% Postgres compatibility and accelerating.**](https://malisper.me/pgrust-update-at-67-postgres-compatibility-and-accelerating/)
 
 ## **Why?**
 
