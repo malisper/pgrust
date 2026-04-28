@@ -38527,6 +38527,38 @@ fn copy_to_stdout_renders_header_and_csv_rows() {
 }
 
 #[test]
+fn copy_relation_to_stdout_skips_inherited_children() {
+    let base = temp_dir("copy_to_inherits_only_parent");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table copy_parent (a int4, b text)")
+        .unwrap();
+    session
+        .execute(&db, "create table copy_child () inherits (copy_parent)")
+        .unwrap();
+    session
+        .execute(&db, "insert into copy_parent values (1, 'parent')")
+        .unwrap();
+    session
+        .execute(&db, "insert into copy_child values (2, 'child')")
+        .unwrap();
+    let copy =
+        crate::pgrust::session::parse_copy_command("copy copy_parent to stdout with delimiter ','")
+            .unwrap()
+            .unwrap();
+
+    match session.execute_copy_command(&db, &copy).unwrap() {
+        crate::pgrust::session::CopyExecutionResult::Output { data, rows } => {
+            assert_eq!(rows, 1);
+            assert_eq!(String::from_utf8(data).unwrap(), "1,parent\n");
+        }
+        other => panic!("expected COPY output, got {other:?}"),
+    }
+}
+
+#[test]
 fn copy_to_rejects_header_match() {
     let base = temp_dir("copy_to_header_match");
     let db = Database::open(&base, 16).unwrap();

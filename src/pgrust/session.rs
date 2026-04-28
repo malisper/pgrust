@@ -12493,25 +12493,25 @@ impl Session {
             }
             CopyRelation::Table { name, columns } => {
                 let catalog = self.catalog_lookup(db);
-                if let Some(entry) = catalog.lookup_any_relation(name)
-                    && entry.relkind == 'm'
-                    && !entry.relispopulated
-                {
-                    return Err(ExecError::DetailedError {
-                        message: format!(
-                            "cannot copy from unpopulated materialized view \"{name}\""
-                        ),
-                        detail: None,
-                        hint: Some("Use the REFRESH MATERIALIZED VIEW command.".into()),
-                        sqlstate: "55000",
-                    });
+                let relation = catalog.lookup_any_relation(name);
+                if let Some(entry) = relation.as_ref() {
+                    if entry.relkind == 'm' && !entry.relispopulated {
+                        return Err(ExecError::DetailedError {
+                            message: format!(
+                                "cannot copy from unpopulated materialized view \"{name}\""
+                            ),
+                            detail: None,
+                            hint: Some("Use the REFRESH MATERIALIZED VIEW command.".into()),
+                            sqlstate: "55000",
+                        });
+                    }
                 }
                 self.ensure_copy_to_relation_source(db, name, columns.as_deref())?;
-                let select_list = columns
-                    .as_ref()
-                    .map(|columns| columns.join(", "))
-                    .unwrap_or_else(|| "*".into());
-                format!("select {select_list} from {name}")
+                relation_copy_to_query_sql(
+                    name,
+                    columns.as_deref(),
+                    relation.is_some_and(|entry| entry.relkind == 'r'),
+                )
             }
         };
         match self.execute(db, &query)? {
@@ -13393,7 +13393,11 @@ impl Session {
                 columns,
             } => {
                 self.ensure_copy_to_relation_source(db, table_name, columns.as_deref())?;
-                relation_copy_to_query_sql(table_name, columns.as_deref())
+                let only = self
+                    .catalog_lookup(db)
+                    .lookup_any_relation(table_name)
+                    .is_some_and(|relation| relation.relkind == 'r');
+                relation_copy_to_query_sql(table_name, columns.as_deref(), only)
             }
             CopyToSource::Query { statement, sql } => {
                 self.validate_copy_to_query(db, statement, sql)?;
@@ -13626,7 +13630,7 @@ impl Session {
     }
 }
 
-fn relation_copy_to_query_sql(table_name: &str, columns: Option<&[String]>) -> String {
+fn relation_copy_to_query_sql(table_name: &str, columns: Option<&[String]>, only: bool) -> String {
     let target = columns
         .filter(|columns| !columns.is_empty())
         .map(|columns| {
@@ -13637,8 +13641,9 @@ fn relation_copy_to_query_sql(table_name: &str, columns: Option<&[String]>) -> S
                 .join(", ")
         })
         .unwrap_or_else(|| "*".into());
+    let only = if only { "only " } else { "" };
     format!(
-        "select {target} from {}",
+        "select {target} from {only}{}",
         quote_copy_qualified_name(table_name)
     )
 }

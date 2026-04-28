@@ -266,3 +266,16 @@ DELETE RETURNING tableoid bucket:
 - Latest rowsecurity regression result with a 300s file timeout:
   `684/774` matched, `90` mismatches, `1752` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+COPY TO inherited-parent bucket:
+- Relation-form `COPY ... TO` now lowers heap table sources to
+  `SELECT ... FROM ONLY ...`, matching PostgreSQL's behavior of copying just
+  the named relation and not inherited children. Materialized-view COPY keeps
+  the non-ONLY form.
+- Added focused COPY tests for inherited parents and populated materialized
+  views.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `689/774` matched, `85` mismatches, `1718` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.
