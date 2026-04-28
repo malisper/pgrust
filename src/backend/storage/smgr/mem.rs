@@ -179,6 +179,21 @@ impl StorageManager for MemStorageManager {
         Ok(())
     }
 
+    fn reserve_block(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        block: BlockNumber,
+        _skip_fsync: bool,
+    ) -> Result<(), SmgrError> {
+        let pages = self.fork_pages_mut(rel, fork)?;
+        if block != pages.len() as BlockNumber {
+            return Err(SmgrError::BlockOutOfRange { rel, fork, block });
+        }
+        pages.push([0u8; BLCKSZ]);
+        Ok(())
+    }
+
     fn nblocks(&mut self, rel: RelFileLocator, fork: ForkNumber) -> Result<BlockNumber, SmgrError> {
         Ok(self.fork_pages(rel, fork)?.len() as BlockNumber)
     }

@@ -647,6 +647,7 @@ impl CatalogStore {
             indimmediate: true,
             btree_options: None,
             brin_options: None,
+            gist_options: None,
             gin_options: None,
             hash_options: None,
         };
@@ -4562,6 +4563,7 @@ impl CatalogStore {
             indimmediate: true,
             btree_options: None,
             brin_options: None,
+            gist_options: None,
             gin_options: None,
             hash_options: None,
         };
@@ -8844,6 +8846,7 @@ fn build_index_entry_with_relkind(
                 .map(str::to_string),
             btree_options: resolved_options.btree_options,
             brin_options: resolved_options.brin_options.clone(),
+            gist_options: resolved_options.gist_options,
             gin_options: resolved_options.gin_options.clone(),
             hash_options: resolved_options.hash_options,
         }),
@@ -8948,6 +8951,7 @@ fn build_toast_catalog_changes(
             indimmediate: true,
             btree_options: None,
             brin_options: None,
+            gist_options: None,
             gin_options: None,
             hash_options: None,
         },
@@ -9041,6 +9045,8 @@ fn default_index_build_options_for_relation(
         btree_options: None,
         brin_options: (am_oid == crate::include::catalog::BRIN_AM_OID)
             .then(crate::include::access::brin::BrinOptions::default),
+        gist_options: (am_oid == crate::include::catalog::GIST_AM_OID)
+            .then(crate::include::access::gist::GistOptions::default),
         gin_options: (am_oid == crate::include::catalog::GIN_AM_OID)
             .then(crate::include::access::gin::GinOptions::default),
         hash_options: (am_oid == crate::include::catalog::HASH_AM_OID)
@@ -10726,6 +10732,7 @@ fn catalog_entry_from_relation_row(
             indpred: index.indpred.clone(),
             btree_options: index.btree_options,
             brin_options: index.brin_options.clone(),
+            gist_options: index.gist_options,
             gin_options: index.gin_options.clone(),
             hash_options: index.hash_options,
         }),
@@ -10776,6 +10783,7 @@ fn catalog_index_meta_from_index_row_for_drop(
         indpred: index.indpred,
         btree_options: None,
         brin_options: None,
+        gist_options: None,
         gin_options: None,
         hash_options: None,
     }
@@ -11329,6 +11337,7 @@ fn catalog_entry_from_visible_relation(
             indpred: index.indpred.clone(),
             btree_options: index.btree_options,
             brin_options: index.brin_options.clone(),
+            gist_options: index.gist_options,
             gin_options: index.gin_options.clone(),
             hash_options: index.hash_options,
         }),
@@ -11388,6 +11397,7 @@ fn catalog_entry_from_relation(relation: &RelCacheEntry) -> CatalogEntry {
             indpred: index.indpred.clone(),
             btree_options: index.btree_options,
             brin_options: index.brin_options.clone(),
+            gist_options: index.gist_options,
             gin_options: index.gin_options.clone(),
             hash_options: index.hash_options,
         }),

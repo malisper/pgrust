@@ -183,6 +183,19 @@ impl StorageManager for AnyStorageManager {
         }
     }
 
+    fn reserve_block(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        block: BlockNumber,
+        skip_fsync: bool,
+    ) -> Result<(), SmgrError> {
+        match self {
+            Self::Md(smgr) => smgr.reserve_block(rel, fork, block, skip_fsync),
+            Self::Mem(smgr) => smgr.reserve_block(rel, fork, block, skip_fsync),
+        }
+    }
+
     fn nblocks(&mut self, rel: RelFileLocator, fork: ForkNumber) -> Result<BlockNumber, SmgrError> {
         match self {
             Self::Md(smgr) => smgr.nblocks(rel, fork),

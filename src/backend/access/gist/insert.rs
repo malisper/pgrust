@@ -6,7 +6,8 @@ use crate::backend::storage::page::bufpage::PageError;
 use crate::include::access::amapi::IndexInsertContext;
 use crate::include::access::gist::{
     F_FOLLOW_RIGHT, F_LEAF, GIST_INVALID_BLOCKNO, GIST_ROOT_BLKNO, GistPageError,
-    gist_downlink_block, gist_page_get_opaque, gist_page_items, gist_page_replace_items,
+    gist_downlink_block, gist_page_append_tuple, gist_page_get_opaque, gist_page_items,
+    gist_page_replace_items,
 };
 use crate::include::access::itup::IndexTupleData;
 use crate::include::nodes::datum::Value;
@@ -14,8 +15,9 @@ use crate::include::nodes::primnodes::RelationDesc;
 use std::sync::OnceLock;
 
 use super::page::{
-    GistLoggedPage, allocate_new_block, clear_follow_right, ensure_empty_gist, init_opaque,
-    page_lsn, read_buffered_page, relation_nblocks, write_buffered_page, write_logged_pages,
+    GistLoggedPage, GistPageWriteMode, allocate_new_block_with_mode, clear_follow_right_with_mode,
+    ensure_empty_gist, init_opaque, page_lsn, read_buffered_page, relation_nblocks,
+    write_buffered_page_with_mode, write_logged_pages_with_mode,
 };
 use super::state::{GistPageSplit, GistState};
 use super::tuple::{decode_tuple_values, make_downlink_tuple, make_leaf_tuple, tuple_storage_size};
@@ -43,17 +45,24 @@ pub(super) struct GistTupleEntry {
 }
 
 #[derive(Debug, Clone)]
-struct ChildSplit {
-    right_block: u32,
-    left_union: Vec<Value>,
-    right_union: Vec<Value>,
+pub(super) struct ChildSplit {
+    pub(super) right_block: u32,
+    pub(super) left_union: Vec<Value>,
+    pub(super) right_union: Vec<Value>,
 }
 
 #[derive(Debug, Clone)]
-struct InsertOutcome {
-    union: Vec<Value>,
-    split: Option<ChildSplit>,
-    write_lsn: u64,
+pub(super) struct RootSplit {
+    pub(super) left_block: u32,
+    pub(super) right_block: u32,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct InsertOutcome {
+    pub(super) union: Vec<Value>,
+    pub(super) split: Option<ChildSplit>,
+    pub(super) root_split: Option<RootSplit>,
+    pub(super) write_lsn: u64,
 }
 
 pub(crate) fn gistinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
@@ -80,7 +89,9 @@ pub(crate) fn gistinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError>
         &state,
         GIST_ROOT_BLKNO,
         vec![new_entry],
+        None,
         true,
+        GistPageWriteMode::Normal,
     )?;
     Ok(true)
 }
@@ -118,6 +129,28 @@ pub(super) fn insert_build_entries(
     state: &GistState,
     entries: Vec<GistTupleEntry>,
 ) -> Result<(), CatalogError> {
+    insert_build_entries_with_mode(
+        pool,
+        client_id,
+        xid,
+        rel,
+        desc,
+        state,
+        entries,
+        GistPageWriteMode::BuildNoExtend,
+    )
+}
+
+pub(super) fn insert_build_entries_with_mode(
+    pool: &crate::BufferPool<crate::SmgrStorageBackend>,
+    client_id: crate::ClientId,
+    xid: u32,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    desc: &RelationDesc,
+    state: &GistState,
+    entries: Vec<GistTupleEntry>,
+    mode: GistPageWriteMode,
+) -> Result<(), CatalogError> {
     if entries.is_empty() {
         return Ok(());
     }
@@ -131,12 +164,14 @@ pub(super) fn insert_build_entries(
         state,
         GIST_ROOT_BLKNO,
         entries,
+        None,
         true,
+        mode,
     )?;
     Ok(())
 }
 
-fn load_page_entries(
+pub(super) fn load_page_entries(
     desc: &RelationDesc,
     page: &[u8; crate::backend::storage::smgr::BLCKSZ],
 ) -> Result<Vec<GistTupleEntry>, CatalogError> {
@@ -150,7 +185,7 @@ fn load_page_entries(
         .collect()
 }
 
-fn choose_child(
+pub(super) fn choose_child(
     desc: &RelationDesc,
     state: &GistState,
     items: &[GistTupleEntry],
@@ -189,6 +224,65 @@ fn penalties_better(left: &[f32], right: &[f32]) -> bool {
     false
 }
 
+fn merge_appended_values(
+    state: &GistState,
+    old_union: &[Value],
+    new_entries: &[GistTupleEntry],
+) -> Result<Vec<Value>, CatalogError> {
+    let mut union = old_union.to_vec();
+    for entry in new_entries {
+        union = state.merge_values(&union, &entry.values)?;
+    }
+    Ok(union)
+}
+
+fn try_append_leaf_entries(
+    pool: &crate::BufferPool<crate::SmgrStorageBackend>,
+    client_id: crate::ClientId,
+    xid: u32,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    page: &[u8; crate::backend::storage::smgr::BLCKSZ],
+    state: &GistState,
+    block: u32,
+    old_union: Option<&[Value]>,
+    new_entries: &[GistTupleEntry],
+    mode: GistPageWriteMode,
+) -> Result<Option<InsertOutcome>, CatalogError> {
+    let Some(old_union) = old_union else {
+        return Ok(None);
+    };
+    let mut appended = *page;
+    for entry in new_entries {
+        match gist_page_append_tuple(&mut appended, &entry.tuple) {
+            Ok(_) => {}
+            Err(crate::include::access::gist::GistPageError::Page(PageError::NoSpace)) => {
+                return Ok(None);
+            }
+            Err(err) => {
+                return Err(CatalogError::Io(format!(
+                    "gist leaf append failed: {err:?}"
+                )));
+            }
+        }
+    }
+    let write_lsn = write_buffered_page_with_mode(
+        pool,
+        client_id,
+        xid,
+        rel,
+        block,
+        &appended,
+        XLOG_GIST_INSERT,
+        mode,
+    )?;
+    Ok(Some(InsertOutcome {
+        union: merge_appended_values(state, old_union, new_entries)?,
+        split: None,
+        root_split: None,
+        write_lsn,
+    }))
+}
+
 fn try_write_page(
     pool: &crate::BufferPool<crate::SmgrStorageBackend>,
     client_id: crate::ClientId,
@@ -198,6 +292,7 @@ fn try_write_page(
     opaque: crate::include::access::gist::GistPageOpaqueData,
     items: &[GistTupleEntry],
     wal_info: u8,
+    mode: GistPageWriteMode,
 ) -> Result<u64, GistWriteError> {
     let mut rebuilt = [0u8; crate::backend::storage::smgr::BLCKSZ];
     let tuples = items
@@ -210,7 +305,8 @@ fn try_write_page(
             "gist page rebuild failed: {other:?}"
         ))),
     })?;
-    write_buffered_page(pool, client_id, xid, rel, block, &rebuilt, wal_info).map_err(Into::into)
+    write_buffered_page_with_mode(pool, client_id, xid, rel, block, &rebuilt, wal_info, mode)
+        .map_err(Into::into)
 }
 
 fn split_page_entries(
@@ -310,7 +406,7 @@ fn union_entry_values(
     )
 }
 
-fn write_or_split_page(
+pub(super) fn write_or_split_page(
     pool: &crate::BufferPool<crate::SmgrStorageBackend>,
     client_id: crate::ClientId,
     xid: u32,
@@ -321,6 +417,7 @@ fn write_or_split_page(
     opaque: crate::include::access::gist::GistPageOpaqueData,
     items: Vec<GistTupleEntry>,
     is_root: bool,
+    mode: GistPageWriteMode,
 ) -> Result<InsertOutcome, CatalogError> {
     let page_update_wal_info = if opaque.is_leaf() {
         XLOG_GIST_INSERT
@@ -336,6 +433,7 @@ fn write_or_split_page(
         opaque,
         &items,
         page_update_wal_info,
+        mode,
     ) {
         Ok(write_lsn) => {
             let union = state.union_all(
@@ -347,6 +445,7 @@ fn write_or_split_page(
             Ok(InsertOutcome {
                 union,
                 split: None,
+                root_split: None,
                 write_lsn,
             })
         }
@@ -368,8 +467,8 @@ fn write_or_split_page(
             let right_union = union_entry_values(state, &right_items)?;
             let inherited_nsn = opaque.nsn;
             if is_root {
-                let left_block = allocate_new_block(pool, rel)?;
-                let right_block = allocate_new_block(pool, rel)?;
+                let left_block = allocate_new_block_with_mode(pool, rel, mode)?;
+                let right_block = allocate_new_block_with_mode(pool, rel, mode)?;
                 let mut left_page = [0u8; crate::backend::storage::smgr::BLCKSZ];
                 let mut right_page = [0u8; crate::backend::storage::smgr::BLCKSZ];
                 let mut root_page = [0u8; crate::backend::storage::smgr::BLCKSZ];
@@ -411,7 +510,7 @@ fn write_or_split_page(
                     init_opaque(0, GIST_INVALID_BLOCKNO, inherited_nsn),
                 )
                 .map_err(|err| CatalogError::Io(format!("gist split rebuild failed: {err:?}")))?;
-                let write_lsn = write_logged_pages(
+                let write_lsn = write_logged_pages_with_mode(
                     pool,
                     client_id,
                     xid,
@@ -434,14 +533,19 @@ fn write_or_split_page(
                             will_init: false,
                         },
                     ],
+                    mode,
                 )?;
                 Ok(InsertOutcome {
                     union: root_union,
                     split: None,
+                    root_split: Some(RootSplit {
+                        left_block,
+                        right_block,
+                    }),
                     write_lsn,
                 })
             } else {
-                let right_block = allocate_new_block(pool, rel)?;
+                let right_block = allocate_new_block_with_mode(pool, rel, mode)?;
                 let mut left_page = [0u8; crate::backend::storage::smgr::BLCKSZ];
                 let mut right_page = [0u8; crate::backend::storage::smgr::BLCKSZ];
                 gist_page_replace_items(
@@ -462,7 +566,7 @@ fn write_or_split_page(
                     init_opaque(child_flags, opaque.rightlink, inherited_nsn),
                 )
                 .map_err(|err| CatalogError::Io(format!("gist split rebuild failed: {err:?}")))?;
-                let write_lsn = write_logged_pages(
+                let write_lsn = write_logged_pages_with_mode(
                     pool,
                     client_id,
                     xid,
@@ -480,6 +584,7 @@ fn write_or_split_page(
                             will_init: true,
                         },
                     ],
+                    mode,
                 )?;
                 Ok(InsertOutcome {
                     union: left_union.clone(),
@@ -488,6 +593,7 @@ fn write_or_split_page(
                         left_union,
                         right_union,
                     }),
+                    root_split: None,
                     write_lsn,
                 })
             }
@@ -496,7 +602,7 @@ fn write_or_split_page(
     }
 }
 
-fn insert_entries_into_block(
+pub(super) fn insert_entries_into_block(
     pool: &crate::BufferPool<crate::SmgrStorageBackend>,
     client_id: crate::ClientId,
     xid: u32,
@@ -505,7 +611,9 @@ fn insert_entries_into_block(
     state: &GistState,
     block: u32,
     new_entries: Vec<GistTupleEntry>,
+    old_union: Option<&[Value]>,
     is_root: bool,
+    mode: GistPageWriteMode,
 ) -> Result<InsertOutcome, CatalogError> {
     if new_entries.is_empty() {
         let page = read_buffered_page(pool, client_id, rel, block)?;
@@ -519,6 +627,7 @@ fn insert_entries_into_block(
         return Ok(InsertOutcome {
             union,
             split: None,
+            root_split: None,
             write_lsn: page_lsn(&page),
         });
     }
@@ -526,15 +635,30 @@ fn insert_entries_into_block(
     let page = read_buffered_page(pool, client_id, rel, block)?;
     let opaque = gist_page_get_opaque(&page)
         .map_err(|err| CatalogError::Io(format!("gist page parse failed: {err:?}")))?;
-    let mut items = load_page_entries(desc, &page)?;
 
     if opaque.is_leaf() {
+        if let Some(outcome) = try_append_leaf_entries(
+            pool,
+            client_id,
+            xid,
+            rel,
+            &page,
+            state,
+            block,
+            old_union,
+            &new_entries,
+            mode,
+        )? {
+            return Ok(outcome);
+        }
+        let mut items = load_page_entries(desc, &page)?;
         items.extend(new_entries);
         return write_or_split_page(
-            pool, client_id, xid, rel, desc, state, block, opaque, items, is_root,
+            pool, client_id, xid, rel, desc, state, block, opaque, items, is_root, mode,
         );
     }
 
+    let mut items = load_page_entries(desc, &page)?;
     let mut child_batches: Vec<(usize, Vec<GistTupleEntry>)> = Vec::new();
     for new_entry in new_entries {
         let child_index = choose_child(desc, state, &items, &new_entry.values)?;
@@ -557,6 +681,7 @@ fn insert_entries_into_block(
         let child_block = gist_downlink_block(&items[child_index].tuple).ok_or(
             CatalogError::Corrupt("gist internal tuple missing child block"),
         )?;
+        let child_old_union = items[child_index].values.clone();
         let child_outcome = insert_entries_into_block(
             pool,
             client_id,
@@ -566,7 +691,9 @@ fn insert_entries_into_block(
             state,
             child_block,
             entries,
+            Some(&child_old_union),
             false,
+            mode,
         )?;
         latest_child_lsn = latest_child_lsn.max(child_outcome.write_lsn);
 
@@ -607,15 +734,24 @@ fn insert_entries_into_block(
         return Ok(InsertOutcome {
             union,
             split: None,
+            root_split: None,
             write_lsn: latest_child_lsn,
         });
     }
 
     let outcome = write_or_split_page(
-        pool, client_id, xid, rel, desc, state, block, opaque, items, is_root,
+        pool, client_id, xid, rel, desc, state, block, opaque, items, is_root, mode,
     )?;
     for child_block in child_split_blocks {
-        clear_follow_right(pool, client_id, xid, rel, child_block, outcome.write_lsn)?;
+        clear_follow_right_with_mode(
+            pool,
+            client_id,
+            xid,
+            rel,
+            child_block,
+            outcome.write_lsn,
+            mode,
+        )?;
     }
     Ok(outcome)
 }

@@ -48,14 +48,16 @@ use crate::include::access::brin_page::{
     BRIN_PAGE_CONTENT_OFFSET, BrinMetaPageData, brin_is_meta_page,
 };
 use crate::include::access::gin::{GinOptions, gin_metapage_data};
+use crate::include::access::gist::{GistBufferingMode, GistOptions};
 use crate::include::access::hash::{HashOptions, hash_metapage_data};
 use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::{
-    BRIN_AM_OID, BTREE_AM_OID, BootstrapCatalogKind, GIN_AM_OID, HASH_AM_OID, PgAmRow, PgAmopRow,
-    PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgCollationRow, PgConstraintRow,
-    PgIndexRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds,
-    bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, bootstrap_pg_database_rows,
-    bootstrap_pg_tablespace_rows, bootstrap_relation_desc, system_catalog_index_by_oid,
+    BRIN_AM_OID, BTREE_AM_OID, BootstrapCatalogKind, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, PgAmRow,
+    PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgCollationRow,
+    PgConstraintRow, PgIndexRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgTypeRow,
+    bootstrap_catalog_kinds, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows, bootstrap_relation_desc,
+    system_catalog_index_by_oid,
 };
 use crate::include::nodes::datum::Value;
 
@@ -409,6 +411,8 @@ pub(crate) fn catalog_from_physical_rows_scoped(
         let rel = catalog_relation_locator(row.oid, row.relfilenode, db_oid);
         let btree_options =
             load_btree_options_from_reloptions(row.relam, row.relkind, row.reloptions.as_deref());
+        let gist_options =
+            load_gist_options_from_reloptions(row.relam, row.relkind, row.reloptions.as_deref());
         let brin_options = load_brin_options_from_metapage(base_dir, rel, row.relam, row.relkind);
         let gin_options = load_gin_options_from_metapage(base_dir, rel, row.relam, row.relkind);
         let hash_options = load_hash_options_from_metapage(base_dir, rel, row.relam, row.relkind);
@@ -467,6 +471,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                         indpred: index.indpred.clone(),
                         btree_options,
                         brin_options: brin_options.clone(),
+                        gist_options,
                         gin_options: gin_options.clone(),
                         hash_options,
                     }),
@@ -564,6 +569,40 @@ fn load_btree_options_from_reloptions(
         }
     }
     saw_option.then_some(options)
+}
+
+fn load_gist_options_from_reloptions(
+    am_oid: u32,
+    relkind: char,
+    reloptions: Option<&[String]>,
+) -> Option<GistOptions> {
+    if am_oid != GIST_AM_OID || !matches!(relkind, 'i' | 'I') {
+        return None;
+    }
+    let reloptions = reloptions?;
+    let mut options = GistOptions::default();
+    let mut saw_option = false;
+    for option in reloptions {
+        let Some((name, value)) = option.split_once('=') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("buffering") {
+            if let Some(value) = parse_gist_buffering_mode(value) {
+                options.buffering_mode = value;
+                saw_option = true;
+            }
+        }
+    }
+    saw_option.then_some(options)
+}
+
+fn parse_gist_buffering_mode(value: &str) -> Option<GistBufferingMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "auto" => Some(GistBufferingMode::Auto),
+        "on" => Some(GistBufferingMode::On),
+        "off" => Some(GistBufferingMode::Off),
+        _ => None,
+    }
 }
 
 fn parse_reloption_bool(value: &str) -> Option<bool> {

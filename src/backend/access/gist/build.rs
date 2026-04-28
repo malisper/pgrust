@@ -9,22 +9,28 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::storage::page::bufpage::{PageError, page_header};
 use crate::include::access::amapi::{IndexBuildContext, IndexBuildEmptyContext, IndexBuildResult};
 use crate::include::access::gist::{
-    F_LEAF, GIST_INVALID_BLOCKNO, GistPageError, gist_page_replace_items,
+    F_LEAF, GIST_INVALID_BLOCKNO, GistBufferingMode, GistOptions, GistPageError,
+    gist_page_replace_items,
 };
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::itup::IndexTupleData;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::RelationDesc;
 
-use super::build_buffers::GistBuildBuffers;
+use super::build_buffers::{GistBuildBufferStats, GistBuildBuffers};
 use super::insert::{GistTupleEntry, insert_build_entries};
-use super::page::{GistLoggedPage, ensure_empty_gist, write_buffered_page, write_logged_pages};
+use super::page::{
+    GistLoggedPage, GistPageWriteMode, ensure_empty_gist, ensure_empty_gist_with_mode,
+    log_gist_build_newpage_range, write_buffered_page_with_mode, write_logged_pages_with_mode,
+};
 use super::state::GistState;
 use super::support::sortsupport;
 use super::tuple::{make_downlink_tuple, make_leaf_tuple, tuple_storage_size};
 
 const GIST_DEFAULT_FILLFACTOR: usize = 90;
 const GIST_BUFFERING_MIN_WORK_MEM_KB: usize = 64;
+const GIST_BUFFERING_MODE_SWITCH_CHECK_STEP: u64 = 256;
+const GIST_BUFFERING_MODE_TUPLE_SIZE_STATS_TARGET: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GistBuildMode {
@@ -74,29 +80,47 @@ pub(crate) fn gistbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, Cat
             "GiST does not support unique indexes".into(),
         ));
     }
-    ensure_empty_gist(
+    ensure_empty_gist_with_mode(
+        &ctx.pool,
+        ctx.client_id,
+        ctx.snapshot.current_xid,
+        ctx.index_relation,
+        GistPageWriteMode::Build,
+    )?;
+    let state = GistState::new(&ctx.index_desc, &ctx.index_meta)?;
+    let options = ctx.index_meta.gist_options.unwrap_or_default();
+    let result = match select_build_mode(&state, ctx.maintenance_work_mem_kb, options) {
+        GistBuildMode::Sorted => gistbuild_sorted(ctx, &state),
+        GistBuildMode::Buffering => gistbuild_buffered(ctx, &state, options.buffering_mode),
+        GistBuildMode::RepeatedInsert => gistbuild_repeated(ctx, &state),
+    }?;
+    log_gist_build_newpage_range(
         &ctx.pool,
         ctx.client_id,
         ctx.snapshot.current_xid,
         ctx.index_relation,
     )?;
-    let state = GistState::new(&ctx.index_desc, &ctx.index_meta)?;
-    match select_build_mode(&state, ctx.maintenance_work_mem_kb) {
-        GistBuildMode::Sorted => gistbuild_sorted(ctx, &state),
-        GistBuildMode::Buffering => gistbuild_buffered(ctx, &state),
-        GistBuildMode::RepeatedInsert => gistbuild_repeated(ctx, &state),
-    }
+    Ok(result)
 }
 
 pub(crate) fn gistbuildempty(ctx: &IndexBuildEmptyContext) -> Result<(), CatalogError> {
     ensure_empty_gist(&ctx.pool, ctx.client_id, ctx.xid, ctx.index_relation)
 }
 
-fn select_build_mode(state: &GistState, maintenance_work_mem_kb: usize) -> GistBuildMode {
-    if has_all_sortsupport(state) {
+fn select_build_mode(
+    state: &GistState,
+    maintenance_work_mem_kb: usize,
+    options: GistOptions,
+) -> GistBuildMode {
+    if options.buffering_mode == GistBufferingMode::Off {
+        return GistBuildMode::RepeatedInsert;
+    }
+    if options.buffering_mode != GistBufferingMode::On && has_all_sortsupport(state) {
         return GistBuildMode::Sorted;
     }
-    if maintenance_work_mem_kb >= GIST_BUFFERING_MIN_WORK_MEM_KB {
+    if options.buffering_mode == GistBufferingMode::On
+        || maintenance_work_mem_kb >= GIST_BUFFERING_MIN_WORK_MEM_KB
+    {
         return GistBuildMode::Buffering;
     }
     GistBuildMode::RepeatedInsert
@@ -122,17 +146,93 @@ fn gistbuild_repeated(
 fn gistbuild_buffered(
     ctx: &IndexBuildContext,
     state: &GistState,
+    buffering_mode: GistBufferingMode,
 ) -> Result<IndexBuildResult, CatalogError> {
-    let mut buffers = GistBuildBuffers::new(ctx.maintenance_work_mem_kb);
+    match buffering_mode {
+        GistBufferingMode::Auto => gistbuild_buffered_auto(ctx, state),
+        GistBufferingMode::On => gistbuild_buffered_on(ctx, state),
+        GistBufferingMode::Off => gistbuild_repeated(ctx, state),
+    }
+}
+
+fn gistbuild_buffered_on(
+    ctx: &IndexBuildContext,
+    state: &GistState,
+) -> Result<IndexBuildResult, CatalogError> {
+    let mut stats = GistBuildBufferStats::default();
+    let mut buffers: Option<GistBuildBuffers> = None;
+    let mut buffering_disabled = false;
     let result = scan_visible_heap(ctx, |tid, key_values| {
-        buffers.insert(
-            ctx,
-            state,
-            make_build_tuple(&ctx.index_desc, tid, key_values)?,
-        )
+        let tuple = make_build_tuple(&ctx.index_desc, tid, key_values)?;
+        stats.observe(&tuple);
+        if let Some(buffers) = buffers.as_mut() {
+            buffers.insert(ctx, state, tuple)?;
+            if stats.tuples % GIST_BUFFERING_MODE_TUPLE_SIZE_STATS_TARGET == 0 {
+                buffers.recalculate_pages_per_buffer(stats);
+            }
+            return Ok(());
+        }
+        if buffering_disabled {
+            return gistinsert_build_tuple_entry(ctx, state, tuple);
+        }
+        gistinsert_build_tuple_entry(ctx, state, tuple)?;
+        if stats.tuples < GIST_BUFFERING_MODE_TUPLE_SIZE_STATS_TARGET {
+            return Ok(());
+        }
+        if let Some(new_buffers) = GistBuildBuffers::try_new(ctx, state, stats)? {
+            buffers = Some(new_buffers);
+        } else {
+            buffering_disabled = true;
+        }
+        Ok(())
     })?;
-    buffers.flush_all(ctx, state)?;
+    if let Some(buffers) = buffers.as_mut() {
+        buffers.flush_all(ctx, state)?;
+    }
     Ok(result)
+}
+
+fn gistbuild_buffered_auto(
+    ctx: &IndexBuildContext,
+    state: &GistState,
+) -> Result<IndexBuildResult, CatalogError> {
+    let mut stats = GistBuildBufferStats::default();
+    let mut buffers: Option<GistBuildBuffers> = None;
+    let mut buffering_disabled = false;
+    let result = scan_visible_heap(ctx, |tid, key_values| {
+        let tuple = make_build_tuple(&ctx.index_desc, tid, key_values)?;
+        stats.observe(&tuple);
+        if let Some(buffers) = buffers.as_mut() {
+            buffers.insert(ctx, state, tuple)?;
+            if stats.tuples % GIST_BUFFERING_MODE_TUPLE_SIZE_STATS_TARGET == 0 {
+                buffers.recalculate_pages_per_buffer(stats);
+            }
+            return Ok(());
+        }
+        gistinsert_build_tuple_entry(ctx, state, tuple)?;
+        if stats.tuples as u64 % GIST_BUFFERING_MODE_SWITCH_CHECK_STEP == 0
+            && !buffering_disabled
+            && relation_exceeds_effective_cache(ctx)?
+        {
+            if let Some(new_buffers) = GistBuildBuffers::try_new(ctx, state, stats)? {
+                buffers = Some(new_buffers);
+            } else {
+                buffering_disabled = true;
+            }
+        }
+        Ok(())
+    })?;
+    if let Some(buffers) = buffers.as_mut() {
+        buffers.flush_all(ctx, state)?;
+    }
+    Ok(result)
+}
+
+fn relation_exceeds_effective_cache(ctx: &IndexBuildContext) -> Result<bool, CatalogError> {
+    Ok(
+        super::page::relation_nblocks(&ctx.pool, ctx.index_relation)? as usize
+            > ctx.pool.capacity(),
+    )
 }
 
 fn gistinsert_build_tuple(
@@ -142,6 +242,14 @@ fn gistinsert_build_tuple(
     values: Vec<Value>,
 ) -> Result<(), CatalogError> {
     let build_tuple = make_build_tuple(&ctx.index_desc, heap_tid, values)?;
+    gistinsert_build_tuple_entry(ctx, state, build_tuple)
+}
+
+fn gistinsert_build_tuple_entry(
+    ctx: &IndexBuildContext,
+    state: &GistState,
+    build_tuple: GistBuildTuple,
+) -> Result<(), CatalogError> {
     insert_build_entries(
         &ctx.pool,
         ctx.client_id,
@@ -515,7 +623,7 @@ fn write_sorted_build_plan(
             if page.is_leaf { F_LEAF } else { 0 },
             page.rightlink,
         )?;
-        write_logged_pages(
+        write_logged_pages_with_mode(
             &ctx.pool,
             ctx.client_id,
             ctx.snapshot.current_xid,
@@ -526,6 +634,7 @@ fn write_sorted_build_plan(
                 page: &image,
                 will_init: true,
             }],
+            GistPageWriteMode::Build,
         )?;
     }
 
@@ -534,7 +643,7 @@ fn write_sorted_build_plan(
         if plan.root.is_leaf { F_LEAF } else { 0 },
         GIST_INVALID_BLOCKNO,
     )?;
-    write_buffered_page(
+    write_buffered_page_with_mode(
         &ctx.pool,
         ctx.client_id,
         ctx.snapshot.current_xid,
@@ -542,6 +651,7 @@ fn write_sorted_build_plan(
         0,
         &root_image,
         XLOG_GIST_PAGE_UPDATE,
+        GistPageWriteMode::Build,
     )?;
     Ok(())
 }
@@ -563,11 +673,15 @@ mod tests {
     use crate::backend::catalog::catalog::column_desc;
     use crate::backend::executor::expr_range::parse_range_text;
     use crate::backend::parser::{SqlType, SqlTypeKind};
-    use crate::include::access::gist::{F_LEAF, GIST_INVALID_BLOCKNO};
+    use crate::include::access::gist::{
+        F_LEAF, GIST_INVALID_BLOCKNO, GistBufferingMode, GistOptions,
+    };
     use crate::include::access::itemptr::ItemPointerData;
     use crate::include::catalog::{
         GIST_BOX_CONSISTENT_PROC_OID, GIST_BOX_DISTANCE_PROC_OID, GIST_BOX_PENALTY_PROC_OID,
         GIST_BOX_PICKSPLIT_PROC_OID, GIST_BOX_SAME_PROC_OID, GIST_BOX_UNION_PROC_OID,
+        GIST_POINT_CONSISTENT_PROC_OID, GIST_POINT_PENALTY_PROC_OID, GIST_POINT_PICKSPLIT_PROC_OID,
+        GIST_POINT_SAME_PROC_OID, GIST_POINT_SORTSUPPORT_PROC_OID, GIST_POINT_UNION_PROC_OID,
         RANGE_GIST_CONSISTENT_PROC_OID, RANGE_GIST_PENALTY_PROC_OID, RANGE_GIST_PICKSPLIT_PROC_OID,
         RANGE_GIST_SAME_PROC_OID, RANGE_GIST_UNION_PROC_OID, RANGE_SORTSUPPORT_PROC_OID,
     };
@@ -596,6 +710,19 @@ mod tests {
             same_proc: RANGE_GIST_SAME_PROC_OID,
             distance_proc: None,
             sortsupport_proc: Some(RANGE_SORTSUPPORT_PROC_OID),
+            translate_cmptype_proc: None,
+        }
+    }
+
+    fn point_state() -> GistColumnState {
+        GistColumnState {
+            consistent_proc: GIST_POINT_CONSISTENT_PROC_OID,
+            union_proc: GIST_POINT_UNION_PROC_OID,
+            penalty_proc: GIST_POINT_PENALTY_PROC_OID,
+            picksplit_proc: GIST_POINT_PICKSPLIT_PROC_OID,
+            same_proc: GIST_POINT_SAME_PROC_OID,
+            distance_proc: None,
+            sortsupport_proc: Some(GIST_POINT_SORTSUPPORT_PROC_OID),
             translate_cmptype_proc: None,
         }
     }
@@ -634,8 +761,30 @@ mod tests {
 
         assert!(has_all_sortsupport(&state));
         assert_eq!(
-            select_build_mode(&state, GIST_BUFFERING_MIN_WORK_MEM_KB),
+            select_build_mode(
+                &state,
+                GIST_BUFFERING_MIN_WORK_MEM_KB,
+                GistOptions::default()
+            ),
             GistBuildMode::Sorted
+        );
+    }
+
+    #[test]
+    fn select_build_mode_respects_forced_buffering_over_sortsupport() {
+        let state = GistState {
+            columns: vec![range_state(), range_state()],
+        };
+
+        assert_eq!(
+            select_build_mode(
+                &state,
+                GIST_BUFFERING_MIN_WORK_MEM_KB,
+                GistOptions {
+                    buffering_mode: GistBufferingMode::On,
+                },
+            ),
+            GistBuildMode::Buffering
         );
     }
 
@@ -647,10 +796,27 @@ mod tests {
 
         assert!(!has_all_sortsupport(&state));
         assert_eq!(
-            select_build_mode(&state, GIST_BUFFERING_MIN_WORK_MEM_KB),
+            select_build_mode(
+                &state,
+                GIST_BUFFERING_MIN_WORK_MEM_KB,
+                GistOptions::default()
+            ),
             GistBuildMode::Buffering
         );
-        assert_eq!(select_build_mode(&state, 0), GistBuildMode::RepeatedInsert);
+        assert_eq!(
+            select_build_mode(&state, 0, GistOptions::default()),
+            GistBuildMode::RepeatedInsert
+        );
+        assert_eq!(
+            select_build_mode(
+                &state,
+                GIST_BUFFERING_MIN_WORK_MEM_KB,
+                GistOptions {
+                    buffering_mode: GistBufferingMode::Off,
+                },
+            ),
+            GistBuildMode::RepeatedInsert
+        );
     }
 
     #[test]
@@ -660,6 +826,20 @@ mod tests {
 
         assert_eq!(
             comparator(&parse_int4range("[1,5)"), &parse_int4range("[5,9)")),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn point_state_exposes_real_sortsupport_comparator() {
+        let comparator = sortsupport(point_state().sortsupport_proc.unwrap())
+            .expect("point proc 11 should produce a comparator");
+
+        assert_eq!(
+            comparator(
+                &Value::Point(crate::include::nodes::datum::GeoPoint { x: -1.0, y: -1.0 }),
+                &Value::Point(crate::include::nodes::datum::GeoPoint { x: 1.0, y: 1.0 }),
+            ),
             Ordering::Less
         );
     }

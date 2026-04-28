@@ -17,6 +17,7 @@ use crate::include::access::amapi::{
 };
 use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
+use crate::include::access::gist::{GistBufferingMode, GistOptions};
 use crate::include::access::hash::HashOptions;
 use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::{
@@ -575,6 +576,7 @@ pub(super) fn catalog_entry_from_bound_index_relation(
             indpred: index.index_meta.indpred.clone(),
             btree_options: index.index_meta.btree_options,
             brin_options: index.index_meta.brin_options.clone(),
+            gist_options: index.index_meta.gist_options,
             gin_options: index.index_meta.gin_options.clone(),
             hash_options: index.index_meta.hash_options,
         }),
@@ -733,6 +735,7 @@ impl Database {
             rd_indpred: None,
             btree_options: meta.btree_options,
             brin_options: meta.brin_options.clone(),
+            gist_options: meta.gist_options,
             gin_options: meta.gin_options.clone(),
             hash_options: meta.hash_options,
         })
@@ -766,6 +769,32 @@ impl Database {
 
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                 "BRIN option \"{}\"",
+                option.name
+            ))));
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_gist_options(&self, options: &[RelOption]) -> Result<GistOptions, ExecError> {
+        let mut resolved = GistOptions::default();
+        for option in options {
+            if option.name.eq_ignore_ascii_case("buffering") {
+                resolved.buffering_mode = match option.value.to_ascii_lowercase().as_str() {
+                    "auto" => GistBufferingMode::Auto,
+                    "on" => GistBufferingMode::On,
+                    "off" => GistBufferingMode::Off,
+                    _ => {
+                        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "GiST buffering option auto, on, or off",
+                            actual: option.value.clone(),
+                        }));
+                    }
+                };
+                continue;
+            }
+
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                "GiST option \"{}\"",
                 option.name
             ))));
         }
@@ -1275,21 +1304,47 @@ impl Database {
             indoption.push(option);
         }
 
-        let (btree_options, brin_options, gin_options, hash_options) = match access_method.oid {
-            BTREE_AM_OID => (self.resolve_btree_options(options)?, None, None, None),
-            BRIN_AM_OID => (None, Some(self.resolve_brin_options(options)?), None, None),
-            GIN_AM_OID => (None, None, Some(self.resolve_gin_options(options)?), None),
-            HASH_AM_OID => (None, None, None, Some(self.resolve_hash_options(options)?)),
-            _ => {
-                if !options.is_empty() {
-                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "simple index definition",
-                        actual: "unsupported CREATE INDEX feature".into(),
-                    }));
+        let (btree_options, brin_options, gist_options, gin_options, hash_options) =
+            match access_method.oid {
+                BTREE_AM_OID => (self.resolve_btree_options(options)?, None, None, None, None),
+                BRIN_AM_OID => (
+                    None,
+                    Some(self.resolve_brin_options(options)?),
+                    None,
+                    None,
+                    None,
+                ),
+                GIST_AM_OID => (
+                    None,
+                    None,
+                    Some(self.resolve_gist_options(options)?),
+                    None,
+                    None,
+                ),
+                GIN_AM_OID => (
+                    None,
+                    None,
+                    None,
+                    Some(self.resolve_gin_options(options)?),
+                    None,
+                ),
+                HASH_AM_OID => (
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(self.resolve_hash_options(options)?),
+                ),
+                _ => {
+                    if !options.is_empty() {
+                        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "simple index definition",
+                            actual: "unsupported CREATE INDEX feature".into(),
+                        }));
+                    }
+                    (None, None, None, None, None)
                 }
-                (None, None, None, None)
-            }
-        };
+            };
 
         Ok((
             access_method.oid,
@@ -1306,6 +1361,7 @@ impl Database {
                 indimmediate: true,
                 btree_options,
                 brin_options,
+                gist_options,
                 gin_options,
                 hash_options,
             },
@@ -1372,6 +1428,7 @@ impl Database {
                 indimmediate: true,
                 btree_options: None,
                 brin_options: None,
+                gist_options: Some(GistOptions::default()),
                 gin_options: None,
                 hash_options: None,
             },
@@ -3076,6 +3133,44 @@ mod tests {
             err,
             ExecError::Parse(ParseError::FeatureNotSupported(message))
                 if message == "BRIN option \"autosummarize\""
+        ));
+    }
+
+    #[test]
+    fn resolve_gist_options_accepts_buffering_modes() {
+        let dir = temp_dir("gist_buffering_modes");
+        let db = Database::open(&dir, 16).unwrap();
+
+        for (value, expected) in [
+            ("auto", GistBufferingMode::Auto),
+            ("on", GistBufferingMode::On),
+            ("off", GistBufferingMode::Off),
+        ] {
+            let options = db
+                .resolve_gist_options(&[RelOption {
+                    name: "buffering".into(),
+                    value: value.into(),
+                }])
+                .unwrap();
+            assert_eq!(options.buffering_mode, expected);
+        }
+    }
+
+    #[test]
+    fn resolve_gist_options_rejects_unknown_option() {
+        let dir = temp_dir("gist_unknown_option");
+        let db = Database::open(&dir, 16).unwrap();
+
+        let err = db
+            .resolve_gist_options(&[RelOption {
+                name: "fillfactor".into(),
+                value: "90".into(),
+            }])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::Parse(ParseError::FeatureNotSupported(message))
+                if message == "GiST option \"fillfactor\""
         ));
     }
 }
