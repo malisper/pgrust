@@ -5707,6 +5707,12 @@ fn relation_or_all_column_acls_allow_as(
     {
         return Ok(true);
     }
+    if relation_oid == PG_AUTH_MEMBERS_RELATION_OID && privilege == 'r' {
+        // PostgreSQL exposes role membership rows through pg_auth_members to
+        // ordinary users while still protecting writes through system catalog
+        // update checks.
+        return Ok(true);
+    }
     let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
     if class_row
         .relacl
