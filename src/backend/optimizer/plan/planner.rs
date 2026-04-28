@@ -1,18 +1,23 @@
 use std::cmp::Ordering;
 
+use crate::backend::catalog::catalog::column_desc;
 use crate::backend::parser::CatalogLookup;
+use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::rewrite::collect_query_relation_privileges;
+use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{
-    Path, PathKey, PathTarget, PlannerConfig, PlannerGlobal, PlannerInfo, RelOptInfo, RelOptKind,
-    UpperRelKind,
+    PartitionInfo, Path, PathKey, PathTarget, PlannerConfig, PlannerGlobal, PlannerInfo,
+    RelOptInfo, RelOptKind, UpperRelKind,
 };
-use crate::include::nodes::plannodes::{AggregateStrategy, PlanEstimate, PlannedStmt};
+use crate::include::nodes::plannodes::{
+    AggregatePhase, AggregateStrategy, PlanEstimate, PlannedStmt,
+};
 use crate::include::nodes::primnodes::{
-    BoolExprType, BuiltinScalarFunction, Expr, OpExprKind, ProjectSetTarget, QueryColumn,
-    ScalarFunctionImpl, TargetEntry, WindowClause, expr_contains_set_returning,
-    set_returning_call_exprs,
+    AggAccum, AggFunc, BoolExprType, BuiltinScalarFunction, Expr, OpExprKind, ProjectSetTarget,
+    QueryColumn, RelationDesc, ScalarFunctionImpl, TargetEntry, WindowClause,
+    expr_contains_set_returning, set_returning_call_exprs, user_attrno,
 };
 
 use super::super::bestpath;
@@ -29,10 +34,11 @@ use super::super::upperrels;
 use super::super::util::{
     annotate_targets_for_input, build_aggregate_output_columns, pathkeys_are_fully_identified,
     pathkeys_to_order_items, projection_is_identity, required_query_pathkeys_for_path,
-    required_query_pathkeys_for_rel,
+    required_query_pathkeys_for_rel, strip_binary_coercible_casts,
 };
 use super::super::{
-    expand_join_rte_vars, expr_relids, optimize_path_with_config, pull_up_sublinks,
+    expand_join_rte_vars, expr_relids, flatten_join_alias_vars, optimize_path_with_config,
+    pull_up_sublinks,
 };
 
 pub(super) fn make_pathtarget_projection_rel(
@@ -49,7 +55,7 @@ pub(super) fn make_pathtarget_projection_rel(
         RelOptKind::UpperRel,
         reltarget.clone(),
     );
-    for path in input_rel.pathlist {
+    for path in input_rel.pathlist.clone() {
         let targets = annotate_targets_for_input(Some(root), &path, &targets);
         if allow_identity_elision && projection_is_identity(&path, &targets) {
             rel.add_path(path);
@@ -85,38 +91,70 @@ fn group_pathkeys(group_by: &[Expr]) -> Vec<PathKey> {
         .collect()
 }
 
-fn accumulators_require_sorted_grouping(
-    accumulators: &[crate::include::nodes::primnodes::AggAccum],
-) -> bool {
+fn accumulators_require_sorted_grouping(accumulators: &[AggAccum]) -> bool {
     accumulators
         .iter()
         .any(|accum| accum.distinct || !accum.order_by.is_empty())
 }
 
-fn ordered_group_input(path: Path, group_pathkeys: &[PathKey]) -> Path {
-    if bestpath::pathkeys_satisfy(&path.pathkeys(), group_pathkeys) {
+fn aggregate_input_pathkeys(group_by: &[Expr], accumulators: &[AggAccum]) -> Vec<PathKey> {
+    let mut pathkeys = group_pathkeys(group_by);
+    for accum in accumulators {
+        for item in &accum.order_by {
+            if !pathkeys.iter().any(|key| key.expr == item.expr) {
+                pathkeys.push(PathKey {
+                    expr: item.expr.clone(),
+                    ressortgroupref: item.ressortgroupref,
+                    descending: item.descending,
+                    nulls_first: item.nulls_first,
+                    collation_oid: item.collation_oid,
+                });
+            }
+        }
+        if accum.distinct {
+            for expr in &accum.args {
+                if !pathkeys.iter().any(|key| key.expr == *expr) {
+                    pathkeys.push(PathKey {
+                        expr: expr.clone(),
+                        ressortgroupref: 0,
+                        descending: false,
+                        nulls_first: None,
+                        collation_oid: None,
+                    });
+                }
+            }
+        }
+    }
+    pathkeys
+}
+
+fn ordered_group_input(path: Path, input_pathkeys: &[PathKey]) -> Path {
+    if bestpath::pathkeys_satisfy(&path.pathkeys(), input_pathkeys) {
         path
     } else {
         Path::OrderBy {
             plan_info: PlanEstimate::default(),
             pathtarget: path.semantic_output_target(),
-            items: pathkeys_to_order_items(group_pathkeys),
+            items: pathkeys_to_order_items(input_pathkeys),
             display_items: Vec::new(),
             input: Box::new(path),
         }
     }
 }
 
-fn aggregate_path(
+#[allow(clippy::too_many_arguments)]
+fn aggregate_path_with_semantics(
     strategy: AggregateStrategy,
+    phase: AggregatePhase,
     pathkeys: Vec<PathKey>,
     slot_id: usize,
     input: Path,
     group_by: Vec<Expr>,
     passthrough_exprs: Vec<Expr>,
-    accumulators: Vec<crate::include::nodes::primnodes::AggAccum>,
+    accumulators: Vec<AggAccum>,
+    semantic_accumulators: Option<Vec<AggAccum>>,
     having: Option<Expr>,
-    output_columns: Vec<crate::include::nodes::primnodes::QueryColumn>,
+    output_columns: Vec<QueryColumn>,
     reltarget: PathTarget,
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
@@ -127,6 +165,8 @@ fn aggregate_path(
             pathtarget: reltarget,
             slot_id,
             strategy,
+            phase,
+            semantic_accumulators,
             disabled: false,
             pathkeys,
             input: Box::new(input),
@@ -138,6 +178,704 @@ fn aggregate_path(
         },
         catalog,
         config,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn aggregate_path(
+    strategy: AggregateStrategy,
+    phase: AggregatePhase,
+    pathkeys: Vec<PathKey>,
+    slot_id: usize,
+    input: Path,
+    group_by: Vec<Expr>,
+    passthrough_exprs: Vec<Expr>,
+    accumulators: Vec<AggAccum>,
+    having: Option<Expr>,
+    output_columns: Vec<QueryColumn>,
+    reltarget: PathTarget,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) -> Path {
+    aggregate_path_with_semantics(
+        strategy,
+        phase,
+        pathkeys,
+        slot_id,
+        input,
+        group_by,
+        passthrough_exprs,
+        accumulators,
+        None,
+        having,
+        output_columns,
+        reltarget,
+        catalog,
+        config,
+    )
+}
+
+fn aggregate_strategy_for_input(
+    root: &PlannerInfo,
+    group_by: &[Expr],
+    accumulators: &[AggAccum],
+) -> AggregateStrategy {
+    if group_by.is_empty() {
+        AggregateStrategy::Plain
+    } else if accumulators_require_sorted_grouping(accumulators) || !root.config.enable_hashagg {
+        AggregateStrategy::Sorted
+    } else {
+        AggregateStrategy::Hashed
+    }
+}
+
+fn prepare_aggregate_input_for_strategy(
+    strategy: AggregateStrategy,
+    input: Path,
+    group_by: &[Expr],
+    accumulators: &[AggAccum],
+) -> Path {
+    match strategy {
+        AggregateStrategy::Sorted => {
+            ordered_group_input(input, &aggregate_input_pathkeys(group_by, accumulators))
+        }
+        AggregateStrategy::Plain | AggregateStrategy::Hashed | AggregateStrategy::Mixed => input,
+    }
+}
+
+fn aggregate_output_columns_for_phase(
+    phase: AggregatePhase,
+    group_by: &[Expr],
+    passthrough_exprs: &[Expr],
+    accumulators: &[AggAccum],
+) -> Vec<QueryColumn> {
+    let mut columns = build_aggregate_output_columns(group_by, passthrough_exprs, accumulators);
+    if phase == AggregatePhase::Partial {
+        for column in columns
+            .iter_mut()
+            .skip(group_by.len() + passthrough_exprs.len())
+        {
+            column.sql_type = SqlType::new(SqlTypeKind::Record);
+            column.wire_type_oid = None;
+        }
+    }
+    columns
+}
+
+fn relation_desc_for_output_columns(output_columns: &[QueryColumn]) -> RelationDesc {
+    RelationDesc {
+        columns: output_columns
+            .iter()
+            .map(|column| column_desc(column.name.clone(), column.sql_type, true))
+            .collect(),
+    }
+}
+
+fn final_accumulators_for_partial(accumulators: &[AggAccum]) -> Vec<AggAccum> {
+    accumulators
+        .iter()
+        .cloned()
+        .map(|mut accum| {
+            accum.distinct = false;
+            accum.direct_args.clear();
+            accum.args.clear();
+            accum.order_by.clear();
+            accum.filter = None;
+            accum
+        })
+        .collect()
+}
+
+fn normalized_partition_expr(root: &PlannerInfo, expr: Expr) -> Expr {
+    strip_binary_coercible_casts(&flatten_join_alias_vars(root, expr))
+}
+
+fn grouping_covers_partition_keys(
+    root: &PlannerInfo,
+    group_by: &[Expr],
+    partition_info: &PartitionInfo,
+) -> bool {
+    !partition_info.key_exprs.is_empty()
+        && partition_info.key_exprs.iter().all(|key| {
+            let key = normalized_partition_expr(root, key.clone());
+            group_by.iter().cloned().any(|expr| {
+                let expr = normalized_partition_expr(root, expr);
+                expr == key || inner_join_equates_exprs(root, &expr, &key)
+            })
+        })
+}
+
+fn grouping_contains_inner_join_key(
+    root: &PlannerInfo,
+    group_by: &[Expr],
+    relids: &[usize],
+) -> bool {
+    root.inner_join_clauses.iter().any(|restrict| {
+        let Expr::Op(op) = &restrict.clause else {
+            return false;
+        };
+        if !matches!(op.op, crate::include::nodes::primnodes::OpExprKind::Eq) {
+            return false;
+        }
+        let [left, right] = op.args.as_slice() else {
+            return false;
+        };
+        if !expr_relids(left).iter().all(|relid| relids.contains(relid))
+            || !expr_relids(right)
+                .iter()
+                .all(|relid| relids.contains(relid))
+        {
+            return false;
+        }
+        let left = normalized_partition_expr(root, left.clone());
+        let right = normalized_partition_expr(root, right.clone());
+        group_by.iter().cloned().any(|expr| {
+            let expr = normalized_partition_expr(root, expr);
+            expr == left || expr == right
+        })
+    })
+}
+
+fn aggregate_expr_contains_whole_row_rel(
+    root: &PlannerInfo,
+    expr: &Expr,
+    relids: &[usize],
+) -> bool {
+    match expr {
+        Expr::Row { fields, .. } => relids.iter().any(|relid| {
+            let Some(rte) = root.parse.rtable.get(relid.saturating_sub(1)) else {
+                return false;
+            };
+            fields.len() == rte.desc.columns.len()
+                && fields.iter().enumerate().all(|(index, (_, expr))| {
+                    matches!(
+                        expr,
+                        Expr::Var(var)
+                            if var.varno == *relid
+                                && var.varlevelsup == 0
+                                && var.varattno == user_attrno(index)
+                    )
+                })
+        }),
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|arg| aggregate_expr_contains_whole_row_rel(root, arg, relids)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| aggregate_expr_contains_whole_row_rel(root, arg, relids)),
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|arg| aggregate_expr_contains_whole_row_rel(root, arg, relids)),
+        Expr::Aggref(aggref) => aggref
+            .args
+            .iter()
+            .any(|arg| aggregate_expr_contains_whole_row_rel(root, arg, relids)),
+        Expr::Cast(inner, _)
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::Collate { expr: inner, .. } => {
+            aggregate_expr_contains_whole_row_rel(root, inner, relids)
+        }
+        Expr::Coalesce(left, right)
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            aggregate_expr_contains_whole_row_rel(root, left, relids)
+                || aggregate_expr_contains_whole_row_rel(root, right, relids)
+        }
+        _ => false,
+    }
+}
+
+fn aggregate_accums_contain_whole_row_rel(
+    root: &PlannerInfo,
+    relids: &[usize],
+    accumulators: &[AggAccum],
+) -> bool {
+    accumulators.iter().any(|accum| {
+        accum
+            .args
+            .iter()
+            .any(|expr| aggregate_expr_contains_whole_row_rel(root, expr, relids))
+            || accum
+                .direct_args
+                .iter()
+                .any(|expr| aggregate_expr_contains_whole_row_rel(root, expr, relids))
+    })
+}
+
+fn aggregate_is_partial_safe(accum: &AggAccum) -> bool {
+    if accum.distinct
+        || !accum.direct_args.is_empty()
+        || !accum.order_by.is_empty()
+        || builtin_aggregate_function_for_proc_oid(accum.aggfnoid).is_none()
+    {
+        return false;
+    }
+    matches!(
+        builtin_aggregate_function_for_proc_oid(accum.aggfnoid),
+        Some(AggFunc::Count | AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max)
+    )
+}
+
+fn all_aggregates_are_partial_safe(accumulators: &[AggAccum]) -> bool {
+    accumulators.iter().all(aggregate_is_partial_safe)
+}
+
+fn prefer_partitionwise_aggregate_path_cost(path: Path, existing_paths: &[Path]) -> Path {
+    let Some(best_existing_total) = existing_paths
+        .iter()
+        .map(|path| path.plan_info().total_cost.as_f64())
+        .min_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal))
+    else {
+        return path;
+    };
+    if path.plan_info().total_cost.as_f64() < best_existing_total {
+        return path;
+    }
+    let preferred_total = best_existing_total * 0.99;
+    match path {
+        Path::Append {
+            plan_info,
+            pathtarget,
+            relids,
+            source_id,
+            desc,
+            child_roots,
+            children,
+        } => Path::Append {
+            plan_info: PlanEstimate::new(
+                plan_info.startup_cost.as_f64(),
+                preferred_total,
+                plan_info.plan_rows.as_f64(),
+                plan_info.plan_width,
+            ),
+            pathtarget,
+            relids,
+            source_id,
+            desc,
+            child_roots,
+            children,
+        },
+        Path::Aggregate {
+            plan_info,
+            pathtarget,
+            slot_id,
+            strategy,
+            phase,
+            semantic_accumulators,
+            disabled,
+            pathkeys,
+            input,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            having,
+            output_columns,
+        } => Path::Aggregate {
+            plan_info: PlanEstimate::new(
+                plan_info.startup_cost.as_f64(),
+                preferred_total,
+                plan_info.plan_rows.as_f64(),
+                plan_info.plan_width,
+            ),
+            pathtarget,
+            slot_id,
+            strategy,
+            phase,
+            semantic_accumulators,
+            disabled,
+            pathkeys,
+            input,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            having,
+            output_columns,
+        },
+        other => other,
+    }
+}
+
+fn const_false_aggregate_input(
+    path: Path,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) -> Path {
+    let pathtarget = path.semantic_output_target();
+    optimize_path_with_config(
+        Path::Filter {
+            plan_info: PlanEstimate::default(),
+            pathtarget,
+            input: Box::new(path),
+            predicate: Expr::Const(Value::Bool(false)),
+        },
+        catalog,
+        config,
+    )
+}
+
+fn path_is_const_false_filter(path: &Path) -> bool {
+    matches!(
+        path,
+        Path::Filter {
+            predicate: Expr::Const(Value::Bool(false)),
+            ..
+        }
+    )
+}
+
+fn projection_is_var_passthrough(targets: &[TargetEntry]) -> bool {
+    targets
+        .iter()
+        .all(|target| !target.resjunk && matches!(target.expr, Expr::Var(_)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn partitionwise_aggregate_path(
+    root: &PlannerInfo,
+    input_rel: &RelOptInfo,
+    input_path: Path,
+    group_by: &[Expr],
+    passthrough_exprs: &[Expr],
+    accumulators: &[AggAccum],
+    having: Option<&Expr>,
+    output_columns: &[QueryColumn],
+    reltarget: &PathTarget,
+    catalog: &dyn CatalogLookup,
+) -> Option<Path> {
+    if !root.config.enable_partitionwise_aggregate {
+        return None;
+    }
+    if !root.parse.grouping_sets.is_empty() {
+        return None;
+    }
+    if matches!(root.parse.where_qual, Some(Expr::Const(Value::Bool(false)))) {
+        return None;
+    }
+    if aggregate_accums_contain_whole_row_rel(root, &input_rel.relids, accumulators) {
+        return None;
+    }
+    let input_path = match input_path {
+        Path::Projection { input, targets, .. } if projection_is_identity(&input, &targets) => {
+            *input
+        }
+        Path::Projection { input, targets, .. } if projection_is_var_passthrough(&targets) => {
+            *input
+        }
+        other => other,
+    };
+    let Path::Append {
+        relids, children, ..
+    } = input_path
+    else {
+        return None;
+    };
+    if children.is_empty() {
+        return None;
+    }
+
+    let group_by_covers_partitioning =
+        input_rel
+            .partition_info
+            .as_ref()
+            .is_some_and(|partition_info| {
+                grouping_covers_partition_keys(root, group_by, partition_info)
+            })
+            || (input_rel.partition_info.is_none()
+                && grouping_contains_inner_join_key(root, group_by, &input_rel.relids));
+
+    if group_by_covers_partitioning {
+        return Some(full_partitionwise_aggregate_path(
+            root,
+            relids,
+            children,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            having,
+            output_columns,
+            reltarget,
+            catalog,
+        ));
+    }
+
+    if !all_aggregates_are_partial_safe(accumulators) {
+        return None;
+    }
+    Some(partial_partitionwise_aggregate_path(
+        root,
+        relids,
+        children,
+        group_by,
+        passthrough_exprs,
+        accumulators,
+        having,
+        output_columns,
+        reltarget,
+        catalog,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_partitionwise_aggregate_fallback_path(
+    root: &PlannerInfo,
+    input_rel: &RelOptInfo,
+    input_path: Path,
+    group_by: &[Expr],
+    passthrough_exprs: &[Expr],
+    accumulators: &[AggAccum],
+    having: Option<&Expr>,
+    output_columns: &[QueryColumn],
+    reltarget: &PathTarget,
+    catalog: &dyn CatalogLookup,
+) -> Option<Path> {
+    if !root.config.enable_partitionwise_aggregate
+        || !root.parse.grouping_sets.is_empty()
+        || matches!(root.parse.where_qual, Some(Expr::Const(Value::Bool(false))))
+        || aggregate_accums_contain_whole_row_rel(root, &input_rel.relids, accumulators)
+    {
+        return None;
+    }
+    let input_path = match input_path {
+        Path::Projection { input, targets, .. } if projection_is_identity(&input, &targets) => {
+            *input
+        }
+        Path::Projection { input, targets, .. } if projection_is_var_passthrough(&targets) => {
+            *input
+        }
+        other => other,
+    };
+    let Path::Append {
+        relids, children, ..
+    } = input_path
+    else {
+        return None;
+    };
+    if children.is_empty() {
+        return None;
+    }
+    if grouping_contains_inner_join_key(root, group_by, &input_rel.relids) {
+        return Some(full_partitionwise_aggregate_path(
+            root,
+            relids,
+            children,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            having,
+            output_columns,
+            reltarget,
+            catalog,
+        ));
+    }
+    if all_aggregates_are_partial_safe(accumulators) {
+        return Some(partial_partitionwise_aggregate_path(
+            root,
+            relids,
+            children,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            having,
+            output_columns,
+            reltarget,
+            catalog,
+        ));
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn full_partitionwise_aggregate_path(
+    root: &PlannerInfo,
+    relids: Vec<usize>,
+    children: Vec<Path>,
+    group_by: &[Expr],
+    passthrough_exprs: &[Expr],
+    accumulators: &[AggAccum],
+    having: Option<&Expr>,
+    output_columns: &[QueryColumn],
+    reltarget: &PathTarget,
+    catalog: &dyn CatalogLookup,
+) -> Path {
+    let group_pathkeys = group_pathkeys(group_by);
+    let strategy = aggregate_strategy_for_input(root, group_by, accumulators);
+    let child_slot_id = next_synthetic_slot_id();
+    let children = children
+        .into_iter()
+        .map(|child| {
+            let input =
+                prepare_aggregate_input_for_strategy(strategy, child, group_by, accumulators);
+            aggregate_path(
+                strategy,
+                AggregatePhase::Complete,
+                if strategy == AggregateStrategy::Sorted {
+                    group_pathkeys.clone()
+                } else {
+                    Vec::new()
+                },
+                child_slot_id,
+                input,
+                group_by.to_vec(),
+                passthrough_exprs.to_vec(),
+                accumulators.to_vec(),
+                having.cloned(),
+                output_columns.to_vec(),
+                reltarget.clone(),
+                catalog,
+                root.config,
+            )
+        })
+        .collect::<Vec<_>>();
+    let source_id = next_synthetic_slot_id();
+    let desc = relation_desc_for_output_columns(output_columns);
+    let append_path = if strategy == AggregateStrategy::Sorted
+        && !root.query_pathkeys.is_empty()
+        && bestpath::pathkeys_satisfy(&group_pathkeys, &root.query_pathkeys)
+    {
+        Path::MergeAppend {
+            plan_info: PlanEstimate::default(),
+            pathtarget: reltarget.clone(),
+            source_id,
+            desc,
+            items: pathkeys_to_order_items(&group_pathkeys),
+            children,
+        }
+    } else {
+        Path::Append {
+            plan_info: PlanEstimate::default(),
+            pathtarget: reltarget.clone(),
+            relids,
+            source_id,
+            desc,
+            child_roots: Vec::new(),
+            children,
+        }
+    };
+    optimize_path_with_config(append_path, catalog, root.config)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn partial_partitionwise_aggregate_path(
+    root: &PlannerInfo,
+    relids: Vec<usize>,
+    children: Vec<Path>,
+    group_by: &[Expr],
+    passthrough_exprs: &[Expr],
+    accumulators: &[AggAccum],
+    having: Option<&Expr>,
+    output_columns: &[QueryColumn],
+    reltarget: &PathTarget,
+    catalog: &dyn CatalogLookup,
+) -> Path {
+    let partial_output_columns = aggregate_output_columns_for_phase(
+        AggregatePhase::Partial,
+        group_by,
+        passthrough_exprs,
+        accumulators,
+    );
+    let partial_target = reltarget.clone();
+    let partial_strategy = if group_by.is_empty() {
+        AggregateStrategy::Plain
+    } else if root.config.enable_hashagg {
+        AggregateStrategy::Hashed
+    } else {
+        AggregateStrategy::Sorted
+    };
+    let partial_group_pathkeys = group_pathkeys(group_by);
+    let final_strategy = if group_by.is_empty() {
+        AggregateStrategy::Plain
+    } else if root.config.enable_hashagg {
+        AggregateStrategy::Hashed
+    } else {
+        AggregateStrategy::Sorted
+    };
+    let child_slot_id = next_synthetic_slot_id();
+    let children = children
+        .into_iter()
+        .map(|child| {
+            let input = prepare_aggregate_input_for_strategy(
+                partial_strategy,
+                child,
+                group_by,
+                accumulators,
+            );
+            aggregate_path(
+                partial_strategy,
+                AggregatePhase::Partial,
+                if partial_strategy == AggregateStrategy::Sorted {
+                    partial_group_pathkeys.clone()
+                } else {
+                    Vec::new()
+                },
+                child_slot_id,
+                input,
+                group_by.to_vec(),
+                passthrough_exprs.to_vec(),
+                accumulators.to_vec(),
+                None,
+                partial_output_columns.clone(),
+                partial_target.clone(),
+                catalog,
+                root.config,
+            )
+        })
+        .collect::<Vec<_>>();
+    let partial_source_id = next_synthetic_slot_id();
+    let partial_desc = relation_desc_for_output_columns(&partial_output_columns);
+    let partial_append_path = if final_strategy == AggregateStrategy::Sorted
+        && partial_strategy == AggregateStrategy::Sorted
+    {
+        Path::MergeAppend {
+            plan_info: PlanEstimate::default(),
+            pathtarget: partial_target,
+            source_id: partial_source_id,
+            desc: partial_desc,
+            items: pathkeys_to_order_items(&partial_group_pathkeys),
+            children,
+        }
+    } else {
+        Path::Append {
+            plan_info: PlanEstimate::default(),
+            pathtarget: partial_target,
+            relids,
+            source_id: partial_source_id,
+            desc: partial_desc,
+            child_roots: Vec::new(),
+            children,
+        }
+    };
+    let partial_append = optimize_path_with_config(partial_append_path, catalog, root.config);
+    let final_accumulators = final_accumulators_for_partial(accumulators);
+    let final_group_pathkeys = group_pathkeys(group_by);
+    let final_input = prepare_aggregate_input_for_strategy(
+        final_strategy,
+        partial_append,
+        group_by,
+        &final_accumulators,
+    );
+    aggregate_path_with_semantics(
+        final_strategy,
+        AggregatePhase::Finalize,
+        if final_strategy == AggregateStrategy::Sorted {
+            final_group_pathkeys
+        } else {
+            Vec::new()
+        },
+        next_synthetic_slot_id(),
+        final_input,
+        group_by.to_vec(),
+        passthrough_exprs.to_vec(),
+        final_accumulators,
+        Some(accumulators.to_vec()),
+        having.cloned(),
+        output_columns.to_vec(),
+        reltarget.clone(),
+        catalog,
+        root.config,
     )
 }
 
@@ -161,7 +899,12 @@ fn make_aggregate_rel(
         RelOptKind::UpperRel,
         root.grouped_target.clone(),
     );
-    for path in input_rel.pathlist {
+    for mut path in input_rel.pathlist.clone() {
+        if matches!(root.parse.where_qual, Some(Expr::Const(Value::Bool(false))))
+            && !path_is_const_false_filter(&path)
+        {
+            path = const_false_aggregate_input(path, catalog, root.config);
+        }
         let group_by = root
             .aggregate_group_by()
             .iter()
@@ -198,36 +941,109 @@ fn make_aggregate_rel(
             .map(|expr| expand_join_rte_vars(root, expr));
         let output_columns =
             build_aggregate_output_columns(&group_by, &passthrough_exprs, &accumulators);
-        if group_by.is_empty() {
+        let partitionwise_input = path.clone();
+        if !root.parse.grouping_sets.is_empty() {
             rel.add_path(aggregate_path(
-                AggregateStrategy::Plain,
+                AggregateStrategy::Mixed,
+                AggregatePhase::Complete,
                 Vec::new(),
                 slot_id,
                 path,
-                group_by,
-                passthrough_exprs,
-                accumulators,
-                having,
-                output_columns,
+                group_by.clone(),
+                passthrough_exprs.clone(),
+                accumulators.clone(),
+                having.clone(),
+                output_columns.clone(),
                 root.grouped_target.clone(),
                 catalog,
                 root.config,
             ));
             continue;
         }
+        if group_by.is_empty() {
+            rel.add_path(aggregate_path(
+                AggregateStrategy::Plain,
+                AggregatePhase::Complete,
+                Vec::new(),
+                slot_id,
+                path,
+                group_by.clone(),
+                passthrough_exprs.clone(),
+                accumulators.clone(),
+                having.clone(),
+                output_columns.clone(),
+                root.grouped_target.clone(),
+                catalog,
+                root.config,
+            ));
+            if let Some(path) = partitionwise_aggregate_path(
+                root,
+                &input_rel,
+                partitionwise_input.clone(),
+                &group_by,
+                &passthrough_exprs,
+                &accumulators,
+                having.as_ref(),
+                &output_columns,
+                &root.grouped_target,
+                catalog,
+            )
+            .or_else(|| {
+                append_partitionwise_aggregate_fallback_path(
+                    root,
+                    &input_rel,
+                    partitionwise_input,
+                    &group_by,
+                    &passthrough_exprs,
+                    &accumulators,
+                    having.as_ref(),
+                    &output_columns,
+                    &root.grouped_target,
+                    catalog,
+                )
+            }) {
+                rel.add_path(prefer_partitionwise_aggregate_path_cost(
+                    path,
+                    &rel.pathlist,
+                ));
+            }
+            continue;
+        }
 
         let group_pathkeys = group_pathkeys(&group_by);
-        if accumulators_require_sorted_grouping(&accumulators) {
+        if path_is_const_false_filter(&path)
+            && !matches!(root.parse.where_qual, Some(Expr::Const(Value::Bool(false))))
+        {
             rel.add_path(aggregate_path(
                 AggregateStrategy::Sorted,
+                AggregatePhase::Complete,
                 group_pathkeys.clone(),
                 slot_id,
-                ordered_group_input(path, &group_pathkeys),
-                group_by,
-                passthrough_exprs,
-                accumulators,
-                having,
-                output_columns,
+                path,
+                group_by.clone(),
+                passthrough_exprs.clone(),
+                accumulators.clone(),
+                having.clone(),
+                output_columns.clone(),
+                root.grouped_target.clone(),
+                catalog,
+                root.config,
+            ));
+            continue;
+        }
+        if accumulators_require_sorted_grouping(&accumulators) {
+            let input_pathkeys = aggregate_input_pathkeys(&group_by, &accumulators);
+            rel.add_path(aggregate_path(
+                AggregateStrategy::Sorted,
+                AggregatePhase::Complete,
+                group_pathkeys.clone(),
+                slot_id,
+                ordered_group_input(path, &input_pathkeys),
+                group_by.clone(),
+                passthrough_exprs.clone(),
+                accumulators.clone(),
+                having.clone(),
+                output_columns.clone(),
                 root.grouped_target.clone(),
                 catalog,
                 root.config,
@@ -238,6 +1054,7 @@ fn make_aggregate_rel(
             if root.config.enable_hashagg {
                 rel.add_path(aggregate_path(
                     AggregateStrategy::Hashed,
+                    AggregatePhase::Complete,
                     Vec::new(),
                     slot_id,
                     path.clone(),
@@ -254,6 +1071,7 @@ fn make_aggregate_rel(
             if path_satisfies_group_order || !root.config.enable_hashagg {
                 rel.add_path(aggregate_path(
                     AggregateStrategy::Sorted,
+                    AggregatePhase::Complete,
                     group_pathkeys.clone(),
                     slot_id,
                     if path_satisfies_group_order {
@@ -261,16 +1079,47 @@ fn make_aggregate_rel(
                     } else {
                         ordered_group_input(path, &group_pathkeys)
                     },
-                    group_by,
-                    passthrough_exprs,
-                    accumulators,
-                    having,
-                    output_columns,
+                    group_by.clone(),
+                    passthrough_exprs.clone(),
+                    accumulators.clone(),
+                    having.clone(),
+                    output_columns.clone(),
                     root.grouped_target.clone(),
                     catalog,
                     root.config,
                 ));
             }
+        }
+        if let Some(path) = partitionwise_aggregate_path(
+            root,
+            &input_rel,
+            partitionwise_input.clone(),
+            &group_by,
+            &passthrough_exprs,
+            &accumulators,
+            having.as_ref(),
+            &output_columns,
+            &root.grouped_target,
+            catalog,
+        )
+        .or_else(|| {
+            append_partitionwise_aggregate_fallback_path(
+                root,
+                &input_rel,
+                partitionwise_input,
+                &group_by,
+                &passthrough_exprs,
+                &accumulators,
+                having.as_ref(),
+                &output_columns,
+                &root.grouped_target,
+                catalog,
+            )
+        }) {
+            rel.add_path(prefer_partitionwise_aggregate_path_cost(
+                path,
+                &rel.pathlist,
+            ));
         }
     }
     bestpath::set_cheapest(&mut rel);
@@ -1776,6 +2625,7 @@ fn make_distinct_rel(
             .collect::<Vec<_>>();
         rel.add_path(aggregate_path(
             AggregateStrategy::Hashed,
+            AggregatePhase::Complete,
             Vec::new(),
             next_synthetic_slot_id(),
             path,
@@ -2090,10 +2940,19 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
                     rte.desc.columns.get(index).map(|column| {
                         let qualifier = rte.alias.as_deref();
                         match (qualifier, &rte.kind) {
-                            (Some(qualifier), RangeTblEntryKind::Relation { relation_oid, .. })
-                                if catalog.class_row_by_oid(*relation_oid).is_some_and(
-                                    |class_row| class_row.relname.eq_ignore_ascii_case(qualifier),
-                                ) =>
+                            (
+                                Some(qualifier),
+                                RangeTblEntryKind::Relation {
+                                    relation_oid,
+                                    relkind,
+                                    ..
+                                },
+                            ) if catalog.class_row_by_oid(*relation_oid).is_some_and(
+                                |class_row| {
+                                    *relkind != 'p'
+                                        && class_row.relname.eq_ignore_ascii_case(qualifier)
+                                },
+                            ) =>
                             {
                                 column.name.clone()
                             }
@@ -2172,11 +3031,54 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
             }
             _ => crate::backend::executor::render_explain_expr(expr, &[]),
         },
+        Expr::Aggref(aggref) => {
+            let name = builtin_aggregate_function_for_proc_oid(aggref.aggfnoid)
+                .map(|func| func.name().to_string())
+                .unwrap_or_else(|| format!("agg_{}", aggref.aggfnoid));
+            let mut args = if aggref.args.is_empty() {
+                vec!["*".into()]
+            } else {
+                aggref
+                    .args
+                    .iter()
+                    .map(|arg| render_sort_key_expr(root, arg, catalog))
+                    .collect::<Vec<_>>()
+            };
+            if aggref.aggdistinct && !args.is_empty() {
+                args[0] = format!("DISTINCT {}", args[0]);
+            }
+            let mut rendered = format!("{name}({})", args.join(", "));
+            if !aggref.aggorder.is_empty() {
+                let order_by = aggref
+                    .aggorder
+                    .iter()
+                    .map(|item| {
+                        let mut item_rendered = render_sort_key_expr(root, &item.expr, catalog);
+                        if item.descending {
+                            item_rendered.push_str(" DESC");
+                        }
+                        if let Some(nulls_first) = item.nulls_first {
+                            item_rendered.push_str(if nulls_first {
+                                " NULLS FIRST"
+                            } else {
+                                " NULLS LAST"
+                            });
+                        }
+                        item_rendered
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                rendered = format!("{name}({} ORDER BY {order_by})", args.join(", "));
+            }
+            rendered
+        }
         Expr::Coalesce(left, right) => format!(
             "COALESCE({}, {})",
             render_sort_key_expr(root, left, catalog),
             render_sort_key_expr(root, right, catalog)
         ),
+        Expr::Row { fields, .. } => render_whole_row_sort_expr(root, fields, catalog)
+            .unwrap_or_else(|| crate::backend::executor::render_explain_expr(expr, &[])),
         Expr::Const(value) => {
             let rendered =
                 crate::backend::executor::render_explain_expr(&Expr::Const(value.clone()), &[]);
@@ -2188,6 +3090,63 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
         }
         _ => crate::backend::executor::render_explain_expr(expr, &[]),
     }
+}
+
+fn render_whole_row_sort_expr(
+    root: &PlannerInfo,
+    fields: &[(String, Expr)],
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    let first_var = match fields.first().map(|(_, expr)| expr)? {
+        Expr::Var(var) if var.varlevelsup == 0 => var,
+        _ => return None,
+    };
+    if !fields.iter().enumerate().all(|(index, (_, expr))| {
+        matches!(
+            expr,
+            Expr::Var(var)
+                if var.varno == first_var.varno
+                    && var.varlevelsup == 0
+                    && var.varattno == user_attrno(index)
+        )
+    }) {
+        return None;
+    }
+    let mut varno = first_var.varno;
+    let rte = root.parse.rtable.get(first_var.varno.saturating_sub(1))?;
+    if let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind {
+        let mapped_vars = (0..fields.len())
+            .map(|index| joinaliasvars.get(index))
+            .collect::<Option<Vec<_>>>()?;
+        let first_mapped = match mapped_vars.first()? {
+            Expr::Var(var) if var.varlevelsup == 0 => var,
+            _ => return None,
+        };
+        if mapped_vars.iter().enumerate().all(|(index, expr)| {
+            matches!(
+                expr,
+                Expr::Var(var)
+                    if var.varno == first_mapped.varno
+                        && var.varlevelsup == 0
+                        && var.varattno == user_attrno(index)
+            )
+        }) {
+            varno = first_mapped.varno;
+        }
+    }
+    let rte = root.parse.rtable.get(varno.saturating_sub(1))?;
+    let alias = rte
+        .alias
+        .as_deref()
+        .or_else(|| (!rte.eref.aliasname.is_empty()).then_some(rte.eref.aliasname.as_str()))?;
+    let type_name = match &rte.kind {
+        RangeTblEntryKind::Relation { relation_oid, .. } => catalog
+            .class_row_by_oid(*relation_oid)
+            .map(|class_row| class_row.relname)
+            .unwrap_or_else(|| alias.to_string()),
+        _ => alias.to_string(),
+    };
+    Some(format!("(({}.*)::{type_name})", alias))
 }
 
 fn render_geometry_sort_arg(

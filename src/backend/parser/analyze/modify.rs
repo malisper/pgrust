@@ -1174,6 +1174,7 @@ fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>
         distinct_on: Vec::new(),
         where_qual,
         group_by: Vec::new(),
+        grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
         having_qual: None,

@@ -87,7 +87,11 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
             let child_rtindex = root.parse.rtable.len() + 1;
             let translated_vars =
                 translate_parent_vars_to_child(&parent_rte.desc, child_rtindex, &child.desc);
-            let child_alias = format!("{parent_alias}_{child_alias_index}");
+            let child_alias = if child_alias_index == 1 {
+                parent_alias.clone()
+            } else {
+                format!("{parent_alias}_{}", child_alias_index - 1)
+            };
             let child_rte = RangeTblEntry {
                 alias: Some(child_alias.clone()),
                 alias_preserves_source_names: false,

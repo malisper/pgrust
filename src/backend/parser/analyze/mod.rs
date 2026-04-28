@@ -2743,6 +2743,47 @@ fn normalize_group_by_exprs(
         .collect()
 }
 
+fn take_single_rollup_grouping_set(group_by_exprs: &mut Vec<SqlExpr>) -> bool {
+    let [
+        SqlExpr::FuncCall {
+            name,
+            args,
+            order_by,
+            within_group,
+            distinct,
+            func_variadic,
+            filter,
+            null_treatment,
+            over,
+        },
+    ] = group_by_exprs.as_mut_slice()
+    else {
+        return false;
+    };
+    if !name.eq_ignore_ascii_case("rollup")
+        || !order_by.is_empty()
+        || within_group.is_some()
+        || *distinct
+        || *func_variadic
+        || filter.is_some()
+        || null_treatment.is_some()
+        || over.is_some()
+    {
+        return false;
+    }
+    let crate::include::nodes::parsenodes::SqlCallArgs::Args(call_args) = args else {
+        return false;
+    };
+    let [arg] = call_args.as_slice() else {
+        return false;
+    };
+    if arg.name.is_some() {
+        return false;
+    }
+    *group_by_exprs = vec![arg.value.clone()];
+    true
+}
+
 fn expand_group_by_with_primary_key_dependencies(
     group_by_exprs: &mut Vec<SqlExpr>,
     scope: &BoundScope,
@@ -3558,6 +3599,7 @@ fn bind_ctes(
                         distinct_on: Vec::new(),
                         where_qual: None,
                         group_by: Vec::new(),
+                        grouping_sets: Vec::new(),
                         accumulators: Vec::new(),
                         window_clauses: Vec::new(),
                         having_qual: None,
@@ -3630,6 +3672,7 @@ fn bind_ctes(
                         distinct_on: Vec::new(),
                         where_qual: None,
                         group_by: Vec::new(),
+                        grouping_sets: Vec::new(),
                         accumulators: Vec::new(),
                         window_clauses: Vec::new(),
                         having_qual: None,
@@ -4765,6 +4808,7 @@ pub(crate) fn bound_cte_from_materialized_rows(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
             having_qual: None,
@@ -4813,6 +4857,7 @@ pub(crate) fn bound_cte_from_query_rows(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
             having_qual: None,
@@ -4907,6 +4952,7 @@ fn bind_values_query_with_outer(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
             having_qual: None,
@@ -5035,6 +5081,8 @@ fn bind_select_query_with_outer(
         } else {
             normalize_group_by_exprs(stmt, &scope)?
         };
+        let has_single_rollup_grouping_set =
+            take_single_rollup_grouping_set(&mut effective_group_by);
         let constraint_deps =
             expand_group_by_with_primary_key_dependencies(&mut effective_group_by, &scope, catalog);
 
@@ -5146,6 +5194,11 @@ fn bind_select_query_with_outer(
                         )
                     })
                     .collect::<Result<_, _>>()?;
+                let grouping_sets = if has_single_rollup_grouping_set {
+                    vec![group_keys.clone(), Vec::new()]
+                } else {
+                    Vec::new()
+                };
                 let rewritten_group_keys = group_keys.clone();
 
                 return with_grouped_agg_cte_context(&visible_ctes, &local_ctes, || {
@@ -5644,6 +5697,7 @@ fn bind_select_query_with_outer(
                         distinct_on: Vec::new(),
                         where_qual,
                         group_by: rewritten_group_keys,
+                        grouping_sets,
                         accumulators,
                         window_clauses,
                         having_qual: having,
@@ -5747,6 +5801,7 @@ fn bind_select_query_with_outer(
                     distinct_on: Vec::new(),
                     where_qual,
                     group_by: Vec::new(),
+                    grouping_sets: Vec::new(),
                     accumulators: Vec::new(),
                     window_clauses,
                     having_qual: None,
@@ -5982,6 +6037,7 @@ fn bind_set_operation_query_with_outer(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
             having_qual: None,

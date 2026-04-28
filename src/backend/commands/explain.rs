@@ -400,7 +400,8 @@ fn format_explain_plan_with_subplans_inner(
     if let Some(plan_info) = const_false_filter_result_plan(plan) {
         let prefix = explain_node_prefix(indent, is_child);
         push_explain_line(&format!("{prefix}Result"), plan_info, show_costs, lines);
-        lines.push(format!("{prefix}  One-Time Filter: false"));
+        let detail_prefix = explain_detail_prefix(indent);
+        lines.push(format!("{detail_prefix}One-Time Filter: false"));
         return;
     }
 
@@ -703,33 +704,73 @@ fn push_nonverbose_plan_details(
             }
             true
         }
+        Plan::MergeAppend {
+            items, children, ..
+        } => {
+            let input_names = children
+                .first()
+                .map(|child| plan_join_output_exprs(child, ctx, true))
+                .unwrap_or_default();
+            let sort_key = items
+                .iter()
+                .map(|item| {
+                    let rendered = render_nonverbose_sort_item(item, &input_names, ctx);
+                    children
+                        .first()
+                        .and_then(|child| {
+                            remap_sort_display_item_through_aggregate(child, &rendered)
+                        })
+                        .unwrap_or(rendered)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !sort_key.is_empty() {
+                lines.push(format!("{prefix}Sort Key: {sort_key}"));
+            }
+            true
+        }
         Plan::Aggregate {
             input,
+            strategy,
             disabled,
             group_by,
             having,
             output_columns,
+            semantic_output_names,
             ..
         } => {
             if *disabled {
                 lines.push(format!("{prefix}Disabled: true"));
             }
-            if !group_by.is_empty() {
+            let suppress_dummy_group_key = *strategy == AggregateStrategy::Sorted
+                && const_false_filter_result_plan(input).is_some();
+            if !group_by.is_empty() && !suppress_dummy_group_key {
                 let mut group_items = Vec::new();
                 for (index, expr) in group_by.iter().enumerate() {
-                    let rendered = render_nonverbose_aggregate_group_key(
-                        expr,
-                        input,
-                        output_columns.get(index).map(|column| column.sql_type),
-                        ctx,
-                        *disabled,
-                        qualify_aggregate_group_keys,
-                    );
+                    let rendered = semantic_output_names
+                        .as_ref()
+                        .and_then(|names| names.get(index))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            render_nonverbose_aggregate_group_key(
+                                expr,
+                                input,
+                                output_columns.get(index).map(|column| column.sql_type),
+                                ctx,
+                                *disabled,
+                                qualify_aggregate_group_keys,
+                            )
+                        });
                     if !group_items.contains(&rendered) {
                         group_items.push(rendered);
                     }
                 }
-                lines.push(format!("{prefix}Group Key: {}", group_items.join(", ")));
+                if *strategy == AggregateStrategy::Mixed {
+                    lines.push(format!("{prefix}Hash Key: {}", group_items.join(", ")));
+                    lines.push(format!("{prefix}Group Key: ()"));
+                } else {
+                    lines.push(format!("{prefix}Group Key: {}", group_items.join(", ")));
+                }
             }
             if let Some(having) = having {
                 lines.push(format!(
@@ -913,7 +954,8 @@ fn nonverbose_sort_items(
             })
             .collect();
     }
-    let input_names = verbose_plan_output_exprs(input, ctx, true);
+    let input_names = qualified_scan_output_names(input)
+        .unwrap_or_else(|| verbose_plan_output_exprs(input, ctx, true));
     items
         .iter()
         .map(|item| render_nonverbose_sort_item(item, &input_names, ctx))
@@ -968,8 +1010,12 @@ fn qualified_scan_output_names(plan: &Plan) -> Option<Vec<String>> {
             desc,
             ..
         } => Some(qualified_base_scan_output_exprs(relation_name, desc)),
-        Plan::Filter { input, .. } | Plan::Projection { input, .. } => {
-            qualified_scan_output_names(input)
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. } => qualified_scan_output_names(input),
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+            children.first().and_then(qualified_scan_output_names)
         }
         _ => None,
     }
@@ -1032,16 +1078,18 @@ fn aggregate_group_key_input_names(
     ctx: &VerboseExplainContext,
     qualify_base_scan: bool,
 ) -> Vec<String> {
+    if const_false_filter_result_plan(input).is_none()
+        && let Some(names) = qualified_scan_output_names(input)
+    {
+        return names;
+    }
     if qualify_base_scan {
-        if let Some(names) = qualified_scan_output_names(input) {
-            return names;
-        }
         return verbose_plan_output_exprs(input, ctx, true);
     }
     if matches!(input, Plan::Projection { .. }) {
         return nonverbose_aggregate_input_names(input, ctx);
     }
-    input.column_names()
+    plan_join_output_exprs(input, ctx, true)
 }
 
 fn group_key_refs_projection_alias(expr: &Expr, input: &Plan, rendered: &str) -> bool {
@@ -1465,11 +1513,16 @@ fn verbose_plan_label(plan: &Plan) -> Option<String> {
         Plan::SeqScan { .. } | Plan::IndexOnlyScan { .. } | Plan::IndexScan { .. } => {
             verbose_scan_plan_label(plan)
         }
-        Plan::Aggregate { strategy, .. } => match strategy {
-            AggregateStrategy::Plain => Some("Aggregate".into()),
-            AggregateStrategy::Sorted => Some("GroupAggregate".into()),
-            AggregateStrategy::Hashed => Some("HashAggregate".into()),
-        },
+        Plan::Aggregate {
+            strategy,
+            phase,
+            accumulators,
+            ..
+        } => Some(aggregate_plan_label(
+            *strategy,
+            *phase,
+            accumulators.is_empty(),
+        )),
         Plan::SetOp { op, strategy, .. } => Some(set_op_plan_label(*op, *strategy)),
         Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
             Some("Result".into())
@@ -1482,6 +1535,27 @@ fn verbose_plan_label(plan: &Plan) -> Option<String> {
             None => "Subquery Scan".into(),
         }),
         _ => None,
+    }
+}
+
+fn aggregate_plan_label(
+    strategy: AggregateStrategy,
+    phase: crate::include::nodes::plannodes::AggregatePhase,
+    groups_only: bool,
+) -> String {
+    if groups_only && strategy == AggregateStrategy::Sorted {
+        return "Group".into();
+    }
+    let base = match strategy {
+        AggregateStrategy::Plain => "Aggregate",
+        AggregateStrategy::Sorted => "GroupAggregate",
+        AggregateStrategy::Hashed => "HashAggregate",
+        AggregateStrategy::Mixed => "MixedAggregate",
+    };
+    match phase {
+        crate::include::nodes::plannodes::AggregatePhase::Complete => base.to_string(),
+        crate::include::nodes::plannodes::AggregatePhase::Partial => format!("Partial {base}"),
+        crate::include::nodes::plannodes::AggregatePhase::Finalize => format!("Finalize {base}"),
     }
 }
 
@@ -2214,6 +2288,7 @@ fn push_verbose_plan_details(
         }
         Plan::Aggregate {
             input,
+            strategy,
             group_by,
             having,
             ..
@@ -2228,7 +2303,12 @@ fn push_verbose_plan_details(
                     }
                 }
                 let group_key = group_items.join(", ");
-                lines.push(format!("{prefix}Group Key: {group_key}"));
+                if *strategy == AggregateStrategy::Mixed {
+                    lines.push(format!("{prefix}Hash Key: {group_key}"));
+                    lines.push(format!("{prefix}Group Key: ()"));
+                } else {
+                    lines.push(format!("{prefix}Group Key: {group_key}"));
+                }
             }
             if let Some(having) = having {
                 lines.push(format!(
@@ -2890,9 +2970,15 @@ fn plan_join_output_exprs(
                 .collect()
         }
         Plan::Aggregate {
+            semantic_output_names: Some(names),
+            ..
+        } => names.clone(),
+        Plan::Aggregate {
             input,
             group_by,
+            passthrough_exprs,
             accumulators,
+            semantic_accumulators,
             ..
         } => {
             let input_names = plan_join_output_exprs(input, ctx, true);
@@ -2900,6 +2986,25 @@ fn plan_join_output_exprs(
                 .iter()
                 .map(|expr| render_verbose_expr(expr, &input_names, ctx))
                 .collect::<Vec<_>>();
+            output.extend(
+                passthrough_exprs
+                    .iter()
+                    .map(|expr| render_verbose_expr(expr, &input_names, ctx)),
+            );
+            if let Some(display_accumulators) = semantic_accumulators {
+                let offset = group_by.len() + passthrough_exprs.len();
+                output.extend(
+                    display_accumulators
+                        .iter()
+                        .enumerate()
+                        .map(|(index, accum)| {
+                            input_names.get(offset + index).cloned().unwrap_or_else(|| {
+                                render_verbose_agg_accum(accum, &input_names, ctx)
+                            })
+                        }),
+                );
+                return output;
+            }
             output.extend(accumulators.iter().map(|accum| {
                 let rendered = render_verbose_agg_accum(accum, &input_names, ctx);
                 if for_parent_ref {
@@ -3100,10 +3205,15 @@ fn verbose_plan_output_exprs(
                 .collect()
         }
         Plan::Aggregate {
+            semantic_output_names: Some(names),
+            ..
+        } => names.clone(),
+        Plan::Aggregate {
             input,
             group_by,
             passthrough_exprs,
             accumulators,
+            semantic_accumulators,
             ..
         } => {
             let input_names = verbose_plan_output_exprs(input, ctx, true);
@@ -3116,6 +3226,20 @@ fn verbose_plan_output_exprs(
                     .iter()
                     .map(|expr| render_verbose_expr(expr, &input_names, ctx)),
             );
+            if let Some(display_accumulators) = semantic_accumulators {
+                let offset = group_by.len() + passthrough_exprs.len();
+                output.extend(
+                    display_accumulators
+                        .iter()
+                        .enumerate()
+                        .map(|(index, accum)| {
+                            input_names.get(offset + index).cloned().unwrap_or_else(|| {
+                                render_verbose_agg_accum(accum, &input_names, ctx)
+                            })
+                        }),
+                );
+                return output;
+            }
             output.extend(accumulators.iter().map(|accum| {
                 let rendered = render_verbose_agg_accum(accum, &input_names, ctx);
                 if for_parent_ref {
@@ -3831,12 +3955,21 @@ fn render_verbose_expr(
             let Some(op_text) = verbose_op_text(op.opno, op.op) else {
                 return strip_outer_parens(&render_explain_expr(expr, column_names));
             };
-            format!(
-                "({} {} {})",
-                render_verbose_expr(left, column_names, ctx),
-                op_text,
-                render_verbose_expr(right, column_names, ctx)
-            )
+            let mut left_rendered =
+                strip_outer_parens(&render_verbose_expr(left, column_names, ctx));
+            let mut right_rendered =
+                strip_outer_parens(&render_verbose_expr(right, column_names, ctx));
+            if (verbose_expr_is_numeric(left) || left_rendered.starts_with("avg("))
+                && matches!(right, Expr::Const(_))
+            {
+                right_rendered = format!("'{}'::numeric", right_rendered);
+            }
+            if (verbose_expr_is_numeric(right) || right_rendered.starts_with("avg("))
+                && matches!(left, Expr::Const(_))
+            {
+                left_rendered = format!("'{}'::numeric", left_rendered);
+            }
+            format!("({left_rendered} {op_text} {right_rendered})")
         }
         Expr::Bool(bool_expr) => match bool_expr.boolop {
             crate::include::nodes::primnodes::BoolExprType::And => format!(
@@ -3898,6 +4031,24 @@ fn verbose_op_text(
         crate::include::nodes::primnodes::OpExprKind::ArrayContains => Some("@>"),
         crate::include::nodes::primnodes::OpExprKind::ArrayContained => Some("<@"),
         _ => None,
+    }
+}
+
+fn verbose_expr_is_numeric(expr: &Expr) -> bool {
+    use crate::backend::parser::SqlTypeKind;
+    match expr {
+        Expr::Aggref(aggref) => {
+            matches!(aggref.aggtype.kind, SqlTypeKind::Numeric)
+                || builtin_aggregate_function_for_proc_oid(aggref.aggfnoid).is_some_and(|func| {
+                    matches!(func, crate::include::nodes::primnodes::AggFunc::Avg)
+                })
+        }
+        Expr::Cast(inner, ty) => {
+            matches!(ty.kind, SqlTypeKind::Numeric) || verbose_expr_is_numeric(inner)
+        }
+        Expr::Collate { expr, .. } => verbose_expr_is_numeric(expr),
+        Expr::Const(Value::Numeric(_)) => true,
+        _ => false,
     }
 }
 
@@ -4079,7 +4230,7 @@ fn const_false_filter_result_plan(plan: &Plan) -> Option<PlanEstimate> {
 fn const_false_filter_input_can_render_as_result(input: &Plan) -> bool {
     match input {
         Plan::SeqScan { .. } | Plan::Result { .. } => true,
-        Plan::Append { children, .. } => children.is_empty(),
+        Plan::Append { .. } => true,
         _ => false,
     }
 }
