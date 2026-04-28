@@ -6620,6 +6620,7 @@ fn partitioned_table_parent_defaults_not_null_and_checks_are_cataloged_and_inher
         Err(ExecError::CheckViolation {
             relation,
             constraint,
+            ..
         }) if relation == "parted_meta_one" && constraint == "parted_meta_b_nonnegative" => {}
         other => panic!("expected inherited check violation, got {other:?}"),
     }
@@ -6761,6 +6762,7 @@ fn alter_table_add_check_reconciles_existing_partition_constraint() {
         Err(ExecError::CheckViolation {
             relation,
             constraint,
+            ..
         }) if relation == "part_b" && constraint == "check_b" => {}
         other => panic!("expected reconciled inherited check violation, got {other:?}"),
     }
@@ -8764,6 +8766,7 @@ fn alter_table_no_inherit_localizes_inherited_check_constraint() {
         Err(ExecError::CheckViolation {
             relation,
             constraint,
+            ..
         }) if relation == "bc" && constraint == "ac_check" => {}
         other => panic!("expected localized inherited check violation, got {other:?}"),
     }
@@ -9417,6 +9420,75 @@ fn base_table_scan_exposes_ctid_system_column() {
             vec![Value::Text("(0,2)".into()), Value::Int32(20)],
         ]
     );
+}
+
+#[test]
+fn check_constraints_allow_tableoid_and_reject_other_system_columns() {
+    let dir = temp_dir("check_constraint_system_columns");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(
+        1,
+        "create table sys_col_check_tbl (
+            city text,
+            state text,
+            is_capital bool,
+            altitude int4,
+            check (not (is_capital and tableoid::regclass::text = 'sys_col_check_tbl'))
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into sys_col_check_tbl values ('Seattle', 'Washington', false, 100)",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "insert into sys_col_check_tbl values ('Olympia', 'Washington', true, 100)",
+    ) {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+            detail,
+        }) if relation == "sys_col_check_tbl" && constraint == "sys_col_check_tbl_check" => {
+            assert_eq!(
+                detail.as_deref(),
+                Some("Failing row contains (Olympia, Washington, t, 100).")
+            );
+        }
+        other => panic!("expected tableoid check violation, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select city, tableoid::regclass::text from sys_col_check_tbl",
+        ),
+        vec![vec![
+            Value::Text("Seattle".into()),
+            Value::Text("sys_col_check_tbl".into()),
+        ]]
+    );
+
+    match db.execute(
+        1,
+        "create table bad_sys_col_check_tbl (
+            city text,
+            check (ctid::text = 'bad_sys_col_check_tbl')
+        )",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(
+                message,
+                "system column \"ctid\" reference in check constraint is invalid"
+            );
+            assert_eq!(sqlstate, "42P16");
+        }
+        other => panic!("expected ctid check constraint rejection, got {other:?}"),
+    }
 }
 
 #[test]
@@ -17587,6 +17659,7 @@ fn alter_table_add_column_propagates_temp_check_constraints() {
         Err(ExecError::CheckViolation {
             relation,
             constraint,
+            ..
         }) if relation == "child1" && constraint == "parent1_a1_check" => {}
         other => panic!("expected propagated temp check violation, got {other:?}"),
     }
@@ -22805,7 +22878,10 @@ fn create_table_check_and_named_not_null_constraints_are_enforced_and_persisted(
         Err(ExecError::CheckViolation {
             relation,
             constraint,
-        }) if relation == "items" && constraint == "items_id_positive" => {}
+            detail,
+        }) if relation == "items" && constraint == "items_id_positive" => {
+            assert_eq!(detail.as_deref(), Some("Failing row contains (0, hello)."));
+        }
         other => panic!("expected check violation, got {other:?}"),
     }
 
@@ -22814,8 +22890,10 @@ fn create_table_check_and_named_not_null_constraints_are_enforced_and_persisted(
             relation,
             column,
             constraint,
-            ..
-        }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
+            detail,
+        }) if relation == "items" && column == "note" && constraint == "items_note_required" => {
+            assert_eq!(detail.as_deref(), Some("Failing row contains (1, null)."));
+        }
         other => panic!("expected named not-null violation, got {other:?}"),
     }
 
@@ -22823,6 +22901,7 @@ fn create_table_check_and_named_not_null_constraints_are_enforced_and_persisted(
         Err(ExecError::CheckViolation {
             relation,
             constraint,
+            ..
         }) if relation == "items" && constraint == "items_note_nonempty" => {}
         other => panic!("expected second check violation, got {other:?}"),
     }
@@ -22880,6 +22959,7 @@ fn create_table_check_and_named_not_null_constraints_are_enforced_and_persisted(
         Err(ExecError::CheckViolation {
             relation,
             constraint,
+            ..
         }) if relation == "items" && constraint == "items_id_positive" => {}
         other => panic!("expected reopened check violation, got {other:?}"),
     }
@@ -25008,6 +25088,7 @@ fn update_and_copy_from_enforce_check_and_not_null_constraints() {
         Err(ExecError::CheckViolation {
             relation,
             constraint,
+            ..
         }) if relation == "items" && constraint == "items_id_positive" => {}
         other => panic!("expected update check violation, got {other:?}"),
     }
@@ -25026,6 +25107,7 @@ fn update_and_copy_from_enforce_check_and_not_null_constraints() {
         Err(ExecError::CheckViolation {
             relation,
             constraint,
+            ..
         }) if relation == "items" && constraint == "items_id_positive" => {}
         other => panic!("expected copy check violation, got {other:?}"),
     }
@@ -25072,6 +25154,7 @@ fn prepared_insert_enforces_check_and_not_null_constraints() {
         Err(ExecError::CheckViolation {
             relation,
             constraint,
+            ..
         }) if relation == "items" && constraint == "items_id_positive" => {}
         other => panic!("expected prepared-insert check violation, got {other:?}"),
     }
@@ -25173,6 +25256,7 @@ fn alter_table_add_constraints_support_not_valid_and_validate() {
         Err(ExecError::CheckViolation {
             relation,
             constraint,
+            ..
         }) if relation == "items" && constraint == "items_id_positive" => {}
         other => panic!("expected ALTER TABLE CHECK violation, got {other:?}"),
     }
@@ -25211,6 +25295,7 @@ fn alter_table_add_constraints_support_not_valid_and_validate() {
         Err(ExecError::CheckViolation {
             relation,
             constraint,
+            ..
         }) if relation == "items" && constraint == "items_id_positive" => {}
         other => panic!("expected CHECK validate failure, got {other:?}"),
     }
@@ -27871,6 +27956,7 @@ fn alter_table_rename_constraint_updates_catalog_and_enforcement() {
         Err(ExecError::CheckViolation {
             relation,
             constraint,
+            ..
         }) if relation == "items" && constraint == "items_id_guard" => {}
         other => panic!("expected renamed CHECK constraint violation, got {other:?}"),
     }

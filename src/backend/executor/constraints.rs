@@ -40,7 +40,8 @@ pub(crate) fn enforce_relation_constraints(
         return Ok(());
     }
 
-    let mut slot = TupleSlot::virtual_row(values.to_vec());
+    let mut slot =
+        TupleSlot::virtual_row_with_metadata(values.to_vec(), None, constraints.relation_oid);
     for check in &constraints.checks {
         if !check.enforced {
             continue;
@@ -51,6 +52,7 @@ pub(crate) fn enforce_relation_constraints(
                 return Err(ExecError::CheckViolation {
                     relation: relation_name.to_string(),
                     constraint: check.constraint_name.clone(),
+                    detail: Some(format_failing_row_detail(values, &ctx.datetime_config)),
                 });
             }
             _ => {
