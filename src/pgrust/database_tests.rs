@@ -24054,7 +24054,10 @@ fn prepared_insert_enforces_check_and_not_null_constraints() {
         }) if relation == "items" && constraint == "items_id_positive" => {}
         other => panic!("expected prepared-insert check violation, got {other:?}"),
     }
+    assert!(session.transaction_failed());
+    session.execute(&db, "rollback").unwrap();
 
+    session.execute(&db, "begin").unwrap();
     match session.execute_prepared_insert(&db, &prepared, &[Value::Int32(2), Value::Null]) {
         Err(ExecError::NotNullViolation {
             relation,
@@ -24064,7 +24067,10 @@ fn prepared_insert_enforces_check_and_not_null_constraints() {
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected prepared-insert not-null violation, got {other:?}"),
     }
+    assert!(session.transaction_failed());
+    session.execute(&db, "rollback").unwrap();
 
+    session.execute(&db, "begin").unwrap();
     session
         .execute_prepared_insert(&db, &prepared, &[Value::Int32(3), Value::Text("ok".into())])
         .unwrap();
@@ -24106,6 +24112,10 @@ fn prepared_insert_and_copy_from_enforce_foreign_keys() {
         }
         other => panic!("expected prepared foreign-key violation, got {other:?}"),
     }
+    assert!(session.transaction_failed());
+    session.execute(&db, "rollback").unwrap();
+
+    session.execute(&db, "begin").unwrap();
     session
         .execute_prepared_insert(&db, &prepared, &[Value::Int32(1), Value::Int32(1)])
         .unwrap();
@@ -35303,10 +35313,18 @@ fn drop_table_is_transactional() {
     writer.execute(&db, "begin").unwrap();
     writer.execute(&db, "drop table drop_me").unwrap();
 
-    assert!(
-        writer.execute(&db, "select count(*) from drop_me").is_err(),
-        "dropping session should stop seeing the table immediately"
-    );
+    match writer
+        .execute(
+            &db,
+            "select count(*) from pg_class where relname = 'drop_me'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected pg_class query, got {other:?}"),
+    }
 
     writer.execute(&db, "commit").unwrap();
 

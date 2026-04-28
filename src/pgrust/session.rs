@@ -8897,6 +8897,12 @@ impl Session {
                         actual: "no active transaction for prepared insert".into(),
                     }));
                 }
+                if self.transaction_failed() {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "ROLLBACK",
+                        actual: "current transaction is aborted, commands ignored until end of transaction block".into(),
+                    }));
+                }
                 let xid = self.ensure_active_xid(db);
                 let txn = self.active_txn.as_mut().ok_or_else(|| {
                     ExecError::Parse(ParseError::UnexpectedToken {
