@@ -1110,6 +1110,33 @@ pub fn default_opclass_for_am_and_type(
             .into_iter()
             .find(|row| row.oid == crate::include::catalog::VARCHAR_BTREE_OPCLASS_OID);
     }
+    let range_rows = db.range_rows();
+    if range_rows.iter().any(|row| row.rngtypid == input_type_oid) {
+        let opclass_oid = match am_oid {
+            crate::include::catalog::BTREE_AM_OID => {
+                crate::include::catalog::RANGE_BTREE_OPCLASS_OID
+            }
+            crate::include::catalog::HASH_AM_OID => crate::include::catalog::RANGE_HASH_OPCLASS_OID,
+            crate::include::catalog::GIST_AM_OID => crate::include::catalog::RANGE_GIST_OPCLASS_OID,
+            crate::include::catalog::SPGIST_AM_OID => {
+                crate::include::catalog::RANGE_SPGIST_OPCLASS_OID
+            }
+            _ => 0,
+        };
+        if opclass_oid != 0 {
+            return opclasses.into_iter().find(|row| row.oid == opclass_oid);
+        }
+    }
+    if range_rows
+        .iter()
+        .any(|row| row.rngmultitypid == input_type_oid)
+    {
+        return opclasses.into_iter().find(|row| {
+            row.opcmethod == am_oid
+                && row.opcdefault
+                && row.opcintype == crate::include::catalog::ANYMULTIRANGEOID
+        });
+    }
     let input_type = type_row_by_oid(db, client_id, txn_ctx, input_type_oid)?;
     if input_type.sql_type.is_range() {
         let opclass_oid = match am_oid {
