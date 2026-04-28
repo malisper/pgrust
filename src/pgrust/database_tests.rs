@@ -40179,6 +40179,184 @@ fn regrole_cast_to_text_renders_role_name() {
 }
 
 #[test]
+fn pg_auth_members_is_selectable_by_role_membership_grantee() {
+    let dir = temp_dir("pg_auth_members_public_select");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create role app_role").unwrap();
+    session.execute(&db, "create role app_admin").unwrap();
+    session.execute(&db, "create role app_member").unwrap();
+    session
+        .execute(&db, "grant app_role to app_admin with admin option")
+        .unwrap();
+    session
+        .execute(&db, "grant app_admin to app_member")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization app_member")
+        .unwrap();
+    session
+        .execute(&db, "grant app_role to app_member")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select grantor::regrole::text from pg_auth_members \
+             where roleid = 'app_role'::regrole and member = 'app_member'::regrole",
+        ),
+        vec![vec![Value::Text("app_admin".into())]]
+    );
+}
+
+#[test]
+fn bootstrap_toast_relations_resolve_before_privilege_checks() {
+    let dir = temp_dir("bootstrap_toast_acl");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create role toast_user").unwrap();
+    session
+        .execute(&db, "set session authorization toast_user")
+        .unwrap();
+
+    match session.execute(&db, "update pg_toast.pg_toast_1213 set chunk_id = 1") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "permission denied for table pg_toast.pg_toast_1213"
+            );
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected toast table permission error, got {other:?}"),
+    }
+}
+
+#[test]
+fn has_relation_column_sequence_and_role_privilege_builtins_use_catalog_acls() {
+    let dir = temp_dir("has_privilege_builtins");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create role acl_reader login").unwrap();
+    db.execute(1, "create role acl_member login").unwrap();
+    db.execute(1, "create role acl_group").unwrap();
+    db.execute(1, "grant acl_group to acl_member with admin option")
+        .unwrap();
+    db.execute(1, "create table acl_table(a int, b int)")
+        .unwrap();
+    db.execute(1, "grant select on acl_table to acl_reader")
+        .unwrap();
+    db.execute(1, "grant update(b) on acl_table to acl_member")
+        .unwrap();
+    db.execute(1, "create sequence acl_seq").unwrap();
+    db.execute(1, "grant usage on acl_seq to acl_reader")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select has_table_privilege('acl_reader', 'acl_table', 'select'), \
+                    has_table_privilege('acl_reader', 'acl_table', 'insert'), \
+                    has_table_privilege('acl_reader', 'acl_table', 'select with grant option')",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(false),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select has_column_privilege('acl_member', 'acl_table', 'b', 'update'), \
+                    has_any_column_privilege('acl_member', 'acl_table', 'update'), \
+                    has_column_privilege('acl_member', 'acl_table', 'a', 'update')",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select has_sequence_privilege('acl_reader', 'acl_seq', 'usage'), \
+                    has_sequence_privilege('acl_reader', 'acl_seq', 'select')",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(false)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_has_role('acl_member', 'acl_group', 'usage'), \
+                    pg_has_role('acl_member', 'acl_group', 'member'), \
+                    pg_has_role('acl_member', 'acl_group', 'member with admin option')",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+        ]]
+    );
+}
+
+#[test]
+fn has_privilege_builtins_match_missing_object_and_largeobject_edges() {
+    let dir = temp_dir("has_privilege_edges");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create role edge_reader login").unwrap();
+    db.execute(1, "create table edge_table(a int)").unwrap();
+    db.execute(1, "select lo_create(5001)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select has_table_privilege(1::oid, 'select'), \
+                    has_column_privilege(9999::oid, 99::int2, 'select'), \
+                    has_largeobject_privilege('edge_reader', 999999::oid, 'select')",
+        ),
+        vec![vec![Value::Null, Value::Null, Value::Null]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select has_largeobject_privilege(5001::oid, 'select'), \
+                    has_largeobject_privilege('edge_reader', 5001::oid, 'select')",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(false)]]
+    );
+
+    let sequence_error = db
+        .execute(
+            1,
+            "select has_sequence_privilege('edge_reader', 'edge_table', 'usage')",
+        )
+        .unwrap_err();
+    assert_sqlstate(sequence_error, "42809", "\"edge_table\" is not a sequence");
+
+    let privilege_error = db
+        .execute(1, "select has_table_privilege('edge_table', 'sel')")
+        .unwrap_err();
+    assert_sqlstate(
+        privilege_error,
+        "22023",
+        "unrecognized privilege type: \"sel\"",
+    );
+}
+
+#[test]
 fn pg_get_userbyid_returns_role_name() {
     let dir = temp_dir("pg_get_userbyid");
     let db = Database::open(&dir, 64).unwrap();

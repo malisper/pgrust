@@ -45,6 +45,13 @@ fn table_privilege_chars(privilege: &GrantObjectPrivilege) -> Option<&str> {
     }
 }
 
+fn relation_privilege_chars(privilege: &GrantObjectPrivilege, relkind: char) -> Option<&str> {
+    if relkind == 'S' && matches!(privilege, GrantObjectPrivilege::AllPrivilegesOnTable) {
+        return Some("rwU");
+    }
+    table_privilege_chars(privilege)
+}
+
 fn table_column_privilege_specs(
     privilege: &GrantObjectPrivilege,
     columns: &[String],
@@ -120,6 +127,13 @@ fn table_owner_default_acl(owner_name: &str, relkind: char) -> Option<String> {
     Some(format!("{owner_name}={privileges}/{owner_name}"))
 }
 
+fn allowed_relation_privilege_chars(relkind: char) -> &'static str {
+    match relkind {
+        'S' => "rwU",
+        _ => TABLE_ALL_PRIVILEGE_CHARS,
+    }
+}
+
 fn parse_acl_item(item: &str) -> Option<(String, String, String)> {
     let (grantee, rest) = item.split_once('=')?;
     let (privileges, grantor) = rest.split_once('/')?;
@@ -142,6 +156,7 @@ fn grant_table_acl_entry(
     grantee: &str,
     grantor: &str,
     privilege_chars: &str,
+    allowed: &str,
 ) {
     if let Some(existing) = acl.iter_mut().find(|item| {
         parse_acl_item(item)
@@ -153,18 +168,23 @@ fn grant_table_acl_entry(
         let (_, existing_privileges, _) = parse_acl_item(existing).expect("validated above");
         let merged = canonicalize_acl_privileges(
             &format!("{existing_privileges}{privilege_chars}"),
-            TABLE_ALL_PRIVILEGE_CHARS,
+            allowed,
         );
         *existing = format!("{grantee}={merged}/{grantor}");
         return;
     }
     acl.push(format!(
         "{grantee}={}/{grantor}",
-        canonicalize_acl_privileges(privilege_chars, TABLE_ALL_PRIVILEGE_CHARS)
+        canonicalize_acl_privileges(privilege_chars, allowed)
     ));
 }
 
-fn revoke_table_acl_entry(acl: &mut Vec<String>, grantee: &str, privilege_chars: &str) {
+fn revoke_table_acl_entry(
+    acl: &mut Vec<String>,
+    grantee: &str,
+    privilege_chars: &str,
+    allowed: &str,
+) {
     acl.retain_mut(|item| {
         let Some((item_grantee, existing_privileges, grantor)) = parse_acl_item(item) else {
             return true;
@@ -176,7 +196,7 @@ fn revoke_table_acl_entry(acl: &mut Vec<String>, grantee: &str, privilege_chars:
             .chars()
             .filter(|ch| !privilege_chars.contains(*ch))
             .collect();
-        let remaining = canonicalize_acl_privileges(&remaining, TABLE_ALL_PRIVILEGE_CHARS);
+        let remaining = canonicalize_acl_privileges(&remaining, allowed);
         if remaining.is_empty() {
             return false;
         }
@@ -995,7 +1015,7 @@ impl Database {
             let relation = catalog.lookup_any_relation(object_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(object_name.to_string()))
             })?;
-            if !matches!(relation.relkind, 'r' | 'p' | 'v' | 'm' | 'f') {
+            if !matches!(relation.relkind, 'r' | 'p' | 'v' | 'm' | 'f' | 'S') {
                 return Err(ExecError::Parse(ParseError::WrongObjectType {
                     name: object_name.to_string(),
                     expected: "table",
@@ -1077,6 +1097,7 @@ impl Database {
                                 &grantee_acl_name,
                                 &grantor_name,
                                 privilege_chars,
+                                TABLE_ALL_PRIVILEGE_CHARS,
                             );
                         }
                     }
@@ -1110,8 +1131,9 @@ impl Database {
             let catcache = self
                 .backend_catcache(client_id, Some((xid, current_cid)))
                 .map_err(map_catalog_error)?;
-            let privilege_chars = table_privilege_chars(&stmt.privilege)
+            let privilege_chars = relation_privilege_chars(&stmt.privilege, relation.relkind)
                 .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
+            let allowed_privilege_chars = allowed_relation_privilege_chars(relation.relkind);
             let mut acl = catcache
                 .class_by_oid(relation.relation_oid)
                 .and_then(|row| row.relacl.clone())
@@ -1134,7 +1156,13 @@ impl Database {
                             )))
                         })?
                 };
-                grant_table_acl_entry(&mut acl, &grantee_acl_name, &grantor_name, privilege_chars);
+                grant_table_acl_entry(
+                    &mut acl,
+                    &grantee_acl_name,
+                    &grantor_name,
+                    privilege_chars,
+                    allowed_privilege_chars,
+                );
             }
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
@@ -1183,7 +1211,7 @@ impl Database {
             let relation = catalog.lookup_any_relation(object_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(object_name.to_string()))
             })?;
-            if !matches!(relation.relkind, 'r' | 'p' | 'v' | 'm' | 'f') {
+            if !matches!(relation.relkind, 'r' | 'p' | 'v' | 'm' | 'f' | 'S') {
                 return Err(ExecError::Parse(ParseError::WrongObjectType {
                     name: object_name.to_string(),
                     expected: "table",
@@ -1251,7 +1279,12 @@ impl Database {
                                         )))
                                     })?
                             };
-                            revoke_table_acl_entry(acl, &grantee_acl_name, privilege_chars);
+                            revoke_table_acl_entry(
+                                acl,
+                                &grantee_acl_name,
+                                privilege_chars,
+                                TABLE_ALL_PRIVILEGE_CHARS,
+                            );
                         }
                     }
                 }
@@ -1284,8 +1317,9 @@ impl Database {
             let catcache = self
                 .backend_catcache(client_id, Some((xid, current_cid)))
                 .map_err(map_catalog_error)?;
-            let privilege_chars = table_privilege_chars(&stmt.privilege)
+            let privilege_chars = relation_privilege_chars(&stmt.privilege, relation.relkind)
                 .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
+            let allowed_privilege_chars = allowed_relation_privilege_chars(relation.relkind);
             let mut acl = catcache
                 .class_by_oid(relation.relation_oid)
                 .and_then(|row| row.relacl.clone())
@@ -1304,7 +1338,12 @@ impl Database {
                             )))
                         })?
                 };
-                revoke_table_acl_entry(&mut acl, &grantee_acl_name, privilege_chars);
+                revoke_table_acl_entry(
+                    &mut acl,
+                    &grantee_acl_name,
+                    privilege_chars,
+                    allowed_privilege_chars,
+                );
             }
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
