@@ -35830,6 +35830,35 @@ fn plpgsql_multidimensional_array_element_assignment_preserves_shape() {
 }
 
 #[test]
+fn plpgsql_not_null_variable_assignment_raises_and_can_be_caught() {
+    let base = temp_dir("plpgsql_not_null_var_assignment");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_not_null_var_assignment() returns int language plpgsql as $$
+         declare
+           i integer not null := 0;
+         begin
+           begin
+             i := (select null::integer);
+           exception
+             when others then
+               i := (select 1::integer);
+           end;
+           return i;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_not_null_var_assignment()"),
+        vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
 fn plpgsql_assignment_query_expr_from_clause_uses_sql_scope() {
     let base = temp_dir("plpgsql_assignment_query_expr_from");
     let db = Database::open(&base, 16).unwrap();

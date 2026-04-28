@@ -1485,10 +1485,12 @@ fn exec_do_block(
     gucs: &HashMap<String, String>,
 ) -> Result<DoControl, ExecError> {
     for local in &block.local_slots {
-        values[local.slot] = match &local.default_expr {
+        let value = match &local.default_expr {
             Some(expr) => cast_value(eval_do_expr(expr, values)?, local.ty)?,
             None => Value::Null,
         };
+        ensure_not_null_assignment(Some(&local.name), local.not_null, &value)?;
+        values[local.slot] = value;
     }
     for stmt in &block.statements {
         match exec_do_stmt(stmt, values, gucs) {
@@ -1564,8 +1566,16 @@ fn exec_do_stmt(
     match stmt {
         CompiledStmt::WithLine { stmt, .. } => exec_do_stmt(stmt, values, gucs),
         CompiledStmt::Block(block) => exec_do_block(block, values, gucs),
-        CompiledStmt::Assign { slot, ty, expr } => {
-            values[*slot] = cast_value(eval_do_expr(expr, values)?, *ty)?;
+        CompiledStmt::Assign {
+            slot,
+            ty,
+            name,
+            not_null,
+            expr,
+        } => {
+            let value = cast_value(eval_do_expr(expr, values)?, *ty)?;
+            ensure_not_null_assignment(name.as_deref(), *not_null, &value)?;
+            values[*slot] = value;
             Ok(DoControl::Continue)
         }
         CompiledStmt::AssignIndirect { target, expr } => {
@@ -1889,7 +1899,7 @@ fn exec_function_block(
     }
 
     for local in &block.local_slots {
-        state.values[local.slot] = match &local.default_expr {
+        let value = match &local.default_expr {
             Some(expr) => cast_function_value(
                 eval_function_expr(expr, &state.values, ctx)?,
                 compiled_expr_sql_type_hint(expr),
@@ -1898,6 +1908,8 @@ fn exec_function_block(
             )?,
             None => Value::Null,
         };
+        ensure_not_null_assignment(Some(&local.name), local.not_null, &value)?;
+        state.values[local.slot] = value;
     }
     for stmt in &block.statements {
         match exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx)
@@ -2017,10 +2029,17 @@ fn exec_function_stmt(
         CompiledStmt::Block(block) => {
             exec_function_block(block, compiled, expected_record_shape, state, ctx)
         }
-        CompiledStmt::Assign { slot, ty, expr } => {
+        CompiledStmt::Assign {
+            slot,
+            ty,
+            name,
+            not_null,
+            expr,
+        } => {
             let value = eval_function_expr(expr, &state.values, ctx)?;
-            state.values[*slot] =
-                cast_function_value(value, compiled_expr_sql_type_hint(expr), *ty, ctx)?;
+            let value = cast_function_value(value, compiled_expr_sql_type_hint(expr), *ty, ctx)?;
+            ensure_not_null_assignment(name.as_deref(), *not_null, &value)?;
+            state.values[*slot] = value;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::AssignIndirect { target, expr } => {
@@ -2646,7 +2665,7 @@ fn assign_query_rows_into_targets(
             ));
         }
         for target in targets {
-            state.values[target.slot] = Value::Null;
+            assign_select_target_value(target, Value::Null, None, state, ctx)?;
         }
         state.values[compiled.found_slot] = Value::Bool(false);
         return Ok(());
@@ -2676,7 +2695,7 @@ fn assign_query_rows_into_targets(
     }
 
     match targets {
-        [CompiledSelectIntoTarget { slot, ty }]
+        [target @ CompiledSelectIntoTarget { ty, .. }]
             if matches!(ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite) =>
         {
             let descriptor = record_descriptor_for_query_target(*ty, columns, ctx)?;
@@ -2687,7 +2706,7 @@ fn assign_query_rows_into_targets(
                     row.len(),
                 )?;
             }
-            state.values[*slot] = Value::Record(RecordValue::from_descriptor(
+            let value = Value::Record(RecordValue::from_descriptor(
                 descriptor.clone(),
                 descriptor
                     .fields
@@ -2703,13 +2722,15 @@ fn assign_query_rows_into_targets(
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             ));
+            assign_select_target_casted_value(target, value, state)?;
         }
-        [CompiledSelectIntoTarget { slot, ty }] => {
+        [target @ CompiledSelectIntoTarget { ty, .. }] => {
             if row.len() != 1 {
                 handle_strict_multi_assignment(&ctx.gucs)?;
             }
             let value = row.first().cloned().unwrap_or(Value::Null);
-            state.values[*slot] = cast_value_with_config(value, *ty, &ctx.datetime_config)?;
+            let value = cast_value_with_config(value, *ty, &ctx.datetime_config)?;
+            assign_select_target_casted_value(target, value, state)?;
         }
         _ => {
             if row.len() != targets.len() {
@@ -2719,8 +2740,8 @@ fn assign_query_rows_into_targets(
                 .iter()
                 .zip(row.iter().chain(std::iter::repeat(&Value::Null)))
             {
-                state.values[target.slot] =
-                    cast_value_with_config(value.clone(), target.ty, &ctx.datetime_config)?;
+                let value = cast_value_with_config(value.clone(), target.ty, &ctx.datetime_config)?;
+                assign_select_target_casted_value(target, value, state)?;
             }
         }
     }
@@ -2802,7 +2823,7 @@ fn exec_function_for_query(
     let result = execute_for_query_source(source, compiled, state, ctx)?;
 
     if result.rows.is_empty() {
-        assign_null_to_targets(&target.targets, state);
+        assign_null_to_targets(&target.targets, state)?;
         state.values[compiled.found_slot] = Value::Bool(false);
         return Ok(FunctionControl::Continue);
     }
@@ -3852,11 +3873,12 @@ fn execute_dynamic_sql_statement(
             other => execute_readonly_statement(other, catalog.as_ref(), ctx),
         })
     });
-    result.map_err(|err| ExecError::WithContext {
-        source: Box::new(err),
-        context: format!("SQL statement \"{sql}\""),
-    })
-    .map_err(|err| with_sql_statement_context(err, Some(sql)))
+    result
+        .map_err(|err| ExecError::WithContext {
+            source: Box::new(err),
+            context: format!("SQL statement \"{sql}\""),
+        })
+        .map_err(|err| with_sql_statement_context(err, Some(sql)))
 }
 
 fn resolve_dynamic_prepared_statement(
@@ -4379,7 +4401,7 @@ fn assign_query_row_to_targets(
     require_exact_single_scalar_width: bool,
 ) -> Result<(), ExecError> {
     match targets {
-        [CompiledSelectIntoTarget { slot, ty }]
+        [target @ CompiledSelectIntoTarget { ty, .. }]
             if matches!(ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite) =>
         {
             let descriptor = record_descriptor_for_query_target(*ty, columns, ctx)?;
@@ -4399,20 +4421,25 @@ fn assign_query_row_to_targets(
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            state.values[*slot] = Value::Record(RecordValue::from_descriptor(descriptor, values));
+            assign_select_target_casted_value(
+                target,
+                Value::Record(RecordValue::from_descriptor(descriptor, values)),
+                state,
+            )?;
             Ok(())
         }
-        [CompiledSelectIntoTarget { slot, ty }] => {
+        [target @ CompiledSelectIntoTarget { ty, .. }] => {
             if require_exact_single_scalar_width && row.len() != 1 {
                 handle_strict_multi_assignment_or_unexpected_shape(&ctx.gucs, 1, row.len())?;
             }
             let value = row.first().cloned().unwrap_or(Value::Null);
-            state.values[*slot] = cast_function_value(
+            let value = cast_function_value(
                 value,
                 columns.first().map(|column| column.sql_type),
                 *ty,
                 ctx,
             )?;
+            assign_select_target_casted_value(target, value, state)?;
             Ok(())
         }
         _ => {
@@ -4425,12 +4452,52 @@ fn assign_query_row_to_targets(
                 .enumerate()
             {
                 let source_type = columns.get(index).map(|column| column.sql_type);
-                state.values[target.slot] =
-                    cast_function_value(value.clone(), source_type, target.ty, ctx)?;
+                let value = cast_function_value(value.clone(), source_type, target.ty, ctx)?;
+                assign_select_target_casted_value(target, value, state)?;
             }
             Ok(())
         }
     }
+}
+
+fn assign_select_target_value(
+    target: &CompiledSelectIntoTarget,
+    value: Value,
+    source_type: Option<SqlType>,
+    state: &mut FunctionState,
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    let value = cast_function_value(value, source_type, target.ty, ctx)?;
+    assign_select_target_casted_value(target, value, state)
+}
+
+fn assign_select_target_casted_value(
+    target: &CompiledSelectIntoTarget,
+    value: Value,
+    state: &mut FunctionState,
+) -> Result<(), ExecError> {
+    ensure_not_null_assignment(target.name.as_deref(), target.not_null, &value)?;
+    state.values[target.slot] = value;
+    Ok(())
+}
+
+fn ensure_not_null_assignment(
+    name: Option<&str>,
+    not_null: bool,
+    value: &Value,
+) -> Result<(), ExecError> {
+    if !not_null || !matches!(value, Value::Null) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!(
+            "null value cannot be assigned to variable \"{}\" declared NOT NULL",
+            name.unwrap_or("<unnamed>")
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "22004",
+    })
 }
 
 fn handle_strict_multi_assignment(gucs: &HashMap<String, String>) -> Result<(), ExecError> {
@@ -4498,10 +4565,14 @@ fn compiled_expr_sql_type_hint(expr: &CompiledExpr) -> Option<SqlType> {
     }
 }
 
-fn assign_null_to_targets(targets: &[CompiledSelectIntoTarget], state: &mut FunctionState) {
+fn assign_null_to_targets(
+    targets: &[CompiledSelectIntoTarget],
+    state: &mut FunctionState,
+) -> Result<(), ExecError> {
     for target in targets {
-        state.values[target.slot] = Value::Null;
+        assign_select_target_casted_value(target, Value::Null, state)?;
     }
+    Ok(())
 }
 
 fn function_outer_tuple(compiled: &CompiledFunction, state: &FunctionState) -> Vec<Value> {

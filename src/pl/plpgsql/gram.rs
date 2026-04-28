@@ -162,6 +162,10 @@ fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
                     type_name = prefix.trim_end();
                     strict = true;
                 }
+                if let Some(prefix) = strip_trailing_not_null(type_name) {
+                    type_name = prefix.trim_end();
+                    strict = true;
+                }
                 ty = Some((type_name.to_string(), decl_type_hint(type_name)?));
             }
             Rule::default_clause => {
@@ -354,6 +358,11 @@ fn strip_trailing_keyword<'a>(input: &'a str, keyword: &str) -> Option<&'a str> 
         return None;
     }
     Some(&trimmed[..start])
+}
+
+fn strip_trailing_not_null(input: &str) -> Option<&str> {
+    let without_null = strip_trailing_keyword(input, "null")?;
+    strip_trailing_keyword(without_null, "not")
 }
 
 fn strip_leading_keyword<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
@@ -1994,6 +2003,28 @@ mod tests {
         assert!(decl.constant);
         assert_eq!(decl.type_name, "refcursor");
         assert_eq!(decl.default_expr.as_deref(), Some("'my_cursor_name'"));
+    }
+
+    #[test]
+    fn parse_not_null_var_declaration() {
+        let block = parse_block(
+            "
+            declare
+                i integer not null := 0;
+            begin
+                null;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Decl::Var(decl) = &block.declarations[0] else {
+            panic!("expected variable declaration");
+        };
+        assert_eq!(decl.name, "i");
+        assert_eq!(decl.type_name, "integer");
+        assert!(decl.strict);
+        assert_eq!(decl.default_expr.as_deref(), Some("0"));
     }
 
     #[test]

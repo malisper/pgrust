@@ -92,9 +92,11 @@ pub(crate) struct CompiledOutputSlot {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledVar {
+    pub(crate) name: String,
     pub(crate) slot: usize,
     pub(crate) ty: SqlType,
     pub(crate) default_expr: Option<CompiledExpr>,
+    pub(crate) not_null: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -122,10 +124,12 @@ pub(crate) enum QueryCompareOp {
     IsNotDistinctFrom,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct CompiledSelectIntoTarget {
     pub(crate) slot: usize,
     pub(crate) ty: SqlType,
+    pub(crate) name: Option<String>,
+    pub(crate) not_null: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +278,8 @@ pub(crate) enum CompiledStmt {
     Assign {
         slot: usize,
         ty: SqlType,
+        name: Option<String>,
+        not_null: bool,
         expr: CompiledExpr,
     },
     AssignIndirect {
@@ -434,6 +440,7 @@ struct ScopeVar {
     slot: usize,
     ty: SqlType,
     constant: bool,
+    not_null: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -476,13 +483,26 @@ impl CompileEnv {
     }
 
     fn define_var(&mut self, name: &str, ty: SqlType) -> usize {
-        self.define_var_with_options(name, ty, false)
+        self.define_var_with_options(name, ty, false, false)
     }
 
-    fn define_var_with_options(&mut self, name: &str, ty: SqlType, constant: bool) -> usize {
+    fn define_var_with_options(
+        &mut self,
+        name: &str,
+        ty: SqlType,
+        constant: bool,
+        not_null: bool,
+    ) -> usize {
         let slot = self.allocate_slot();
-        self.vars
-            .insert(name.to_ascii_lowercase(), ScopeVar { slot, ty, constant });
+        self.vars.insert(
+            name.to_ascii_lowercase(),
+            ScopeVar {
+                slot,
+                ty,
+                constant,
+                not_null,
+            },
+        );
         slot
     }
 
@@ -500,11 +520,13 @@ impl CompileEnv {
             slot: sqlstate_slot,
             ty: text_ty,
             constant: false,
+            not_null: false,
         });
         self.exception_sqlerrm = Some(ScopeVar {
             slot: sqlerrm_slot,
             ty: text_ty,
             constant: false,
+            not_null: false,
         });
         (sqlstate_slot, sqlerrm_slot)
     }
@@ -537,6 +559,7 @@ impl CompileEnv {
             slot,
             ty,
             constant: false,
+            not_null: false,
         });
         let positional_name = positional_parameter_var_name(self.parameter_slots.len());
         self.vars.insert(
@@ -545,6 +568,7 @@ impl CompileEnv {
                 slot,
                 ty,
                 constant: false,
+                not_null: false,
             },
         );
         self.positional_parameter_names.push(positional_name);
@@ -558,6 +582,7 @@ impl CompileEnv {
                 slot,
                 ty,
                 constant: false,
+                not_null: false,
             },
         );
     }
@@ -1245,16 +1270,18 @@ fn compile_var_decl(
     env: &mut CompileEnv,
 ) -> Result<CompiledVar, ParseError> {
     let ty = resolve_decl_type(&decl.type_name, catalog)?;
-    let slot = env.define_var_with_options(&decl.name, ty, decl.constant);
+    let slot = env.define_var_with_options(&decl.name, ty, decl.constant, decl.strict);
     let default_expr = decl
         .default_expr
         .as_deref()
         .map(|expr| compile_assignment_expr_text(expr, catalog, env))
         .transpose()?;
     Ok(CompiledVar {
+        name: decl.name.clone(),
         slot,
         ty,
         default_expr,
+        not_null: decl.strict,
     })
 }
 
@@ -1280,6 +1307,7 @@ fn compile_cursor_decl(
             .collect(),
     );
     Ok(CompiledVar {
+        name: decl.name.clone(),
         slot,
         ty,
         default_expr: Some(compile_expr_text(
@@ -1287,6 +1315,7 @@ fn compile_cursor_decl(
             catalog,
             env,
         )?),
+        not_null: false,
     })
 }
 
@@ -1390,10 +1419,12 @@ fn compile_stmt(
                     expr: compile_assignment_expr_text(expr, catalog, env)?,
                 },
                 None => {
-                    let (slot, ty) = resolve_assign_target(target, env)?;
+                    let (slot, ty, name, not_null) = resolve_assign_target(target, env)?;
                     CompiledStmt::Assign {
                         slot,
                         ty,
+                        name,
+                        not_null,
                         expr: compile_assignment_expr_text(expr, catalog, env)?,
                     }
                 }
@@ -1515,10 +1546,7 @@ fn compile_stmt(
         Stmt::GetDiagnostics { stacked, items } => {
             let items = items
                 .iter()
-                .map(|(target, item)| {
-                    let (slot, ty) = resolve_assign_target(target, env)?;
-                    Ok((CompiledSelectIntoTarget { slot, ty }, item.clone()))
-                })
+                .map(|(target, item)| Ok((compile_select_into_target(target, env)?, item.clone())))
                 .collect::<Result<Vec<_>, ParseError>>()?;
             CompiledStmt::GetDiagnostics {
                 stacked: *stacked,
@@ -1531,13 +1559,10 @@ fn compile_stmt(
             direction,
             targets,
         } => {
-            let (slot, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
+            let (slot, _, _, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
             let targets = targets
                 .iter()
-                .map(|target| {
-                    resolve_assign_target(target, env)
-                        .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
-                })
+                .map(|target| compile_select_into_target(target, env))
                 .collect::<Result<Vec<_>, _>>()?;
             CompiledStmt::FetchCursor {
                 slot,
@@ -1546,14 +1571,14 @@ fn compile_stmt(
             }
         }
         Stmt::MoveCursor { name, direction } => {
-            let (slot, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
+            let (slot, _, _, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
             CompiledStmt::MoveCursor {
                 slot,
                 direction: *direction,
             }
         }
         Stmt::CloseCursor { name } => {
-            let (slot, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
+            let (slot, _, _, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
             CompiledStmt::CloseCursor { slot }
         }
         Stmt::ExecSql { sql } => compile_exec_sql_stmt(sql, catalog, env)?,
@@ -2093,10 +2118,7 @@ fn compile_dynamic_execute_stmt(
 ) -> Result<CompiledStmt, ParseError> {
     let mut targets = into_targets
         .iter()
-        .map(|target| {
-            resolve_assign_target(target, env)
-                .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
-        })
+        .map(|target| compile_select_into_target(target, env))
         .collect::<Result<Vec<_>, _>>()?;
     if let [target] = targets.as_mut_slice()
         && target.ty.kind == SqlTypeKind::Record
@@ -3108,10 +3130,7 @@ fn compile_select_into_stmt(
     )?;
     let mut targets = target_refs
         .iter()
-        .map(|target| {
-            resolve_assign_target(target, env)
-                .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
-        })
+        .map(|target| compile_select_into_target(target, env))
         .collect::<Result<Vec<_>, _>>()?;
     if let [target] = targets.as_mut_slice()
         && target.ty.kind == SqlTypeKind::Record
@@ -3225,7 +3244,7 @@ fn compile_for_query_stmt(
             None,
         ),
         ForQuerySource::Cursor { name, args } => {
-            let (slot, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
+            let (slot, _, _, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
             let source = OpenCursorSource::Declared { args: args.clone() };
             let (source, scrollable, shape_plan) =
                 compile_cursor_open_source(name, &source, catalog, env)?;
@@ -3291,10 +3310,7 @@ fn compile_for_query_target(
 
     let mut targets = target_refs
         .iter()
-        .map(|target| {
-            resolve_assign_target(target, env)
-                .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
-        })
+        .map(|target| compile_select_into_target(target, env))
         .collect::<Result<Vec<_>, _>>()?;
 
     if targets.len() > 1
@@ -3399,10 +3415,7 @@ fn compile_dml_into_targets(
 ) -> Result<Vec<CompiledSelectIntoTarget>, ParseError> {
     let mut targets = target_refs
         .iter()
-        .map(|target| {
-            resolve_assign_target(target, env)
-                .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
-        })
+        .map(|target| compile_select_into_target(target, env))
         .collect::<Result<Vec<_>, _>>()?;
     if let [target] = targets.as_mut_slice()
         && target.ty.kind == SqlTypeKind::Record
@@ -4874,11 +4887,11 @@ fn seed_event_trigger_env(env: &mut CompileEnv) -> CompiledEventTriggerBindings 
 fn resolve_assign_target(
     target: &AssignTarget,
     env: &CompileEnv,
-) -> Result<(usize, SqlType), ParseError> {
+) -> Result<(usize, SqlType, Option<String>, bool), ParseError> {
     match target {
         AssignTarget::Parameter(index) => env
             .get_parameter(*index)
-            .map(|var| (var.slot, var.ty))
+            .map(|var| (var.slot, var.ty, None, var.not_null))
             .ok_or_else(|| ParseError::UnexpectedToken {
                 expected: "existing positional parameter assignment target",
                 actual: format!("${index}"),
@@ -4894,19 +4907,32 @@ fn resolve_assign_target(
                         sqlstate: "22005",
                     })
                 } else {
-                    Ok((var.slot, var.ty))
+                    Ok((var.slot, var.ty, Some(name.clone()), var.not_null))
                 }
             })
             .transpose()?
             .ok_or_else(|| ParseError::UnknownColumn(name.clone())),
         AssignTarget::Field { relation, field } => env
             .get_relation_field(relation, field)
-            .map(|column| (column.slot, column.sql_type))
+            .map(|column| (column.slot, column.sql_type, None, false))
             .ok_or_else(|| ParseError::UnknownColumn(format!("{relation}.{field}"))),
         AssignTarget::Indirect { .. } => Err(ParseError::FeatureNotSupported(
             "indirect assignment target is only supported for assignment statements".into(),
         )),
     }
+}
+
+fn compile_select_into_target(
+    target: &AssignTarget,
+    env: &CompileEnv,
+) -> Result<CompiledSelectIntoTarget, ParseError> {
+    let (slot, ty, name, not_null) = resolve_assign_target(target, env)?;
+    Ok(CompiledSelectIntoTarget {
+        slot,
+        ty,
+        name,
+        not_null,
+    })
 }
 
 fn compile_indirect_assign_target(
@@ -4917,7 +4943,7 @@ fn compile_indirect_assign_target(
     let AssignTarget::Indirect { base, indirection } = target else {
         return Ok(None);
     };
-    let (slot, ty) = resolve_assign_target(base, env)?;
+    let (slot, ty, _, _) = resolve_assign_target(base, env)?;
     let indirection = indirection
         .iter()
         .map(|step| match step {
