@@ -1,3 +1,4 @@
+use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{PlannerInfo, RestrictInfo, SpecialJoinInfo};
 use crate::include::nodes::primnodes::{
@@ -23,9 +24,38 @@ pub(super) fn make_restrict_info(clause: Expr) -> RestrictInfo {
 }
 
 pub(super) fn make_restrict_info_with_pushdown(clause: Expr, is_pushed_down: bool) -> RestrictInfo {
+    make_restrict_info_inner(clause, is_pushed_down, 0, false)
+}
+
+pub(super) fn make_restrict_info_with_security(
+    clause: Expr,
+    security_level: usize,
+    catalog: &dyn CatalogLookup,
+) -> RestrictInfo {
+    make_restrict_info_with_pushdown_and_security(clause, true, security_level, catalog)
+}
+
+pub(super) fn make_restrict_info_with_pushdown_and_security(
+    clause: Expr,
+    is_pushed_down: bool,
+    security_level: usize,
+    catalog: &dyn CatalogLookup,
+) -> RestrictInfo {
+    let leakproof = security_level > 0 && expr_is_leakproof(&clause, catalog);
+    make_restrict_info_inner(clause, is_pushed_down, security_level, leakproof)
+}
+
+fn make_restrict_info_inner(
+    clause: Expr,
+    is_pushed_down: bool,
+    security_level: usize,
+    leakproof: bool,
+) -> RestrictInfo {
     let required_relids = expr_relids(&clause);
     let mut restrict = RestrictInfo::new(clause.clone(), required_relids);
     restrict.is_pushed_down = is_pushed_down;
+    restrict.security_level = security_level;
+    restrict.leakproof = leakproof;
     if let Some((left_relids, right_relids, hashjoin_operator)) = classify_join_clause(&clause) {
         restrict.can_join = true;
         restrict.left_relids = left_relids;
@@ -33,6 +63,92 @@ pub(super) fn make_restrict_info_with_pushdown(clause: Expr, is_pushed_down: boo
         restrict.hashjoin_operator = hashjoin_operator;
     }
     restrict
+}
+
+pub(super) fn translated_restrict_info(clause: Expr, source: &RestrictInfo) -> RestrictInfo {
+    let mut translated = make_restrict_info_with_pushdown(clause, source.is_pushed_down);
+    translated.security_level = source.security_level;
+    translated.leakproof = source.leakproof;
+    translated
+}
+
+fn expr_is_leakproof(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
+    match expr {
+        Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => true,
+        Expr::Op(op) => {
+            let proc_oid = if op.opfuncid != 0 {
+                Some(op.opfuncid)
+            } else {
+                catalog
+                    .operator_by_oid(op.opno)
+                    .map(|operator| operator.oprcode)
+            };
+            proc_oid.is_some_and(|proc_oid| proc_is_leakproof(proc_oid, catalog))
+                && op.args.iter().all(|arg| expr_is_leakproof(arg, catalog))
+        }
+        Expr::Func(func) => {
+            proc_is_leakproof(func.funcid, catalog)
+                && func.args.iter().all(|arg| expr_is_leakproof(arg, catalog))
+        }
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .all(|arg| expr_is_leakproof(arg, catalog)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_none_or(|arg| expr_is_leakproof(arg, catalog))
+                && case_expr.args.iter().all(|arm| {
+                    expr_is_leakproof(&arm.expr, catalog) && expr_is_leakproof(&arm.result, catalog)
+                })
+                && expr_is_leakproof(&case_expr.defresult, catalog)
+        }
+        Expr::ScalarArrayOp(_) => false,
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_is_leakproof(inner, catalog),
+        Expr::Like { .. } | Expr::Similar { .. } => false,
+        Expr::IsDistinctFrom(_, _) | Expr::IsNotDistinctFrom(_, _) => false,
+        Expr::Coalesce(left, right) => {
+            expr_is_leakproof(left, catalog) && expr_is_leakproof(right, catalog)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .all(|element| expr_is_leakproof(element, catalog)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .all(|(_, expr)| expr_is_leakproof(expr, catalog)),
+        Expr::ArraySubscript { .. } | Expr::Xml(_) | Expr::SqlJsonQueryFunction(_) => false,
+        Expr::Aggref(_)
+        | Expr::WindowFunc(_)
+        | Expr::SetReturning(_)
+        | Expr::SubLink(_)
+        | Expr::SubPlan(_)
+        | Expr::Random => false,
+    }
+}
+
+fn proc_is_leakproof(proc_oid: u32, catalog: &dyn CatalogLookup) -> bool {
+    proc_oid != 0
+        && catalog
+            .proc_row_by_oid(proc_oid)
+            .is_some_and(|row| row.proleakproof)
 }
 
 fn classify_join_clause(clause: &Expr) -> Option<(Vec<usize>, Vec<usize>, Option<u32>)> {

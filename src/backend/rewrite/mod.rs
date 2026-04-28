@@ -207,10 +207,32 @@ pub(crate) fn relation_has_security_invoker(
 
 fn apply_view_permission_context(query: &mut Query, view_owner_oid: u32, security_invoker: bool) {
     for rte in &mut query.rtable {
-        let Some(permission) = rte.permission.as_mut() else {
-            continue;
-        };
-        permission.check_as_user_oid = (!security_invoker).then_some(view_owner_oid);
+        if let Some(permission) = rte.permission.as_mut() {
+            permission.check_as_user_oid = (!security_invoker).then_some(view_owner_oid);
+        }
+        match &mut rte.kind {
+            RangeTblEntryKind::Subquery { query } | RangeTblEntryKind::Cte { query, .. } => {
+                apply_view_permission_context(query, view_owner_oid, security_invoker);
+            }
+            _ => {}
+        }
+    }
+    if let Some(recursive_union) = &mut query.recursive_union {
+        apply_view_permission_context(
+            &mut recursive_union.anchor,
+            view_owner_oid,
+            security_invoker,
+        );
+        apply_view_permission_context(
+            &mut recursive_union.recursive,
+            view_owner_oid,
+            security_invoker,
+        );
+    }
+    if let Some(set_operation) = &mut query.set_operation {
+        for input in &mut set_operation.inputs {
+            apply_view_permission_context(input, view_owner_oid, security_invoker);
+        }
     }
 }
 

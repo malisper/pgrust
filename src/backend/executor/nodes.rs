@@ -3510,21 +3510,11 @@ fn render_explain_expr_inner_with_qualifier(
                     crate::include::nodes::primnodes::BoolExprType::And,
                     &mut args,
                 );
-                let mut rendered = args
+                let rendered = args
                     .into_iter()
-                    .map(|arg| {
-                        (
-                            explain_filter_conjunct_rank(arg),
-                            render_explain_bool_arg(arg, qualifier, column_names),
-                        )
-                    })
+                    .map(|arg| render_explain_bool_arg(arg, qualifier, column_names))
                     .collect::<Vec<_>>();
-                rendered.sort_by_key(|(rank, _)| *rank);
-                rendered
-                    .into_iter()
-                    .map(|(_, rendered)| rendered)
-                    .collect::<Vec<_>>()
-                    .join(" AND ")
+                rendered.join(" AND ")
             }
             crate::include::nodes::primnodes::BoolExprType::Or => {
                 let mut args = Vec::new();
@@ -3744,55 +3734,6 @@ fn render_explain_negated_bool_comparison(
             }
         }
         _ => None,
-    }
-}
-
-fn explain_filter_conjunct_rank(expr: &Expr) -> u8 {
-    use crate::include::nodes::primnodes::{BoolExprType, OpExprKind};
-
-    match expr {
-        Expr::IsNull(_) | Expr::IsNotNull(_) => 0,
-        Expr::Bool(bool_expr) if matches!(bool_expr.boolop, BoolExprType::Not) => 1,
-        Expr::ScalarArrayOp(saop)
-            if matches!(
-                saop.op,
-                SubqueryComparisonOp::Eq | SubqueryComparisonOp::NotEq
-            ) =>
-        {
-            2
-        }
-        Expr::Op(op) => match op.op {
-            OpExprKind::Eq => 2,
-            OpExprKind::NotEq
-            | OpExprKind::Lt
-            | OpExprKind::LtEq
-            | OpExprKind::Gt
-            | OpExprKind::GtEq
-                if op
-                    .args
-                    .iter()
-                    .any(|arg| explain_filter_arg_has_function(arg)) =>
-            {
-                3
-            }
-            OpExprKind::NotEq
-            | OpExprKind::Lt
-            | OpExprKind::LtEq
-            | OpExprKind::Gt
-            | OpExprKind::GtEq => 1,
-            _ => 1,
-        },
-        _ => 1,
-    }
-}
-
-fn explain_filter_arg_has_function(expr: &Expr) -> bool {
-    match expr {
-        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
-            explain_filter_arg_has_function(inner)
-        }
-        Expr::Func(_) => true,
-        _ => false,
     }
 }
 

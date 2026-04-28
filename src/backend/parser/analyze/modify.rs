@@ -1199,6 +1199,28 @@ fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>
     }
 }
 
+fn query_from_projection_with_target_security_quals(
+    mut input: AnalyzedFrom,
+    security_quals: Vec<Expr>,
+    where_qual: Option<Expr>,
+) -> Query {
+    if let Some(target_rte) = input.rtable.first_mut() {
+        target_rte.security_quals.extend(security_quals);
+    }
+    query_from_projection_with_qual(input, where_qual)
+}
+
+fn prepend_visibility_quals(
+    mut visibility_quals: Vec<Expr>,
+    predicate: Option<Expr>,
+) -> Option<Expr> {
+    if let Some(predicate) = predicate {
+        visibility_quals.push(predicate);
+    }
+    let first = visibility_quals.first().cloned()?;
+    Some(visibility_quals.into_iter().skip(1).fold(first, Expr::and))
+}
+
 fn merge_mutating_event(stmt: &MergeStatement) -> Option<ViewDmlEvent> {
     stmt.when_clauses
         .iter()
@@ -3856,12 +3878,7 @@ fn bind_simple_update(
         false,
         catalog,
     )?;
-    let predicate = match (predicate, target_rls.visibility_qual) {
-        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(predicate, visibility_qual)),
-        (Some(predicate), None) => Some(predicate),
-        (None, Some(visibility_qual)) => Some(visibility_qual),
-        (None, None) => None,
-    };
+    let predicate = prepend_visibility_quals(target_rls.visibility_quals.clone(), predicate);
     let assignments = stmt
         .assignments
         .iter()
@@ -4025,7 +4042,7 @@ fn bind_update_from(
         false,
         catalog,
     )?;
-    let predicate = stmt
+    let user_predicate = stmt
         .where_clause
         .as_ref()
         .map(|expr| {
@@ -4039,12 +4056,8 @@ fn bind_update_from(
             )
         })
         .transpose()?;
-    let predicate = match (predicate, target_rls.visibility_qual) {
-        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(predicate, visibility_qual)),
-        (Some(predicate), None) => Some(predicate),
-        (None, Some(visibility_qual)) => Some(visibility_qual),
-        (None, None) => None,
-    };
+    let predicate =
+        prepend_visibility_quals(target_rls.visibility_quals.clone(), user_predicate.clone());
     let assignments = stmt
         .assignments
         .iter()
@@ -4105,7 +4118,11 @@ fn bind_update_from(
         outer_scopes,
         local_ctes,
     )?;
-    let query = query_from_projection_with_qual(projected, predicate.clone());
+    let query = query_from_projection_with_target_security_quals(
+        projected,
+        target_rls.visibility_quals.clone(),
+        user_predicate,
+    );
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
         .map(|query| crate::backend::optimizer::planner(query, catalog))??;
 
@@ -4311,12 +4328,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
         false,
         catalog,
     )?;
-    let predicate = match (predicate, target_rls.visibility_qual) {
-        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(predicate, visibility_qual)),
-        (Some(predicate), None) => Some(predicate),
-        (None, Some(visibility_qual)) => Some(visibility_qual),
-        (None, None) => None,
-    };
+    let predicate = prepend_visibility_quals(target_rls.visibility_quals.clone(), predicate);
 
     let targets = partitioned_update_target_oids(catalog, &entry, stmt.only)
         .into_iter()

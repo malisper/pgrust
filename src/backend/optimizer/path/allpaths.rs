@@ -49,9 +49,9 @@ use super::super::util::{
     required_query_pathkeys_for_rel, strip_binary_coercible_casts,
 };
 use super::super::{
-    IndexPathSpec, JoinBuildSpec, and_exprs, expand_join_rte_vars, expr_relids,
-    flatten_and_conjuncts, has_outer_joins, is_pushable_base_clause, path_relids, relids_disjoint,
-    relids_overlap, relids_subset, relids_union, reverse_join_type,
+    CPU_OPERATOR_COST, IndexPathSpec, JoinBuildSpec, and_exprs, expand_join_rte_vars, expr_relids,
+    flatten_and_conjuncts, has_outer_joins, is_pushable_base_clause, path_relids, predicate_cost,
+    relids_disjoint, relids_overlap, relids_subset, relids_union, reverse_join_type,
 };
 use super::{
     build_index_path_spec, build_join_paths_with_root, estimate_bitmap_candidate,
@@ -115,7 +115,7 @@ pub(super) fn residual_where_qual(root: &PlannerInfo) -> Option<Expr> {
     and_exprs(clauses)
 }
 
-fn assign_base_restrictinfo(root: &mut PlannerInfo) {
+fn assign_base_restrictinfo(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) {
     for rel in root.simple_rel_array.iter_mut().flatten() {
         rel.baserestrictinfo.clear();
         rel.joininfo.clear();
@@ -132,20 +132,29 @@ fn assign_base_restrictinfo(root: &mut PlannerInfo) {
         else {
             continue;
         };
-        rel.baserestrictinfo.extend(
-            rte.security_quals
-                .iter()
-                .cloned()
-                .map(joininfo::make_restrict_info),
-        );
+        rel.baserestrictinfo
+            .extend(rte.security_quals.iter().cloned().enumerate().map(
+                |(security_level, clause)| {
+                    joininfo::make_restrict_info_with_security(clause, security_level, catalog)
+                },
+            ));
     }
     if let Some(where_qual) = root.parse.where_qual.as_ref() {
         for clause in flatten_and_conjuncts(where_qual) {
-            let restrict = joininfo::make_restrict_info(expand_join_rte_vars(root, clause));
-            if !is_pushable_base_clause(root, &restrict.required_relids) {
+            let clause = expand_join_rte_vars(root, clause);
+            let relids = expr_relids(&clause);
+            if !is_pushable_base_clause(root, &relids) {
                 continue;
             }
-            let relid = restrict.required_relids[0];
+            let relid = relids[0];
+            let security_level = root
+                .parse
+                .rtable
+                .get(relid.saturating_sub(1))
+                .map(|rte| rte.security_quals.len())
+                .unwrap_or(0);
+            let restrict =
+                joininfo::make_restrict_info_with_security(clause, security_level, catalog);
             if let Some(rel) = root
                 .simple_rel_array
                 .get_mut(relid)
@@ -262,12 +271,42 @@ fn equalities_match_commuted(left: &Expr, right: &Expr) -> bool {
 }
 
 fn base_filter_expr(rel: &RelOptInfo) -> Option<Expr> {
-    super::super::and_exprs(
-        rel.baserestrictinfo
-            .iter()
-            .map(|restrict| restrict.clause.clone())
-            .collect(),
-    )
+    super::super::and_exprs(ordered_base_restrict_exprs(rel))
+}
+
+pub(super) fn ordered_base_restrict_exprs(rel: &RelOptInfo) -> Vec<Expr> {
+    let mut items = rel
+        .baserestrictinfo
+        .iter()
+        .enumerate()
+        .map(|(index, restrict)| {
+            let cost = qual_order_cost(&restrict.clause) * CPU_OPERATOR_COST;
+            let security_level = if restrict.leakproof && cost < 10.0 * CPU_OPERATOR_COST {
+                0
+            } else {
+                restrict.security_level
+            };
+            (security_level, cost, index, restrict.clause.clone())
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.partial_cmp(&right.1).unwrap_or(Ordering::Equal))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    items.into_iter().map(|(_, _, _, clause)| clause).collect()
+}
+
+fn qual_order_cost(expr: &Expr) -> f64 {
+    match expr {
+        Expr::Op(op) => 1.0 + op.args.iter().map(qual_order_cost).sum::<f64>(),
+        Expr::Func(func) => 10.0 + func.args.iter().map(qual_order_cost).sum::<f64>(),
+        Expr::Bool(bool_expr) => 1.0 + bool_expr.args.iter().map(qual_order_cost).sum::<f64>(),
+        Expr::Coalesce(left, right) => 1.0 + qual_order_cost(left) + qual_order_cost(right),
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => 1.0 + qual_order_cost(inner),
+        _ => predicate_cost(expr),
+    }
 }
 
 fn base_restrictinfo_is_contradictory(rel: &RelOptInfo) -> bool {
@@ -4194,7 +4233,7 @@ fn translate_restrict_clauses_to_child(
                     clause = translate_append_rel_expr(clause, info);
                 }
             }
-            joininfo::make_restrict_info_with_pushdown(clause, restrict.is_pushed_down)
+            joininfo::translated_restrict_info(clause, restrict)
         })
         .collect()
 }
@@ -4839,7 +4878,7 @@ fn join_search_one_level(root: &mut PlannerInfo, level: usize, catalog: &dyn Cat
 }
 
 pub(super) fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
-    assign_base_restrictinfo(root);
+    assign_base_restrictinfo(root, catalog);
     expand_inherited_rtentries(root, catalog);
     root.inner_join_clauses = collect_inner_join_clauses(root);
     set_base_rel_pathlists(root, catalog);
