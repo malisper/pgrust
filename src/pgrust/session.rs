@@ -3412,6 +3412,14 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::CreateCollation(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_create_collation_stmt_with_search_path(
+                    self.client_id,
+                    create_stmt,
+                    search_path.as_deref(),
+                )
+            }
             Statement::CreatePublication(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_create_publication_stmt_with_search_path(
@@ -3589,6 +3597,14 @@ impl Session {
             Statement::DropPublication(ref drop_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_drop_publication_stmt_with_search_path(
+                    self.client_id,
+                    drop_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::DropCollation(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_drop_collation_stmt_with_search_path(
                     self.client_id,
                     drop_stmt,
                     search_path.as_deref(),
@@ -3890,6 +3906,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_alter_schema_owner_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterSchemaRename(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_schema_rename_stmt_with_search_path(
                         self.client_id,
                         alter_stmt,
                         search_path.as_deref(),
@@ -6111,6 +6145,18 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::CreateCollation(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_create_collation_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::CreateForeignDataWrapper(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_create_foreign_data_wrapper_stmt_with_search_path(
@@ -7627,6 +7673,18 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::DropCollation(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_collation_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::DropPublication(ref drop_stmt) => {
                 let search_path = self.configured_search_path();
                 let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
@@ -7710,6 +7768,16 @@ impl Session {
             Statement::AlterSchemaOwner(ref alter_stmt) => {
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_schema_owner_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterSchemaRename(ref alter_stmt) => {
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_schema_rename_stmt_in_transaction_with_search_path(
                     client_id,
                     alter_stmt,
                     xid,

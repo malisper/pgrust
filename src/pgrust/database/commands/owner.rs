@@ -2,7 +2,8 @@ use super::super::*;
 use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::commands::rolecmds::role_management_error;
 use crate::backend::parser::{
-    AlterRelationOwnerStatement, AlterSchemaOwnerStatement, BoundRelation,
+    AlterRelationOwnerStatement, AlterSchemaOwnerStatement, AlterSchemaRenameStatement,
+    BoundRelation,
 };
 use crate::pgrust::database::ddl::{
     lookup_table_or_partitioned_table_for_alter_table, relation_kind_name,
@@ -41,6 +42,27 @@ impl Database {
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
         let result = self.execute_alter_schema_owner_stmt_in_transaction_with_search_path(
+            client_id,
+            alter_stmt,
+            xid,
+            0,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_alter_schema_rename_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterSchemaRenameStatement,
+        _configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_alter_schema_rename_stmt_in_transaction_with_search_path(
             client_id,
             alter_stmt,
             xid,
@@ -219,6 +241,69 @@ impl Database {
             .alter_namespace_owner_mvcc(schema.oid, new_owner.oid, &ctx)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_alter_schema_rename_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterSchemaRenameStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let auth = self.auth_state(client_id);
+        let catcache = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
+        let schema = catcache
+            .namespace_by_name(&alter_stmt.schema_name)
+            .cloned()
+            .filter(|row| !self.other_session_temp_namespace_oid(client_id, row.oid))
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("schema \"{}\" does not exist", alter_stmt.schema_name),
+                detail: None,
+                hint: None,
+                sqlstate: "3F000",
+            })?;
+        if catcache.namespace_by_name(&alter_stmt.new_name).is_some() {
+            return Err(ExecError::DetailedError {
+                message: format!("schema \"{}\" already exists", alter_stmt.new_name),
+                detail: None,
+                hint: None,
+                sqlstate: "42P06",
+            });
+        }
+        let auth_catalog = self.txn_auth_catalog(client_id, xid, cid).map_err(|err| {
+            ExecError::Parse(role_management_error(format!(
+                "authorization catalog unavailable: {err:?}"
+            )))
+        })?;
+        if !auth.has_effective_membership(schema.nspowner, &auth_catalog) {
+            return Err(ExecError::DetailedError {
+                message: format!("must be owner of schema {}", alter_stmt.schema_name),
+                detail: None,
+                hint: None,
+                sqlstate: "42501",
+            });
+        }
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .alter_namespace_rename_mvcc(schema.oid, &alter_stmt.new_name, &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        self.invalidate_backend_cache_state(client_id);
+        self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
     }
 

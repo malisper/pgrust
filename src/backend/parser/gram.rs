@@ -88,6 +88,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_conversion_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_collation_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_foreign_data_wrapper_statement(&sql)? {
         return Ok(stmt);
     }
@@ -164,6 +167,9 @@ fn parse_statement_with_options_inner(
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_create_schema_statement(&sql, options)? {
+        return Ok(stmt);
+    }
+    if let Some(stmt) = try_parse_alter_schema_rename_statement(&sql)? {
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_policy_statement(&sql)? {
@@ -1717,6 +1723,36 @@ fn try_parse_create_schema_statement(
         if_not_exists,
         elements,
     })))
+}
+
+fn try_parse_alter_schema_rename_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "alter") {
+        return Ok(None);
+    }
+    let mut rest = consume_keyword(trimmed, "alter").trim_start();
+    if !keyword_at_start(rest, "schema") {
+        return Ok(None);
+    }
+    rest = consume_keyword(rest, "schema").trim_start();
+    let (schema_name, next) = parse_sql_identifier(rest)?;
+    rest = next.trim_start();
+    let Some(next) = consume_keywords(rest, &["rename", "to"]) else {
+        return Ok(None);
+    };
+    let (new_name, trailing) = parse_sql_identifier(next)?;
+    if !trailing.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: trailing.trim().into(),
+        });
+    }
+    Ok(Some(Statement::AlterSchemaRename(
+        AlterSchemaRenameStatement {
+            schema_name,
+            new_name,
+        },
+    )))
 }
 
 fn parse_role_spec(input: &str) -> Result<(RoleSpec, &str), ParseError> {
@@ -3362,15 +3398,16 @@ fn publication_missing_object_kind_error() -> ParseError {
 }
 
 fn parse_publication_target_spec(input: &str) -> Result<(PublicationTargetSpec, &str), ParseError> {
+    #[derive(Clone, Copy)]
     enum PublicationObjectMode {
-        Table,
+        Table { explicit: bool },
         Schema,
     }
 
     let mut rest = input.trim_start();
     let mut mode = if let Some(next) = consume_keywords(rest, &["table"]) {
         rest = next;
-        PublicationObjectMode::Table
+        PublicationObjectMode::Table { explicit: true }
     } else if let Some(next) = consume_keywords(rest, &["tables", "in", "schema"]) {
         rest = next;
         PublicationObjectMode::Schema
@@ -3381,12 +3418,12 @@ fn parse_publication_target_spec(input: &str) -> Result<(PublicationTargetSpec, 
     let mut objects = Vec::new();
     loop {
         let (object, next) = match mode {
-            PublicationObjectMode::Table => {
-                let (table, next) = parse_publication_table_object(rest)?;
+            PublicationObjectMode::Table { explicit } => {
+                let (table, next) = parse_publication_table_object(rest, explicit)?;
                 (PublicationObjectSpec::Table(table), next)
             }
             PublicationObjectMode::Schema => {
-                let (schema, next) = parse_publication_schema_object(rest)?;
+                let (schema, next) = parse_publication_schema_object(rest, !objects.is_empty())?;
                 (PublicationObjectSpec::Schema(schema), next)
             }
         };
@@ -3398,13 +3435,16 @@ fn parse_publication_target_spec(input: &str) -> Result<(PublicationTargetSpec, 
         rest = after_comma.trim_start();
         if let Some(next) = consume_keywords(rest, &["table"]) {
             rest = next;
-            mode = PublicationObjectMode::Table;
+            mode = PublicationObjectMode::Table { explicit: true };
             continue;
         }
         if let Some(next) = consume_keywords(rest, &["tables", "in", "schema"]) {
             rest = next;
             mode = PublicationObjectMode::Schema;
             continue;
+        }
+        if matches!(mode, PublicationObjectMode::Table { .. }) {
+            mode = PublicationObjectMode::Table { explicit: false };
         }
     }
 
@@ -3433,12 +3473,24 @@ fn parse_publication_target_spec(input: &str) -> Result<(PublicationTargetSpec, 
     ))
 }
 
-fn parse_publication_table_object(input: &str) -> Result<(PublicationTableSpec, &str), ParseError> {
+fn parse_publication_table_object(
+    input: &str,
+    explicit_table_keyword: bool,
+) -> Result<(PublicationTableSpec, &str), ParseError> {
     let mut rest = input.trim_start();
     let mut only = false;
     if keyword_at_start(rest, "only") {
         only = true;
         rest = consume_keyword(rest, "only").trim_start();
+    }
+    if explicit_table_keyword && keyword_at_start(rest, "current_schema") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "publication table name",
+            actual: format!(
+                "syntax error at or near \"{}\"",
+                leading_identifier_token(rest)
+            ),
+        });
     }
     let (parts, mut rest) = parse_qualified_identifier_parts(rest)?;
     let relation_name = match parts.as_slice() {
@@ -3474,6 +3526,7 @@ fn parse_publication_table_object(input: &str) -> Result<(PublicationTableSpec, 
 
 fn parse_publication_schema_object(
     input: &str,
+    has_prior_schema: bool,
 ) -> Result<(PublicationSchemaSpec, &str), ParseError> {
     let rest = input.trim_start();
     let (schema_name, rest) = if keyword_at_start(rest, "current_schema") {
@@ -3492,12 +3545,26 @@ fn parse_publication_schema_object(
     };
     let trailing = rest.trim_start();
     if trailing.starts_with('(') {
-        let _ = take_parenthesized_segment(trailing)?;
-        return Err(ParseError::FeatureNotSupported(
-            "publication column lists".into(),
-        ));
+        if has_prior_schema {
+            return Err(ParseError::DetailedError {
+                message: "column specification not allowed for schema".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            });
+        }
+        return Err(ParseError::UnexpectedToken {
+            expected: "schema name",
+            actual: "syntax error at or near \"(\"".into(),
+        });
     }
     if keyword_at_start(trailing, "where") {
+        if !has_prior_schema {
+            return Err(ParseError::UnexpectedToken {
+                expected: "schema name",
+                actual: "syntax error at or near \"WHERE\"".into(),
+            });
+        }
         return Err(ParseError::DetailedError {
             message: "WHERE clause not allowed for schema".into(),
             detail: None,
@@ -3627,6 +3694,17 @@ fn parse_publication_option_text_value(input: &str) -> Result<(String, &str), Pa
     }
     let (value, rest) = parse_sql_identifier(input)?;
     Ok((value, rest))
+}
+
+fn leading_identifier_token(input: &str) -> &str {
+    let input = input.trim_start();
+    let end = input
+        .char_indices()
+        .find_map(|(index, ch)| {
+            (index > 0 && !(ch.is_ascii_alphanumeric() || ch == '_')).then_some(index)
+        })
+        .unwrap_or(input.len());
+    &input[..end]
 }
 
 fn parse_publication_bool_value(input: &str) -> Result<(bool, &str), ParseError> {
@@ -4779,6 +4857,20 @@ fn try_parse_conversion_statement(sql: &str) -> Result<Option<Statement>, ParseE
     if lowered.starts_with("comment on conversion ") {
         return build_comment_on_conversion_statement(trimmed)
             .map(|stmt| Some(Statement::CommentOnConversion(stmt)));
+    }
+    Ok(None)
+}
+
+fn try_parse_collation_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create collation ") {
+        return build_create_collation_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateCollation(stmt)));
+    }
+    if lowered.starts_with("drop collation ") {
+        return build_drop_collation_statement(trimmed)
+            .map(|stmt| Some(Statement::DropCollation(stmt)));
     }
     Ok(None)
 }
@@ -14427,6 +14519,37 @@ fn build_create_conversion_statement(sql: &str) -> Result<CreateConversionStatem
     })
 }
 
+fn build_create_collation_statement(sql: &str) -> Result<CreateCollationStatement, ParseError> {
+    let rest = sql
+        .get("create collation ".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let ((schema_name, base_name), rest) = parse_schema_qualified_name(rest)?;
+    let collation_name = schema_name
+        .map(|schema| format!("{schema}.{base_name}"))
+        .unwrap_or(base_name);
+    let Some(rest) = consume_keyword_if_present(rest, "from") else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "FROM",
+            actual: rest.trim().into(),
+        });
+    };
+    let ((source_schema, source_base), trailing) = parse_schema_qualified_name(rest)?;
+    if !trailing.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: trailing.trim().into(),
+        });
+    }
+    let source_collation = source_schema
+        .map(|schema| format!("{schema}.{source_base}"))
+        .unwrap_or(source_base);
+    Ok(CreateCollationStatement {
+        collation_name,
+        source_collation,
+    })
+}
+
 fn build_drop_conversion_statement(sql: &str) -> Result<DropConversionStatement, ParseError> {
     let tokens = sql.split_whitespace().collect::<Vec<_>>();
     if tokens.len() < 3 {
@@ -14476,6 +14599,48 @@ fn build_drop_conversion_statement(sql: &str) -> Result<DropConversionStatement,
     Ok(DropConversionStatement {
         if_exists,
         conversion_name: (*name).to_string(),
+        cascade,
+    })
+}
+
+fn build_drop_collation_statement(sql: &str) -> Result<DropCollationStatement, ParseError> {
+    let mut rest = sql
+        .get("drop collation ".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next.trim_start();
+    }
+    let ((schema_name, base_name), next) = parse_schema_qualified_name(rest)?;
+    rest = next.trim_start();
+    let mut cascade = false;
+    if !rest.is_empty() {
+        if keyword_at_start(rest, "cascade") {
+            cascade = true;
+            rest = consume_keyword(rest, "cascade").trim_start();
+        } else if keyword_at_start(rest, "restrict") {
+            rest = consume_keyword(rest, "restrict").trim_start();
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "CASCADE, RESTRICT, or end of statement",
+                actual: rest.into(),
+            });
+        }
+    }
+    if !rest.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: rest.into(),
+        });
+    }
+    let collation_name = schema_name
+        .map(|schema| format!("{schema}.{base_name}"))
+        .unwrap_or(base_name);
+    Ok(DropCollationStatement {
+        if_exists,
+        collation_name,
         cascade,
     })
 }
@@ -18280,7 +18445,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             }
             Rule::temp_clause => persistence = TablePersistence::Temporary,
             Rule::if_not_exists_clause => if_not_exists = true,
-            Rule::identifier if relation_name.is_none() => {
+            Rule::identifier | Rule::qualified_identifier if relation_name.is_none() => {
                 relation_name = Some(build_relation_name(part))
             }
             Rule::create_table_column_form => {
@@ -20207,12 +20372,36 @@ fn validate_table_storage_clause(pair: Pair<'_, Rule>) -> Result<(), ParseError>
 }
 
 fn build_relation_name(pair: Pair<'_, Rule>) -> (Option<String>, String) {
-    let name = build_identifier(pair);
+    if pair.as_rule() == Rule::qualified_identifier {
+        let parts = pair
+            .into_inner()
+            .filter(|part| part.as_rule() == Rule::identifier)
+            .map(|part| (part.as_str().to_string(), build_identifier(part)))
+            .collect::<Vec<_>>();
+        return match parts.as_slice() {
+            [(raw, name)] if !is_quoted_identifier_token(raw) => split_relation_name(name),
+            [(_, name)] => (None, name.clone()),
+            [(_, schema), (_, rel)] => (Some(schema.clone()), rel.clone()),
+            _ => (None, String::new()),
+        };
+    }
+    split_relation_name(&build_identifier(pair))
+}
+
+fn split_relation_name(name: &str) -> (Option<String>, String) {
     if let Some((schema, rel)) = name.split_once('.') {
         (Some(schema.to_string()), rel.to_string())
     } else {
-        (None, name)
+        (None, name.to_string())
     }
+}
+
+fn is_quoted_identifier_token(raw: &str) -> bool {
+    let raw = raw.trim_start();
+    raw.starts_with('"')
+        || raw
+            .get(..3)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("u&\""))
 }
 
 fn build_on_commit_action(pair: Pair<'_, Rule>) -> Result<OnCommitAction, ParseError> {

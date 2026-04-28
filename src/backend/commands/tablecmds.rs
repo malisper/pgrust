@@ -1092,6 +1092,13 @@ fn active_publication_memberships(
     action: PublicationDmlAction,
 ) -> Vec<(PgPublicationRow, Option<PgPublicationRelRow>)> {
     let relation_oids = relation_and_publication_parent_oids(catalog, relation_oid);
+    let mut namespace_oids = relation_oids
+        .iter()
+        .filter_map(|oid| catalog.class_row_by_oid(*oid).map(|row| row.relnamespace))
+        .collect::<Vec<_>>();
+    if !namespace_oids.contains(&namespace_oid) {
+        namespace_oids.push(namespace_oid);
+    }
     let publication_rows = catalog.publication_rows();
     let publication_rel_rows = catalog.publication_rel_rows();
     let publication_namespace_rows = catalog.publication_namespace_rows();
@@ -1116,7 +1123,7 @@ fn active_publication_memberships(
         }
         if publication_namespace_rows
             .iter()
-            .any(|row| row.pnpubid == publication.oid && row.pnnspid == namespace_oid)
+            .any(|row| row.pnpubid == publication.oid && namespace_oids.contains(&row.pnnspid))
         {
             memberships.push((publication, None));
         }
@@ -1161,7 +1168,7 @@ fn replica_identity_columns(
         'n' => (ReplicaIdentityColumns::None, Vec::new()),
         _ => indexes
             .iter()
-            .find(|index| index.index_meta.indisprimary)
+            .find(|index| index.index_meta.indisprimary && index.index_meta.indimmediate)
             .map(|index| {
                 (
                     ReplicaIdentityColumns::Columns,
@@ -1182,6 +1189,51 @@ fn relation_column_attnum(desc: &RelationDesc, name: &str) -> Option<i16> {
 }
 
 fn publication_filter_attnums(qual: &str, desc: &RelationDesc) -> Result<Vec<i16>, ExecError> {
+    let expr = parse_expr(qual).map_err(ExecError::Parse)?;
+    let mut column_names = BTreeSet::new();
+    collect_sql_expr_column_names(&expr, &mut column_names);
+    Ok(column_names
+        .into_iter()
+        .filter_map(|name| relation_column_attnum(desc, &name))
+        .collect())
+}
+
+fn publication_membership_attnums(
+    relation_oid: u32,
+    desc: &RelationDesc,
+    membership: &PgPublicationRelRow,
+    catalog: &dyn CatalogLookup,
+) -> Option<Vec<i16>> {
+    let attrs = membership.prattrs.as_ref()?;
+    if membership.prrelid == relation_oid {
+        return Some(attrs.clone());
+    }
+    let membership_relation = catalog.relation_by_oid(membership.prrelid)?;
+    let translated = attrs
+        .iter()
+        .filter_map(|attnum| {
+            let column = attnum
+                .checked_sub(1)
+                .and_then(|idx| usize::try_from(idx).ok())
+                .and_then(|idx| membership_relation.desc.columns.get(idx))?;
+            (!column.dropped)
+                .then(|| relation_column_attnum(desc, &column.name))
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    Some(translated)
+}
+
+fn publication_filter_attnums_for_membership(
+    qual: &str,
+    relation_oid: u32,
+    desc: &RelationDesc,
+    membership: &PgPublicationRelRow,
+    _catalog: &dyn CatalogLookup,
+) -> Result<Vec<i16>, ExecError> {
+    if membership.prrelid == relation_oid {
+        return publication_filter_attnums(qual, desc);
+    }
     let expr = parse_expr(qual).map_err(ExecError::Parse)?;
     let mut column_names = BTreeSet::new();
     collect_sql_expr_column_names(&expr, &mut column_names);
@@ -1238,7 +1290,10 @@ fn enforce_publication_replica_identity(
     let (identity_kind, identity_attrs) =
         replica_identity_columns(relation_oid, desc, indexes, catalog);
     for (publication, membership) in &memberships {
-        if let Some(attrs) = membership.as_ref().and_then(|row| row.prattrs.as_ref()) {
+        if let Some(attrs) = membership
+            .as_ref()
+            .and_then(|row| publication_membership_attnums(relation_oid, desc, row, catalog))
+        {
             if identity_kind == ReplicaIdentityColumns::Full
                 || identity_attrs.iter().any(|attnum| !attrs.contains(attnum))
             {
@@ -1251,8 +1306,12 @@ fn enforce_publication_replica_identity(
                 ));
             }
         }
-        if let Some(qual) = membership.as_ref().and_then(|row| row.prqual.as_deref()) {
-            let filter_attrs = publication_filter_attnums(qual, desc)?;
+        if let Some((row, qual)) = membership
+            .as_ref()
+            .and_then(|row| row.prqual.as_deref().map(|qual| (row, qual)))
+        {
+            let filter_attrs =
+                publication_filter_attnums_for_membership(qual, relation_oid, desc, row, catalog)?;
             if filter_attrs
                 .iter()
                 .any(|attnum| !identity_attrs.contains(attnum))
@@ -5135,8 +5194,43 @@ pub fn execute_insert(
         let values = materialize_insert_rows(&stmt, catalog, ctx)?;
 
         let returned_rows = if let Some(on_conflict) = stmt.on_conflict.as_ref() {
-            let returned_rows =
-                execute_insert_on_conflict_rows(&stmt, on_conflict, &values, ctx, xid, cid)?;
+            let returned_rows = if catalog
+                .relation_by_oid(stmt.relation_oid)
+                .is_some_and(|relation| relation.relkind == 'p')
+            {
+                if matches!(on_conflict.action, BoundOnConflictAction::Update { .. }) {
+                    enforce_partitioned_on_conflict_update_publication_identity(
+                        catalog, &stmt, &values, ctx,
+                    )?;
+                }
+                // :HACK: Partitioned INSERT ... ON CONFLICT is only modeled
+                // enough for the publication regression: DO NOTHING can take
+                // the normal routing path when no conflict occurs, while DO
+                // UPDATE performs PostgreSQL's publication identity precheck
+                // before routing rows as inserts.
+                execute_insert_rows_with_routing(
+                    catalog,
+                    &stmt.relation_name,
+                    stmt.relation_oid,
+                    stmt.rel,
+                    stmt.toast,
+                    stmt.toast_index.as_ref(),
+                    &stmt.desc,
+                    &stmt.relation_constraints,
+                    &stmt.rls_write_checks,
+                    &stmt.indexes,
+                    &values,
+                    Some(&stmt.returning),
+                    ctx,
+                    xid,
+                    cid,
+                )?
+            } else {
+                if matches!(on_conflict.action, BoundOnConflictAction::Update { .. }) {
+                    enforce_on_conflict_update_publication_identity(catalog, &stmt)?;
+                }
+                execute_insert_on_conflict_rows(&stmt, on_conflict, &values, ctx, xid, cid)?
+            };
             for _ in 0..returned_rows.len() {
                 ctx.session_stats
                     .write()
@@ -5179,6 +5273,68 @@ pub fn execute_insert(
     })();
     ctx.subplans = saved_subplans;
     result
+}
+
+fn enforce_partitioned_on_conflict_update_publication_identity(
+    catalog: &dyn CatalogLookup,
+    stmt: &BoundInsertStatement,
+    rows: &[Vec<Value>],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let Some(target_relation) = catalog.relation_by_oid(stmt.relation_oid) else {
+        return Ok(());
+    };
+    if target_relation.relkind != 'p' {
+        return Ok(());
+    }
+    let mut proute = exec_setup_partition_tuple_routing(catalog, &target_relation)?;
+    let mut checked = BTreeSet::new();
+    for row in rows {
+        let leaf = exec_find_partition(catalog, &mut proute, &target_relation, row, ctx)?;
+        if !checked.insert(leaf.relation_oid) {
+            continue;
+        }
+        let result_rel_info = PartitionResultRelInfo::new(
+            catalog,
+            &stmt.relation_name,
+            stmt.relation_oid,
+            &stmt.relation_constraints,
+            &stmt.indexes,
+            stmt.toast_index.as_ref(),
+            leaf,
+        )?;
+        enforce_publication_replica_identity(
+            &result_rel_info.relation_name,
+            result_rel_info.relation.relation_oid,
+            result_rel_info.relation.namespace_oid,
+            &result_rel_info.relation.desc,
+            &result_rel_info.indexes,
+            catalog,
+            PublicationDmlAction::Update,
+            true,
+        )?;
+    }
+    Ok(())
+}
+
+fn enforce_on_conflict_update_publication_identity(
+    catalog: &dyn CatalogLookup,
+    stmt: &BoundInsertStatement,
+) -> Result<(), ExecError> {
+    let namespace_oid = catalog
+        .class_row_by_oid(stmt.relation_oid)
+        .map(|row| row.relnamespace)
+        .unwrap_or(0);
+    enforce_publication_replica_identity(
+        &stmt.relation_name,
+        stmt.relation_oid,
+        namespace_oid,
+        &stmt.desc,
+        &stmt.indexes,
+        catalog,
+        PublicationDmlAction::Update,
+        true,
+    )
 }
 
 fn first_toast_index_for_relation(
@@ -6117,6 +6273,22 @@ fn execute_merge_update_row(
         )?;
     }
     materialize_generated_columns(&stmt.desc, &mut updated_values, ctx)?;
+    if let Some(catalog) = ctx.catalog.as_deref() {
+        let namespace_oid = catalog
+            .class_row_by_oid(stmt.relation_oid)
+            .map(|row| row.relnamespace)
+            .unwrap_or(0);
+        enforce_publication_replica_identity(
+            &stmt.relation_name,
+            stmt.relation_oid,
+            namespace_oid,
+            &stmt.desc,
+            &stmt.indexes,
+            catalog,
+            PublicationDmlAction::Update,
+            true,
+        )?;
+    }
     let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, target_tid)?;
     crate::backend::executor::enforce_relation_constraints(
         &stmt.relation_name,
@@ -6249,6 +6421,22 @@ fn execute_merge_delete_row(
     ctx: &mut ExecutorContext,
     xid: TransactionId,
 ) -> Result<bool, ExecError> {
+    if let Some(catalog) = ctx.catalog.as_deref() {
+        let namespace_oid = catalog
+            .class_row_by_oid(stmt.relation_oid)
+            .map(|row| row.relnamespace)
+            .unwrap_or(0);
+        enforce_publication_replica_identity(
+            &stmt.relation_name,
+            stmt.relation_oid,
+            namespace_oid,
+            &stmt.desc,
+            &stmt.indexes,
+            catalog,
+            PublicationDmlAction::Delete,
+            true,
+        )?;
+    }
     apply_inbound_foreign_key_actions_on_delete(
         &stmt.relation_name,
         &stmt.referenced_by_foreign_keys,
@@ -6315,6 +6503,49 @@ fn execute_merge_delete_row(
     }
 }
 
+fn enforce_merge_publication_replica_identity(
+    stmt: &BoundMergeStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    let namespace_oid = catalog
+        .class_row_by_oid(stmt.relation_oid)
+        .map(|row| row.relnamespace)
+        .unwrap_or(0);
+    if stmt
+        .when_clauses
+        .iter()
+        .any(|clause| matches!(clause.action, BoundMergeAction::Update { .. }))
+    {
+        enforce_publication_replica_identity(
+            &stmt.relation_name,
+            stmt.relation_oid,
+            namespace_oid,
+            &stmt.desc,
+            &stmt.indexes,
+            catalog,
+            PublicationDmlAction::Update,
+            true,
+        )?;
+    }
+    if stmt
+        .when_clauses
+        .iter()
+        .any(|clause| matches!(clause.action, BoundMergeAction::Delete))
+    {
+        enforce_publication_replica_identity(
+            &stmt.relation_name,
+            stmt.relation_oid,
+            namespace_oid,
+            &stmt.desc,
+            &stmt.indexes,
+            catalog,
+            PublicationDmlAction::Delete,
+            true,
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn execute_merge(
     stmt: BoundMergeStatement,
     catalog: &dyn CatalogLookup,
@@ -6324,6 +6555,7 @@ pub(crate) fn execute_merge(
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_merge(stmt, catalog);
     check_merge_privileges(&stmt, &stmt.input_plan, ctx)?;
+    enforce_merge_publication_replica_identity(&stmt, catalog)?;
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.input_plan.subplans.clone());
     let result = (|| {
         let mut state = executor_start(stmt.input_plan.plan_tree.clone());

@@ -12,9 +12,9 @@ use crate::backend::utils::cache::syscache::{
 };
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::{
-    CONSTRAINT_FOREIGN, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PgCastRow, PgConstraintRow, PgProcRow,
-    PgRewriteRow,
+    CONSTRAINT_FOREIGN, DEPENDENCY_AUTO, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID,
+    PG_CONSTRAINT_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PgCastRow,
+    PgConstraintRow, PgProcRow, PgRewriteRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
@@ -87,9 +87,29 @@ fn drop_format_name(catcache: &CatCache, namespace_oid: u32, object_name: &str) 
         .namespace_by_oid(namespace_oid)
         .map(|row| row.nspname.clone())
         .unwrap_or_else(|| "public".to_string());
+    let object_name = drop_quote_identifier_if_needed(object_name);
     match schema_name.as_str() {
-        "public" | "pg_catalog" => object_name.to_string(),
-        _ => format!("{schema_name}.{object_name}"),
+        "public" | "pg_catalog" => object_name,
+        _ => format!(
+            "{}.{object_name}",
+            drop_quote_identifier_if_needed(&schema_name)
+        ),
+    }
+}
+
+fn drop_quote_identifier_if_needed(identifier: &str) -> String {
+    let mut chars = identifier.chars();
+    let Some(first) = chars.next() else {
+        return "\"\"".into();
+    };
+    let is_simple_start = first == '_' || first.is_ascii_lowercase();
+    let is_simple_rest =
+        chars.all(|ch| ch == '_' || ch.is_ascii_lowercase() || ch.is_ascii_digit());
+    let is_keyword = matches!(identifier, "user");
+    if is_simple_start && is_simple_rest && !is_keyword {
+        identifier.to_string()
+    } else {
+        format!("\"{}\"", identifier.replace('"', "\"\""))
     }
 }
 
@@ -346,6 +366,37 @@ fn drop_schema_relation_drop_priority(relkind: char) -> u8 {
     }
 }
 
+fn owned_sequence_owner_relation_oid(catcache: &CatCache, sequence_oid: u32) -> Option<u32> {
+    catcache.depend_rows().into_iter().find_map(|row| {
+        (row.classid == PG_CLASS_RELATION_OID
+            && row.objid == sequence_oid
+            && row.objsubid == 0
+            && row.refclassid == PG_CLASS_RELATION_OID
+            && row.refobjsubid > 0
+            && row.deptype == DEPENDENCY_AUTO)
+            .then_some(row.refobjid)
+    })
+}
+
+fn sequence_is_owned_by_relation_in_schema(
+    catcache: &CatCache,
+    sequence_oid: u32,
+    schema_oid: u32,
+) -> bool {
+    owned_sequence_owner_relation_oid(catcache, sequence_oid)
+        .and_then(|relation_oid| catcache.class_by_oid(relation_oid))
+        .is_some_and(|row| row.relnamespace == schema_oid)
+}
+
+fn partition_has_parent_in_schema(catcache: &CatCache, relation_oid: u32, schema_oid: u32) -> bool {
+    catcache
+        .inherit_rows()
+        .into_iter()
+        .filter(|row| row.inhrelid == relation_oid)
+        .filter_map(|row| catcache.class_by_oid(row.inhparent))
+        .any(|parent| parent.relnamespace == schema_oid)
+}
+
 fn drop_table_display_relation_name(
     catalog: &dyn CatalogLookup,
     relation_oid: u32,
@@ -564,7 +615,7 @@ fn drop_schema_display_object_name(
     object_name: &str,
 ) -> String {
     if visible_namespaces.contains(&namespace_oid) {
-        return object_name.to_string();
+        return drop_quote_identifier_if_needed(object_name);
     }
     drop_format_name(catcache, namespace_oid, object_name)
 }
@@ -1680,6 +1731,10 @@ impl Database {
             .into_iter()
             .filter(|row| row.relnamespace == schema_oid)
             .filter(|row| matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'S' | 'v'))
+            .filter(|row| {
+                row.relkind != 'S'
+                    || !sequence_is_owned_by_relation_in_schema(&catcache, row.oid, schema_oid)
+            })
             .collect::<Vec<_>>();
         let proc_rows = catcache
             .proc_rows()
@@ -2515,8 +2570,13 @@ impl Database {
                 let mut relation_notice_rows = relation_rows
                     .iter()
                     .filter(|row| {
-                        !row.relispartition
+                        (!row.relispartition
+                            || !partition_has_parent_in_schema(&catcache, row.oid, schema.oid))
                             && matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'S' | 'v')
+                            && (row.relkind != 'S'
+                                || !sequence_is_owned_by_relation_in_schema(
+                                    &catcache, row.oid, schema.oid,
+                                ))
                     })
                     .cloned()
                     .collect::<Vec<_>>();

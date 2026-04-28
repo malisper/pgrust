@@ -2187,8 +2187,10 @@ fn bind_function_from_item_with_ctes(
         .unwrap_or(func_variadic);
     let resolved_row_columns =
         resolve_function_row_columns(catalog, resolved.as_ref(), column_definitions)?;
+    let lowered_name = name.to_ascii_lowercase();
+    let builtin_name = normalize_builtin_function_name(&lowered_name);
 
-    match name {
+    match builtin_name {
         "generate_series" => {
             if args.len() < 2 || args.len() > 4 {
                 return Err(ParseError::UnexpectedToken {

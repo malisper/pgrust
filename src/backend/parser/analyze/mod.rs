@@ -3253,7 +3253,7 @@ fn normalize_create_table_name_parts(
         return Err(ParseError::OnCommitOnlyForTempTables);
     }
 
-    Ok((table_name.to_ascii_lowercase(), effective_persistence))
+    Ok((table_name.to_string(), effective_persistence))
 }
 
 pub fn normalize_create_table_name(

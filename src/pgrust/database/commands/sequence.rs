@@ -229,6 +229,19 @@ impl Database {
                             .map_err(map_catalog_error)?;
                         self.apply_catalog_mutation_effect_immediate(&pg_sequence_effect)?;
                         catalog_effects.push(pg_sequence_effect);
+                        if let Some(owned_by) = data.options.owned_by {
+                            let effect = self
+                                .catalog
+                                .write()
+                                .set_sequence_owned_by_dependency_mvcc(
+                                    entry.relation_oid,
+                                    Some((owned_by.relation_oid, owned_by.attnum)),
+                                    &ctx,
+                                )
+                                .map_err(map_catalog_error)?;
+                            self.apply_catalog_mutation_effect_immediate(&effect)?;
+                            catalog_effects.push(effect);
+                        }
                         sequence_effects.push(self.sequences.apply_upsert(
                             entry.relation_oid,
                             data,
@@ -359,6 +372,24 @@ impl Database {
                 .map_err(map_catalog_error)?;
             self.apply_catalog_mutation_effect_immediate(&effect)?;
             catalog_effects.push(effect);
+            if matches!(
+                alter_stmt.options.owned_by,
+                Some(SequenceOwnedByClause::Column { .. }) | Some(SequenceOwnedByClause::None)
+            ) {
+                let effect = self
+                    .catalog
+                    .write()
+                    .set_sequence_owned_by_dependency_mvcc(
+                        relation.relation_oid,
+                        next.options
+                            .owned_by
+                            .map(|owned_by| (owned_by.relation_oid, owned_by.attnum)),
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+            }
         }
         sequence_effects.push(self.sequences.apply_upsert(
             relation.relation_oid,

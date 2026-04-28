@@ -10,11 +10,12 @@ use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
     SysCacheId, SysCacheTuple, backend_catcache, ensure_am_rows, ensure_amop_rows,
-    ensure_amproc_rows, ensure_attribute_rows, ensure_class_rows, ensure_constraint_rows,
-    ensure_index_rows, ensure_inherit_rows, ensure_namespace_rows, ensure_opclass_rows,
-    ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows, ensure_type_rows,
-    relation_id_get_relation_db, search_sys_cache_list1_db, search_sys_cache_list2_db,
-    search_sys_cache_list3_db, search_sys_cache1_db, search_sys_cache2_db,
+    ensure_amproc_rows, ensure_attribute_rows, ensure_class_rows, ensure_collation_rows,
+    ensure_constraint_rows, ensure_index_rows, ensure_inherit_rows, ensure_namespace_rows,
+    ensure_opclass_rows, ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows,
+    ensure_type_rows, relation_id_get_relation_db, search_sys_cache_list1_db,
+    search_sys_cache_list2_db, search_sys_cache_list3_db, search_sys_cache1_db,
+    search_sys_cache2_db,
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
@@ -50,22 +51,30 @@ fn catalog_name_key(name: &str) -> Value {
     Value::Text(normalize_catalog_name(name).to_ascii_lowercase().into())
 }
 
+fn catalog_name_lookup_keys(name: &str) -> Vec<Value> {
+    let normalized = normalize_catalog_name(name);
+    let mut names = vec![normalized.to_string()];
+    let folded = normalized.to_ascii_lowercase();
+    if folded != normalized {
+        names.push(folded);
+    }
+    names
+        .into_iter()
+        .map(|name| Value::Text(name.into()))
+        .collect()
+}
+
 fn namespace_row_by_name(
     db: &Database,
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
     name: &str,
 ) -> Option<crate::include::catalog::PgNamespaceRow> {
-    select_namespace_row(
-        search_sys_cache1_db(
-            db,
-            client_id,
-            txn_ctx,
-            SysCacheId::NamespaceName,
-            catalog_name_key(name),
+    catalog_name_lookup_keys(name).into_iter().find_map(|key| {
+        select_namespace_row(
+            search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::NamespaceName, key).ok()?,
         )
-        .ok()?,
-    )
+    })
 }
 
 fn namespace_row_by_oid(
@@ -122,24 +131,28 @@ fn class_row_by_name_namespace(
     relname: &str,
     namespace_oid: u32,
 ) -> Option<crate::include::catalog::PgClassRow> {
-    search_sys_cache2_db(
-        db,
-        client_id,
-        txn_ctx,
-        SysCacheId::RelNameNsp,
-        Value::Text(relname.to_ascii_lowercase().into()),
-        oid_key(namespace_oid),
-    )
-    .ok()?
-    .into_iter()
-    .find_map(|tuple| match tuple {
-        SysCacheTuple::Class(row)
-            if !db.other_session_temp_namespace_oid(client_id, row.relnamespace) =>
-        {
-            Some(row)
-        }
-        _ => None,
-    })
+    catalog_name_lookup_keys(relname)
+        .into_iter()
+        .find_map(|key| {
+            search_sys_cache2_db(
+                db,
+                client_id,
+                txn_ctx,
+                SysCacheId::RelNameNsp,
+                key,
+                oid_key(namespace_oid),
+            )
+            .ok()?
+            .into_iter()
+            .find_map(|tuple| match tuple {
+                SysCacheTuple::Class(row)
+                    if !db.other_session_temp_namespace_oid(client_id, row.relnamespace) =>
+                {
+                    Some(row)
+                }
+                _ => None,
+            })
+        })
 }
 
 fn attribute_rows_for_relation(
@@ -448,11 +461,13 @@ fn type_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<PgTypeRow> {
-    super::syscache::with_backend_catcache(db, client_id, txn_ctx, |catcache| {
-        catcache.type_by_oid(oid).cloned()
-    })
-    .ok()
-    .flatten()
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::TypeOid, oid_key(oid))
+        .ok()?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Type(row) => Some(row),
+            _ => None,
+        })
 }
 
 fn type_row_by_name_namespace(
@@ -462,13 +477,30 @@ fn type_row_by_name_namespace(
     name: &str,
     namespace_oid: u32,
 ) -> Option<PgTypeRow> {
-    super::syscache::with_backend_catcache(db, client_id, txn_ctx, |catcache| {
-        catcache
-            .type_by_name_namespace(name, namespace_oid)
-            .cloned()
+    let normalized = normalize_catalog_name(name);
+    search_sys_cache2_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::TypeNameNsp,
+        Value::Text(normalized.to_ascii_lowercase().into()),
+        oid_key(namespace_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Type(row) => Some(row),
+        _ => None,
     })
-    .ok()
-    .flatten()
+    .or_else(|| {
+        crate::include::catalog::builtin_type_rows()
+            .into_iter()
+            .chain(crate::include::catalog::bootstrap_composite_type_rows())
+            .find(|row| {
+                row.typnamespace == namespace_oid
+                    && row.typname.eq_ignore_ascii_case(normalized.as_ref())
+            })
+    })
     .filter(|row| !db.other_session_temp_namespace_oid(client_id, row.typnamespace))
 }
 
@@ -1469,10 +1501,11 @@ pub fn lookup_any_relation(
     search_path: &[String],
     name: &str,
 ) -> Option<BoundRelation> {
-    let exact = name.to_ascii_lowercase();
-    if let Some((schema, relname)) = exact.split_once('.') {
+    let catalog_name = normalize_catalog_name(name);
+    if let Some((schema, relname)) = catalog_name.split_once('.') {
         if let Some(temp_namespace) = owned_temp_namespace(db, client_id)
-            && (schema == "pg_temp" || schema == temp_namespace.name)
+            && (schema.eq_ignore_ascii_case("pg_temp")
+                || temp_namespace.name.eq_ignore_ascii_case(schema))
         {
             return temp_namespace
                 .tables
@@ -1487,8 +1520,8 @@ pub fn lookup_any_relation(
         return Some(bound_relation_from_entry(db, client_id, txn_ctx, entry));
     }
 
-    let normalized = normalize_catalog_name(name).to_ascii_lowercase();
-    if let Some(temp) = temp_relation_entry_by_name(db, client_id, &normalized) {
+    let temp_name = catalog_name.to_ascii_lowercase();
+    if let Some(temp) = temp_relation_entry_by_name(db, client_id, &temp_name) {
         return Some(bound_relation_from_entry(db, client_id, txn_ctx, temp));
     }
 
@@ -1499,7 +1532,7 @@ pub fn lookup_any_relation(
             continue;
         };
         if let Some(entry) =
-            relation_entry_by_name_namespace(db, client_id, txn_ctx, &normalized, namespace_oid)
+            relation_entry_by_name_namespace(db, client_id, txn_ctx, catalog_name, namespace_oid)
         {
             return Some(bound_relation_from_entry(db, client_id, txn_ctx, entry));
         }
@@ -1917,6 +1950,10 @@ impl CatalogLookup for LazyCatalogLookup {
 
     fn amop_rows(&self) -> Vec<PgAmopRow> {
         ensure_amop_rows(&self.db, self.client_id, self.txn_ctx)
+    }
+
+    fn collation_rows(&self) -> Vec<PgCollationRow> {
+        ensure_collation_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn ts_config_rows(&self) -> Vec<PgTsConfigRow> {

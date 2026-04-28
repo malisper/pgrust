@@ -204,16 +204,11 @@ fn parse_alter_publication_set_all_tables_except() {
 
 #[test]
 fn parse_publication_current_schema_depends_on_target_mode() {
-    let table_stmt = parse_statement("create publication pub for table current_schema").unwrap();
-    match table_stmt {
-        Statement::CreatePublication(stmt) => {
-            assert!(matches!(
-                &stmt.target.objects[0],
-                PublicationObjectSpec::Table(table) if table.relation_name == "current_schema"
-            ));
-        }
-        other => panic!("expected create publication, got {other:?}"),
-    }
+    assert!(matches!(
+        parse_statement("create publication pub for table current_schema"),
+        Err(ParseError::UnexpectedToken { actual, .. })
+            if actual == "syntax error at or near \"current_schema\""
+    ));
 
     let schema_stmt =
         parse_statement("create publication pub for tables in schema current_schema").unwrap();
@@ -10419,6 +10414,9 @@ fn parse_insert_update_delete() {
     ));
     assert!(
         matches!(parse_statement("create table pg_temp.tempy (id int4)").unwrap(), Statement::CreateTable(CreateTableStatement { schema_name: Some(schema), table_name, persistence: TablePersistence::Permanent, .. }) if schema == "pg_temp" && table_name == "tempy")
+    );
+    assert!(
+        matches!(parse_statement("create table \"CURRENT_SCHEMA\".\"CURRENT_SCHEMA\" (id int4)").unwrap(), Statement::CreateTable(CreateTableStatement { schema_name: Some(schema), table_name, .. }) if schema == "CURRENT_SCHEMA" && table_name == "CURRENT_SCHEMA")
     );
     assert!(matches!(
         parse_statement("create temp table tempy (id int4) on commit delete rows").unwrap(),
