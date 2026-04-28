@@ -37,20 +37,20 @@ use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAmopRow, PgAmprocRow, PgAttributeRow, PgAuthIdRow,
     PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow,
-    PgDatabaseRow, PgDependRow, PgEnumRow, PgForeignDataWrapperRow, PgForeignServerRow,
-    PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgProcRow, PgPublicationNamespaceRow,
-    PgPublicationRelRow, PgPublicationRow, PgRangeRow, PgRewriteRow, PgStatisticExtDataRow,
-    PgStatisticExtRow, PgStatisticRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow, PgUserMappingRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows,
-    bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_conversion_rows, bootstrap_pg_database_rows,
-    bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
-    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
-    bootstrap_pg_proc_row_by_oid, bootstrap_pg_proc_rows, bootstrap_pg_proc_rows_by_name,
-    bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
-    bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows, builtin_range_rows,
-    builtin_type_row_by_name, builtin_type_row_by_oid, builtin_type_rows,
+    PgDatabaseRow, PgDependRow, PgEnumRow, PgEventTriggerRow, PgForeignDataWrapperRow,
+    PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgProcRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRangeRow, PgRewriteRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTsConfigMapRow, PgTsConfigRow,
+    PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow, RECORD_TYPE_OID,
+    bootstrap_pg_aggregate_rows, bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows,
+    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_conversion_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_opfamily_rows, bootstrap_pg_proc_row_by_oid, bootstrap_pg_proc_rows,
+    bootstrap_pg_proc_rows_by_name, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
+    bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows,
+    builtin_range_rows, builtin_type_row_by_name, builtin_type_row_by_oid, builtin_type_rows,
     is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
     proc_oid_for_builtin_aggregate_function, proc_oid_for_builtin_hypothetical_aggregate_function,
     range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
@@ -74,7 +74,7 @@ use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
     build_pg_rules_rows, build_pg_stats_ext_exprs_rows, build_pg_stats_ext_rows,
-    build_pg_stats_rows, build_pg_user_mappings_rows, build_pg_views_rows,
+    build_pg_stats_rows, build_pg_tables_rows, build_pg_user_mappings_rows, build_pg_views_rows,
     current_pg_stat_progress_copy_rows,
 };
 use agg::*;
@@ -898,6 +898,22 @@ pub trait CatalogLookup {
         self.database_rows().into_iter().find(|row| row.oid == oid)
     }
 
+    fn event_trigger_rows(&self) -> Vec<PgEventTriggerRow> {
+        Vec::new()
+    }
+
+    fn event_trigger_row_by_oid(&self, oid: u32) -> Option<PgEventTriggerRow> {
+        self.event_trigger_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+    }
+
+    fn event_trigger_row_by_name(&self, name: &str) -> Option<PgEventTriggerRow> {
+        self.event_trigger_rows()
+            .into_iter()
+            .find(|row| row.evtname == name)
+    }
+
     fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
         bootstrap_pg_namespace_rows()
             .into_iter()
@@ -1416,6 +1432,10 @@ pub trait CatalogLookup {
     }
 
     fn user_mapping_rows(&self) -> Vec<PgUserMappingRow> {
+        Vec::new()
+    }
+
+    fn pg_tables_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
 
@@ -2266,6 +2286,15 @@ impl CatalogLookup for Catalog {
 
     fn user_mapping_rows(&self) -> Vec<PgUserMappingRow> {
         CatCache::from_catalog(self).user_mapping_rows()
+    }
+
+    fn pg_tables_rows(&self) -> Vec<Vec<Value>> {
+        let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
+        build_pg_tables_rows(
+            catcache.namespace_rows(),
+            catcache.authid_rows(),
+            catcache.class_rows(),
+        )
     }
 
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {

@@ -7,6 +7,7 @@ pub enum SyntheticSystemViewKind {
     PgType,
     PgConstraint,
     PgRange,
+    PgTables,
     PgViews,
     PgMatviews,
     PgIndexes,
@@ -113,6 +114,7 @@ pub fn synthetic_system_views() -> &'static [SyntheticSystemView] {
 }
 
 const PG_VIEW_ALIASES: &[&str] = &["pg_views", "pg_catalog.pg_views"];
+const PG_TABLES_ALIASES: &[&str] = &["pg_tables", "pg_catalog.pg_tables"];
 const PG_ENUM_ALIASES: &[&str] = &["pg_enum", "pg_catalog.pg_enum"];
 const PG_TYPE_ALIASES: &[&str] = &["pg_type", "pg_catalog.pg_type"];
 const PG_CONSTRAINT_ALIASES: &[&str] = &["pg_constraint", "pg_catalog.pg_constraint"];
@@ -273,6 +275,17 @@ const PG_VIEWS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("viewname"),
     SyntheticSystemViewColumn::text("viewowner"),
     SyntheticSystemViewColumn::text("definition"),
+];
+
+const PG_TABLES_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("schemaname"),
+    SyntheticSystemViewColumn::text("tablename"),
+    SyntheticSystemViewColumn::text("tableowner"),
+    SyntheticSystemViewColumn::text("tablespace"),
+    SyntheticSystemViewColumn::new("hasindexes", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("hasrules", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("hastriggers", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("rowsecurity", SqlType::new(SqlTypeKind::Bool)),
 ];
 
 const PG_MATVIEWS_COLUMNS: &[SyntheticSystemViewColumn] = &[
@@ -790,7 +803,7 @@ const INFORMATION_SCHEMA_FOREIGN_TABLE_OPTIONS_COLUMNS: &[SyntheticSystemViewCol
     SyntheticSystemViewColumn::text("option_value"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 40] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 41] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgEnum,
         canonical_name: "pg_catalog.pg_enum",
@@ -817,6 +830,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 40] = [
         canonical_name: "pg_catalog.pg_range",
         aliases: PG_RANGE_ALIASES,
         columns: PG_RANGE_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgTables,
+        canonical_name: "pg_catalog.pg_tables",
+        aliases: PG_TABLES_ALIASES,
+        columns: PG_TABLES_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

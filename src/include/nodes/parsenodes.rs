@@ -329,6 +329,7 @@ pub enum Statement {
     CreateAggregate(CreateAggregateStatement),
     CreateCast(CreateCastStatement),
     CreateTrigger(CreateTriggerStatement),
+    CreateEventTrigger(CreateEventTriggerStatement),
     CreateType(CreateTypeStatement),
     AlterType(AlterTypeStatement),
     AlterTypeOwner(AlterTypeOwnerStatement),
@@ -401,6 +402,7 @@ pub enum Statement {
     AlterTableSetSchema(AlterRelationSetSchemaStatement),
     AlterViewSetSchema(AlterRelationSetSchemaStatement),
     AlterMaterializedViewSetSchema(AlterRelationSetSchemaStatement),
+    AlterMaterializedViewSetAccessMethod(AlterMaterializedViewSetAccessMethodStatement),
     AlterViewOwner(AlterRelationOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterSchemaRename(AlterSchemaRenameStatement),
@@ -420,6 +422,8 @@ pub enum Statement {
     AlterTableAttachPartition(AlterTableAttachPartitionStatement),
     AlterTableDetachPartition(AlterTableDetachPartitionStatement),
     AlterTableTriggerState(AlterTableTriggerStateStatement),
+    AlterEventTrigger(AlterEventTriggerStatement),
+    AlterEventTriggerOwner(AlterEventTriggerOwnerStatement),
     AlterForeignTableOptions(AlterForeignTableOptionsStatement),
     AlterPublication(AlterPublicationStatement),
     AlterOperator(AlterOperatorStatement),
@@ -429,6 +433,7 @@ pub enum Statement {
     AlterLanguage(AlterLanguageStatement),
     DropLanguage(DropLanguageStatement),
     AlterTriggerRename(AlterTriggerRenameStatement),
+    AlterEventTriggerRename(AlterEventTriggerRenameStatement),
     CommentOnTable(CommentOnTableStatement),
     CommentOnColumn(CommentOnColumnStatement),
     CommentOnView(CommentOnViewStatement),
@@ -437,6 +442,7 @@ pub enum Statement {
     CommentOnConstraint(CommentOnConstraintStatement),
     CommentOnRule(CommentOnRuleStatement),
     CommentOnTrigger(CommentOnTriggerStatement),
+    CommentOnEventTrigger(CommentOnEventTriggerStatement),
     CommentOnDomain(CommentOnDomainStatement),
     CommentOnConversion(CommentOnConversionStatement),
     CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
@@ -470,6 +476,7 @@ pub enum Statement {
     DropAggregate(DropAggregateStatement),
     DropTable(DropTableStatement),
     DropTrigger(DropTriggerStatement),
+    DropEventTrigger(DropEventTriggerStatement),
     DropIndex(DropIndexStatement),
     ReindexIndex(ReindexIndexStatement),
     DropDomain(DropDomainStatement),
@@ -1044,6 +1051,21 @@ pub struct CreateTriggerStatement {
     pub function_schema_name: Option<String>,
     pub function_name: String,
     pub func_args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventTriggerWhenClause {
+    pub variable: String,
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateEventTriggerStatement {
+    pub trigger_name: String,
+    pub event_name: String,
+    pub when_clauses: Vec<EventTriggerWhenClause>,
+    pub function_schema_name: Option<String>,
+    pub function_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2306,6 +2328,12 @@ pub struct RefreshMaterializedViewStatement {
     pub skip_data: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterMaterializedViewSetAccessMethodStatement {
+    pub relation_name: String,
+    pub access_method: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleEvent {
     Insert,
@@ -2974,10 +3002,28 @@ pub struct AlterTableTriggerStateStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterEventTriggerStatement {
+    pub trigger_name: String,
+    pub mode: AlterTableTriggerMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterEventTriggerOwnerStatement {
+    pub trigger_name: String,
+    pub new_owner: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTriggerRenameStatement {
     pub trigger_name: String,
     pub schema_name: Option<String>,
     pub table_name: String,
+    pub new_trigger_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterEventTriggerRenameStatement {
+    pub trigger_name: String,
     pub new_trigger_name: String,
 }
 
@@ -3030,6 +3076,12 @@ pub struct CommentOnRuleStatement {
 pub struct CommentOnTriggerStatement {
     pub trigger_name: String,
     pub table_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnEventTriggerStatement {
+    pub trigger_name: String,
     pub comment: Option<String>,
 }
 
@@ -3649,6 +3701,13 @@ pub struct DropTriggerStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropEventTriggerStatement {
+    pub if_exists: bool,
+    pub trigger_name: String,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropIndexStatement {
     pub concurrently: bool,
     pub if_exists: bool,
@@ -4207,6 +4266,7 @@ pub enum SqlTypeKind {
     Shell,
     Void,
     Trigger,
+    EventTrigger,
     FdwHandler,
     Int2,
     Int2Vector,

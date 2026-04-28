@@ -6091,7 +6091,8 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::PgNodeTree
         | SqlTypeKind::Record
         | SqlTypeKind::Composite
-        | SqlTypeKind::Trigger => 32,
+        | SqlTypeKind::Trigger
+        | SqlTypeKind::EventTrigger => 32,
         SqlTypeKind::Enum => 4,
         SqlTypeKind::Range
         | SqlTypeKind::Int4Range

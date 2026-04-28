@@ -17,8 +17,8 @@ use crate::backend::statistics::{
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::TupleError;
 use crate::include::catalog::{
-    PG_DEPENDENCIES_TYPE_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID, TRIGGER_TYPE_OID,
-    builtin_type_rows, range_type_ref_for_sql_type,
+    EVENT_TRIGGER_TYPE_OID, PG_DEPENDENCIES_TYPE_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
+    TRIGGER_TYPE_OID, builtin_type_rows, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::InetValue;
 use crate::include::nodes::parsenodes::CopyFormat;
@@ -708,6 +708,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             }
             SqlTypeKind::AnyArray => unreachable!("anyarray is not a concrete SQL array type"),
             SqlTypeKind::Trigger => unreachable!("trigger arrays are unsupported"),
+            SqlTypeKind::EventTrigger => unreachable!("event_trigger arrays are unsupported"),
             SqlTypeKind::Record | SqlTypeKind::Composite => {
                 crate::include::catalog::RECORD_ARRAY_TYPE_OID as i32
             }
@@ -743,6 +744,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             -1,
         ),
         SqlTypeKind::Trigger => (TRIGGER_TYPE_OID as i32, -1, -1),
+        SqlTypeKind::EventTrigger => (EVENT_TRIGGER_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Internal => (crate::include::catalog::INTERNAL_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Shell => (col.sql_type.type_oid as i32, -1, -1),
         SqlTypeKind::Cstring => (crate::include::catalog::CSTRING_TYPE_OID as i32, -2, -1),

@@ -251,9 +251,14 @@ fn execute_statement_with_source(
             }))
         }
         Statement::CreateTrigger(_)
+        | Statement::CreateEventTrigger(_)
         | Statement::DropTrigger(_)
+        | Statement::DropEventTrigger(_)
         | Statement::AlterTableTriggerState(_)
-        | Statement::AlterTriggerRename(_) => {
+        | Statement::AlterTriggerRename(_)
+        | Statement::AlterEventTrigger(_)
+        | Statement::AlterEventTriggerOwner(_)
+        | Statement::AlterEventTriggerRename(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "TRIGGER handled by database/session layer",
                 actual: "TRIGGER".into(),
@@ -268,6 +273,7 @@ fn execute_statement_with_source(
         | Statement::AlterViewRenameColumn(_)
         | Statement::AlterViewSetSchema(_)
         | Statement::AlterMaterializedViewSetSchema(_)
+        | Statement::AlterMaterializedViewSetAccessMethod(_)
         | Statement::AlterIndexAlterColumnStatistics(_)
         | Statement::AlterIndexAlterColumnOptions(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -368,6 +374,12 @@ fn execute_statement_with_source(
             expected: "COMMENT ON TRIGGER handled by database/session layer",
             actual: "COMMENT ON TRIGGER".into(),
         })),
+        Statement::CommentOnEventTrigger(_) => Err(ExecError::Parse(
+            ParseError::UnexpectedToken {
+                expected: "COMMENT ON EVENT TRIGGER handled by database/session layer",
+                actual: "COMMENT ON EVENT TRIGGER".into(),
+            },
+        )),
         Statement::CommentOnDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON DOMAIN handled by database/session layer",
             actual: "COMMENT ON DOMAIN".into(),
@@ -731,6 +743,7 @@ pub fn execute_readonly_statement_with_config(
         | Statement::AlterViewRenameColumn(_)
         | Statement::AlterViewSetSchema(_)
         | Statement::AlterMaterializedViewSetSchema(_)
+        | Statement::AlterMaterializedViewSetAccessMethod(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableAddColumns(_)
         | Statement::AlterTableDropColumn(_)
@@ -796,6 +809,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::CommentOnTrigger(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "COMMENT ON TRIGGER".into(),
+        })),
+        Statement::CommentOnEventTrigger(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "COMMENT ON EVENT TRIGGER".into(),
         })),
         Statement::CommentOnDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
@@ -935,9 +952,17 @@ pub fn execute_readonly_statement_with_config(
             expected: "read-only statement",
             actual: "CREATE TRIGGER".into(),
         })),
+        Statement::CreateEventTrigger(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE EVENT TRIGGER".into(),
+        })),
         Statement::DropTrigger(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP TRIGGER".into(),
+        })),
+        Statement::DropEventTrigger(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP EVENT TRIGGER".into(),
         })),
         Statement::CreateTablespace(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

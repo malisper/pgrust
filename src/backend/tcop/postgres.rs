@@ -663,6 +663,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message == "wrong flag in flag array: \"\"" {
                 return None;
             }
+            if message.starts_with("filter value \"")
+                && message.ends_with("\" not recognized for filter variable \"tag\"")
+            {
+                return None;
+            }
             if is_text_search_template_parameter_error(sql, message) {
                 return None;
             }

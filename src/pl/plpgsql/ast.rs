@@ -124,11 +124,13 @@ pub enum Stmt {
         sqlstate: Option<String>,
         message: String,
         params: Vec<String>,
+        line: usize,
     },
     Assert {
         condition: String,
         message: Option<String>,
     },
+    Continue,
     Return {
         expr: Option<String>,
     },
@@ -147,6 +149,7 @@ pub enum Stmt {
         sql_expr: String,
         into_targets: Vec<AssignTarget>,
         using_exprs: Vec<String>,
+        line: usize,
     },
     GetDiagnostics {
         stacked: bool,

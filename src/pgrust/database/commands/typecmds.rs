@@ -840,6 +840,15 @@ impl Database {
                 });
             }
         }
+        if stmt.actions.iter().any(alter_composite_action_changes_type) {
+            reject_alter_composite_type_column_dependents(
+                &catalog,
+                type_row.oid,
+                type_relation.relation_oid,
+                &typed_table_oids,
+                &type_row.typname,
+            )?;
+        }
 
         let mut type_desc = type_relation.desc.clone();
         for action in &stmt.actions {
@@ -870,6 +879,26 @@ impl Database {
                 )?;
             }
             table_updates.push((relation, desc));
+        }
+
+        if stmt.actions.iter().any(alter_composite_action_changes_type) && !table_updates.is_empty()
+        {
+            let mut event_ctx = self.matview_executor_context(
+                client_id,
+                xid,
+                cid,
+                Arc::clone(&interrupts),
+                Some(crate::backend::executor::executor_catalog(catalog.clone())),
+                true,
+            )?;
+            for (relation, _) in &table_updates {
+                self.fire_table_rewrite_event_in_executor_context(
+                    &mut event_ctx,
+                    "ALTER TYPE",
+                    relation.relation_oid,
+                    4,
+                )?;
+            }
         }
 
         let ctx = CatalogWriteContext {
@@ -1291,6 +1320,81 @@ fn alter_composite_action_cascade(action: &AlterCompositeTypeAction) -> bool {
         | AlterCompositeTypeAction::DropAttribute { cascade, .. }
         | AlterCompositeTypeAction::AlterAttributeType { cascade, .. }
         | AlterCompositeTypeAction::RenameAttribute { cascade, .. } => *cascade,
+    }
+}
+
+fn alter_composite_action_changes_type(action: &AlterCompositeTypeAction) -> bool {
+    matches!(action, AlterCompositeTypeAction::AlterAttributeType { .. })
+}
+
+fn reject_alter_composite_type_column_dependents(
+    catalog: &dyn CatalogLookup,
+    type_oid: u32,
+    type_relation_oid: u32,
+    typed_table_oids: &[u32],
+    type_name: &str,
+) -> Result<(), ExecError> {
+    // :HACK: This is the dependency shape needed by the event_trigger
+    // regression. Long term, ALTER TYPE should consult pg_depend's typed
+    // relation/attribute dependencies instead of reconstructing them from
+    // relation descriptors.
+    let mut typed_table_oids = typed_table_oids.to_vec();
+    typed_table_oids.sort_unstable();
+    for class_row in catalog.class_rows().into_iter().filter(|row| {
+        row.oid != type_relation_oid
+            && !matches!(row.relkind, 'i' | 'I' | 'S' | 't')
+            && typed_table_oids.binary_search(&row.oid).is_err()
+    }) {
+        let Some(relation) = catalog.lookup_relation_by_oid(class_row.oid) else {
+            continue;
+        };
+        if relation.of_type_oid == type_oid {
+            continue;
+        }
+        for column in relation
+            .desc
+            .columns
+            .iter()
+            .filter(|column| !column.dropped)
+        {
+            if sql_type_references_composite_type(column.sql_type, type_oid) {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "cannot alter type \"{type_name}\" because column \"{}.{}\" uses it",
+                        relation_name_for_alter_type_dependency(
+                            catalog,
+                            &relation,
+                            &class_row.relname,
+                        ),
+                        column.name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "2BP01",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn relation_name_for_alter_type_dependency(
+    catalog: &dyn CatalogLookup,
+    relation: &crate::backend::parser::BoundRelation,
+    fallback: &str,
+) -> String {
+    let relname = catalog
+        .class_row_by_oid(relation.relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| fallback.to_string());
+    match catalog
+        .namespace_row_by_oid(relation.namespace_oid)
+        .map(|row| row.nspname)
+    {
+        Some(schema) if schema != "public" && schema != "pg_catalog" => {
+            format!("{schema}.{relname}")
+        }
+        _ => relname,
     }
 }
 

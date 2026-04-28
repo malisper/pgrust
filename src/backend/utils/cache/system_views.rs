@@ -640,6 +640,54 @@ pub fn build_pg_views_rows(
     rows.into_iter().map(|(_, _, row)| row).collect()
 }
 
+pub fn build_pg_tables_rows(
+    namespaces: Vec<PgNamespaceRow>,
+    authids: Vec<PgAuthIdRow>,
+    classes: Vec<PgClassRow>,
+) -> Vec<Vec<Value>> {
+    let namespace_names = namespaces
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<BTreeMap<_, _>>();
+    let role_names = authids
+        .into_iter()
+        .map(|row| (row.oid, row.rolname))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut rows = classes
+        .into_iter()
+        .filter(|class| matches!(class.relkind, 'r' | 'p'))
+        .map(|class| {
+            let schemaname = namespace_names
+                .get(&class.relnamespace)
+                .cloned()
+                .unwrap_or_else(|| "public".to_string());
+            (
+                schemaname.clone(),
+                class.relname.clone(),
+                vec![
+                    Value::Text(schemaname.into()),
+                    Value::Text(class.relname.clone().into()),
+                    Value::Text(
+                        role_names
+                            .get(&class.relowner)
+                            .cloned()
+                            .unwrap_or_else(|| "unknown".into())
+                            .into(),
+                    ),
+                    Value::Null,
+                    Value::Bool(class.relhasindex),
+                    Value::Bool(false),
+                    Value::Bool(class.relhastriggers),
+                    Value::Bool(class.relrowsecurity),
+                ],
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    rows.into_iter().map(|(_, _, row)| row).collect()
+}
+
 pub fn build_pg_matviews_rows(
     namespaces: Vec<PgNamespaceRow>,
     authids: Vec<PgAuthIdRow>,

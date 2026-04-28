@@ -7255,6 +7255,7 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::Cstring => "cstring",
         SqlTypeKind::Void => "void",
         SqlTypeKind::Trigger => "trigger",
+        SqlTypeKind::EventTrigger => "event_trigger",
         SqlTypeKind::FdwHandler => "fdw_handler",
         SqlTypeKind::Int2 => "smallint",
         SqlTypeKind::Int2Vector => "int2vector",

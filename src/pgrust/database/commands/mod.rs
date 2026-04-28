@@ -17,6 +17,7 @@ mod dependency_drop;
 mod domain;
 mod drop;
 mod drop_column;
+mod event_trigger;
 mod execute;
 mod foreign_data_wrapper;
 mod index;

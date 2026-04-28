@@ -78,6 +78,8 @@ const PG_REWRITE_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_REWRITE_REL_RULENAME_INDEX_KEYS: [i16; 2] = [3, 2];
 const PG_TRIGGER_RELID_NAME_INDEX_KEYS: [i16; 2] = [2, 4];
 const PG_TRIGGER_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_EVENT_TRIGGER_EVTNAME_INDEX_KEYS: [i16; 1] = [2];
+const PG_EVENT_TRIGGER_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_PUBLICATION_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_PUBLICATION_PUBNAME_INDEX_KEYS: [i16; 1] = [2];
 const PG_PUBLICATION_REL_OID_INDEX_KEYS: [i16; 1] = [1];
@@ -184,7 +186,7 @@ const OID_INT2_BOOL_OPCLASS_3: [u32; 3] = [
     BOOL_BTREE_OPCLASS_OID,
 ];
 
-pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 95] = [
+pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 97] = [
     CatalogIndexDescriptor {
         relation_oid: 2684,
         relation_name: "pg_namespace_nspname_index",
@@ -711,6 +713,22 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 95] = [
         heap_kind: BootstrapCatalogKind::PgTrigger,
         unique: true,
         key_attnums: &PG_TRIGGER_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3467,
+        relation_name: "pg_event_trigger_evtname_index",
+        heap_kind: BootstrapCatalogKind::PgEventTrigger,
+        unique: true,
+        key_attnums: &PG_EVENT_TRIGGER_EVTNAME_INDEX_KEYS,
+        opclass_oids: &NAME_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3468,
+        relation_name: "pg_event_trigger_oid_index",
+        heap_kind: BootstrapCatalogKind::PgEventTrigger,
+        unique: true,
+        key_attnums: &PG_EVENT_TRIGGER_OID_INDEX_KEYS,
         opclass_oids: &OID_OPCLASS_1,
     },
     CatalogIndexDescriptor {

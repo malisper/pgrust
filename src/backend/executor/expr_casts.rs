@@ -4430,7 +4430,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Err(unsupported_record_input()),
             SqlType {
-                kind: SqlTypeKind::Trigger,
+                kind: SqlTypeKind::Trigger | SqlTypeKind::EventTrigger,
                 ..
             } => Err(unsupported_trigger_input()),
             SqlType {
@@ -4582,7 +4582,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Err(unsupported_record_input()),
             SqlType {
-                kind: SqlTypeKind::Trigger,
+                kind: SqlTypeKind::Trigger | SqlTypeKind::EventTrigger,
                 ..
             } => Err(unsupported_trigger_input()),
             SqlType {
@@ -4710,7 +4710,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Err(unsupported_record_input()),
             SqlType {
-                kind: SqlTypeKind::Trigger,
+                kind: SqlTypeKind::Trigger | SqlTypeKind::EventTrigger,
                 ..
             } => Err(unsupported_trigger_input()),
             SqlType {
@@ -5404,7 +5404,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Err(unsupported_record_input()),
             SqlType {
-                kind: SqlTypeKind::Trigger,
+                kind: SqlTypeKind::Trigger | SqlTypeKind::EventTrigger,
                 ..
             } => Err(unsupported_trigger_input()),
             SqlType {
@@ -5557,7 +5557,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Err(unsupported_record_input()),
             SqlType {
-                kind: SqlTypeKind::Trigger,
+                kind: SqlTypeKind::Trigger | SqlTypeKind::EventTrigger,
                 ..
             } => Err(unsupported_trigger_input()),
             SqlType {
@@ -5900,7 +5900,7 @@ pub(crate) fn cast_text_value_with_config(
             left: Value::Text(CompactString::new(text)),
             right: Value::Null,
         }),
-        SqlTypeKind::Trigger => Err(unsupported_trigger_input()),
+        SqlTypeKind::Trigger | SqlTypeKind::EventTrigger => Err(unsupported_trigger_input()),
         SqlTypeKind::Internal => Err(ExecError::TypeMismatch {
             op: "::internal",
             left: Value::Text(CompactString::new(text)),
@@ -6077,7 +6077,7 @@ pub(super) fn cast_numeric_value(
             left: Value::Numeric(value.clone()),
             right: Value::Null,
         }),
-        SqlTypeKind::Trigger => Err(unsupported_trigger_input()),
+        SqlTypeKind::Trigger | SqlTypeKind::EventTrigger => Err(unsupported_trigger_input()),
         SqlTypeKind::Internal => Err(ExecError::TypeMismatch {
             op: "::internal",
             left: Value::Numeric(value),

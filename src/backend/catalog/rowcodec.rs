@@ -11,13 +11,13 @@ use crate::include::catalog::{
     BootstrapCatalogKind, PG_STATISTIC_RELATION_OID, PG_STATISTIC_ROWTYPE_OID, PgAggregateRow,
     PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
     PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow,
-    PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow,
-    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
-    PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
-    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow,
-    PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow,
-    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow,
-    bootstrap_composite_type_rows, builtin_type_rows, pg_type_desc,
+    PgDependRow, PgDescriptionRow, PgEventTriggerRow, PgForeignDataWrapperRow, PgForeignServerRow,
+    PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
+    PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    PgUserMappingRow, bootstrap_composite_type_rows, builtin_type_rows, pg_type_desc,
 };
 use crate::include::nodes::datetime::TimestampTzADT;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, RecordValue, Value};
@@ -235,6 +235,12 @@ pub(crate) fn catalog_row_values_for_kind(
             .iter()
             .cloned()
             .map(pg_trigger_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgEventTrigger => rows
+            .event_triggers
+            .iter()
+            .cloned()
+            .map(pg_event_trigger_row_values)
             .collect(),
         BootstrapCatalogKind::PgPolicy => rows
             .policies
@@ -511,6 +517,20 @@ pub(crate) fn pg_trigger_row_from_values(values: Vec<Value>) -> Result<PgTrigger
         tgqual: nullable_text(&values[16])?,
         tgoldtable: nullable_text(&values[17])?,
         tgnewtable: nullable_text(&values[18])?,
+    })
+}
+
+pub(crate) fn pg_event_trigger_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgEventTriggerRow, CatalogError> {
+    Ok(PgEventTriggerRow {
+        oid: expect_oid(&values[0])?,
+        evtname: expect_text(&values[1])?,
+        evtevent: expect_text(&values[2])?,
+        evtowner: expect_oid(&values[3])?,
+        evtfoid: expect_oid(&values[4])?,
+        evtenabled: expect_char(&values[5], "evtenabled")?,
+        evttags: nullable_text_array(&values[6])?,
     })
 }
 
@@ -2097,6 +2117,18 @@ fn pg_trigger_row_values(row: PgTriggerRow) -> Vec<Value> {
         nullable_text_value(row.tgqual),
         nullable_text_value(row.tgoldtable),
         nullable_text_value(row.tgnewtable),
+    ]
+}
+
+fn pg_event_trigger_row_values(row: PgEventTriggerRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.evtname.into()),
+        Value::Text(row.evtevent.into()),
+        Value::Int32(row.evtowner as i32),
+        Value::Int32(row.evtfoid as i32),
+        Value::InternalChar(row.evtenabled as u8),
+        nullable_array_value(row.evttags.map(text_array_value)),
     ]
 }
 

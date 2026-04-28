@@ -6,13 +6,89 @@ use crate::backend::parser::{BoundIndexRelation, BoundRelation};
 use crate::backend::rewrite::load_view_return_select;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::include::nodes::parsenodes::{
-    CreateTableAsQuery, DropMaterializedViewStatement, RefreshMaterializedViewStatement,
-    TableAsObjectType,
+    AlterMaterializedViewSetAccessMethodStatement, CreateTableAsQuery,
+    DropMaterializedViewStatement, RefreshMaterializedViewStatement, TableAsObjectType,
 };
 use crate::include::nodes::primnodes::QueryColumn;
 use std::collections::{HashMap, HashSet};
 
 impl Database {
+    pub(crate) fn execute_alter_materialized_view_set_access_method_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterMaterializedViewSetAccessMethodStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self
+            .execute_alter_materialized_view_set_access_method_stmt_in_transaction_with_search_path(
+                client_id,
+                alter_stmt,
+                xid,
+                0,
+                configured_search_path,
+                &mut catalog_effects,
+            );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_alter_materialized_view_set_access_method_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterMaterializedViewSetAccessMethodStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        _catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = match catalog.lookup_any_relation(&alter_stmt.relation_name) {
+            Some(relation) if relation.relkind == 'm' => relation,
+            Some(_) => {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: alter_stmt.relation_name.clone(),
+                    expected: "materialized view",
+                }));
+            }
+            None => {
+                return Err(ExecError::Parse(ParseError::UnknownTable(
+                    alter_stmt.relation_name.clone(),
+                )));
+            }
+        };
+        ensure_relation_owner(self, client_id, &relation, &alter_stmt.relation_name)?;
+        lock_tables_interruptible(
+            &self.table_locks,
+            client_id,
+            &[relation.rel],
+            TableLockMode::AccessExclusive,
+            interrupts.as_ref(),
+        )?;
+        let mut ctx = self.matview_executor_context(
+            client_id,
+            xid,
+            cid,
+            Arc::clone(&interrupts),
+            Some(crate::backend::executor::executor_catalog(catalog.clone())),
+            true,
+        )?;
+        let result = self
+            .fire_table_rewrite_event_in_executor_context(
+                &mut ctx,
+                "ALTER MATERIALIZED VIEW",
+                relation.relation_oid,
+                8,
+            )
+            .map(|_| StatementResult::AffectedRows(0));
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
     pub(crate) fn execute_create_materialized_view_stmt_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
@@ -422,7 +498,7 @@ impl Database {
         result
     }
 
-    fn matview_executor_context(
+    pub(crate) fn matview_executor_context(
         &self,
         client_id: ClientId,
         xid: TransactionId,

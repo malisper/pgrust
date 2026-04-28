@@ -1563,6 +1563,7 @@ pub(crate) fn format_sql_type_name(sql_type: SqlType) -> String {
         SqlTypeKind::Internal => "internal",
         SqlTypeKind::Cstring => "cstring",
         SqlTypeKind::Trigger => "trigger",
+        SqlTypeKind::EventTrigger => "event_trigger",
         SqlTypeKind::Void => "void",
         SqlTypeKind::FdwHandler => "fdw_handler",
         SqlTypeKind::Int2 => "smallint",
@@ -1705,6 +1706,23 @@ pub(super) fn automatic_alter_type_cast_allowed(
         return true;
     }
     if from.kind == to.kind && from.is_array == to.is_array {
+        return true;
+    }
+    if !from.is_array
+        && !to.is_array
+        && matches!(from.kind, SqlTypeKind::Float4 | SqlTypeKind::Float8)
+        && matches!(to.kind, SqlTypeKind::Numeric)
+    {
+        return true;
+    }
+    if !from.is_array
+        && !to.is_array
+        && matches!(
+            (from.kind, to.kind),
+            (SqlTypeKind::Timestamp, SqlTypeKind::TimestampTz)
+                | (SqlTypeKind::TimestampTz, SqlTypeKind::Timestamp)
+        )
+    {
         return true;
     }
     if is_text_like_type(from) && is_text_like_type(to) {
@@ -2258,6 +2276,7 @@ pub(super) fn validate_alter_table_alter_column_type(
     new_column.attrdef_oid = current_column.attrdef_oid;
     new_column.default_expr = current_column.default_expr.clone();
     new_column.default_sequence_oid = current_column.default_sequence_oid;
+    new_column.identity = current_column.identity;
     new_column.fdw_options = current_column.fdw_options.clone();
     new_column.generated = current_column.generated;
     new_column.missing_default_value = if current_column.default_sequence_oid.is_some() {

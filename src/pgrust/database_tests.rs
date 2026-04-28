@@ -27909,7 +27909,6 @@ fn foreign_keys_block_parent_ddl_and_allow_child_drop() {
         "drop table parents",
         "truncate parents",
         "alter table parents drop column id",
-        "alter table children drop column parent_id",
         "alter table parents drop constraint parents_pkey",
     ] {
         match db.execute(1, sql) {
@@ -27932,6 +27931,28 @@ fn foreign_keys_block_parent_ddl_and_allow_child_drop() {
     db.execute(1, "alter table children alter column parent_id type int8")
         .unwrap();
 
+    db.execute(
+        1,
+        "create table child_column_drop (
+            id int4 primary key,
+            parent_id int8 constraint child_column_drop_fk references parents
+        )",
+    )
+    .unwrap();
+    clear_backend_notices();
+    db.execute(1, "alter table child_column_drop drop column parent_id")
+        .unwrap();
+    assert_eq!(take_backend_notices().len(), 0);
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint where conname = 'child_column_drop_fk'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    db.execute(1, "drop table child_column_drop").unwrap();
     db.execute(1, "drop table children").unwrap();
     db.execute(1, "drop table parents").unwrap();
 }
@@ -28042,26 +28063,15 @@ fn without_overlaps_remaining_drop_column_cascade_drops_dependent_foreign_key_co
     )
     .unwrap();
 
-    match db.execute(1, "alter table cascade_child drop column parent_id") {
-        Err(ExecError::DetailedError {
-            message,
-            detail: Some(detail),
-            ..
-        }) if message
-            == "cannot drop column parent_id of table cascade_child because other objects depend on it"
-            && detail.contains("constraint cascade_child_fk on table cascade_child") => {}
-        other => panic!("expected DROP COLUMN FK dependency blocker, got {other:?}"),
-    }
-
     clear_backend_notices();
-    db.execute(1, "alter table cascade_child drop column parent_id cascade")
+    db.execute(1, "alter table cascade_child drop column parent_id")
         .unwrap();
     assert_eq!(
         take_backend_notices()
             .into_iter()
             .map(|notice| notice.message)
             .collect::<Vec<_>>(),
-        vec!["drop cascades to constraint cascade_child_fk on table cascade_child"]
+        Vec::<String>::new()
     );
     assert_eq!(
         query_rows(
