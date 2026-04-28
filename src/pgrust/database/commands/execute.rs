@@ -980,13 +980,27 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableSet(ref alter_stmt) => {
+                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                if catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .is_some_and(|relation| relation.relkind == 'v')
+                {
+                    self.execute_alter_view_set_options_stmt_with_search_path(
+                        client_id,
+                        alter_stmt,
+                        configured_search_path,
+                    )
+                } else {
+                    Ok(StatementResult::AffectedRows(0))
+                }
+            }
             Statement::Show(_)
             | Statement::Set(_)
             | Statement::Reset(_)
             | Statement::Prepare(_)
             | Statement::Execute(_)
             | Statement::Deallocate(_)
-            | Statement::AlterTableSet(_)
             | Statement::AlterIndexSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CreateRole(ref create_stmt) => {
                 self.execute_create_role_stmt(client_id, create_stmt, None)

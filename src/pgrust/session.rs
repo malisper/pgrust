@@ -1386,10 +1386,35 @@ impl Session {
     }
 
     fn apply_alter_table_set(
-        &self,
+        &mut self,
         db: &Database,
         stmt: &crate::backend::parser::AlterTableSetStatement,
     ) -> Result<StatementResult, ExecError> {
+        let catalog = self.catalog_lookup(db);
+        if let Some(relation) = catalog.lookup_any_relation(&stmt.table_name)
+            && relation.relkind == 'v'
+        {
+            drop(catalog);
+            if let Some((xid, cid)) = self.catalog_txn_ctx() {
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                return db.execute_alter_view_set_options_stmt_in_transaction_with_search_path(
+                    self.client_id,
+                    stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                );
+            }
+            let search_path = self.configured_search_path();
+            return db.execute_alter_view_set_options_stmt_with_search_path(
+                self.client_id,
+                stmt,
+                search_path.as_deref(),
+            );
+        }
         for option in &stmt.options {
             if option.name.eq_ignore_ascii_case("toast_tuple_target") {
                 let target = option.value.parse::<usize>().map_err(|_| {
@@ -1398,7 +1423,6 @@ impl Session {
                         actual: option.value.clone(),
                     })
                 })?;
-                let catalog = self.catalog_lookup(db);
                 let relation = catalog
                     .lookup_any_relation(&stmt.table_name)
                     .ok_or_else(|| {

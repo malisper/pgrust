@@ -14412,6 +14412,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_view_set_schema_stmt => Ok(Statement::AlterViewSetSchema(
             build_alter_relation_set_schema(inner)?,
         )),
+        Rule::alter_view_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
         Rule::alter_materialized_view_set_schema_stmt => Ok(
             Statement::AlterMaterializedViewSetSchema(build_alter_relation_set_schema(inner)?),
         ),
@@ -19318,6 +19319,11 @@ fn build_alter_table_set(pair: Pair<'_, Rule>) -> Result<AlterTableSetStatement,
                     build_alter_table_target(part)?;
                 if_exists = parsed_if_exists;
                 only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::alter_view_target => {
+                let (parsed_if_exists, parsed_table_name) = build_alter_view_target(part)?;
+                if_exists = parsed_if_exists;
                 table_name = Some(parsed_table_name);
             }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),

@@ -2,8 +2,8 @@ use crate::include::catalog::PolicyCommand;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, JoinType, QueryColumn, RelationDesc, SetReturningCall, SortGroupClause,
-    TargetEntry, ToastRelationRef, WindowClause,
+    AggAccum, Expr, JoinType, QueryColumn, RelationDesc, RelationPrivilegeRequirement,
+    SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, WindowClause,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -606,6 +606,7 @@ pub struct RangeTblEntry {
     pub desc: RelationDesc,
     pub inh: bool,
     pub security_quals: Vec<Expr>,
+    pub permission: Option<RelationPrivilegeRequirement>,
     pub kind: RangeTblEntryKind,
 }
 

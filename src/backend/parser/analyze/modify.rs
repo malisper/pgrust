@@ -3,16 +3,18 @@ use super::query::rewrite_local_vars_for_output_exprs;
 use super::*;
 use crate::backend::rewrite::{
     RlsWriteCheck, ViewDmlEvent, ViewDmlRewriteError, build_target_relation_row_security,
-    relation_has_row_security, resolve_auto_updatable_view_target,
+    relation_has_row_security, relation_has_security_invoker, resolve_auto_updatable_view_target,
 };
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::PolicyCommand;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::plannodes::PlannedStmt;
-use crate::include::nodes::primnodes::JoinType;
 use crate::include::nodes::primnodes::{
     INNER_VAR, OUTER_VAR, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, TargetEntry, Var,
     expr_contains_set_returning,
+};
+use crate::include::nodes::primnodes::{
+    JoinType, RelationPrivilegeMask, RelationPrivilegeRequirement,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +37,7 @@ pub struct BoundInsertStatement {
     pub raw_on_conflict: Option<crate::include::nodes::parsenodes::OnConflictClause>,
     pub returning: Vec<TargetEntry>,
     pub(crate) rls_write_checks: Vec<RlsWriteCheck>,
+    pub required_privileges: Vec<RelationPrivilegeRequirement>,
     pub subplans: Vec<Plan>,
 }
 
@@ -94,6 +97,7 @@ pub struct BoundUpdateStatement {
     pub visible_column_count: usize,
     pub target_ctid_index: usize,
     pub target_tableoid_index: usize,
+    pub required_privileges: Vec<RelationPrivilegeRequirement>,
     pub subplans: Vec<Plan>,
 }
 
@@ -114,6 +118,7 @@ pub struct BoundDeleteTarget {
 pub struct BoundDeleteStatement {
     pub targets: Vec<BoundDeleteTarget>,
     pub returning: Vec<TargetEntry>,
+    pub required_privileges: Vec<RelationPrivilegeRequirement>,
     pub subplans: Vec<Plan>,
 }
 
@@ -136,6 +141,7 @@ pub struct BoundMergeStatement {
     pub source_present_index: usize,
     pub when_clauses: Vec<BoundMergeWhenClause>,
     pub returning: Vec<TargetEntry>,
+    pub required_privileges: Vec<RelationPrivilegeRequirement>,
     pub input_plan: crate::include::nodes::plannodes::PlannedStmt,
 }
 
@@ -157,6 +163,220 @@ pub enum BoundMergeAction {
         target_columns: Vec<BoundAssignmentTarget>,
         values: Option<Vec<Expr>>,
     },
+}
+
+fn relation_privilege_requirement(
+    relation: &BoundRelation,
+    relation_name: impl Into<String>,
+    required: RelationPrivilegeMask,
+) -> RelationPrivilegeRequirement {
+    RelationPrivilegeRequirement::new(
+        relation.relation_oid,
+        relation_name,
+        relation.relkind,
+        required,
+    )
+}
+
+fn view_base_privilege_requirement(
+    view_oid: u32,
+    relation_name: impl Into<String>,
+    base_relation: &BoundRelation,
+    required: RelationPrivilegeMask,
+    catalog: &dyn CatalogLookup,
+) -> RelationPrivilegeRequirement {
+    let check_as_user_oid = view_check_as_user_oid(view_oid, catalog);
+    let mut requirement = relation_privilege_requirement(base_relation, relation_name, required)
+        .checked_as(check_as_user_oid);
+    requirement.selected_columns = base_relation.desc.visible_column_indexes();
+    requirement
+}
+
+fn view_check_as_user_oid(view_oid: u32, catalog: &dyn CatalogLookup) -> Option<u32> {
+    if relation_has_security_invoker(catalog, view_oid) {
+        None
+    } else {
+        catalog.class_row_by_oid(view_oid).map(|row| row.relowner)
+    }
+}
+
+fn map_view_privilege_columns(
+    columns: &[usize],
+    updatable_column_map: &[Option<usize>],
+) -> Vec<usize> {
+    let mut mapped = columns
+        .iter()
+        .filter_map(|column| updatable_column_map.get(*column).copied().flatten())
+        .collect::<Vec<_>>();
+    mapped.sort_unstable();
+    mapped.dedup();
+    mapped
+}
+
+fn view_context_privilege_requirement(
+    context: &crate::backend::rewrite::ViewPrivilegeContext,
+    relation_name: impl Into<String>,
+    required: RelationPrivilegeMask,
+) -> RelationPrivilegeRequirement {
+    let mut requirement =
+        relation_privilege_requirement(&context.relation, relation_name, required)
+            .checked_as(context.check_as_user_oid);
+    requirement.selected_columns = context.relation.desc.visible_column_indexes();
+    requirement
+}
+
+fn view_context_insert_privilege_requirement(
+    context: &crate::backend::rewrite::ViewPrivilegeContext,
+    relation_name: impl Into<String>,
+    target_columns: &[BoundAssignmentTarget],
+) -> RelationPrivilegeRequirement {
+    let mut requirement = view_context_privilege_requirement(
+        context,
+        relation_name,
+        RelationPrivilegeMask {
+            select: true,
+            insert: true,
+            ..RelationPrivilegeMask::default()
+        },
+    );
+    requirement.inserted_columns = map_view_privilege_columns(
+        &target_columns
+            .iter()
+            .map(|target| target.column_index)
+            .collect::<Vec<_>>(),
+        &context.column_map,
+    );
+    requirement
+}
+
+fn view_context_update_privilege_requirement(
+    context: &crate::backend::rewrite::ViewPrivilegeContext,
+    relation_name: impl Into<String>,
+    assignments: &[BoundAssignment],
+) -> RelationPrivilegeRequirement {
+    let mut requirement = view_context_privilege_requirement(
+        context,
+        relation_name,
+        RelationPrivilegeMask {
+            select: true,
+            update: true,
+            ..RelationPrivilegeMask::default()
+        },
+    );
+    requirement.updated_columns = map_view_privilege_columns(
+        &assignments
+            .iter()
+            .map(|assignment| assignment.column_index)
+            .collect::<Vec<_>>(),
+        &context.column_map,
+    );
+    requirement
+}
+
+fn view_context_delete_privilege_requirement(
+    context: &crate::backend::rewrite::ViewPrivilegeContext,
+    relation_name: impl Into<String>,
+) -> RelationPrivilegeRequirement {
+    view_context_privilege_requirement(
+        context,
+        relation_name,
+        RelationPrivilegeMask {
+            select: true,
+            delete: true,
+            ..RelationPrivilegeMask::default()
+        },
+    )
+}
+
+fn view_context_merge_privilege_requirement(
+    context: &crate::backend::rewrite::ViewPrivilegeContext,
+    relation_name: impl Into<String>,
+    clauses: &[BoundMergeWhenClause],
+) -> RelationPrivilegeRequirement {
+    let mut requirement = merge_privilege_requirement(&context.relation, relation_name, clauses)
+        .checked_as(context.check_as_user_oid);
+    let inserted_columns = requirement.inserted_columns.clone();
+    let updated_columns = requirement.updated_columns.clone();
+    requirement.inserted_columns =
+        map_view_privilege_columns(&inserted_columns, &context.column_map);
+    requirement.updated_columns = map_view_privilege_columns(&updated_columns, &context.column_map);
+    requirement
+}
+
+fn insert_privilege_requirement(
+    relation: &BoundRelation,
+    relation_name: impl Into<String>,
+    target_columns: &[BoundAssignmentTarget],
+) -> RelationPrivilegeRequirement {
+    let mut requirement =
+        relation_privilege_requirement(relation, relation_name, RelationPrivilegeMask::insert());
+    requirement.inserted_columns = target_columns
+        .iter()
+        .map(|target| target.column_index)
+        .collect();
+    requirement
+}
+
+fn update_privilege_requirement(
+    relation: &BoundRelation,
+    relation_name: impl Into<String>,
+    assignments: &[BoundAssignment],
+) -> RelationPrivilegeRequirement {
+    let mut requirement =
+        relation_privilege_requirement(relation, relation_name, RelationPrivilegeMask::update());
+    requirement.updated_columns = assignments
+        .iter()
+        .map(|assignment| assignment.column_index)
+        .collect();
+    requirement
+}
+
+fn delete_privilege_requirement(
+    relation: &BoundRelation,
+    relation_name: impl Into<String>,
+) -> RelationPrivilegeRequirement {
+    relation_privilege_requirement(relation, relation_name, RelationPrivilegeMask::delete())
+}
+
+fn merge_privilege_requirement(
+    relation: &BoundRelation,
+    relation_name: impl Into<String>,
+    clauses: &[BoundMergeWhenClause],
+) -> RelationPrivilegeRequirement {
+    let mut needs_insert = false;
+    let mut needs_update = false;
+    let mut needs_delete = false;
+    let mut inserted_columns = Vec::new();
+    let mut updated_columns = Vec::new();
+    for clause in clauses {
+        match &clause.action {
+            BoundMergeAction::DoNothing => {}
+            BoundMergeAction::Delete => needs_delete = true,
+            BoundMergeAction::Update { assignments } => {
+                needs_update = true;
+                updated_columns
+                    .extend(assignments.iter().map(|assignment| assignment.column_index));
+            }
+            BoundMergeAction::Insert { target_columns, .. } => {
+                needs_insert = true;
+                inserted_columns.extend(target_columns.iter().map(|target| target.column_index));
+            }
+        }
+    }
+    inserted_columns.sort_unstable();
+    inserted_columns.dedup();
+    updated_columns.sort_unstable();
+    updated_columns.dedup();
+
+    let mut requirement = relation_privilege_requirement(
+        relation,
+        relation_name,
+        RelationPrivilegeMask::merge_actions(needs_insert, needs_update, needs_delete),
+    );
+    requirement.selected_columns = relation.desc.visible_column_indexes();
+    requirement.inserted_columns = inserted_columns;
+    requirement.updated_columns = updated_columns;
+    requirement
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1204,6 +1424,14 @@ pub fn plan_merge(
         !stmt.target_only && execution_relation.relkind == 'r',
         execution_relation.desc.clone(),
     );
+    if auto_view_target.is_some()
+        && let Some(permission) = target_base
+            .rtable
+            .get_mut(0)
+            .and_then(|rte| rte.permission.as_mut())
+    {
+        permission.check_as_user_oid = view_check_as_user_oid(entry.relation_oid, catalog);
+    }
     target_base.output_exprs = generated_relation_output_exprs(&execution_relation.desc, catalog)?;
     let (target_from, target_visible_count) =
         with_merge_target_ctid(target_base, &execution_relation.desc);
@@ -1315,7 +1543,21 @@ pub fn plan_merge(
             )
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
+    let mut required_privileges = vec![merge_privilege_requirement(
+        &entry,
+        &stmt.target_table,
+        &when_clauses,
+    )];
     if let Some(resolved) = auto_view_target.as_ref() {
+        for context in &resolved.privilege_contexts {
+            let context_name =
+                relation_display_name(catalog, context.relation.relation_oid, &stmt.target_table);
+            required_privileges.push(view_context_merge_privilege_requirement(
+                context,
+                context_name,
+                &when_clauses,
+            ));
+        }
         when_clauses = when_clauses
             .into_iter()
             .map(|clause| rewrite_merge_when_clause_auto_view(clause, &entry.desc, resolved))
@@ -1408,6 +1650,7 @@ pub fn plan_merge(
         source_present_index,
         when_clauses,
         returning,
+        required_privileges,
         input_plan: crate::backend::optimizer::fold_query_constants(query)
             .map(|query| crate::backend::optimizer::planner(query, catalog))??,
     })
@@ -2057,6 +2300,16 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         &resolved.base_relation.desc,
         target_columns.iter().map(|target| target.column_index),
     )?;
+    let mut required_privileges = stmt.required_privileges.clone();
+    for context in &resolved.privilege_contexts {
+        let context_name =
+            relation_display_name(catalog, context.relation.relation_oid, &stmt.relation_name);
+        required_privileges.push(view_context_insert_privilege_requirement(
+            context,
+            context_name,
+            &stmt.target_columns,
+        ));
+    }
     let on_conflict = match stmt.raw_on_conflict.as_ref() {
         Some(clause) => Some(bind_auto_view_on_conflict_clause(
             clause,
@@ -2120,6 +2373,7 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
                     }),
             )
             .collect(),
+        required_privileges,
         subplans: stmt.subplans,
     })
 }
@@ -2186,6 +2440,19 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         &resolved.base_relation.desc,
         assignments.iter().map(|assignment| assignment.column_index),
     )?;
+    let mut required_privileges = stmt.required_privileges.clone();
+    for context in &resolved.privilege_contexts {
+        let context_name = relation_display_name(
+            catalog,
+            context.relation.relation_oid,
+            &target.relation_name,
+        );
+        required_privileges.push(view_context_update_privilege_requirement(
+            context,
+            context_name,
+            &target.assignments,
+        ));
+    }
     let predicate = and_predicates(
         target.predicate.as_ref().map(|expr| {
             rewrite_local_vars_for_output_exprs(expr.clone(), 1, &resolved.visible_output_exprs)
@@ -2235,6 +2502,7 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
             &resolved.visible_output_exprs,
             &resolved.base_relation.desc,
         ),
+        required_privileges,
         ..stmt
     })
 }
@@ -2268,6 +2536,18 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
         resolved.base_relation.relation_oid,
         &target.relation_name,
     );
+    let mut required_privileges = stmt.required_privileges.clone();
+    for context in &resolved.privilege_contexts {
+        let context_name = relation_display_name(
+            catalog,
+            context.relation.relation_oid,
+            &target.relation_name,
+        );
+        required_privileges.push(view_context_delete_privilege_requirement(
+            context,
+            context_name,
+        ));
+    }
     let predicate = and_predicates(
         target.predicate.as_ref().map(|expr| {
             rewrite_local_vars_for_output_exprs(expr.clone(), 1, &resolved.visible_output_exprs)
@@ -2296,6 +2576,7 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
             &resolved.visible_output_exprs,
             &resolved.base_relation.desc,
         ),
+        required_privileges,
         subplans: stmt.subplans,
     })
 }
@@ -2910,6 +3191,11 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         }
     };
     let (target_columns, source) = source;
+    let required_privileges = vec![insert_privilege_requirement(
+        &entry,
+        &stmt.table_name,
+        &target_columns,
+    )];
 
     Ok(BoundInsertStatement {
         relation_name: stmt.table_name.clone(),
@@ -2955,6 +3241,7 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
             .flatten(),
         returning,
         rls_write_checks: target_rls.write_checks,
+        required_privileges,
         subplans: Vec::new(),
     })
 }
@@ -3120,6 +3407,11 @@ fn bind_simple_update(
             )
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
+    let required_privileges = vec![update_privilege_requirement(
+        &entry,
+        &stmt.table_name,
+        &assignments,
+    )];
 
     Ok(BoundUpdateStatement {
         target_relation_name,
@@ -3131,6 +3423,7 @@ fn bind_simple_update(
         visible_column_count: entry.desc.columns.len(),
         target_ctid_index: entry.desc.columns.len(),
         target_tableoid_index: entry.desc.columns.len() + 1,
+        required_privileges,
         subplans: Vec::new(),
     })
 }
@@ -3307,6 +3600,11 @@ fn bind_update_from(
         )
     })
     .collect::<Result<Vec<_>, ParseError>>()?;
+    let required_privileges = vec![update_privilege_requirement(
+        &entry,
+        &stmt.table_name,
+        &assignments,
+    )];
 
     Ok(BoundUpdateStatement {
         target_relation_name,
@@ -3318,6 +3616,7 @@ fn bind_update_from(
         visible_column_count,
         target_ctid_index: visible_column_count,
         target_tableoid_index: visible_column_count + 1,
+        required_privileges,
         subplans: Vec::new(),
     })
 }
@@ -3501,6 +3800,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
     Ok(BoundDeleteStatement {
         targets,
         returning,
+        required_privileges: vec![delete_privilege_requirement(&entry, &stmt.table_name)],
         subplans: Vec::new(),
     })
 }

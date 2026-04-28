@@ -466,6 +466,7 @@ fn make_pulled_up_join(
         desc: left_desc.clone(),
         inh: false,
         security_quals: Vec::new(),
+        permission: None,
         kind: RangeTblEntryKind::Join {
             jointype: kind,
             joinmergedcols: 0,

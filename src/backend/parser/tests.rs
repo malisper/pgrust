@@ -3910,6 +3910,20 @@ fn parse_alter_table_set_statement() {
         })
     );
 
+    let stmt = parse_statement("alter view rw_view1 set (security_invoker = true)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableSet(AlterTableSetStatement {
+            if_exists: false,
+            only: false,
+            table_name: "rw_view1".into(),
+            options: vec![RelOption {
+                name: "security_invoker".into(),
+                value: "true".into(),
+            }],
+        })
+    );
+
     let stmt = parse_statement("alter table vac_truncate_test reset (vacuum_truncate)").unwrap();
     assert_eq!(
         stmt,

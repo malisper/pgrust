@@ -4,8 +4,9 @@ use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RangeTblEref,
 };
 use crate::include::nodes::primnodes::{
-    Aggref, BoolExpr, FuncExpr, OpExpr, OrderByEntry, ScalarArrayOpExpr, SetReturningExpr, SubLink,
-    attrno_index, is_system_attr, user_attrno,
+    Aggref, BoolExpr, FuncExpr, OpExpr, OrderByEntry, RelationPrivilegeMask,
+    RelationPrivilegeRequirement, ScalarArrayOpExpr, SetReturningExpr, SubLink, attrno_index,
+    is_system_attr, user_attrno,
 };
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
 
@@ -100,6 +101,15 @@ impl AnalyzedFrom {
                 wire_type_oid: None,
             })
             .collect::<Vec<_>>();
+        let selected_columns = desc.visible_column_indexes();
+        let privilege_name = relation_name.clone();
+        let mut permission = RelationPrivilegeRequirement::new(
+            relation_oid,
+            privilege_name,
+            relkind,
+            RelationPrivilegeMask::select(),
+        );
+        permission.selected_columns = selected_columns;
         Self {
             rtable: vec![RangeTblEntry {
                 alias: Some(relation_name.clone()),
@@ -108,6 +118,7 @@ impl AnalyzedFrom {
                 desc,
                 inh,
                 security_quals: Vec::new(),
+                permission: Some(permission),
                 kind: RangeTblEntryKind::Relation {
                     rel,
                     relation_oid,
@@ -137,6 +148,7 @@ impl AnalyzedFrom {
                 desc,
                 inh: false,
                 security_quals: Vec::new(),
+                permission: None,
                 kind: RangeTblEntryKind::Values {
                     rows,
                     output_columns: output_columns.clone(),
@@ -169,6 +181,7 @@ impl AnalyzedFrom {
                 desc,
                 inh: false,
                 security_quals: Vec::new(),
+                permission: None,
                 kind: RangeTblEntryKind::Function { call },
             }],
             jointree: Some(JoinTreeNode::RangeTblRef(1)),
@@ -192,6 +205,7 @@ impl AnalyzedFrom {
                 desc,
                 inh: false,
                 security_quals: Vec::new(),
+                permission: None,
                 kind: RangeTblEntryKind::WorkTable { worktable_id },
             }],
             jointree: Some(JoinTreeNode::RangeTblRef(1)),
@@ -216,6 +230,7 @@ impl AnalyzedFrom {
                 desc,
                 inh: false,
                 security_quals: Vec::new(),
+                permission: None,
                 kind: RangeTblEntryKind::Cte {
                     cte_id,
                     query: Box::new(query),
@@ -243,6 +258,7 @@ impl AnalyzedFrom {
                 desc,
                 inh: false,
                 security_quals: Vec::new(),
+                permission: None,
                 kind: RangeTblEntryKind::Subquery {
                     query: Box::new(query),
                 },
@@ -310,6 +326,7 @@ impl AnalyzedFrom {
             desc,
             inh: false,
             security_quals: Vec::new(),
+            permission: None,
             kind: RangeTblEntryKind::Join {
                 jointype: kind,
                 joinmergedcols,
