@@ -556,7 +556,7 @@ fn simplify_exprs(exprs: Vec<Expr>) -> Result<Vec<Expr>, ParseError> {
 }
 
 fn simplify_func_expr(func: FuncExpr, case_test_value: Option<&Value>) -> Result<Expr, ParseError> {
-    if stats_import_builtin_preserves_arg_types(func.implementation) {
+    if builtin_preserves_arg_types_during_constfold(func.implementation) {
         return Ok(Expr::Func(Box::new(func)));
     }
     let args = func
@@ -573,7 +573,7 @@ fn simplify_func_expr(func: FuncExpr, case_test_value: Option<&Value>) -> Result
     Ok(Expr::Func(Box::new(FuncExpr { args, ..func })))
 }
 
-fn stats_import_builtin_preserves_arg_types(implementation: ScalarFunctionImpl) -> bool {
+fn builtin_preserves_arg_types_during_constfold(implementation: ScalarFunctionImpl) -> bool {
     matches!(
         implementation,
         ScalarFunctionImpl::Builtin(
@@ -581,6 +581,7 @@ fn stats_import_builtin_preserves_arg_types(implementation: ScalarFunctionImpl) 
                 | BuiltinScalarFunction::PgClearRelationStats
                 | BuiltinScalarFunction::PgRestoreAttributeStats
                 | BuiltinScalarFunction::PgClearAttributeStats
+                | BuiltinScalarFunction::SatisfiesHashPartition
         )
     )
 }

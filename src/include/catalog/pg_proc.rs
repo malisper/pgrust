@@ -1261,6 +1261,19 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             'v',
         ),
+        variadic_proc_row(
+            5028,
+            "satisfies_hash_partition",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID, INT4_TYPE_OID, INT4_TYPE_OID, ANYOID]),
+            ANYOID,
+            "satisfies_hash_partition",
+            4,
+            false,
+            false,
+            'f',
+            'i',
+        ),
         proc_row(
             2079,
             "pg_table_is_visible",
@@ -11075,6 +11088,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgEncodingToChar,
         ),
         ("pg_partition_root", BuiltinScalarFunction::PgPartitionRoot),
+        (
+            "satisfies_hash_partition",
+            BuiltinScalarFunction::SatisfiesHashPartition,
+        ),
         (
             "pg_relation_filenode",
             BuiltinScalarFunction::PgRelationFilenode,

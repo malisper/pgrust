@@ -374,15 +374,16 @@ pub(super) fn validate_check_rows(
     let rows =
         collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
     for (_, values) in rows {
+        let detail = format_failing_row_detail(&values, &ctx.datetime_config);
         let mut slot =
-            TupleSlot::virtual_row_with_metadata(values.clone(), None, Some(relation.relation_oid));
+            TupleSlot::virtual_row_with_metadata(values, None, Some(relation.relation_oid));
         match eval_expr(&check.expr, &mut slot, &mut ctx)? {
             Value::Null | Value::Bool(true) => {}
             Value::Bool(false) => {
                 return Err(ExecError::CheckViolation {
                     relation: relation_name.to_string(),
                     constraint: check.constraint_name.clone(),
-                    detail: Some(format_failing_row_detail(&values, &datetime_config)),
+                    detail: Some(detail),
                 });
             }
             _ => {

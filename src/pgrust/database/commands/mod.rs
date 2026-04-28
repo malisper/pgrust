@@ -32,6 +32,7 @@ mod partitioned_keys;
 mod policy;
 pub(crate) mod privilege;
 mod publication;
+mod reloptions;
 mod rename;
 mod role;
 mod routine;

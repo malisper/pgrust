@@ -8,6 +8,7 @@ use crate::backend::parser::{
     CreateTableLikeOption, RawTypeName, SequenceOptionsSpec, SerialKind, SqlExpr, SqlType,
     SqlTypeKind, TableConstraint,
 };
+use crate::backend::rewrite::render_relation_expr_sql;
 use crate::include::access::htup::{AttributeCompression, AttributeStorage};
 use crate::include::catalog::{CONSTRAINT_CHECK, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
 use crate::include::nodes::primnodes::expr_contains_set_returning;
@@ -16,7 +17,7 @@ use crate::pgrust::database::ddl::format_sql_type_name;
 use super::{
     CatalogLookup, CheckConstraintAction, CreateTableStatement, ForeignKeyConstraintAction,
     IndexBackedConstraintAction, LoweredPartitionSpec, NotNullConstraintAction, ParseError,
-    PartitionBoundSpec, normalize_create_table_constraints, raw_type_name_hint,
+    PartitionBoundSpec, bind_relation_expr, normalize_create_table_constraints, raw_type_name_hint,
     resolve_collation_oid, resolve_raw_type_name, validate_generated_columns,
 };
 
@@ -95,7 +96,7 @@ pub fn lower_create_table(
         .map(|constraint| (constraint.column.to_ascii_lowercase(), constraint))
         .collect::<std::collections::BTreeMap<_, _>>();
 
-    let relation_desc = RelationDesc {
+    let mut relation_desc = RelationDesc {
         columns: columns
             .iter()
             .enumerate()
@@ -279,6 +280,27 @@ pub fn lower_create_table(
             })
             .collect::<Result<Vec<_>, _>>()?,
     };
+    let relation_name = stmt
+        .table_name
+        .rsplit('.')
+        .next()
+        .unwrap_or(&stmt.table_name);
+    canonicalize_stored_sql_json_defaults(&mut relation_desc, relation_name, catalog);
+    let check_actions = normalized
+        .checks
+        .into_iter()
+        .map(|mut action| {
+            if let Some(canonical) = canonicalize_stored_sql_json_relation_expr(
+                &action.expr_sql,
+                relation_name,
+                &relation_desc,
+                catalog,
+            ) {
+                action.expr_sql = canonical;
+            }
+            action
+        })
+        .collect();
 
     validate_generated_columns(&relation_desc, catalog)?;
 
@@ -286,7 +308,7 @@ pub fn lower_create_table(
         of_type_oid,
         relation_desc,
         not_null_actions: normalized.not_nulls,
-        check_actions: normalized.checks,
+        check_actions,
         constraint_actions,
         foreign_key_actions: normalized.foreign_keys,
         owned_sequences,
@@ -296,6 +318,47 @@ pub fn lower_create_table(
         partition_parent_oid: None,
         partition_bound: None,
     })
+}
+
+fn canonicalize_stored_sql_json_defaults(
+    desc: &mut RelationDesc,
+    relation_name: &str,
+    catalog: &dyn CatalogLookup,
+) {
+    let snapshot = desc.clone();
+    for column in &mut desc.columns {
+        let Some(expr_sql) = column.default_expr.clone() else {
+            continue;
+        };
+        if let Some(canonical) =
+            canonicalize_stored_sql_json_relation_expr(&expr_sql, relation_name, &snapshot, catalog)
+        {
+            column.default_expr = Some(canonical);
+        }
+    }
+}
+
+fn canonicalize_stored_sql_json_relation_expr(
+    expr_sql: &str,
+    relation_name: &str,
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    if !contains_sql_json_query_function(expr_sql) {
+        return None;
+    }
+    let bound = bind_relation_expr(expr_sql, Some(relation_name), desc, catalog).ok()?;
+    Some(render_relation_expr_sql(
+        &bound,
+        Some(relation_name),
+        desc,
+        catalog,
+    ))
+}
+
+fn contains_sql_json_query_function(expr_sql: &str) -> bool {
+    let upper = expr_sql.to_ascii_uppercase();
+    upper.contains("JSON_QUERY(") || upper.contains("JSON_VALUE(") || upper.contains("JSON_EXISTS(")
 }
 
 fn expand_create_table_of_type(

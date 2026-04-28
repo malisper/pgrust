@@ -44,7 +44,7 @@ use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::access::nbtree::BtreeOptions;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
-    BootstrapCatalogKind, CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
+    BTREE_AM_OID, BootstrapCatalogKind, CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
     CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
     PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_AUTHID_RELATION_OID,
     PG_CAST_RELATION_OID, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
@@ -7391,10 +7391,16 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, _new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if !matches!(entry.relkind, 'r' | 'p' | 'm' | 'v') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'm' | 'v' | 'i' | 'I' | 't') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
-                entry.reloptions = reloptions;
+                entry.reloptions = reloptions.clone();
+                if entry.relkind == 'i'
+                    && entry.am_oid == BTREE_AM_OID
+                    && let Some(index_meta) = entry.index_meta.as_mut()
+                {
+                    index_meta.btree_options = btree_options_from_reloptions(reloptions.as_deref());
+                }
                 Ok(((), vec![BootstrapCatalogKind::PgClass]))
             })?;
 
@@ -8374,6 +8380,30 @@ fn btree_reloptions(options: Option<BtreeOptions>) -> Option<Vec<String>> {
             ),
         ]
     })
+}
+
+fn btree_options_from_reloptions(reloptions: Option<&[String]>) -> Option<BtreeOptions> {
+    let reloptions = reloptions?;
+    let mut options = BtreeOptions::default();
+    let mut found = false;
+    for option in reloptions {
+        let Some((name, value)) = option.split_once('=') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("fillfactor") {
+            if let Ok(fillfactor) = value.parse::<u16>() {
+                options.fillfactor = fillfactor;
+                found = true;
+            }
+        } else if name.eq_ignore_ascii_case("deduplicate_items") {
+            options.deduplicate_items = matches!(
+                value.to_ascii_lowercase().as_str(),
+                "on" | "true" | "yes" | "1"
+            );
+            found = true;
+        }
+    }
+    found.then_some(options)
 }
 
 fn explicit_btree_opclass_oid(opclass_name: &str, type_oid: u32) -> Option<u32> {

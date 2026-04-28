@@ -19856,7 +19856,7 @@ fn build_alter_table_reset(pair: Pair<'_, Rule>) -> Result<AlterTableResetStatem
                 table_name = Some(parsed_table_name);
             }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
-            Rule::ident_list => options = part.into_inner().map(build_identifier).collect(),
+            Rule::reset_reloption => options.push(build_reset_reloption_name(part)?),
             _ => {}
         }
     }
@@ -20112,8 +20112,29 @@ fn build_reloption(pair: Pair<'_, Rule>) -> Result<RelOption, ParseError> {
     }
     Ok(RelOption {
         name: name.ok_or(ParseError::UnexpectedEof)?,
-        value: value.ok_or(ParseError::UnexpectedEof)?,
+        value: value.unwrap_or_else(|| "true".into()),
     })
+}
+
+fn build_reset_reloption_name(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    let mut name = None;
+    let mut has_value = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::set_value_atom => has_value = true,
+            _ => {}
+        }
+    }
+    if has_value {
+        return Err(ParseError::DetailedError {
+            message: "RESET must not include values for parameters".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+    name.ok_or(ParseError::UnexpectedEof)
 }
 
 fn build_view_reloption(pair: Pair<'_, Rule>) -> Result<RelOption, ParseError> {
@@ -20158,27 +20179,19 @@ fn build_table_storage_options(pair: Pair<'_, Rule>) -> Result<Vec<RelOption>, P
             let mut options = Vec::new();
             for item in part
                 .into_inner()
-                .filter(|inner| inner.as_rule() == Rule::table_with_item)
+                .filter(|inner| inner.as_rule() == Rule::reloption)
             {
-                let mut item_parts = item.into_inner();
-                let name = build_identifier(item_parts.next().ok_or(ParseError::UnexpectedEof)?);
-                let value = item_parts
-                    .next()
-                    .map(|value| value.as_str().to_ascii_lowercase());
-                if name != name.to_ascii_lowercase() {
-                    return Err(ParseError::UnrecognizedParameter(name));
-                }
+                let option = build_reloption(item)?;
+                let name = option.name.clone();
                 if name.eq_ignore_ascii_case("oids")
-                    && value
-                        .as_deref()
-                        .map_or(true, |value| matches!(value, "true" | "on" | "1"))
+                    && matches!(
+                        option.value.to_ascii_lowercase().as_str(),
+                        "true" | "on" | "1"
+                    )
                 {
                     return Err(ParseError::TablesDeclaredWithOidsNotSupported);
                 }
-                options.push(RelOption {
-                    name,
-                    value: value.unwrap_or_else(|| "true".into()),
-                });
+                options.push(option);
             }
             Ok(options)
         }
@@ -22528,9 +22541,9 @@ fn build_alter_table_alter_column_options(
                         Rule::alter_table_reset_options_action => {
                             let options = inner
                                 .into_inner()
-                                .find(|item| item.as_rule() == Rule::ident_list)
-                                .map(|list| list.into_inner().map(build_identifier).collect())
-                                .ok_or(ParseError::UnexpectedEof)?;
+                                .filter(|item| item.as_rule() == Rule::reset_reloption)
+                                .map(build_reset_reloption_name)
+                                .collect::<Result<Vec<_>, _>>()?;
                             action = Some(AlterColumnOptionsAction::Reset(options));
                         }
                         _ => {}

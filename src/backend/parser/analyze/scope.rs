@@ -42,6 +42,11 @@ pub(crate) struct ScopeRelation {
     pub(crate) relation_oid: Option<u32>,
 }
 
+pub(super) struct ResolvedRelationRowExpr {
+    pub(super) fields: Vec<(String, Expr)>,
+    pub(super) relation_oid: Option<u32>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct GroupedOuterScope {
     pub(crate) scope: BoundScope,
@@ -557,15 +562,26 @@ pub(super) fn resolve_relation_row_expr_with_outer(
     outer_scopes: &[BoundScope],
     name: &str,
 ) -> Option<Vec<(String, Expr)>> {
+    resolve_relation_row_expr_ref_with_outer(scope, outer_scopes, name)
+        .map(|resolved| resolved.fields)
+}
+
+pub(super) fn resolve_relation_row_expr_ref_with_outer(
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+    name: &str,
+) -> Option<ResolvedRelationRowExpr> {
     resolve_relation_row_expr_in_scope(scope, name).or_else(|| {
         outer_scopes.iter().enumerate().find_map(|(depth, scope)| {
-            let exprs = resolve_relation_row_expr_in_scope(scope, name)?;
-            Some(
-                exprs
+            let resolved = resolve_relation_row_expr_in_scope(scope, name)?;
+            Some(ResolvedRelationRowExpr {
+                fields: resolved
+                    .fields
                     .into_iter()
                     .map(|(field, expr)| (field, raise_expr_varlevels(expr, depth + 1)))
                     .collect(),
-            )
+                relation_oid: resolved.relation_oid,
+            })
         })
     })
 }
@@ -587,13 +603,14 @@ pub(super) fn relation_row_reference_level(
 fn resolve_relation_row_expr_in_scope(
     scope: &BoundScope,
     name: &str,
-) -> Option<Vec<(String, Expr)>> {
-    let relation_exists = scope.relations.iter().any(|relation| {
+) -> Option<ResolvedRelationRowExpr> {
+    let matched_relation = scope.relations.iter().find(|relation| {
         relation
             .relation_names
             .iter()
             .any(|relation_name| relation_name.eq_ignore_ascii_case(name))
     });
+    let relation_exists = matched_relation.is_some();
     let mut matched = false;
     let fields = scope
         .columns
@@ -612,7 +629,10 @@ fn resolve_relation_row_expr_in_scope(
             Some((column.output_name.clone(), expr.clone()))
         })
         .collect::<Vec<_>>();
-    (matched || relation_exists).then_some(fields)
+    (matched || relation_exists).then_some(ResolvedRelationRowExpr {
+        fields,
+        relation_oid: matched_relation.and_then(|relation| relation.relation_oid),
+    })
 }
 
 fn from_item_is_lateral(item: &FromItem) -> bool {
@@ -2509,6 +2529,23 @@ fn bind_function_from_item_with_ctes(
                         actual: format!("{arg:?}"),
                     });
                 };
+                if args.len() == 1
+                    && let Some(columns) = unnest_composite_output_columns(element_type, catalog)?
+                {
+                    bound_args.push(bind_expr_with_outer_and_ctes(
+                        arg,
+                        &call_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?);
+                    for column in columns {
+                        desc_columns.push(column_desc(column.name.clone(), column.sql_type, true));
+                        output_columns.push(column);
+                    }
+                    continue;
+                }
                 let column_name = if idx == 0 {
                     "unnest".to_string()
                 } else {
@@ -3234,6 +3271,50 @@ fn unnest_element_type(arg_type: SqlType) -> Option<SqlType> {
         SqlTypeKind::OidVector => Some(SqlType::new(SqlTypeKind::Oid)),
         _ => None,
     }
+}
+
+fn unnest_composite_output_columns(
+    element_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Vec<QueryColumn>>, ParseError> {
+    let fields =
+        if matches!(element_type.kind, SqlTypeKind::Composite) && element_type.typrelid != 0 {
+            let relation = catalog
+                .lookup_relation_by_oid(element_type.typrelid)
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "named composite type",
+                    actual: format!("type relation {} not found", element_type.typrelid),
+                })?;
+            relation
+                .desc
+                .columns
+                .into_iter()
+                .filter(|column| !column.dropped)
+                .map(|column| (column.name, column.sql_type))
+                .collect::<Vec<_>>()
+        } else if matches!(element_type.kind, SqlTypeKind::Record)
+            && element_type.typmod > 0
+            && let Some(descriptor) = lookup_anonymous_record_descriptor(element_type.typmod)
+        {
+            descriptor
+                .fields
+                .into_iter()
+                .map(|field| (field.name, field.sql_type))
+                .collect::<Vec<_>>()
+        } else {
+            return Ok(None);
+        };
+
+    Ok(Some(
+        fields
+            .into_iter()
+            .map(|(name, sql_type)| QueryColumn {
+                name,
+                sql_type,
+                wire_type_oid: None,
+            })
+            .collect(),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]

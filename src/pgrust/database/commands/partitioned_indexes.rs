@@ -365,6 +365,26 @@ impl<'a> PartitionedIndexInstaller<'a> {
             .write()
             .create_relation_inheritance_mvcc(child_index_oid, &[parent_index_oid], &ctx)
             .map_err(map_catalog_error)?;
+        self.apply_effect(effect)?;
+
+        let child_index = self.current_relation(child_index_oid)?;
+        if child_index.relispartition {
+            return Ok(());
+        }
+        let cid = self.take_cid();
+        let ctx = self.write_ctx(cid);
+        let effect = self
+            .db
+            .catalog
+            .write()
+            .replace_relation_partitioning_mvcc(
+                child_index_oid,
+                true,
+                child_index.relpartbound.clone(),
+                child_index.partitioned_table.clone(),
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
         self.apply_effect(effect)
     }
 

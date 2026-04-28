@@ -24,6 +24,7 @@ pub(crate) mod expr_multirange;
 mod expr_network;
 pub(crate) mod expr_numeric;
 pub(crate) mod expr_ops;
+mod expr_partition;
 pub(crate) mod expr_range;
 pub(crate) mod expr_reg;
 mod expr_string;

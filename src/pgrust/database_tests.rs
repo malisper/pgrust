@@ -7372,6 +7372,217 @@ fn hash_partitioning_uses_custom_opclass_support_proc() {
 }
 
 #[test]
+fn satisfies_hash_partition_matches_postgres_validation_and_hashing() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table tenk1(unique1 int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function part_hashint4_noop(value int4, seed int8) returns int8 as $$ select value + seed; $$ language sql strict immutable parallel safe",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create operator class part_test_int4_ops for type int4 using hash as operator 1 =, function 2 part_hashint4_noop(int4, int8)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function part_hashtext_length(value text, seed int8) returns int8 as $$ select length(coalesce(value, ''))::int8 $$ language sql strict immutable parallel safe",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create operator class part_test_text_ops for type text using hash as operator 1 =, function 2 part_hashtext_length(text, int8)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table mchash (a int, b text, c jsonb) partition by hash (a part_test_int4_ops, b part_test_text_ops)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table mchash1 partition of mchash for values with (modulus 4, remainder 0)",
+        )
+        .unwrap();
+
+    fn assert_error(session: &mut Session, db: &Database, sql: &str, expected_message: &str) {
+        match session.execute(db, sql) {
+            Err(ExecError::DetailedError { message, .. }) if message == expected_message => {}
+            other => panic!("expected {expected_message:?} error, got {other:?}"),
+        }
+    }
+
+    assert_error(
+        &mut session,
+        &db,
+        "select satisfies_hash_partition(0, 4, 0, null)",
+        "could not open relation with OID 0",
+    );
+    assert_error(
+        &mut session,
+        &db,
+        "select satisfies_hash_partition('tenk1'::regclass, 4, 0, null)",
+        "\"tenk1\" is not a hash partitioned table",
+    );
+    assert_error(
+        &mut session,
+        &db,
+        "select satisfies_hash_partition('mchash1'::regclass, 4, 0, null)",
+        "\"mchash1\" is not a hash partitioned table",
+    );
+    assert_error(
+        &mut session,
+        &db,
+        "select satisfies_hash_partition('mchash'::regclass, 0, 0, null)",
+        "modulus for hash partition must be an integer value greater than zero",
+    );
+    assert_error(
+        &mut session,
+        &db,
+        "select satisfies_hash_partition('mchash'::regclass, 1, -1, null)",
+        "remainder for hash partition must be an integer value greater than or equal to zero",
+    );
+    assert_error(
+        &mut session,
+        &db,
+        "select satisfies_hash_partition('mchash'::regclass, 1, 1, null)",
+        "remainder for hash partition must be less than modulus",
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select satisfies_hash_partition('mchash'::regclass, null, 0, null)"
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select satisfies_hash_partition('mchash'::regclass, 4, null, null)"
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+
+    assert_error(
+        &mut session,
+        &db,
+        "select satisfies_hash_partition('mchash'::regclass, 4, 0, null::int, null::text, null::json)",
+        "number of partitioning columns (2) does not match number of partition keys provided (3)",
+    );
+    assert_error(
+        &mut session,
+        &db,
+        "select satisfies_hash_partition('mchash'::regclass, 3, 1, null::int)",
+        "number of partitioning columns (2) does not match number of partition keys provided (1)",
+    );
+    assert_error(
+        &mut session,
+        &db,
+        "select satisfies_hash_partition('mchash'::regclass, 2, 1, null::int, null::int)",
+        "column 2 of the partition key has type text, but supplied value is of type integer",
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select satisfies_hash_partition('mchash'::regclass, 4, 0, 0, ''::text)"
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select satisfies_hash_partition('mchash'::regclass, 4, 0, 2, ''::text)"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_error(
+        &mut session,
+        &db,
+        "select satisfies_hash_partition('mchash'::regclass, 2, 1, variadic array[1,2]::int[])",
+        "column 2 of the partition key has type \"text\", but supplied value is of type \"integer\"",
+    );
+
+    session
+        .execute(
+            &db,
+            "create table mcinthash (a int, b int, c jsonb) partition by hash (a part_test_int4_ops, b part_test_int4_ops)",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select satisfies_hash_partition('mcinthash'::regclass, 4, 0, variadic array[0, 0])"
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select satisfies_hash_partition('mcinthash'::regclass, 4, 0, variadic array[0, 1])"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    assert_error(
+        &mut session,
+        &db,
+        "select satisfies_hash_partition('mcinthash'::regclass, 4, 0, variadic array[]::int[])",
+        "number of partitioning columns (2) does not match number of partition keys provided (0)",
+    );
+    assert_error(
+        &mut session,
+        &db,
+        "select satisfies_hash_partition('mcinthash'::regclass, 4, 0, variadic array[now(), now()])",
+        "column 1 of the partition key has type \"integer\", but supplied value is of type \"timestamp with time zone\"",
+    );
+
+    session
+        .execute(
+            &db,
+            "create table text_hashp (a text) partition by hash (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table text_hashp0 partition of text_hashp for values with (modulus 2, remainder 0)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table text_hashp1 partition of text_hashp for values with (modulus 2, remainder 1)",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select satisfies_hash_partition('text_hashp'::regclass, 2, 0, 'xxx'::text) or satisfies_hash_partition('text_hashp'::regclass, 2, 1, 'xxx'::text)"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn partitioned_primary_keys_support_rename_flow_and_index_tree_metadata() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -7526,7 +7737,7 @@ fn create_index_on_partitioned_table_builds_index_tree() {
         query_rows(
             &db,
             1,
-            "select relname, relkind::text, relhassubclass \
+            "select relname, relkind::text, relispartition, relhassubclass \
                from pg_class \
               where relname in ('idxpart_a_idx', 'idxpart1_a_idx', 'idxpart2_a_idx', 'idxpart2a_a_idx') \
               order by relname",
@@ -7535,21 +7746,25 @@ fn create_index_on_partitioned_table_builds_index_tree() {
             vec![
                 Value::Text("idxpart1_a_idx".into()),
                 Value::Text("i".into()),
+                Value::Bool(true),
                 Value::Bool(false),
             ],
             vec![
                 Value::Text("idxpart2_a_idx".into()),
                 Value::Text("I".into()),
                 Value::Bool(true),
+                Value::Bool(true),
             ],
             vec![
                 Value::Text("idxpart2a_a_idx".into()),
                 Value::Text("i".into()),
+                Value::Bool(true),
                 Value::Bool(false),
             ],
             vec![
                 Value::Text("idxpart_a_idx".into()),
                 Value::Text("I".into()),
+                Value::Bool(false),
                 Value::Bool(true),
             ],
         ]
@@ -7578,6 +7793,61 @@ fn create_index_on_partitioned_table_builds_index_tree() {
                 Value::Text("idxpart2_a_idx".into()),
                 Value::Text("idxpart_a_idx".into()),
             ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_partition_root('idxpart2a_a_idx')::regclass::text",
+        ),
+        vec![vec![Value::Text("idxpart_a_idx".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relid::regclass::text, parentrelid::regclass::text, level, isleaf \
+               from pg_partition_tree('idxpart_a_idx') \
+              order by level, relid::regclass::text",
+        ),
+        vec![
+            vec![
+                Value::Text("idxpart_a_idx".into()),
+                Value::Null,
+                Value::Int32(0),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("idxpart1_a_idx".into()),
+                Value::Text("idxpart_a_idx".into()),
+                Value::Int32(1),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("idxpart2_a_idx".into()),
+                Value::Text("idxpart_a_idx".into()),
+                Value::Int32(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("idxpart2a_a_idx".into()),
+                Value::Text("idxpart2_a_idx".into()),
+                Value::Int32(2),
+                Value::Bool(true),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relid::regclass::text from pg_partition_ancestors('idxpart2a_a_idx')",
+        ),
+        vec![
+            vec![Value::Text("idxpart2a_a_idx".into())],
+            vec![Value::Text("idxpart2_a_idx".into())],
+            vec![Value::Text("idxpart_a_idx".into())],
         ]
     );
     assert_eq!(
@@ -10569,6 +10839,278 @@ fn create_view_persists_security_reloptions() {
 }
 
 #[test]
+fn table_reloptions_create_set_reset_and_errors() {
+    let dir = temp_dir("table_reloptions_create_set_reset");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(
+        1,
+        "create table reloptions_test(i int) with \
+         (FiLLFaCToR=30, autovacuum_enabled = false, autovacuum_analyze_scale_factor = 0.2)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_test'",
+        ),
+        vec![vec![typed_text_array_value(
+            &[
+                "fillfactor=30",
+                "autovacuum_enabled=false",
+                "autovacuum_analyze_scale_factor=0.2",
+            ],
+            TEXT_TYPE_OID
+        )]]
+    );
+
+    db.execute(
+        1,
+        "alter table reloptions_test set \
+         (fillfactor=31, autovacuum_analyze_scale_factor = 0.3)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_test'",
+        ),
+        vec![vec![typed_text_array_value(
+            &[
+                "autovacuum_enabled=false",
+                "fillfactor=31",
+                "autovacuum_analyze_scale_factor=0.3",
+            ],
+            TEXT_TYPE_OID
+        )]]
+    );
+
+    db.execute(
+        1,
+        "alter table reloptions_test set (autovacuum_enabled, fillfactor=32)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_test'",
+        ),
+        vec![vec![typed_text_array_value(
+            &[
+                "autovacuum_analyze_scale_factor=0.3",
+                "autovacuum_enabled=true",
+                "fillfactor=32",
+            ],
+            TEXT_TYPE_OID
+        )]]
+    );
+
+    db.execute(1, "alter table reloptions_test reset (fillfactor)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_test'",
+        ),
+        vec![vec![typed_text_array_value(
+            &[
+                "autovacuum_analyze_scale_factor=0.3",
+                "autovacuum_enabled=true",
+            ],
+            TEXT_TYPE_OID
+        )]]
+    );
+
+    db.execute(
+        1,
+        "alter table reloptions_test reset \
+         (autovacuum_enabled, autovacuum_analyze_scale_factor)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_test'",
+        ),
+        vec![vec![Value::Null]]
+    );
+
+    match db.execute(1, "create table reloptions_bad(i int) with (fillfactor=2)") {
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        }) if message == "value 2 out of bounds for option \"fillfactor\""
+            && detail == "Valid values are between \"10\" and \"100\"."
+            && sqlstate == "22023" => {}
+        other => panic!("expected fillfactor range error, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname = 'reloptions_bad'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    match db.execute(
+        1,
+        "create table reloptions_bad(i int) with (fillfactor='string')",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "invalid value for integer option \"fillfactor\": string"
+            && sqlstate == "22023" => {}
+        other => panic!("expected fillfactor type error, got {other:?}"),
+    }
+    match db.execute(
+        1,
+        "create table reloptions_bad(i int) with (not_existing_namespace.fillfactor=2)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "unrecognized parameter namespace \"not_existing_namespace\""
+            && sqlstate == "22023" => {}
+        other => panic!("expected reloption namespace error, got {other:?}"),
+    }
+    match db.execute(
+        1,
+        "create table reloptions_bad(i int) with (fillfactor=30, fillfactor=40)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "parameter \"fillfactor\" specified more than once"
+            && sqlstate == "22023" => {}
+        other => panic!("expected duplicate reloption error, got {other:?}"),
+    }
+}
+
+#[test]
+fn toast_and_index_reloptions_are_stored_on_target_relations() {
+    let dir = temp_dir("toast_index_reloptions");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(
+        1,
+        "create table reloptions_toast(s varchar) with \
+         (toast.autovacuum_vacuum_cost_delay = 23, \
+          autovacuum_vacuum_cost_delay = 24, fillfactor = 40)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_toast'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["autovacuum_vacuum_cost_delay=24", "fillfactor=40"],
+            TEXT_TYPE_OID
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tc.reloptions from pg_class c join pg_class tc on tc.oid = c.reltoastrelid \
+             where c.relname = 'reloptions_toast'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["autovacuum_vacuum_cost_delay=23"],
+            TEXT_TYPE_OID
+        )]]
+    );
+
+    db.execute(
+        1,
+        "alter table reloptions_toast set (toast.autovacuum_vacuum_cost_delay = 24)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tc.reloptions from pg_class c join pg_class tc on tc.oid = c.reltoastrelid \
+             where c.relname = 'reloptions_toast'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["autovacuum_vacuum_cost_delay=24"],
+            TEXT_TYPE_OID
+        )]]
+    );
+    db.execute(
+        1,
+        "alter table reloptions_toast reset (toast.autovacuum_vacuum_cost_delay)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tc.reloptions from pg_class c join pg_class tc on tc.oid = c.reltoastrelid \
+             where c.relname = 'reloptions_toast'",
+        ),
+        vec![vec![Value::Null]]
+    );
+
+    db.execute(
+        1,
+        "create index reloptions_toast_idx on reloptions_toast (s) with (fillfactor=30)",
+    )
+    .unwrap();
+    db.execute(1, "alter index reloptions_toast_idx set (fillfactor=40)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_toast_idx'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["fillfactor=40"],
+            TEXT_TYPE_OID
+        )]]
+    );
+
+    db.execute(
+        1,
+        "create index reloptions_toast_idx2 on reloptions_toast (s)",
+    )
+    .unwrap();
+    db.execute(1, "alter index reloptions_toast_idx2 set (fillfactor=40)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_toast_idx2'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["fillfactor=40"],
+            TEXT_TYPE_OID
+        )]]
+    );
+
+    match db.execute(
+        1,
+        "create index reloptions_toast_idx3 on reloptions_toast (s) with (not_existing_ns.fillfactor=2)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "unrecognized parameter namespace \"not_existing_ns\""
+            && sqlstate == "22023" => {}
+        other => panic!("expected index reloption namespace error, got {other:?}"),
+    }
+}
+
+#[test]
 fn security_barrier_inheritance_view_filters_through_subquery_scan() {
     let dir = temp_dir("security_barrier_inheritance_view");
     let db = Database::open(&dir, 128).unwrap();
@@ -12280,8 +12822,8 @@ fn dropping_last_temp_table_keeps_temp_namespace() {
 }
 
 #[test]
-fn create_index_and_alter_table_set_are_noops() {
-    let base = temp_dir("numeric_sql_noops");
+fn create_index_catalog_paths_and_alter_table_set_parallel_workers() {
+    let base = temp_dir("numeric_sql_catalog_paths");
     let db = Database::open(&base, 16).unwrap();
 
     match db
