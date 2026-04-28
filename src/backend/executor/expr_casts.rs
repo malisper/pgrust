@@ -7195,9 +7195,9 @@ mod tests {
         let info = soft_input_error_info("<?xml version=\"1.0\" standalone=\"y\"?><foo/>", "xml")
             .unwrap()
             .expect("invalid xml declaration should return structured info");
-        assert_eq!(info.message, "invalid XML content");
+        assert_eq!(info.message, "invalid XML content: invalid XML declaration");
         assert_eq!(info.sqlstate, "2200N");
-        assert!(info.detail.is_some());
+        assert!(info.detail.is_none());
     }
 
     #[test]

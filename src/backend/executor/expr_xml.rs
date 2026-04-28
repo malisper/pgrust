@@ -57,6 +57,14 @@ fn xml_validation_error_for_option(
     xml_input_error(text, message, Some(detail), sqlstate)
 }
 
+fn xml_declaration_error(text: &str, option: XmlOptionSetting) -> ExecError {
+    let (message, sqlstate) = match option {
+        XmlOptionSetting::Document => ("invalid XML document: invalid XML declaration", "2200M"),
+        XmlOptionSetting::Content => ("invalid XML content: invalid XML declaration", "2200N"),
+    };
+    xml_input_error(text, message, None, sqlstate)
+}
+
 fn parse_xml_decl_attributes(body: &str) -> Result<Vec<(String, String)>, String> {
     let mut attrs = Vec::new();
     let bytes = body.as_bytes();
@@ -113,26 +121,122 @@ fn validate_xml_declaration(text: &str, option: XmlOptionSetting) -> Result<(), 
         .strip_prefix("<?xml")
         .and_then(|rest| rest.strip_suffix("?>"))
         .map(str::trim)
-        .ok_or_else(|| {
-            xml_validation_error_for_option(text, option, "malformed XML declaration".into())
-        })?;
-    let attrs = parse_xml_decl_attributes(body)
-        .map_err(|detail| xml_validation_error_for_option(text, option, detail))?;
+        .ok_or_else(|| xml_declaration_error(text, option))?;
+    let attrs = parse_xml_decl_attributes(body).map_err(|_| xml_declaration_error(text, option))?;
     for (name, value) in attrs {
         if name == "standalone" && value != "yes" && value != "no" {
-            return Err(xml_validation_error_for_option(
-                text,
-                option,
-                "invalid standalone value in XML declaration".into(),
-            ));
+            return Err(xml_declaration_error(text, option));
         }
     }
     Ok(())
 }
 
+fn xml_declared_entity_names(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = text;
+    while let Some(offset) = rest.find("<!ENTITY") {
+        rest = &rest[offset + "<!ENTITY".len()..];
+        let mut candidate = rest.trim_start();
+        if let Some(after_percent) = candidate.strip_prefix('%') {
+            candidate = after_percent.trim_start();
+        }
+        let name: String = candidate
+            .chars()
+            .take_while(|ch| !ch.is_whitespace() && *ch != '>')
+            .collect();
+        if !name.is_empty() {
+            names.push(name);
+        }
+    }
+    names
+}
+
+fn doctype_has_external_subset(text: &str) -> bool {
+    let Some(offset) = text.find("<!DOCTYPE") else {
+        return false;
+    };
+    let after_doctype = &text[offset + "<!DOCTYPE".len()..];
+    let head_end = after_doctype
+        .find(|ch| matches!(ch, '[' | '>'))
+        .unwrap_or(after_doctype.len());
+    let head = &after_doctype[..head_end];
+    head.split_whitespace()
+        .any(|token| matches!(token, "SYSTEM" | "PUBLIC"))
+}
+
+fn xml_entity_ref_allowed(name: &str, declared_entities: &[String], allow_external: bool) -> bool {
+    matches!(name, "amp" | "lt" | "gt" | "apos" | "quot")
+        || declared_entities.iter().any(|declared| declared == name)
+        || allow_external
+}
+
+fn xml_extra_content_error(text: &str, option: XmlOptionSetting) -> ExecError {
+    xml_validation_error_for_option(
+        text,
+        option,
+        "line 1: Extra content at the end of the document".into(),
+    )
+}
+
+fn xml_invalid_start_tag_error(text: &str, option: XmlOptionSetting) -> ExecError {
+    xml_validation_error_for_option(
+        text,
+        option,
+        "line 1: StartTag: invalid element name".into(),
+    )
+}
+
+fn xml_undefined_entity_error(text: &str, option: XmlOptionSetting, name: &str) -> ExecError {
+    xml_validation_error_for_option(text, option, format!("line 1: Entity '{name}' not defined"))
+}
+
+fn first_start_tag_name(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    let rest = trimmed.strip_prefix('<')?;
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|ch| matches!(ch, '!' | '?' | '/'))
+    {
+        return None;
+    }
+    let end = rest
+        .find(|ch: char| ch.is_whitespace() || matches!(ch, '>' | '/'))
+        .unwrap_or(rest.len());
+    (end > 0).then_some(&rest[..end])
+}
+
+fn postgres_xml_detail_for_quick_xml_error(text: &str, err: &str) -> Option<String> {
+    if err.contains("tag not closed")
+        && let Some(name) = first_start_tag_name(text)
+    {
+        return Some(format!(
+            "line 1: Couldn't find end of Start Tag {name} line 1"
+        ));
+    }
+    if err.contains("entity or character reference not closed") {
+        return Some("line 1: xmlParseEntityRef: no name".into());
+    }
+    if let Some(rest) = err.strip_prefix("ill-formed document: expected `</")
+        && let Some((opened, rest)) = rest.split_once(">`, but `</")
+        && let Some((closed, _)) = rest.split_once(">` was found")
+    {
+        return Some(format!(
+            "line 1: Opening and ending tag mismatch: {opened} line 1 and {closed}"
+        ));
+    }
+    None
+}
+
 pub(crate) fn validate_xml_input(text: &str, option: XmlOptionSetting) -> Result<(), ExecError> {
     validate_xml_declaration(text, option)?;
 
+    if text.trim() == "<>" {
+        return Err(xml_invalid_start_tag_error(text, option));
+    }
+
+    let declared_entities = xml_declared_entity_names(text);
+    let allow_external_entities = doctype_has_external_subset(text);
     let mut reader = Reader::from_str(text);
     reader.config_mut().trim_text(false);
 
@@ -140,35 +244,34 @@ pub(crate) fn validate_xml_input(text: &str, option: XmlOptionSetting) -> Result
     let mut seen_document_element = false;
     let mut after_document_element = false;
     let mut seen_doctype = false;
+    let mut seen_non_misc_before_doctype = false;
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(_)) => {
-                if depth == 0 && matches!(option, XmlOptionSetting::Document) {
-                    if after_document_element || seen_document_element {
-                        return Err(xml_input_error(
-                            text,
-                            "invalid XML document",
-                            Some("XML document must have exactly one top-level element".into()),
-                            "2200M",
-                        ));
+                if depth == 0 {
+                    if matches!(option, XmlOptionSetting::Document) || seen_doctype {
+                        if after_document_element || seen_document_element {
+                            return Err(xml_extra_content_error(text, option));
+                        }
+                        seen_document_element = true;
+                    } else if matches!(option, XmlOptionSetting::Content) {
+                        seen_non_misc_before_doctype = true;
                     }
-                    seen_document_element = true;
                 }
                 depth += 1;
             }
             Ok(Event::Empty(_)) => {
-                if depth == 0 && matches!(option, XmlOptionSetting::Document) {
-                    if after_document_element || seen_document_element {
-                        return Err(xml_input_error(
-                            text,
-                            "invalid XML document",
-                            Some("XML document must have exactly one top-level element".into()),
-                            "2200M",
-                        ));
+                if depth == 0 {
+                    if matches!(option, XmlOptionSetting::Document) || seen_doctype {
+                        if after_document_element || seen_document_element {
+                            return Err(xml_extra_content_error(text, option));
+                        }
+                        seen_document_element = true;
+                        after_document_element = true;
+                    } else if matches!(option, XmlOptionSetting::Content) {
+                        seen_non_misc_before_doctype = true;
                     }
-                    seen_document_element = true;
-                    after_document_element = true;
                 }
             }
             Ok(Event::End(_)) => {
@@ -186,19 +289,27 @@ pub(crate) fn validate_xml_input(text: &str, option: XmlOptionSetting) -> Result
                 }
             }
             Ok(Event::Text(text_event)) => {
-                if depth == 0
-                    && matches!(option, XmlOptionSetting::Document)
-                    && !is_xml_whitespace(text_event.as_ref())
-                {
-                    return Err(xml_input_error(
-                        text,
-                        "invalid XML document",
-                        Some(
-                            "non-whitespace text is not allowed outside the document element"
-                                .into(),
-                        ),
-                        "2200M",
-                    ));
+                if depth == 0 && !is_xml_whitespace(text_event.as_ref()) {
+                    if matches!(option, XmlOptionSetting::Document) {
+                        return Err(xml_input_error(
+                            text,
+                            "invalid XML document",
+                            Some(
+                                "non-whitespace text is not allowed outside the document element"
+                                    .into(),
+                            ),
+                            "2200M",
+                        ));
+                    }
+                    if seen_doctype {
+                        if after_document_element || seen_document_element {
+                            return Err(xml_extra_content_error(text, option));
+                        }
+                        return Err(xml_invalid_start_tag_error(text, option));
+                    }
+                    if matches!(option, XmlOptionSetting::Content) {
+                        seen_non_misc_before_doctype = true;
+                    }
                 }
             }
             Ok(Event::CData(text_event)) => {
@@ -215,32 +326,32 @@ pub(crate) fn validate_xml_input(text: &str, option: XmlOptionSetting) -> Result
                 }
             }
             Ok(Event::DocType(_)) => {
-                if matches!(option, XmlOptionSetting::Document) {
-                    if seen_doctype || seen_document_element || after_document_element {
-                        return Err(xml_input_error(
-                            text,
-                            "invalid XML document",
-                            Some("DOCTYPE must appear before the document element".into()),
-                            "2200M",
-                        ));
-                    }
-                    seen_doctype = true;
+                if seen_doctype {
+                    return Err(xml_invalid_start_tag_error(text, option));
+                }
+                if seen_document_element || after_document_element || seen_non_misc_before_doctype {
+                    return Err(xml_invalid_start_tag_error(text, option));
+                }
+                seen_doctype = true;
+            }
+            Ok(Event::Decl(_)) | Ok(Event::PI(_)) | Ok(Event::Comment(_)) => {}
+            Ok(Event::GeneralRef(entity)) => {
+                let name = String::from_utf8_lossy(entity.as_ref());
+                if !xml_entity_ref_allowed(&name, &declared_entities, allow_external_entities) {
+                    return Err(xml_undefined_entity_error(text, option, &name));
                 }
             }
-            Ok(Event::Decl(_))
-            | Ok(Event::PI(_))
-            | Ok(Event::Comment(_))
-            | Ok(Event::GeneralRef(_)) => {}
             Ok(Event::Eof) => break,
             Err(err) => {
                 let (message, sqlstate) = match option {
                     XmlOptionSetting::Document => ("invalid XML document", "2200M"),
                     XmlOptionSetting::Content => ("invalid XML content", "2200N"),
                 };
+                let err = err.to_string();
                 return Err(xml_input_error(
                     text,
                     message,
-                    Some(err.to_string()),
+                    Some(postgres_xml_detail_for_quick_xml_error(text, &err).unwrap_or(err)),
                     sqlstate,
                 ));
             }
@@ -1732,6 +1843,57 @@ mod tests {
         assert!(validate_xml_input("<a/><b/>", XmlOptionSetting::Document).is_err());
         assert!(validate_xml_input("hello", XmlOptionSetting::Content).is_ok());
         assert!(validate_xml_input("hello", XmlOptionSetting::Document).is_err());
+    }
+
+    #[test]
+    fn validates_entity_references_like_libxml() {
+        assert!(validate_xml_input("<a>&amp;</a>", XmlOptionSetting::Document).is_ok());
+        let err = validate_xml_input("<a>&undefined;</a>", XmlOptionSetting::Content).unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::XmlInput {
+                detail: Some(ref detail),
+                ..
+            } if detail.contains("Entity 'undefined' not defined")
+        ));
+        assert!(
+            validate_xml_input(
+                "<!DOCTYPE a [<!ENTITY local \"ok\">]><a>&local;</a>",
+                XmlOptionSetting::Document
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_xml_input(
+                "<!DOCTYPE chapter PUBLIC \"-//OASIS//DTD DocBook XML V4.1.2//EN\" \"docbookx.dtd\"><chapter>&nbsp;</chapter>",
+                XmlOptionSetting::Document,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn doctype_content_must_be_document_shaped() {
+        assert!(validate_xml_input("<a/><b/>", XmlOptionSetting::Content).is_ok());
+        assert!(validate_xml_input("<!DOCTYPE a><a/>", XmlOptionSetting::Content).is_ok());
+        let err =
+            validate_xml_input("<!DOCTYPE a><a/><b/>", XmlOptionSetting::Content).unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::XmlInput {
+                detail: Some(ref detail),
+                ..
+            } if detail.contains("Extra content")
+        ));
+        let err =
+            validate_xml_input("text <!DOCTYPE a><a/>", XmlOptionSetting::Content).unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::XmlInput {
+                detail: Some(ref detail),
+                ..
+            } if detail.contains("StartTag: invalid element name")
+        ));
     }
 
     #[test]

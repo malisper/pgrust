@@ -20395,6 +20395,17 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::FuncCall { name, .. } => sql_json_public_func_name(name)
             .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name))
             .to_string(),
+        SqlExpr::Xml(xml) => match xml.op {
+            RawXmlExprOp::Concat => "xmlconcat",
+            RawXmlExprOp::Element => "xmlelement",
+            RawXmlExprOp::Forest => "xmlforest",
+            RawXmlExprOp::Parse => "xmlparse",
+            RawXmlExprOp::Pi => "xmlpi",
+            RawXmlExprOp::Root => "xmlroot",
+            RawXmlExprOp::Serialize => "xmlserialize",
+            RawXmlExprOp::IsDocument => "?column?",
+        }
+        .to_string(),
         _ => "?column?".to_string(),
     }
 }
@@ -24689,12 +24700,19 @@ fn build_xml_element_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
-            Rule::xml_attributes_expr => {
-                let (attr_values, attr_names) = build_xml_attributes_expr(part)?;
-                named_args.extend(attr_values);
-                arg_names.extend(attr_names);
+            Rule::xml_element_arg => {
+                for arg_part in part.into_inner() {
+                    match arg_part.as_rule() {
+                        Rule::xml_attributes_expr => {
+                            let (attr_values, attr_names) = build_xml_attributes_expr(arg_part)?;
+                            named_args.extend(attr_values);
+                            arg_names.extend(attr_names);
+                        }
+                        Rule::expr => args.push(build_expr(arg_part)?),
+                        _ => {}
+                    }
+                }
             }
-            Rule::expr => args.push(build_expr(part)?),
             _ => {}
         }
     }
