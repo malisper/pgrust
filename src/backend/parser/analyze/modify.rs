@@ -3,7 +3,8 @@ use super::query::rewrite_local_vars_for_output_exprs;
 use super::*;
 use crate::backend::rewrite::{
     RlsWriteCheck, ViewDmlEvent, ViewDmlRewriteError, build_target_relation_row_security,
-    relation_has_row_security, relation_has_security_invoker, resolve_auto_updatable_view_target,
+    pg_rewrite_query, relation_has_row_security, relation_has_security_invoker,
+    resolve_auto_updatable_view_target,
 };
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::PolicyCommand;
@@ -147,6 +148,10 @@ pub struct BoundMergeStatement {
     pub visible_column_count: usize,
     pub target_ctid_index: usize,
     pub source_present_index: usize,
+    pub merge_update_visibility_checks: Vec<RlsWriteCheck>,
+    pub merge_delete_visibility_checks: Vec<RlsWriteCheck>,
+    pub merge_update_write_checks: Vec<RlsWriteCheck>,
+    pub merge_insert_write_checks: Vec<RlsWriteCheck>,
     pub when_clauses: Vec<BoundMergeWhenClause>,
     pub returning: Vec<TargetEntry>,
     pub required_privileges: Vec<RelationPrivilegeRequirement>,
@@ -1243,15 +1248,25 @@ fn prepend_visibility_quals(
     Some(visibility_quals.into_iter().skip(1).fold(first, Expr::and))
 }
 
-fn build_conflict_visibility_checks(visibility_quals: Vec<Expr>) -> Vec<RlsWriteCheck> {
+fn build_visibility_write_checks(
+    visibility_quals: Vec<Expr>,
+    source: crate::backend::rewrite::RlsWriteCheckSource,
+) -> Vec<RlsWriteCheck> {
     visibility_quals
         .into_iter()
         .map(|expr| RlsWriteCheck {
             expr,
             policy_name: None,
-            source: crate::backend::rewrite::RlsWriteCheckSource::ConflictUpdateVisibility,
+            source: source.clone(),
         })
         .collect()
+}
+
+fn build_conflict_visibility_checks(visibility_quals: Vec<Expr>) -> Vec<RlsWriteCheck> {
+    build_visibility_write_checks(
+        visibility_quals,
+        crate::backend::rewrite::RlsWriteCheckSource::ConflictUpdateVisibility,
+    )
 }
 
 fn merge_mutating_event(stmt: &MergeStatement) -> Option<ViewDmlEvent> {
@@ -1472,9 +1487,6 @@ pub fn plan_merge(
         .as_ref()
         .map(|target| target.base_relation.clone())
         .unwrap_or_else(|| entry.clone());
-    if relation_has_row_security(execution_relation.relation_oid, catalog) {
-        return Err(unsupported_with_row_security("MERGE"));
-    }
     let column_defaults =
         bind_insert_column_defaults(&execution_relation.desc, catalog, &local_ctes)?;
     let target_relation_name = merge_target_relation_name(stmt);
@@ -1564,12 +1576,13 @@ pub fn plan_merge(
         ),
     );
     let action_merged_scope = combine_scopes(&action_target_scope, &action_source_scope);
+    let returning_merged_scope = combine_scopes(&action_source_scope, &action_target_scope);
 
     let returning_visible_column_count =
         execution_relation.desc.columns.len() + source_visible_count;
     let returning_scope = if let Some(resolved) = auto_view_target.as_ref() {
         scope_with_returning_pseudo_row_exprs(
-            action_merged_scope.clone(),
+            returning_merged_scope,
             &entry.desc,
             view_returning_pseudo_output_exprs(
                 &resolved.visible_output_exprs,
@@ -1583,7 +1596,7 @@ pub fn plan_merge(
             ),
         )
     } else {
-        scope_with_returning_pseudo_rows(action_merged_scope.clone(), &execution_relation.desc)
+        scope_with_returning_pseudo_rows(returning_merged_scope, &execution_relation.desc)
     };
     let returning = bind_merge_returning_targets(
         &stmt.returning,
@@ -1591,6 +1604,33 @@ pub fn plan_merge(
         returning_visible_column_count,
         catalog,
         &local_ctes,
+    )?;
+    let merge_update_rls = build_target_relation_row_security(
+        &stmt.target_table,
+        execution_relation.relation_oid,
+        &execution_relation.desc,
+        PolicyCommand::Update,
+        false,
+        true,
+        catalog,
+    )?;
+    let merge_delete_rls = build_target_relation_row_security(
+        &stmt.target_table,
+        execution_relation.relation_oid,
+        &execution_relation.desc,
+        PolicyCommand::Delete,
+        false,
+        false,
+        catalog,
+    )?;
+    let merge_insert_rls = build_target_relation_row_security(
+        &stmt.target_table,
+        execution_relation.relation_oid,
+        &execution_relation.desc,
+        PolicyCommand::Insert,
+        false,
+        !returning.is_empty(),
+        catalog,
     )?;
 
     let mut when_clauses = stmt
@@ -1687,6 +1727,9 @@ pub fn plan_merge(
         .with_input_resno(source_marker_input),
     );
     let query = query_from_from_projection(joined, projection_targets);
+    let [query] = pg_rewrite_query(query, catalog)?
+        .try_into()
+        .expect("MERGE input rewrite should return a single query");
 
     Ok(BoundMergeStatement {
         relation_name: stmt.target_table.clone(),
@@ -1713,6 +1756,16 @@ pub fn plan_merge(
         visible_column_count,
         target_ctid_index,
         source_present_index,
+        merge_update_visibility_checks: build_visibility_write_checks(
+            merge_update_rls.visibility_quals,
+            crate::backend::rewrite::RlsWriteCheckSource::MergeUpdateVisibility,
+        ),
+        merge_delete_visibility_checks: build_visibility_write_checks(
+            merge_delete_rls.visibility_quals,
+            crate::backend::rewrite::RlsWriteCheckSource::MergeDeleteVisibility,
+        ),
+        merge_update_write_checks: merge_update_rls.write_checks,
+        merge_insert_write_checks: merge_insert_rls.write_checks,
         when_clauses,
         returning,
         required_privileges,

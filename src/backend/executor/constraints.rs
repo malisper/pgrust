@@ -94,8 +94,8 @@ pub(crate) fn enforce_row_security_write_checks(
     let mut slot = TupleSlot::virtual_row(values.to_vec());
     for check in checks {
         match eval_expr(&check.expr, &mut slot, ctx)? {
-            Value::Null | Value::Bool(true) => {}
-            Value::Bool(false) => {
+            Value::Bool(true) => {}
+            Value::Null | Value::Bool(false) => {
                 if let crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(view_name) =
                     &check.source
                 {
@@ -117,6 +117,20 @@ pub(crate) fn enforce_row_security_write_checks(
                     return Err(ExecError::DetailedError {
                         message: format!(
                             "new row violates row-level security policy (USING expression) for table \"{relation_name}\""
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42501",
+                    });
+                }
+                if matches!(
+                    check.source,
+                    crate::backend::rewrite::RlsWriteCheckSource::MergeUpdateVisibility
+                        | crate::backend::rewrite::RlsWriteCheckSource::MergeDeleteVisibility
+                ) {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "target row violates row-level security policy (USING expression) for table \"{relation_name}\""
                         ),
                         detail: None,
                         hint: None,

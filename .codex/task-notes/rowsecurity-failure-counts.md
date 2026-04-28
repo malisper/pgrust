@@ -105,3 +105,15 @@ Current largest remaining blockers:
 - Some semantic RLS gaps remain around COPY TO permission ordering,
   UPDATE/RETURNING SELECT-policy checks, `pg_stats` RLS filtering, policy role
   dependencies, and inherited/partitioned DML display/projection.
+
+MERGE RLS bucket:
+- Added action-specific MERGE RLS checks: UPDATE/DELETE target USING checks,
+  UPDATE final-row checks, INSERT final-row checks, and SELECT-policy rewrite
+  for match visibility.
+- Changed RLS write checks to require true; false and null now both fail.
+- Adjusted MERGE `RETURNING *` expansion to emit source columns before target
+  columns like PostgreSQL.
+- Focused MERGE/RLS tests and existing MERGE returning tests passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result: `655/774` matched, `119` mismatches,
+  `2158` diff lines. New diff copied to `/tmp/diffs/rowsecurity.diff`.

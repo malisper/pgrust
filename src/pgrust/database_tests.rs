@@ -43450,6 +43450,147 @@ fn on_conflict_do_update_enforces_rls_update_path_checks() {
 }
 
 #[test]
+fn merge_enforces_action_specific_rls_checks() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut bob = Session::new(2);
+
+    owner
+        .execute(&db, "create role merge_owner nologin")
+        .unwrap();
+    owner.execute(&db, "create role merge_bob nologin").unwrap();
+    owner
+        .execute(&db, "set session authorization merge_owner")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table merge_docs (id int4 primary key, kind int4, author name, title text)",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "grant all on merge_docs to public")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into merge_docs values
+             (1, 1, 'merge_bob', 'old'),
+             (2, 2, 'merge_bob', 'blocked')",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "alter table merge_docs enable row level security")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy merge_select on merge_docs for select using (true)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy merge_insert on merge_docs for insert with check (author = current_user)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy merge_update on merge_docs for update
+             using (kind = 1) with check (author = current_user and kind = 1)",
+        )
+        .unwrap();
+
+    bob.execute(&db, "set session authorization merge_bob")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut bob,
+            &db,
+            "merge into merge_docs d using (values (1, 'updated')) as s(id, title)
+             on d.id = s.id
+             when matched then update set title = s.title
+             returning d.id, d.title",
+        ),
+        vec![vec![Value::Int32(1), Value::Text("updated".into())]]
+    );
+
+    let err = bob
+        .execute(
+            &db,
+            "merge into merge_docs d using (values (2, 'blocked update')) as s(id, title)
+             on d.id = s.id
+             when matched then update set title = s.title",
+        )
+        .unwrap_err();
+    assert_sqlstate(
+        err,
+        "42501",
+        "target row violates row-level security policy",
+    );
+
+    let err = bob
+        .execute(
+            &db,
+            "merge into merge_docs d using (values (3, 'merge_owner', 'bad insert')) as s(id, author, title)
+             on d.id = s.id
+             when not matched then insert values (s.id, 1, s.author, s.title)",
+        )
+        .unwrap_err();
+    assert_sqlstate(err, "42501", "new row violates row-level security policy");
+
+    owner.execute(&db, "reset session authorization").unwrap();
+    owner
+        .execute(&db, "drop policy merge_select on merge_docs")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy merge_select on merge_docs for select using (kind = 1)",
+        )
+        .unwrap();
+
+    bob.execute(&db, "set session authorization merge_bob")
+        .unwrap();
+    match bob.execute(
+        &db,
+        "merge into merge_docs d using (values (2, 'dupe')) as s(id, title)
+         on d.id = s.id
+         when matched then update set title = s.title
+         when not matched then insert values (s.id, 2, current_user, s.title)",
+    ) {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
+            assert_eq!(constraint, "merge_docs_pkey");
+        }
+        other => panic!("expected hidden target row to produce duplicate key, got {other:?}"),
+    }
+
+    bob.execute(
+        &db,
+        "merge into merge_docs d using (values (4, 'hidden')) as s(id, title)
+         on d.id = s.id
+         when not matched then insert values (s.id, 2, current_user, s.title)",
+    )
+    .unwrap();
+    assert_eq!(
+        session_query_rows(&mut bob, &db, "select id from merge_docs where id = 4"),
+        Vec::<Vec<Value>>::new()
+    );
+
+    let err = bob
+        .execute(
+            &db,
+            "merge into merge_docs d using (values (5, 'hidden returning')) as s(id, title)
+             on d.id = s.id
+             when not matched then insert values (s.id, 2, current_user, s.title)
+             returning d.id",
+        )
+        .unwrap_err();
+    assert_sqlstate(err, "42501", "new row violates row-level security policy");
+}
+
+#[test]
 fn row_security_active_reports_current_user_policy_state() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut owner = Session::new(1);

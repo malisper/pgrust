@@ -18,6 +18,8 @@ pub(crate) enum RlsWriteCheckSource {
     Update,
     SelectVisibility,
     ConflictUpdateVisibility,
+    MergeUpdateVisibility,
+    MergeDeleteVisibility,
     ViewCheckOption(String),
 }
 

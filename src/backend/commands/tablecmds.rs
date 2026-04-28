@@ -448,6 +448,38 @@ fn finalize_bound_merge(
             ..target
         })
         .collect();
+    stmt.merge_update_visibility_checks = stmt
+        .merge_update_visibility_checks
+        .into_iter()
+        .map(|check| RlsWriteCheck {
+            expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
+            ..check
+        })
+        .collect();
+    stmt.merge_delete_visibility_checks = stmt
+        .merge_delete_visibility_checks
+        .into_iter()
+        .map(|check| RlsWriteCheck {
+            expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
+            ..check
+        })
+        .collect();
+    stmt.merge_update_write_checks = stmt
+        .merge_update_write_checks
+        .into_iter()
+        .map(|check| RlsWriteCheck {
+            expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
+            ..check
+        })
+        .collect();
+    stmt.merge_insert_write_checks = stmt
+        .merge_insert_write_checks
+        .into_iter()
+        .map(|check| RlsWriteCheck {
+            expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
+            ..check
+        })
+        .collect();
     stmt.input_plan.subplans = subplans;
     stmt
 }
@@ -6857,7 +6889,7 @@ fn execute_merge_insert_action(
         stmt.toast_index.as_ref(),
         &stmt.desc,
         &stmt.relation_constraints,
-        &[],
+        &stmt.merge_insert_write_checks,
         &stmt.indexes,
         &[row_values],
         None,
@@ -6889,6 +6921,13 @@ fn execute_merge_update_row(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<Option<Vec<Value>>, ExecError> {
+    crate::backend::executor::enforce_row_security_write_checks(
+        &stmt.relation_name,
+        &stmt.desc,
+        &stmt.merge_update_visibility_checks,
+        original_values,
+        ctx,
+    )?;
     let mut updated_values = original_values.to_vec();
     for assignment in assignments {
         let value = eval_expr(&assignment.expr, slot, ctx)?;
@@ -6925,6 +6964,13 @@ fn execute_merge_update_row(
         )?;
     }
     let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, target_tid)?;
+    crate::backend::executor::enforce_row_security_write_checks(
+        &stmt.relation_name,
+        &stmt.desc,
+        &stmt.merge_update_write_checks,
+        &updated_values,
+        ctx,
+    )?;
     crate::backend::executor::enforce_relation_constraints(
         &stmt.relation_name,
         &stmt.desc,
@@ -7072,6 +7118,13 @@ fn execute_merge_delete_row(
             true,
         )?;
     }
+    crate::backend::executor::enforce_row_security_write_checks(
+        &stmt.relation_name,
+        &stmt.desc,
+        &stmt.merge_delete_visibility_checks,
+        original_values,
+        ctx,
+    )?;
     apply_inbound_foreign_key_actions_on_delete(
         &stmt.relation_name,
         &stmt.referenced_by_foreign_keys,
