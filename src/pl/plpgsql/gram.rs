@@ -8,9 +8,9 @@ use crate::backend::parser::{
 use crate::include::catalog::RECORD_TYPE_OID;
 
 use super::ast::{
-    AliasDecl, AliasTarget, AssignTarget, Block, CursorDecl, Decl, ExceptionCondition,
-    ExceptionHandler, ForQuerySource, ForTarget, RaiseCondition, RaiseLevel, RaiseUsingOption,
-    ReturnQueryKind, Stmt, VarDecl,
+    AliasDecl, AliasTarget, AssignTarget, Block, CursorArg, CursorDecl, CursorDirection,
+    CursorParamDecl, Decl, ExceptionCondition, ExceptionHandler, ForQuerySource, ForTarget,
+    OpenCursorSource, RaiseCondition, RaiseLevel, RaiseUsingOption, Stmt, VarDecl,
 };
 
 pub fn parse_block(sql: &str) -> Result<Block, ParseError> {
@@ -194,7 +194,7 @@ fn build_cursor_decl(pair: Pair<'_, Rule>) -> Result<CursorDecl, ParseError> {
     Ok(CursorDecl {
         name: name.ok_or(ParseError::UnexpectedEof)?,
         scrollable: cursor_decl_scrollable(&raw),
-        param_names: cursor_decl_param_names(&raw)?,
+        params: cursor_decl_params(&raw)?,
         query: query.ok_or(ParseError::UnexpectedEof)?,
     })
 }
@@ -206,7 +206,7 @@ fn cursor_decl_scrollable(raw: &str) -> bool {
     !raw[..cursor_idx].to_ascii_lowercase().contains("no scroll")
 }
 
-fn cursor_decl_param_names(raw: &str) -> Result<Vec<String>, ParseError> {
+fn cursor_decl_params(raw: &str) -> Result<Vec<CursorParamDecl>, ParseError> {
     let Some(cursor_idx) = find_next_top_level_keyword(raw, &["cursor"]) else {
         return Ok(Vec::new());
     };
@@ -228,14 +228,44 @@ fn cursor_decl_param_names(raw: &str) -> Result<Vec<String>, ParseError> {
     split_top_level_csv(params)
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|param| param.split_whitespace().next().map(str::to_string))
-        .map(|name| {
-            parse_expr(&name).and_then(|expr| match expr {
+        .map(|param| {
+            let mut parts = param.splitn(2, char::is_whitespace);
+            let name = parts.next().unwrap_or_default().trim();
+            let type_name = parts.next().unwrap_or_default().trim();
+            if name.is_empty() || type_name.is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "cursor parameter name and type",
+                    actual: param,
+                });
+            }
+            let name = parse_expr(name).and_then(|expr| match expr {
                 SqlExpr::Column(name) => Ok(name),
                 _ => Err(ParseError::UnexpectedToken {
                     expected: "cursor parameter name",
-                    actual: name,
+                    actual: param.clone(),
                 }),
+            })?;
+            let ty = match parse_type_name(type_name)? {
+                RawTypeName::Builtin(ty) => ty,
+                RawTypeName::Named { name, .. } => {
+                    return Err(ParseError::UnsupportedType(name));
+                }
+                RawTypeName::Serial(kind) => {
+                    return Err(ParseError::FeatureNotSupported(format!(
+                        "{} is only allowed in CREATE TABLE / ALTER TABLE ADD COLUMN",
+                        match kind {
+                            SerialKind::Small => "smallserial",
+                            SerialKind::Regular => "serial",
+                            SerialKind::Big => "bigserial",
+                        }
+                    )));
+                }
+                RawTypeName::Record => SqlType::record(RECORD_TYPE_OID),
+            };
+            Ok(CursorParamDecl {
+                name,
+                type_name: type_name.to_string(),
+                ty,
             })
         })
         .collect()
@@ -254,6 +284,53 @@ fn matching_paren_index(input: &str) -> Option<usize> {
             }
             _ => {}
         }
+    }
+    None
+}
+
+fn top_level_open_paren_index(input: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_single {
+            if ch == '\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if let Some(tag) = dollar_quote_tag_at(input, idx) {
+            if let Some(close) = input[idx + tag.len()..].find(tag) {
+                idx += tag.len() + close + tag.len();
+                continue;
+            }
+            return None;
+        }
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '(' => return Some(idx),
+            _ => {}
+        }
+        idx += 1;
     }
     None
 }
@@ -376,6 +453,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         Rule::get_diagnostics_stmt => build_get_diagnostics_stmt(inner),
         Rule::open_cursor_stmt => build_open_cursor_stmt(inner),
         Rule::fetch_cursor_stmt => build_fetch_cursor_stmt(inner),
+        Rule::move_cursor_stmt => build_move_cursor_stmt(inner),
         Rule::close_cursor_stmt => build_close_cursor_stmt(inner),
         Rule::exec_sql_stmt => build_exec_sql_stmt(inner),
         _ => Err(ParseError::UnexpectedToken {
@@ -521,6 +599,16 @@ fn build_for_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
                 sql_expr,
                 using_exprs,
             },
+            body,
+        });
+    }
+
+    if source_can_be_cursor_reference(&source)
+        && let Ok((name, args)) = parse_cursor_name_and_args(&source)
+    {
+        return Ok(Stmt::ForQuery {
+            target: build_for_target(targets)?,
+            source: ForQuerySource::Cursor { name, args },
             body,
         });
     }
@@ -843,18 +931,21 @@ fn build_return_query_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         .find(|part| part.as_rule() == Rule::return_query_sql)
         .map(|part| part.as_str().trim().to_string())
         .ok_or(ParseError::UnexpectedEof)?;
-    let lowered = sql.trim_start().to_ascii_lowercase();
-    let kind = if lowered.starts_with("select") || lowered.starts_with("with") {
-        ReturnQueryKind::Select
-    } else if lowered.starts_with("values") {
-        ReturnQueryKind::Values
+    let source = if source_starts_with_execute(&sql) {
+        let (sql_expr, using_exprs) = split_execute_query_source(&sql)?;
+        ForQuerySource::Execute {
+            sql_expr,
+            using_exprs,
+        }
+    } else if sql_starts_static_query(&sql) {
+        ForQuerySource::Static(sql)
     } else {
         return Err(ParseError::UnexpectedToken {
-            expected: "RETURN QUERY SELECT ... or RETURN QUERY VALUES (...)",
+            expected: "RETURN QUERY SELECT ..., RETURN QUERY VALUES (...), or RETURN QUERY EXECUTE ...",
             actual: sql,
         });
     };
-    Ok(Stmt::ReturnQuery { sql, kind })
+    Ok(Stmt::ReturnQuery { source })
 }
 
 fn build_perform_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
@@ -933,9 +1024,10 @@ fn build_open_cursor_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         .map(|inner| inner.as_str().trim().to_string())
         .ok_or(ParseError::UnexpectedEof)?;
     let Some(for_idx) = find_next_top_level_keyword(&text, &["for"]) else {
+        let (name, args) = parse_cursor_name_and_args(&text)?;
         return Ok(Stmt::OpenCursor {
-            name: cursor_name_from_text(&text)?,
-            sql: None,
+            name,
+            source: OpenCursorSource::Declared { args },
         });
     };
     let name = cursor_name_from_text(&text[..for_idx])?;
@@ -946,9 +1038,19 @@ fn build_open_cursor_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
             actual: text,
         });
     }
+    if source_starts_with_execute(sql) {
+        let (sql_expr, using_exprs) = split_execute_query_source(sql)?;
+        return Ok(Stmt::OpenCursor {
+            name,
+            source: OpenCursorSource::Dynamic {
+                sql_expr,
+                using_exprs,
+            },
+        });
+    }
     Ok(Stmt::OpenCursor {
         name,
-        sql: Some(sql.to_string()),
+        source: OpenCursorSource::Static(sql.to_string()),
     })
 }
 
@@ -966,8 +1068,7 @@ fn build_fetch_cursor_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     };
     let cursor_sql = text[..into_idx].trim();
     let targets_sql = text[into_idx + "into".len()..].trim();
-    let name = fetch_cursor_name(cursor_sql)?;
-    let backward = fetch_cursor_moves_backward(cursor_sql);
+    let (direction, name) = parse_cursor_direction_and_name(cursor_sql)?;
     let targets = split_top_level_csv(targets_sql)
         .ok_or_else(|| ParseError::UnexpectedToken {
             expected: "FETCH cursor INTO target [, ...]",
@@ -978,9 +1079,19 @@ fn build_fetch_cursor_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Stmt::FetchCursor {
         name,
-        backward,
+        direction,
         targets,
     })
+}
+
+fn build_move_cursor_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let text = pair
+        .into_inner()
+        .find(|inner| inner.as_rule() == Rule::exec_sql_text)
+        .map(|inner| inner.as_str().trim().to_string())
+        .ok_or(ParseError::UnexpectedEof)?;
+    let (direction, name) = parse_cursor_direction_and_name(&text)?;
+    Ok(Stmt::MoveCursor { name, direction })
 }
 
 fn build_close_cursor_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
@@ -1011,29 +1122,196 @@ fn cursor_name_from_text(text: &str) -> Result<String, ParseError> {
     })
 }
 
-fn fetch_cursor_name(text: &str) -> Result<String, ParseError> {
-    let mut words = text
+fn parse_cursor_name_and_args(text: &str) -> Result<(String, Vec<CursorArg>), ParseError> {
+    let trimmed = text.trim();
+    let Some(open_idx) = top_level_open_paren_index(trimmed) else {
+        return Ok((cursor_name_from_text(trimmed)?, Vec::new()));
+    };
+    let Some(close_idx) = matching_paren_index(&trimmed[open_idx..]) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "cursor argument list",
+            actual: text.to_string(),
+        });
+    };
+    if !trimmed[open_idx + close_idx + 1..].trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "cursor argument list",
+            actual: text.to_string(),
+        });
+    }
+    let name = cursor_name_from_text(&trimmed[..open_idx])?;
+    let arg_sql = trimmed[open_idx + 1..open_idx + close_idx].trim();
+    let args = if arg_sql.is_empty() {
+        Vec::new()
+    } else {
+        split_top_level_csv(arg_sql)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "cursor argument list",
+                actual: text.to_string(),
+            })?
+            .into_iter()
+            .map(parse_cursor_arg)
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    Ok((name, args))
+}
+
+fn parse_cursor_arg(arg: String) -> Result<CursorArg, ParseError> {
+    if let Some((op_idx, op_len)) = find_top_level_cursor_arg_assignment(&arg) {
+        let name_sql = arg[..op_idx].trim();
+        let expr = arg[op_idx + op_len..].trim();
+        if expr.is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "cursor named argument expression",
+                actual: arg,
+            });
+        }
+        let name = parse_expr(name_sql).and_then(|expr| match expr {
+            SqlExpr::Column(name) => Ok(name),
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "cursor argument name",
+                actual: name_sql.to_string(),
+            }),
+        })?;
+        return Ok(CursorArg::Named {
+            name,
+            expr: expr.to_string(),
+        });
+    }
+    Ok(CursorArg::Positional(arg))
+}
+
+fn source_can_be_cursor_reference(source: &str) -> bool {
+    let trimmed = source.trim_start();
+    !sql_starts_static_query(trimmed) && !keyword_at(trimmed, 0, "execute")
+}
+
+fn sql_starts_static_query(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    keyword_at(trimmed, 0, "select")
+        || keyword_at(trimmed, 0, "with")
+        || keyword_at(trimmed, 0, "values")
+}
+
+fn parse_cursor_direction_and_name(text: &str) -> Result<(CursorDirection, String), ParseError> {
+    let words = text
         .split_whitespace()
-        .filter(|word| {
-            !matches!(
-                word.to_ascii_lowercase().as_str(),
-                "from" | "next" | "prior" | "first" | "last" | "forward" | "backward"
-            ) && word.parse::<i64>().is_err()
-        })
+        .map(str::to_string)
         .collect::<Vec<_>>();
-    let name = words.pop().ok_or_else(|| ParseError::UnexpectedToken {
+    if words.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "cursor direction and name",
+            actual: text.to_string(),
+        });
+    }
+
+    let mut idx = 0usize;
+    let direction = match words[idx].to_ascii_lowercase().as_str() {
+        "from" | "in" => CursorDirection::Next,
+        "next" => {
+            idx += 1;
+            CursorDirection::Next
+        }
+        "prior" => {
+            idx += 1;
+            CursorDirection::Prior
+        }
+        "first" => {
+            idx += 1;
+            CursorDirection::First
+        }
+        "last" => {
+            idx += 1;
+            CursorDirection::Last
+        }
+        "forward" => {
+            idx += 1;
+            parse_cursor_count_direction(&words, &mut idx, true)?
+        }
+        "backward" => {
+            idx += 1;
+            parse_cursor_count_direction(&words, &mut idx, false)?
+        }
+        "absolute" => {
+            idx += 1;
+            CursorDirection::Absolute(parse_cursor_direction_count(&words, &mut idx, text)?)
+        }
+        "relative" => {
+            idx += 1;
+            CursorDirection::Relative(parse_cursor_direction_count(&words, &mut idx, text)?)
+        }
+        _ => CursorDirection::Next,
+    };
+
+    if words
+        .get(idx)
+        .is_some_and(|word| word.eq_ignore_ascii_case("from") || word.eq_ignore_ascii_case("in"))
+    {
+        idx += 1;
+    }
+    let name = words.get(idx).ok_or_else(|| ParseError::UnexpectedToken {
         expected: "cursor name",
         actual: text.to_string(),
     })?;
-    cursor_name_from_text(name)
+    if words.get(idx + 1).is_some() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "cursor name",
+            actual: text.to_string(),
+        });
+    }
+    Ok((direction, cursor_name_from_text(name)?))
 }
 
-fn fetch_cursor_moves_backward(text: &str) -> bool {
-    let lowered = text.to_ascii_lowercase();
-    lowered
-        .split_whitespace()
-        .any(|word| matches!(word, "prior" | "last" | "backward"))
-        || lowered.contains("relative -")
+fn parse_cursor_count_direction(
+    words: &[String],
+    idx: &mut usize,
+    forward: bool,
+) -> Result<CursorDirection, ParseError> {
+    let Some(word) = words.get(*idx) else {
+        return Ok(if forward {
+            CursorDirection::Forward(1)
+        } else {
+            CursorDirection::Backward(1)
+        });
+    };
+    if word.eq_ignore_ascii_case("all") {
+        *idx += 1;
+        return Ok(if forward {
+            CursorDirection::ForwardAll
+        } else {
+            CursorDirection::BackwardAll
+        });
+    }
+    if let Ok(count) = word.parse::<i64>() {
+        *idx += 1;
+        return Ok(if forward {
+            CursorDirection::Forward(count)
+        } else {
+            CursorDirection::Backward(count)
+        });
+    }
+    Ok(if forward {
+        CursorDirection::Forward(1)
+    } else {
+        CursorDirection::Backward(1)
+    })
+}
+
+fn parse_cursor_direction_count(
+    words: &[String],
+    idx: &mut usize,
+    text: &str,
+) -> Result<i64, ParseError> {
+    let word = words.get(*idx).ok_or_else(|| ParseError::UnexpectedToken {
+        expected: "cursor direction count",
+        actual: text.to_string(),
+    })?;
+    *idx += 1;
+    word.parse::<i64>()
+        .map_err(|_| ParseError::UnexpectedToken {
+            expected: "cursor direction count",
+            actual: text.to_string(),
+        })
 }
 
 fn build_ident(pair: Pair<'_, Rule>) -> String {
@@ -1363,6 +1641,72 @@ fn find_top_level_range_op(sql: &str) -> Option<usize> {
             }
             '.' if depth == 0 && bracket_depth == 0 && bytes[idx + 1] == b'.' => {
                 return Some(idx);
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn find_top_level_cursor_arg_assignment(sql: &str) -> Option<(usize, usize)> {
+    let bytes = sql.as_bytes();
+    let mut depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_single {
+            if ch == '\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if let Some(tag) = dollar_quote_tag_at(sql, idx) {
+            if let Some(close) = sql[idx + tag.len()..].find(tag) {
+                idx += tag.len() + close + tag.len();
+                continue;
+            }
+            return None;
+        }
+        match ch {
+            '\'' => {
+                in_single = true;
+                idx += 1;
+                continue;
+            }
+            '"' => {
+                in_double = true;
+                idx += 1;
+                continue;
+            }
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            ':' if depth == 0 && bracket_depth == 0 && bytes.get(idx + 1) == Some(&b'=') => {
+                return Some((idx, 2));
+            }
+            '=' if depth == 0 && bracket_depth == 0 && bytes.get(idx + 1) == Some(&b'>') => {
+                return Some((idx, 2));
             }
             _ => {}
         }

@@ -48827,6 +48827,106 @@ fn plpgsql_dynamic_execute_statement_supports_into_and_using() {
 }
 
 #[test]
+fn plpgsql_return_query_execute_supports_using() {
+    let dir = temp_dir("plpgsql_return_query_execute_using");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function dynamic_return_rows() returns setof int4 language plpgsql as $$ begin return query execute 'values (10), (20)'; return query execute 'values ($1), ($2)' using 40, 50; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from dynamic_return_rows()"),
+        vec![
+            vec![Value::Int32(10)],
+            vec![Value::Int32(20)],
+            vec![Value::Int32(40)],
+            vec![Value::Int32(50)],
+        ]
+    );
+}
+
+#[test]
+fn plpgsql_open_cursor_for_execute_supports_using() {
+    let dir = temp_dir("plpgsql_open_cursor_execute_using");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function dynamic_cursor_sum(n int4) returns int4 language plpgsql as $$ declare c refcursor; i int4; total int4 := 0; begin open c for execute 'select * from generate_series(1,$1)' using n; loop fetch c into i; exit when not found; total := total + i; end loop; close c; return total; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select dynamic_cursor_sum(5)"),
+        vec![vec![Value::Int32(15)]]
+    );
+}
+
+#[test]
+fn plpgsql_declared_cursor_accepts_named_arguments() {
+    let dir = temp_dir("plpgsql_declared_cursor_named_args");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function cursor_named_arg_rows() returns setof int4 language plpgsql as $$ declare c cursor(r1 int4, r2 int4) for select * from generate_series(r1,r2) i; begin for r in c(r2 := 7, r1 => 5) loop return next r.i; end loop; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from cursor_named_arg_rows()"),
+        vec![
+            vec![Value::Int32(5)],
+            vec![Value::Int32(6)],
+            vec![Value::Int32(7)],
+        ]
+    );
+}
+
+#[test]
+fn plpgsql_declared_cursor_rejects_duplicate_named_arguments() {
+    let dir = temp_dir("plpgsql_declared_cursor_duplicate_args");
+    let db = Database::open(&dir, 64).unwrap();
+
+    let err = db
+        .execute(
+            1,
+            "create function bad_cursor_args() returns void language plpgsql as $$ declare c cursor(p1 int4, p2 int4) for select p1, p2; begin open c(p2 := 77, p2 := 42); end $$",
+        )
+        .unwrap_err();
+    let err_text = format!("{err:?}");
+    assert!(
+        err_text.contains("value for parameter") && err_text.contains("p2"),
+        "{err_text}"
+    );
+}
+
+#[test]
+fn plpgsql_cursor_move_supports_relative_and_forward_all() {
+    let dir = temp_dir("plpgsql_cursor_move");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function cursor_move_rows() returns setof int4 language plpgsql as $$ declare c scroll cursor for select * from generate_series(1,10); i int4; begin open c; loop move relative 2 in c; fetch next from c into i; exit when not found; return next i; end loop; close c; open c; move forward all in c; fetch backward from c into i; if found then return next i; end if; close c; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from cursor_move_rows()"),
+        vec![
+            vec![Value::Int32(3)],
+            vec![Value::Int32(6)],
+            vec![Value::Int32(9)],
+            vec![Value::Int32(10)],
+        ]
+    );
+}
+
+#[test]
 fn plpgsql_exception_block_handles_named_condition() {
     let dir = temp_dir("plpgsql_exception_named_condition");
     let db = Database::open(&dir, 64).unwrap();

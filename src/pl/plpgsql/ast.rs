@@ -21,8 +21,15 @@ pub struct VarDecl {
 pub struct CursorDecl {
     pub name: String,
     pub scrollable: bool,
-    pub param_names: Vec<String>,
+    pub params: Vec<CursorParamDecl>,
     pub query: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorParamDecl {
+    pub name: String,
+    pub type_name: String,
+    pub ty: SqlType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,12 +73,6 @@ pub struct RaiseUsingOption {
     pub expr: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReturnQueryKind {
-    Select,
-    Values,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssignTarget {
     Name(String),
@@ -91,6 +92,42 @@ pub enum ForQuerySource {
         sql_expr: String,
         using_exprs: Vec<String>,
     },
+    Cursor {
+        name: String,
+        args: Vec<CursorArg>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CursorArg {
+    Positional(String),
+    Named { name: String, expr: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenCursorSource {
+    Declared {
+        args: Vec<CursorArg>,
+    },
+    Static(String),
+    Dynamic {
+        sql_expr: String,
+        using_exprs: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorDirection {
+    Next,
+    Prior,
+    First,
+    Last,
+    Forward(i64),
+    Backward(i64),
+    ForwardAll,
+    BackwardAll,
+    Absolute(i64),
+    Relative(i64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,8 +205,7 @@ pub enum Stmt {
         expr: Option<String>,
     },
     ReturnQuery {
-        sql: String,
-        kind: ReturnQueryKind,
+        source: ForQuerySource,
     },
     Perform {
         sql: String,
@@ -188,12 +224,16 @@ pub enum Stmt {
     },
     OpenCursor {
         name: String,
-        sql: Option<String>,
+        source: OpenCursorSource,
     },
     FetchCursor {
         name: String,
-        backward: bool,
+        direction: CursorDirection,
         targets: Vec<AssignTarget>,
+    },
+    MoveCursor {
+        name: String,
+        direction: CursorDirection,
     },
     CloseCursor {
         name: String,

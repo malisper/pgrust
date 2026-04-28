@@ -41,13 +41,13 @@ use crate::include::nodes::execnodes::{MaterializedCteTable, MaterializedRow};
 use crate::include::nodes::primnodes::{QueryColumn, expr_sql_type_hint};
 use crate::pgrust::session::{ByteaOutputFormat, resolve_thread_prepared_statement};
 
-use super::ast::{ExceptionCondition, RaiseLevel};
+use super::ast::{CursorDirection, ExceptionCondition, RaiseLevel};
 use super::cache::{PlpgsqlFunctionCacheKey, RelationShape, TransitionTableShape};
 use super::compile::{
-    CompiledBlock, CompiledExceptionHandler, CompiledExpr, CompiledForQuerySource,
-    CompiledForQueryTarget, CompiledFunction, CompiledSelectIntoTarget, CompiledStmt,
-    CompiledStrictParam, FunctionReturnContract, QueryCompareOp, TriggerReturnedRow,
-    compile_event_trigger_function_from_proc, compile_function_from_proc,
+    CompiledBlock, CompiledCursorOpenSource, CompiledExceptionHandler, CompiledExpr,
+    CompiledForQuerySource, CompiledForQueryTarget, CompiledFunction, CompiledSelectIntoTarget,
+    CompiledStmt, CompiledStrictParam, DeclaredCursorParam, FunctionReturnContract, QueryCompareOp,
+    TriggerReturnedRow, compile_event_trigger_function_from_proc, compile_function_from_proc,
     compile_trigger_function_from_proc,
 };
 
@@ -186,7 +186,7 @@ struct PlpgsqlExceptionData {
 struct FunctionCursor {
     columns: Vec<QueryColumn>,
     rows: Vec<Vec<Value>>,
-    pos: usize,
+    current: isize,
     scrollable: bool,
 }
 
@@ -1688,6 +1688,7 @@ fn exec_do_stmt(
         | CompiledStmt::Perform { .. }
         | CompiledStmt::OpenCursor { .. }
         | CompiledStmt::FetchCursor { .. }
+        | CompiledStmt::MoveCursor { .. }
         | CompiledStmt::CloseCursor { .. }
         | CompiledStmt::UnsupportedTransactionCommand { .. }
         | CompiledStmt::SelectInto { .. }
@@ -2147,8 +2148,8 @@ fn exec_function_stmt(
             state.trigger_return = Some(TriggerFunctionResult::NoValue);
             Ok(FunctionControl::Return)
         }
-        CompiledStmt::ReturnQuery { plan, .. } => {
-            exec_function_return_query(plan, compiled, expected_record_shape, state, ctx)?;
+        CompiledStmt::ReturnQuery { source } => {
+            exec_function_return_query(source, compiled, expected_record_shape, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::Perform { plan, .. } => {
@@ -2193,18 +2194,22 @@ fn exec_function_stmt(
         CompiledStmt::OpenCursor {
             slot,
             name,
-            plan,
+            source,
             scrollable,
         } => {
-            exec_function_open_cursor(*slot, name, plan, *scrollable, compiled, state, ctx)?;
+            exec_function_open_cursor(*slot, name, source, *scrollable, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::FetchCursor {
             slot,
-            backward,
+            direction,
             targets,
         } => {
-            exec_function_fetch_cursor(*slot, *backward, targets, compiled, state, ctx)?;
+            exec_function_fetch_cursor(*slot, *direction, targets, compiled, state, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::MoveCursor { slot, direction } => {
+            exec_function_move_cursor(*slot, *direction, compiled, state)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::CloseCursor { slot } => {
@@ -2422,13 +2427,13 @@ fn exec_function_return_next(
 }
 
 fn exec_function_return_query(
-    plan: &crate::include::nodes::plannodes::PlannedStmt,
+    source: &CompiledForQuerySource,
     compiled: &CompiledFunction,
     expected_record_shape: Option<&[QueryColumn]>,
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
-    let result = execute_function_query_result(plan, compiled, state, ctx)?;
+    let result = execute_for_query_source(source, compiled, state, ctx)?;
     for row in result.rows {
         state.rows.push(coerce_function_result_row(
             row,
@@ -2650,15 +2655,7 @@ fn exec_function_for_query(
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<FunctionControl, ExecError> {
-    let result = match source {
-        CompiledForQuerySource::Static { plan } => {
-            execute_function_query_result(plan, compiled, state, ctx)?
-        }
-        CompiledForQuerySource::Dynamic {
-            sql_expr,
-            using_exprs,
-        } => execute_dynamic_for_query(sql_expr, using_exprs, compiled, state, ctx)?,
-    };
+    let result = execute_for_query_source(source, compiled, state, ctx)?;
 
     if result.rows.is_empty() {
         assign_null_to_targets(&target.targets, state);
@@ -2677,6 +2674,29 @@ fn exec_function_for_query(
 
     state.values[compiled.found_slot] = Value::Bool(true);
     Ok(FunctionControl::Continue)
+}
+
+fn execute_for_query_source(
+    source: &CompiledForQuerySource,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<FunctionQueryResult, ExecError> {
+    match source {
+        CompiledForQuerySource::Static { plan } => {
+            execute_function_query_result(plan, compiled, state, ctx)
+        }
+        CompiledForQuerySource::Dynamic {
+            sql_expr,
+            using_exprs,
+        } => execute_dynamic_for_query(sql_expr, using_exprs, compiled, state, ctx),
+        CompiledForQuerySource::Cursor {
+            slot,
+            name,
+            source,
+            scrollable,
+        } => execute_cursor_query_result(*slot, name, source, *scrollable, compiled, state, ctx),
+    }
 }
 
 fn exec_function_foreach(
@@ -3683,6 +3703,52 @@ fn install_dynamic_external_params(
     Ok(())
 }
 
+fn execute_literal_query_result(
+    sql: &str,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<FunctionQueryResult, ExecError> {
+    let sql = sql.trim().trim_end_matches(';').trim_end().to_string();
+    let catalog = ctx.catalog.clone().ok_or_else(|| {
+        function_runtime_error(
+            "user-defined functions require executor catalog context",
+            None,
+            "0A000",
+        )
+    })?;
+
+    execute_function_query_with_bindings(compiled, state, ctx, false, |ctx| {
+        let stmt = parse_statement(&sql).map_err(ExecError::Parse)?;
+        match stmt {
+            crate::backend::parser::Statement::Select(stmt) => execute_planned_stmt(
+                pg_plan_query_with_outer_scopes_and_ctes(
+                    &stmt,
+                    catalog.as_ref(),
+                    &[],
+                    &compiled.local_ctes,
+                )
+                .map_err(ExecError::Parse)?,
+                ctx,
+            ),
+            crate::backend::parser::Statement::Values(stmt) => execute_planned_stmt(
+                pg_plan_values_query_with_outer_scopes_and_ctes(
+                    &stmt,
+                    catalog.as_ref(),
+                    &[],
+                    &compiled.local_ctes,
+                )
+                .map_err(ExecError::Parse)?,
+                ctx,
+            ),
+            other => execute_readonly_statement(other, catalog.as_ref(), ctx),
+        }
+    })
+    .and_then(|result| {
+        statement_result_to_query_result(result, "cursor query did not produce rows")
+    })
+}
+
 fn execute_function_query_with_bindings<T>(
     compiled: &CompiledFunction,
     state: &FunctionState,
@@ -3724,30 +3790,86 @@ fn cursor_name_for_slot(slot: usize, fallback: &str, state: &FunctionState) -> S
 fn exec_function_open_cursor(
     slot: usize,
     name: &str,
-    plan: &crate::include::nodes::plannodes::PlannedStmt,
+    source: &CompiledCursorOpenSource,
     scrollable: bool,
     compiled: &CompiledFunction,
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let portal_name = cursor_name_for_slot(slot, name, state);
-    let result = execute_function_query_result(plan, compiled, state, ctx)?;
+    let result = execute_cursor_open_source(source, compiled, state, ctx)?;
     state.values[slot] = Value::Text(portal_name.clone().into());
     state.cursors.insert(
         portal_name,
         FunctionCursor {
             columns: result.columns,
             rows: result.rows,
-            pos: 0,
+            current: -1,
             scrollable,
         },
     );
     Ok(())
 }
 
+fn execute_cursor_query_result(
+    slot: usize,
+    name: &str,
+    source: &CompiledCursorOpenSource,
+    _scrollable: bool,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<FunctionQueryResult, ExecError> {
+    let original_name = state.values[slot].clone();
+    let result = execute_cursor_open_source(source, compiled, state, ctx);
+    state.values[slot] = original_name;
+    let _ = name;
+    result
+}
+
+fn execute_cursor_open_source(
+    source: &CompiledCursorOpenSource,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<FunctionQueryResult, ExecError> {
+    match source {
+        CompiledCursorOpenSource::Static { plan } => {
+            execute_function_query_result(plan, compiled, state, ctx)
+        }
+        CompiledCursorOpenSource::Dynamic {
+            sql_expr,
+            using_exprs,
+        } => execute_dynamic_for_query(sql_expr, using_exprs, compiled, state, ctx),
+        CompiledCursorOpenSource::Declared {
+            query,
+            params,
+            args,
+        } => execute_declared_cursor_query(query, params, args, compiled, state, ctx),
+    }
+}
+
+fn execute_declared_cursor_query(
+    query: &str,
+    params: &[DeclaredCursorParam],
+    args: &[CompiledExpr],
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<FunctionQueryResult, ExecError> {
+    let values = args
+        .iter()
+        .map(|expr| eval_function_expr(expr, &state.values, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
+    // :HACK: Declared cursor parameters are substituted as SQL literals until
+    // pgrust has native PL/pgSQL cursor parameter binding in the SQL planner.
+    let sql = substitute_declared_cursor_params(query, params, &values, ctx)?;
+    execute_literal_query_result(&sql, compiled, state, ctx)
+}
+
 fn exec_function_fetch_cursor(
     slot: usize,
-    backward: bool,
+    direction: CursorDirection,
     targets: &[CompiledSelectIntoTarget],
     compiled: &CompiledFunction,
     state: &mut FunctionState,
@@ -3762,7 +3884,7 @@ fn exec_function_fetch_cursor(
                 "34000",
             )
         })?;
-        if backward && !cursor.scrollable {
+        if !cursor_direction_is_forward_only(direction) && !cursor.scrollable {
             return Err(function_runtime_error_with_hint(
                 "cursor can only scan forward",
                 None,
@@ -3770,15 +3892,106 @@ fn exec_function_fetch_cursor(
                 "55000",
             ));
         }
-        let row = cursor.rows.get(cursor.pos).cloned();
-        if row.is_some() {
-            cursor.pos += 1;
-        }
+        let row = cursor_fetch(cursor, direction);
         (row.into_iter().collect::<Vec<_>>(), cursor.columns.clone())
     };
     assign_query_rows_into_targets(
         &rows, &columns, targets, false, None, false, true, compiled, state, ctx,
     )
+}
+
+fn exec_function_move_cursor(
+    slot: usize,
+    direction: CursorDirection,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+) -> Result<(), ExecError> {
+    let portal_name = cursor_name_for_slot(slot, "", state);
+    let moved = {
+        let cursor = state.cursors.get_mut(&portal_name).ok_or_else(|| {
+            function_runtime_error(
+                &format!("cursor \"{portal_name}\" does not exist"),
+                None,
+                "34000",
+            )
+        })?;
+        if !cursor_direction_is_forward_only(direction) && !cursor.scrollable {
+            return Err(function_runtime_error_with_hint(
+                "cursor can only scan forward",
+                None,
+                Some("Declare it with SCROLL option to enable backward scan.".into()),
+                "55000",
+            ));
+        }
+        cursor_move(cursor, direction)
+    };
+    state.values[compiled.found_slot] = Value::Bool(moved);
+    Ok(())
+}
+
+fn cursor_direction_is_forward_only(direction: CursorDirection) -> bool {
+    matches!(
+        direction,
+        CursorDirection::Next | CursorDirection::Forward(_)
+    )
+}
+
+fn cursor_fetch(cursor: &mut FunctionCursor, direction: CursorDirection) -> Option<Vec<Value>> {
+    let target = cursor_target_position(cursor, direction)?;
+    if target >= 0 && (target as usize) < cursor.rows.len() {
+        cursor.current = target;
+        return cursor.rows.get(target as usize).cloned();
+    }
+    cursor.current = target.clamp(-1, cursor.rows.len() as isize);
+    None
+}
+
+fn cursor_move(cursor: &mut FunctionCursor, direction: CursorDirection) -> bool {
+    match direction {
+        CursorDirection::ForwardAll => {
+            let old = cursor.current;
+            cursor.current = cursor.rows.len() as isize;
+            cursor.current != old
+        }
+        CursorDirection::BackwardAll => {
+            let old = cursor.current;
+            cursor.current = -1;
+            cursor.current != old
+        }
+        _ => {
+            let Some(target) = cursor_target_position(cursor, direction) else {
+                return false;
+            };
+            let clamped = target.clamp(-1, cursor.rows.len() as isize);
+            let moved = clamped != cursor.current;
+            cursor.current = clamped;
+            moved && target >= 0 && (target as usize) < cursor.rows.len()
+        }
+    }
+}
+
+fn cursor_target_position(cursor: &FunctionCursor, direction: CursorDirection) -> Option<isize> {
+    let len = cursor.rows.len() as isize;
+    Some(match direction {
+        CursorDirection::Next => cursor.current + 1,
+        CursorDirection::Prior => cursor.current - 1,
+        CursorDirection::First => 0,
+        CursorDirection::Last => len.checked_sub(1)?,
+        CursorDirection::Forward(count) => cursor.current + count as isize,
+        CursorDirection::Backward(count) => cursor.current - count as isize,
+        CursorDirection::ForwardAll => len,
+        CursorDirection::BackwardAll => -1,
+        CursorDirection::Absolute(index) => {
+            if index > 0 {
+                index as isize - 1
+            } else if index < 0 {
+                len + index as isize
+            } else {
+                -1
+            }
+        }
+        CursorDirection::Relative(count) => cursor.current + count as isize,
+    })
 }
 
 fn exec_function_close_cursor(slot: usize, state: &mut FunctionState) -> Result<(), ExecError> {
@@ -4140,6 +4353,130 @@ fn substitute_dynamic_query_params(
     Ok(out)
 }
 
+fn substitute_declared_cursor_params(
+    sql: &str,
+    params: &[DeclaredCursorParam],
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<String, ExecError> {
+    if params.is_empty() {
+        return Ok(sql.to_string());
+    }
+    let catalog = ctx.catalog.clone().ok_or_else(|| {
+        function_runtime_error(
+            "user-defined functions require executor catalog context",
+            None,
+            "0A000",
+        )
+    })?;
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut idx = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_single {
+            out.push(ch);
+            idx += 1;
+            if ch == '\'' {
+                if bytes.get(idx) == Some(&b'\'') {
+                    out.push('\'');
+                    idx += 1;
+                    continue;
+                }
+                in_single = false;
+            }
+            continue;
+        }
+        if in_double {
+            out.push(ch);
+            idx += 1;
+            if ch == '"' {
+                if bytes.get(idx) == Some(&b'"') {
+                    out.push('"');
+                    idx += 1;
+                    continue;
+                }
+                in_double = false;
+            }
+            continue;
+        }
+        if let Some(tag) = dollar_quote_tag_at(sql, idx) {
+            if let Some(close) = sql[idx + tag.len()..].find(tag) {
+                let end = idx + tag.len() + close + tag.len();
+                out.push_str(&sql[idx..end]);
+                idx = end;
+            } else {
+                out.push_str(&sql[idx..]);
+                break;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => {
+                in_single = true;
+                out.push(ch);
+                idx += 1;
+                continue;
+            }
+            '"' => {
+                in_double = true;
+                out.push(ch);
+                idx += 1;
+                continue;
+            }
+            _ if is_identifier_start(ch) => {
+                let start = idx;
+                idx += 1;
+                while idx < bytes.len() && is_identifier_char(bytes[idx] as char) {
+                    idx += 1;
+                }
+                let ident = &sql[start..idx];
+                if let Some(param_index) = params
+                    .iter()
+                    .position(|param| param.name.eq_ignore_ascii_case(ident))
+                {
+                    let value = values.get(param_index).ok_or_else(|| {
+                        function_runtime_error(
+                            &format!("missing value for cursor parameter \"{ident}\""),
+                            None,
+                            "42P02",
+                        )
+                    })?;
+                    out.push_str(&render_declared_cursor_param_sql(
+                        value,
+                        &params[param_index],
+                        catalog.as_ref(),
+                        ctx,
+                    )?);
+                } else {
+                    out.push_str(ident);
+                }
+                continue;
+            }
+            _ => {}
+        }
+
+        out.push(ch);
+        idx += 1;
+    }
+    Ok(out)
+}
+
+fn render_declared_cursor_param_sql(
+    value: &Value,
+    param: &DeclaredCursorParam,
+    catalog: &dyn CatalogLookup,
+    ctx: &ExecutorContext,
+) -> Result<String, ExecError> {
+    if matches!(value, Value::Null) {
+        return Ok(format!("(null::{})", param.type_name));
+    }
+    render_dynamic_query_param_sql(value, catalog, ctx)
+}
+
 fn render_dynamic_query_param_sql(
     value: &Value,
     catalog: &dyn CatalogLookup,
@@ -4401,6 +4738,10 @@ fn dollar_quote_tag_at(sql: &str, idx: usize) -> Option<&str> {
 
 fn is_identifier_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn is_identifier_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_'
 }
 
 fn current_output_row(
@@ -5063,6 +5404,7 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
         CompiledStmt::GetDiagnostics { .. } => "GET DIAGNOSTICS",
         CompiledStmt::OpenCursor { .. } => "OPEN",
         CompiledStmt::FetchCursor { .. } => "FETCH",
+        CompiledStmt::MoveCursor { .. } => "MOVE",
         CompiledStmt::CloseCursor { .. } => "CLOSE",
         CompiledStmt::UnsupportedTransactionCommand { .. }
         | CompiledStmt::SelectInto { .. }

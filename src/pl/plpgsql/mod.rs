@@ -47,6 +47,7 @@ pub(crate) fn validate_create_function_body_with_options(
     gucs: Option<&HashMap<String, String>>,
 ) -> Result<Vec<PlpgsqlValidationNotice>, ParseError> {
     let block = parse_block(body)?;
+    validate_declared_cursor_arguments(&block)?;
     if !has_output_args {
         let mut notices = Vec::new();
         validate_shadowed_variables(&block, arg_names, gucs, &mut notices)?;
@@ -63,6 +64,171 @@ pub(crate) fn validate_create_function_body_with_options(
     let mut notices = Vec::new();
     validate_shadowed_variables(&block, arg_names, gucs, &mut notices)?;
     Ok(notices)
+}
+
+fn validate_declared_cursor_arguments(block: &Block) -> Result<(), ParseError> {
+    validate_declared_cursor_arguments_in_block(block, &mut Vec::new())
+}
+
+fn validate_declared_cursor_arguments_in_block(
+    block: &Block,
+    scopes: &mut Vec<HashMap<String, Vec<String>>>,
+) -> Result<(), ParseError> {
+    scopes.push(
+        block
+            .declarations
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::Cursor(cursor) => Some((
+                    cursor.name.to_ascii_lowercase(),
+                    cursor
+                        .params
+                        .iter()
+                        .map(|param| param.name.clone())
+                        .collect(),
+                )),
+                _ => None,
+            })
+            .collect(),
+    );
+    for stmt in &block.statements {
+        validate_declared_cursor_arguments_in_stmt(stmt, scopes)?;
+    }
+    for handler in &block.exception_handlers {
+        for stmt in &handler.statements {
+            validate_declared_cursor_arguments_in_stmt(stmt, scopes)?;
+        }
+    }
+    scopes.pop();
+    Ok(())
+}
+
+fn validate_declared_cursor_arguments_in_stmt(
+    stmt: &Stmt,
+    scopes: &mut Vec<HashMap<String, Vec<String>>>,
+) -> Result<(), ParseError> {
+    match stmt {
+        Stmt::WithLine { stmt, .. } => validate_declared_cursor_arguments_in_stmt(stmt, scopes),
+        Stmt::Block(block) => validate_declared_cursor_arguments_in_block(block, scopes),
+        Stmt::If {
+            branches,
+            else_branch,
+        } => {
+            for (_, body) in branches {
+                for stmt in body {
+                    validate_declared_cursor_arguments_in_stmt(stmt, scopes)?;
+                }
+            }
+            for stmt in else_branch {
+                validate_declared_cursor_arguments_in_stmt(stmt, scopes)?;
+            }
+            Ok(())
+        }
+        Stmt::While { body, .. }
+        | Stmt::Loop { body }
+        | Stmt::ForInt { body, .. }
+        | Stmt::ForEach { body, .. } => {
+            for stmt in body {
+                validate_declared_cursor_arguments_in_stmt(stmt, scopes)?;
+            }
+            Ok(())
+        }
+        Stmt::ForQuery { source, body, .. } => {
+            if let ForQuerySource::Cursor { name, args } = source {
+                let params = visible_declared_cursor_params(name, scopes).ok_or_else(|| {
+                    ParseError::DetailedError {
+                        message: "cursor FOR loop must use a bound cursor variable".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42601",
+                    }
+                })?;
+                validate_cursor_arg_list(name, args, params)?;
+            }
+            for stmt in body {
+                validate_declared_cursor_arguments_in_stmt(stmt, scopes)?;
+            }
+            Ok(())
+        }
+        Stmt::OpenCursor { name, source } => {
+            if let OpenCursorSource::Declared { args } = source
+                && let Some(params) = visible_declared_cursor_params(name, scopes)
+            {
+                validate_cursor_arg_list(name, args, params)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn visible_declared_cursor_params<'a>(
+    name: &str,
+    scopes: &'a [HashMap<String, Vec<String>>],
+) -> Option<&'a [String]> {
+    scopes
+        .iter()
+        .rev()
+        .find_map(|scope| scope.get(&name.to_ascii_lowercase()))
+        .map(Vec::as_slice)
+}
+
+fn validate_cursor_arg_list(
+    cursor_name: &str,
+    args: &[CursorArg],
+    params: &[String],
+) -> Result<(), ParseError> {
+    let mut assigned = vec![false; params.len()];
+    for (arg_index, arg) in args.iter().enumerate() {
+        match arg {
+            CursorArg::Positional(_) => {
+                let Some(param_name) = params.get(arg_index) else {
+                    return Err(cursor_arg_error(format!(
+                        "too many arguments for cursor \"{cursor_name}\""
+                    )));
+                };
+                if assigned[arg_index] {
+                    return Err(duplicate_cursor_param_error(cursor_name, param_name));
+                }
+                assigned[arg_index] = true;
+            }
+            CursorArg::Named { name, .. } => {
+                let Some(index) = params
+                    .iter()
+                    .position(|param| param.eq_ignore_ascii_case(name))
+                else {
+                    return Err(cursor_arg_error(format!(
+                        "cursor \"{cursor_name}\" has no argument named \"{name}\""
+                    )));
+                };
+                if assigned[index] {
+                    return Err(duplicate_cursor_param_error(cursor_name, &params[index]));
+                }
+                assigned[index] = true;
+            }
+        }
+    }
+    if assigned.iter().any(|assigned| !assigned) {
+        return Err(cursor_arg_error(format!(
+            "not enough arguments for cursor \"{cursor_name}\""
+        )));
+    }
+    Ok(())
+}
+
+fn duplicate_cursor_param_error(cursor_name: &str, param_name: &str) -> ParseError {
+    cursor_arg_error(format!(
+        "value for parameter \"{param_name}\" of cursor \"{cursor_name}\" specified more than once"
+    ))
+}
+
+fn cursor_arg_error(message: String) -> ParseError {
+    ParseError::DetailedError {
+        message,
+        detail: None,
+        hint: None,
+        sqlstate: "42601",
+    }
 }
 
 fn block_contains_return_expr(block: &Block) -> bool {
@@ -135,8 +301,8 @@ fn validate_shadowed_variables_in_block(
             Decl::Alias(decl) => validate_decl_name_shadow(&decl.name, level, scopes, notices)?,
             Decl::Cursor(decl) => {
                 validate_decl_name_shadow(&decl.name, level, scopes, notices)?;
-                for param_name in &decl.param_names {
-                    validate_decl_name_shadow(param_name, level, scopes, notices)?;
+                for param in &decl.params {
+                    validate_decl_name_shadow(&param.name, level, scopes, notices)?;
                 }
             }
         }
