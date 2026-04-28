@@ -400,6 +400,7 @@ pub enum Statement {
     AlterTableRenameColumn(AlterTableRenameColumnStatement),
     AlterTableRename(AlterTableRenameStatement),
     AlterTableSetSchema(AlterRelationSetSchemaStatement),
+    AlterTableSetTablespace(AlterTableSetTablespaceStatement),
     AlterViewSetSchema(AlterRelationSetSchemaStatement),
     AlterMaterializedViewSetSchema(AlterRelationSetSchemaStatement),
     AlterMaterializedViewSetAccessMethod(AlterMaterializedViewSetAccessMethodStatement),
@@ -456,6 +457,7 @@ pub enum Statement {
     CreateConversion(CreateConversionStatement),
     CreateCollation(CreateCollationStatement),
     CreatePublication(CreatePublicationStatement),
+    CommentOnDatabase(CommentOnDatabaseStatement),
     CommentOnRole(CommentOnRoleStatement),
     GrantObject(GrantObjectStatement),
     RevokeObject(RevokeObjectStatement),
@@ -2574,6 +2576,14 @@ pub struct AlterTableSetStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableSetTablespaceStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub tablespace_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableResetStatement {
     pub if_exists: bool,
     pub only: bool,
@@ -3513,6 +3523,12 @@ pub struct ResetRoleStatement;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnRoleStatement {
     pub role_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnDatabaseStatement {
+    pub database_name: String,
     pub comment: Option<String>,
 }
 

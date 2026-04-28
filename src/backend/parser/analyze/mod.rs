@@ -932,6 +932,10 @@ pub trait CatalogLookup {
         None
     }
 
+    fn current_relation_live_tuples(&self, _relation_oid: u32) -> Option<f64> {
+        None
+    }
+
     fn brin_pages_per_range(&self, _relation_oid: u32) -> Option<u32> {
         None
     }
@@ -1505,6 +1509,34 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn pg_stat_database_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_checkpointer_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_wal_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_slru_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_archiver_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_bgwriter_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_recovery_prefetch_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
     fn pg_stat_all_tables_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
@@ -1585,6 +1617,10 @@ impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
 
     fn current_relation_pages(&self, relation_oid: u32) -> Option<u32> {
         self.inner.current_relation_pages(relation_oid)
+    }
+
+    fn current_relation_live_tuples(&self, relation_oid: u32) -> Option<f64> {
+        self.inner.current_relation_live_tuples(relation_oid)
     }
 
     fn brin_pages_per_range(&self, relation_oid: u32) -> Option<u32> {

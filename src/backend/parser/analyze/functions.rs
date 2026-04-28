@@ -1782,6 +1782,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::TxidCurrent
             | BuiltinScalarFunction::TxidCurrentIfAssigned
             | BuiltinScalarFunction::TxidCurrentSnapshot => args.is_empty(),
+            BuiltinScalarFunction::CurrentSchemas => args.len() == 1,
             BuiltinScalarFunction::TxidSnapshotXmin | BuiltinScalarFunction::TxidSnapshotXmax => {
                 args.len() == 1
             }
@@ -1941,7 +1942,20 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgStatGetCheckpointerStatResetTime
             | BuiltinScalarFunction::PgStatForceNextFlush
             | BuiltinScalarFunction::PgStatGetSnapshotTimestamp
-            | BuiltinScalarFunction::PgStatClearSnapshot => args.is_empty(),
+            | BuiltinScalarFunction::PgStatClearSnapshot
+            | BuiltinScalarFunction::PgStatReset => args.is_empty(),
+            BuiltinScalarFunction::PgStatResetShared
+            | BuiltinScalarFunction::PgStatResetReplicationSlot => args.len() == 1,
+            BuiltinScalarFunction::PgStatResetSlru => matches!(args.len(), 0 | 1),
+            BuiltinScalarFunction::PgStatResetSingleTableCounters
+            | BuiltinScalarFunction::PgStatResetSingleFunctionCounters
+            | BuiltinScalarFunction::PgStatResetBackendStats
+            | BuiltinScalarFunction::PgStatGetBackendPid
+            | BuiltinScalarFunction::PgStatGetBackendWal
+            | BuiltinScalarFunction::PgStatGetReplicationSlot
+            | BuiltinScalarFunction::PgStatGetSubscriptionStats
+            | BuiltinScalarFunction::PgStatResetSubscriptionStats => args.len() == 1,
+            BuiltinScalarFunction::ShobjDescription => args.len() == 2,
             BuiltinScalarFunction::PgStatHaveStats => args.len() == 3,
             BuiltinScalarFunction::PgStatGetNumscans
             | BuiltinScalarFunction::PgStatGetLastscan
@@ -1949,6 +1963,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgStatGetTuplesFetched
             | BuiltinScalarFunction::PgStatGetTuplesInserted
             | BuiltinScalarFunction::PgStatGetTuplesUpdated
+            | BuiltinScalarFunction::PgStatGetTuplesHotUpdated
             | BuiltinScalarFunction::PgStatGetTuplesDeleted
             | BuiltinScalarFunction::PgStatGetLiveTuples
             | BuiltinScalarFunction::PgStatGetDeadTuples
@@ -2523,6 +2538,9 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::CurrentSetting => {
             return Some(SqlType::new(SqlTypeKind::Text));
         }
+        BuiltinScalarFunction::CurrentSchemas => {
+            return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Name)));
+        }
         BuiltinScalarFunction::Extract => {
             return Some(SqlType::new(SqlTypeKind::Numeric));
         }
@@ -2990,6 +3008,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::UuidExtractTimestamp,
         ),
         ("current_database", BuiltinScalarFunction::CurrentDatabase),
+        ("current_schemas", BuiltinScalarFunction::CurrentSchemas),
         ("version", BuiltinScalarFunction::Version),
         ("pgsql_version", BuiltinScalarFunction::Version),
         ("pg_backend_pid", BuiltinScalarFunction::PgBackendPid),
@@ -3101,6 +3120,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("clock_timestamp", BuiltinScalarFunction::ClockTimestamp),
         ("timeofday", BuiltinScalarFunction::TimeOfDay),
         ("pg_sleep", BuiltinScalarFunction::PgSleep),
+        ("pg_sleep_for", BuiltinScalarFunction::PgSleep),
         ("timezone", BuiltinScalarFunction::Timezone),
         ("date_part", BuiltinScalarFunction::DatePart),
         ("extract", BuiltinScalarFunction::Extract),
@@ -3788,6 +3808,49 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_stat_clear_snapshot",
             BuiltinScalarFunction::PgStatClearSnapshot,
         ),
+        (
+            "pg_stat_get_backend_pid",
+            BuiltinScalarFunction::PgStatGetBackendPid,
+        ),
+        (
+            "pg_stat_get_backend_wal",
+            BuiltinScalarFunction::PgStatGetBackendWal,
+        ),
+        ("pg_stat_reset", BuiltinScalarFunction::PgStatReset),
+        (
+            "pg_stat_reset_shared",
+            BuiltinScalarFunction::PgStatResetShared,
+        ),
+        (
+            "pg_stat_reset_single_table_counters",
+            BuiltinScalarFunction::PgStatResetSingleTableCounters,
+        ),
+        (
+            "pg_stat_reset_single_function_counters",
+            BuiltinScalarFunction::PgStatResetSingleFunctionCounters,
+        ),
+        (
+            "pg_stat_reset_backend_stats",
+            BuiltinScalarFunction::PgStatResetBackendStats,
+        ),
+        ("pg_stat_reset_slru", BuiltinScalarFunction::PgStatResetSlru),
+        (
+            "pg_stat_reset_replication_slot",
+            BuiltinScalarFunction::PgStatResetReplicationSlot,
+        ),
+        (
+            "pg_stat_reset_subscription_stats",
+            BuiltinScalarFunction::PgStatResetSubscriptionStats,
+        ),
+        (
+            "pg_stat_get_replication_slot",
+            BuiltinScalarFunction::PgStatGetReplicationSlot,
+        ),
+        (
+            "pg_stat_get_subscription_stats",
+            BuiltinScalarFunction::PgStatGetSubscriptionStats,
+        ),
+        ("shobj_description", BuiltinScalarFunction::ShobjDescription),
         ("pg_stat_have_stats", BuiltinScalarFunction::PgStatHaveStats),
         (
             "pg_stat_get_numscans",
@@ -3812,6 +3875,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_stat_get_tuples_updated",
             BuiltinScalarFunction::PgStatGetTuplesUpdated,
+        ),
+        (
+            "pg_stat_get_tuples_hot_updated",
+            BuiltinScalarFunction::PgStatGetTuplesHotUpdated,
         ),
         (
             "pg_stat_get_tuples_deleted",
@@ -4935,6 +5002,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ClockTimestamp
             | BuiltinScalarFunction::TimeOfDay
             | BuiltinScalarFunction::CurrentDatabase
+            | BuiltinScalarFunction::CurrentSchemas
             | BuiltinScalarFunction::PgBackendPid
             | BuiltinScalarFunction::PgPartitionRoot
             | BuiltinScalarFunction::SatisfiesHashPartition
@@ -5013,6 +5081,19 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgStatGetCheckpointerWriteTime
             | BuiltinScalarFunction::PgStatGetCheckpointerSyncTime
             | BuiltinScalarFunction::PgStatGetCheckpointerStatResetTime
+            | BuiltinScalarFunction::PgStatReset
+            | BuiltinScalarFunction::PgStatResetShared
+            | BuiltinScalarFunction::PgStatResetSingleTableCounters
+            | BuiltinScalarFunction::PgStatResetSingleFunctionCounters
+            | BuiltinScalarFunction::PgStatResetBackendStats
+            | BuiltinScalarFunction::PgStatResetSlru
+            | BuiltinScalarFunction::PgStatResetReplicationSlot
+            | BuiltinScalarFunction::PgStatResetSubscriptionStats
+            | BuiltinScalarFunction::PgStatGetBackendPid
+            | BuiltinScalarFunction::PgStatGetBackendWal
+            | BuiltinScalarFunction::PgStatGetReplicationSlot
+            | BuiltinScalarFunction::PgStatGetSubscriptionStats
+            | BuiltinScalarFunction::ShobjDescription
             | BuiltinScalarFunction::PgRestoreRelationStats
             | BuiltinScalarFunction::PgClearRelationStats
             | BuiltinScalarFunction::PgRestoreAttributeStats

@@ -410,6 +410,12 @@ fn access_method_supports_bitmap_scan(am_oid: u32) -> bool {
         .is_some_and(|routine| routine.amgetbitmap.is_some())
 }
 
+fn brin_partial_bitmap_allowed(index: &BoundIndexRelation, config: PlannerConfig) -> bool {
+    index.index_meta.am_oid != crate::include::catalog::BRIN_AM_OID
+        || index.index_meta.indpred.is_none()
+        || !config.enable_seqscan
+}
+
 #[derive(Debug, Clone)]
 struct BitmapOrFilter {
     arms: Vec<Expr>,
@@ -884,6 +890,7 @@ fn collect_relation_access_paths(
             }
             if config.enable_bitmapscan
                 && access_method_supports_bitmap_scan(index.index_meta.am_oid)
+                && brin_partial_bitmap_allowed(index, config)
             {
                 paths.push(
                     estimate_bitmap_candidate(

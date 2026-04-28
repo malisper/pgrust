@@ -169,7 +169,9 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_depend_row_values)
             .collect(),
-        BootstrapCatalogKind::PgShdepend | BootstrapCatalogKind::PgReplicationOrigin => Vec::new(),
+        BootstrapCatalogKind::PgShdepend
+        | BootstrapCatalogKind::PgShdescription
+        | BootstrapCatalogKind::PgReplicationOrigin => Vec::new(),
         BootstrapCatalogKind::PgInherits => rows
             .inherits
             .iter()

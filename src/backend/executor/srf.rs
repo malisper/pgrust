@@ -15,7 +15,9 @@ use crate::backend::access::index::buildkeys::materialize_heap_row_values;
 use crate::backend::commands::partition::{partition_ancestor_oids, partition_tree_entries};
 use crate::backend::parser::{CatalogLookup, SqlTypeKind};
 use crate::backend::statistics::types::decode_pg_mcv_list_payload;
-use crate::backend::utils::cache::system_views::build_pg_get_publication_tables_rows;
+use crate::backend::utils::cache::system_views::{
+    build_pg_get_publication_tables_rows, build_pg_stat_io_rows,
+};
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::utils::time::datetime::{
     current_timezone_name, days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
@@ -250,6 +252,13 @@ fn execute_native_set_returning_function(
             Value::Interval(IntervalValue::zero()),
             Value::Bool(false),
         ])]),
+        "pg_stat_get_backend_idset" => Some(vec![TupleSlot::virtual_row(vec![Value::Int32(
+            ctx.database
+                .as_ref()
+                .map(|db| db.temp_backend_id(ctx.client_id) as i32)
+                .unwrap_or(ctx.client_id as i32),
+        )])]),
+        "pg_stat_get_backend_io" => Some(eval_pg_stat_get_backend_io(&values, ctx)),
         "pg_tablespace_databases" => Some(eval_pg_tablespace_databases(&values)),
         "pg_get_publication_tables" => Some(eval_pg_get_publication_tables(&values, ctx)?),
         "pg_event_trigger_ddl_commands" => Some(eval_pg_event_trigger_ddl_commands()),
@@ -268,6 +277,29 @@ fn execute_native_set_returning_function(
         }
     };
     Ok(rows)
+}
+
+fn eval_pg_stat_get_backend_io(values: &[Value], ctx: &ExecutorContext) -> Vec<TupleSlot> {
+    let pid = values.first().and_then(|value| match value {
+        Value::Int32(value) => Some(*value),
+        Value::Int64(value) => i32::try_from(*value).ok(),
+        _ => None,
+    });
+    if pid != Some(ctx.client_id as i32) {
+        return Vec::new();
+    }
+    let io = ctx
+        .session_stats
+        .read()
+        .backend_io_entries(crate::backend::utils::activity::default_pg_stat_io_keys());
+    let stats = crate::pgrust::database::DatabaseStatsStore {
+        io,
+        ..crate::pgrust::database::DatabaseStatsStore::default()
+    };
+    build_pg_stat_io_rows(&stats)
+        .into_iter()
+        .map(TupleSlot::virtual_row)
+        .collect()
 }
 
 fn eval_pg_event_trigger_dropped_objects() -> Vec<TupleSlot> {

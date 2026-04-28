@@ -264,6 +264,7 @@ fn execute_statement_with_source(
         }
         Statement::AlterTableRename(_)
         | Statement::AlterTableSetSchema(_)
+        | Statement::AlterTableSetTablespace(_)
         | Statement::AlterTableSetPersistence(_)
         | Statement::AlterIndexRename(_)
         | Statement::AlterIndexAttachPartition(_)
@@ -332,6 +333,10 @@ fn execute_statement_with_source(
                 actual: "ALTER SCHEMA".into(),
             }))
         }
+        Statement::CommentOnDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COMMENT ON DATABASE handled by database/session layer",
+            actual: "COMMENT ON DATABASE".into(),
+        })),
         Statement::CommentOnTable(_) | Statement::CommentOnColumn(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON TABLE handled by database/session layer",
             actual: "COMMENT ON TABLE".into(),
@@ -738,6 +743,7 @@ pub fn execute_readonly_statement_with_config(
         | Statement::AlterTableSet(_)
         | Statement::AlterTableReset(_)
         | Statement::AlterTableSetSchema(_)
+        | Statement::AlterTableSetTablespace(_)
         | Statement::AlterTableRenameColumn(_)
         | Statement::AlterViewRenameColumn(_)
         | Statement::AlterViewSetSchema(_)
@@ -820,6 +826,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::CommentOnConversion(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "COMMENT ON CONVERSION".into(),
+        })),
+        Statement::CommentOnDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "COMMENT ON DATABASE".into(),
         })),
         Statement::CommentOnRole(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

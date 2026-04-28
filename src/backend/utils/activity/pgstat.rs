@@ -62,11 +62,68 @@ impl StatsDelta {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SharedStatsState {
+    pub database_reset: Option<TimestampTzADT>,
+    pub archiver_reset: TimestampTzADT,
+    pub bgwriter_reset: TimestampTzADT,
+    pub checkpointer_reset: TimestampTzADT,
+    pub io_reset: TimestampTzADT,
+    pub recovery_prefetch_reset: TimestampTzADT,
+    pub wal_reset: TimestampTzADT,
+    pub slru_reset: BTreeMap<String, TimestampTzADT>,
+}
+
+impl Default for SharedStatsState {
+    fn default() -> Self {
+        let now = now_timestamptz();
+        Self {
+            database_reset: None,
+            archiver_reset: now,
+            bgwriter_reset: now,
+            checkpointer_reset: now,
+            io_reset: now,
+            recovery_prefetch_reset: now,
+            wal_reset: now,
+            slru_reset: default_slru_reset_times(now),
+        }
+    }
+}
+
+fn default_slru_reset_times(ts: TimestampTzADT) -> BTreeMap<String, TimestampTzADT> {
+    [
+        "commit_timestamp",
+        "multixact_member",
+        "multixact_offset",
+        "notify",
+        "serializable",
+        "subtransaction",
+        "transaction",
+    ]
+    .into_iter()
+    .map(|name| (name.to_string(), ts))
+    .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatabaseStatsStore {
     pub(crate) relations: BTreeMap<u32, RelationStatsEntry>,
     pub(crate) functions: BTreeMap<u32, FunctionStatsEntry>,
     pub(crate) io: BTreeMap<IoStatsKey, IoStatsEntry>,
+    pub(crate) shared: SharedStatsState,
+    pub(crate) database_sessions: i64,
+}
+
+impl Default for DatabaseStatsStore {
+    fn default() -> Self {
+        Self {
+            relations: BTreeMap::new(),
+            functions: BTreeMap::new(),
+            io: BTreeMap::new(),
+            shared: SharedStatsState::default(),
+            database_sessions: 0,
+        }
+    }
 }
 
 impl DatabaseStatsStore {
@@ -82,6 +139,10 @@ impl DatabaseStatsStore {
             );
         }
         store
+    }
+
+    pub(crate) fn record_database_session_start(&mut self) {
+        self.database_sessions += 1;
     }
 
     pub(crate) fn apply_pending_flush(&mut self, pending: &mut StatsDelta) {
@@ -172,6 +233,76 @@ impl DatabaseStatsStore {
         self.functions.remove(&oid);
     }
 
+    pub(crate) fn reset_database(&mut self) {
+        self.relations.clear();
+        self.functions.clear();
+        self.shared.database_reset = Some(now_timestamptz());
+    }
+
+    pub(crate) fn reset_relation(&mut self, oid: u32) {
+        self.relations.remove(&oid);
+    }
+
+    pub(crate) fn reset_function(&mut self, oid: u32) {
+        self.functions.remove(&oid);
+    }
+
+    pub(crate) fn reset_shared(&mut self, target: &str) -> Result<(), String> {
+        let now = now_timestamptz();
+        match target.to_ascii_lowercase().as_str() {
+            "archiver" => self.shared.archiver_reset = now,
+            "bgwriter" => self.shared.bgwriter_reset = now,
+            "checkpointer" => self.shared.checkpointer_reset = now,
+            "io" => {
+                self.io.clear();
+                for key in default_pg_stat_io_keys() {
+                    self.io.insert(
+                        key,
+                        IoStatsEntry {
+                            stats_reset: Some(now),
+                            ..IoStatsEntry::default()
+                        },
+                    );
+                }
+                self.shared.io_reset = now;
+            }
+            "recovery_prefetch" => self.shared.recovery_prefetch_reset = now,
+            "slru" => {
+                for value in self.shared.slru_reset.values_mut() {
+                    *value = now;
+                }
+            }
+            "wal" => self.shared.wal_reset = now,
+            other => return Err(other.to_string()),
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reset_slru(&mut self, target: Option<&str>) {
+        let now = now_timestamptz();
+        if let Some(target) = target {
+            self.shared
+                .slru_reset
+                .insert(target.to_ascii_lowercase(), now);
+        } else {
+            for value in self.shared.slru_reset.values_mut() {
+                *value = now;
+            }
+        }
+    }
+
+    pub(crate) fn apply_global_io_delta(&mut self, key: IoStatsKey, delta: &IoStatsDelta) {
+        self.io.entry(key).or_default().apply_delta(delta);
+    }
+
+    pub(crate) fn wal_write_bytes(&self) -> i64 {
+        self.io
+            .iter()
+            .filter(|(key, _)| key.object == "wal")
+            .map(|(_, entry)| entry.write_bytes)
+            .sum()
+    }
+
     pub(crate) fn report_relation_vacuum(
         &mut self,
         oid: u32,
@@ -210,11 +341,13 @@ pub struct SessionStatsState {
     cache_snapshot: StatsReadCache,
     snapshot_store: Option<DatabaseStatsStore>,
     pub snapshot_timestamp: Option<TimestampTzADT>,
+    pub backend_io: BTreeMap<IoStatsKey, IoStatsEntry>,
     pub relation_xact: BTreeMap<u32, RelationTransactionState>,
     pub function_xact: BTreeMap<u32, FunctionStatsDelta>,
     pub stats_effects: Vec<StatsMutationEffect>,
     pub dropped_relations_in_xact: BTreeSet<u32>,
     pub dropped_functions_in_xact: BTreeSet<u32>,
+    pub relation_have_stats_false_once: BTreeSet<u32>,
     pub xact_active: bool,
     pub(super) call_stack: Vec<FunctionCallFrame>,
 }
@@ -228,11 +361,13 @@ impl Default for SessionStatsState {
             cache_snapshot: StatsReadCache::default(),
             snapshot_store: None,
             snapshot_timestamp: None,
+            backend_io: BTreeMap::new(),
             relation_xact: BTreeMap::new(),
             function_xact: BTreeMap::new(),
             stats_effects: Vec::new(),
             dropped_relations_in_xact: BTreeSet::new(),
             dropped_functions_in_xact: BTreeSet::new(),
+            relation_have_stats_false_once: BTreeSet::new(),
             xact_active: false,
             call_stack: Vec::new(),
         }
@@ -241,6 +376,16 @@ impl Default for SessionStatsState {
 
 impl SessionStatsState {
     pub(crate) fn clear_snapshot(&mut self) {
+        if matches!(self.fetch_consistency, StatsFetchConsistency::Snapshot)
+            && self.snapshot_store.is_some()
+        {
+            self.cache_snapshot = StatsReadCache::default();
+            return;
+        }
+        self.force_clear_snapshot();
+    }
+
+    pub(crate) fn force_clear_snapshot(&mut self) {
         self.cache_snapshot = StatsReadCache::default();
         self.snapshot_store = None;
         self.snapshot_timestamp = None;
@@ -249,7 +394,7 @@ impl SessionStatsState {
     pub(crate) fn set_fetch_consistency(&mut self, fetch_consistency: StatsFetchConsistency) {
         if self.fetch_consistency != fetch_consistency {
             self.fetch_consistency = fetch_consistency;
-            self.clear_snapshot();
+            self.force_clear_snapshot();
         }
     }
 
@@ -360,6 +505,15 @@ impl SessionStatsState {
         oid: u32,
     ) -> bool {
         self.visible_relation_entry(db_stats, oid).is_some()
+    }
+
+    pub(crate) fn note_relation_have_stats_false_once(&mut self, oid: u32) {
+        self.relation_have_stats_false_once.insert(oid);
+        self.clear_snapshot();
+    }
+
+    pub(crate) fn take_relation_have_stats_false_once(&mut self, oid: u32) -> bool {
+        self.relation_have_stats_false_once.remove(&oid)
     }
 
     pub(crate) fn visible_function_entry(
@@ -538,7 +692,35 @@ impl SessionStatsState {
         db_stats
             .write()
             .apply_pending_flush(&mut self.pending_flush);
-        self.clear_snapshot();
+        self.force_clear_snapshot();
+    }
+
+    pub(crate) fn reset_backend_stats(&mut self) {
+        self.backend_io.clear();
+    }
+
+    pub(crate) fn backend_io_entries(
+        &self,
+        keys: impl IntoIterator<Item = IoStatsKey>,
+    ) -> BTreeMap<IoStatsKey, IoStatsEntry> {
+        let now = now_timestamptz();
+        keys.into_iter()
+            .map(|key| {
+                let mut entry = self.backend_io.get(&key).cloned().unwrap_or_default();
+                if entry.stats_reset.is_none() {
+                    entry.stats_reset = Some(now);
+                }
+                (key, entry)
+            })
+            .collect()
+    }
+
+    pub(crate) fn backend_wal_write_bytes(&self) -> i64 {
+        self.backend_io
+            .iter()
+            .filter(|(key, _)| key.object == "wal")
+            .map(|(_, entry)| entry.write_bytes)
+            .sum()
     }
 
     fn ensure_snapshot_started(&mut self, db_stats: &Arc<RwLock<DatabaseStatsStore>>) {

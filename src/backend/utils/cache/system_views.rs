@@ -10,11 +10,11 @@ use crate::backend::utils::cache::system_view_registry::synthetic_system_views;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, INTERNAL_CHAR_TYPE_OID, NAME_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PG_LANGUAGE_INTERNAL_OID, PG_TOAST_NAMESPACE_OID, PUBLISH_GENCOLS_STORED, PgAmRow,
-    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgForeignDataWrapperRow,
-    PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow, PgNamespaceRow, PgPolicyRow,
-    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgUserMappingRow, PolicyCommand,
-    TEXT_TYPE_OID,
+    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgDatabaseRow,
+    PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow,
+    PgNamespaceRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
+    PgUserMappingRow, PolicyCommand, TEXT_TYPE_OID,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::pgrust::database::DatabaseStatsStore;
@@ -1702,7 +1702,7 @@ fn build_pg_stat_tables_rows(
                     Value::Int64(rel_stats.tuples_inserted),
                     Value::Int64(rel_stats.tuples_updated),
                     Value::Int64(rel_stats.tuples_deleted),
-                    Value::Int64(0),
+                    Value::Int64(rel_stats.tuples_hot_updated),
                     Value::Int64(0),
                     Value::Int64(rel_stats.live_tuples),
                     Value::Int64(rel_stats.dead_tuples),
@@ -1848,6 +1848,165 @@ pub(crate) fn build_pg_stat_user_functions_rows(
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
     rows.into_iter().map(|(_, _, row)| row).collect()
+}
+
+pub(crate) fn build_pg_stat_activity_rows(current_pid: i32, datname: &str) -> Vec<Vec<Value>> {
+    vec![
+        vec![
+            Value::Int32(current_pid),
+            Value::Text(datname.to_string().into()),
+            Value::Text("postgres".into()),
+            Value::Text("active".into()),
+            Value::Null,
+            Value::Text(String::new().into()),
+            Value::Text("client backend".into()),
+        ],
+        vec![
+            Value::Int32(0),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Text("checkpointer".into()),
+        ],
+    ]
+}
+
+pub(crate) fn build_pg_stat_database_rows(
+    databases: Vec<PgDatabaseRow>,
+    stats: &DatabaseStatsStore,
+) -> Vec<Vec<Value>> {
+    std::iter::once(None)
+        .chain(databases.into_iter().map(Some))
+        .map(|database| {
+            let (oid, datname) = database
+                .map(|database| (database.oid, Value::Text(database.datname.into())))
+                .unwrap_or((0, Value::Null));
+            vec![
+                Value::Int64(i64::from(oid)),
+                datname,
+                Value::Int32(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Null,
+                Value::Float64(0.0),
+                Value::Float64(0.0),
+                Value::Float64(0.0),
+                Value::Float64(0.0),
+                Value::Float64(0.0),
+                Value::Int64(if oid == 0 { 0 } else { stats.database_sessions }),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                stats
+                    .shared
+                    .database_reset
+                    .map(Value::TimestampTz)
+                    .unwrap_or(Value::Null),
+            ]
+        })
+        .collect()
+}
+
+pub(crate) fn build_pg_stat_archiver_rows(stats: &DatabaseStatsStore) -> Vec<Vec<Value>> {
+    vec![vec![
+        Value::Int64(0),
+        Value::Null,
+        Value::Null,
+        Value::Int64(0),
+        Value::Null,
+        Value::Null,
+        Value::TimestampTz(stats.shared.archiver_reset),
+    ]]
+}
+
+pub(crate) fn build_pg_stat_bgwriter_rows(stats: &DatabaseStatsStore) -> Vec<Vec<Value>> {
+    vec![vec![
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::TimestampTz(stats.shared.bgwriter_reset),
+    ]]
+}
+
+pub(crate) fn build_pg_stat_checkpointer_rows(
+    checkpoint: &crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot,
+    stats: &DatabaseStatsStore,
+) -> Vec<Vec<Value>> {
+    vec![vec![
+        Value::Int64(checkpoint.num_timed as i64),
+        Value::Int64(checkpoint.num_requested as i64),
+        Value::Int64(checkpoint.num_done as i64),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Float64(checkpoint.write_time_ms),
+        Value::Float64(checkpoint.sync_time_ms),
+        Value::Int64(checkpoint.buffers_written as i64),
+        Value::Int64(checkpoint.slru_written as i64),
+        Value::TimestampTz(stats.shared.checkpointer_reset),
+    ]]
+}
+
+pub(crate) fn build_pg_stat_wal_rows(stats: &DatabaseStatsStore) -> Vec<Vec<Value>> {
+    vec![vec![
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int64(stats.wal_write_bytes()),
+        Value::Int64(0),
+        Value::TimestampTz(stats.shared.wal_reset),
+    ]]
+}
+
+pub(crate) fn build_pg_stat_slru_rows(stats: &DatabaseStatsStore) -> Vec<Vec<Value>> {
+    stats
+        .shared
+        .slru_reset
+        .iter()
+        .map(|(name, reset)| {
+            vec![
+                Value::Text(name.clone().into()),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::TimestampTz(*reset),
+            ]
+        })
+        .collect()
+}
+
+pub(crate) fn build_pg_stat_recovery_prefetch_rows(stats: &DatabaseStatsStore) -> Vec<Vec<Value>> {
+    vec![vec![
+        Value::TimestampTz(stats.shared.recovery_prefetch_reset),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int32(0),
+        Value::Int32(0),
+        Value::Int32(0),
+    ]]
 }
 
 pub(crate) fn build_pg_user_mappings_rows(

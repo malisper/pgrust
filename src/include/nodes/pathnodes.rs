@@ -38,6 +38,9 @@ pub struct PlannerConfig {
     pub enable_indexonlyscan: bool,
     pub enable_bitmapscan: bool,
     pub retain_partial_index_filters: bool,
+    pub enable_nestloop: bool,
+    pub enable_mergejoin: bool,
+    pub enable_hashjoin: bool,
     pub enable_hashagg: bool,
     pub enable_sort: bool,
 }
@@ -51,6 +54,9 @@ impl Default for PlannerConfig {
             enable_indexonlyscan: true,
             enable_bitmapscan: true,
             retain_partial_index_filters: false,
+            enable_nestloop: true,
+            enable_mergejoin: true,
+            enable_hashjoin: true,
             enable_hashagg: true,
             enable_sort: true,
         }
