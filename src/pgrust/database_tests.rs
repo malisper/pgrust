@@ -1029,6 +1029,95 @@ fn sql_set_returning_function_accepts_values_body() {
 }
 
 #[test]
+fn sql_function_accepts_with_body() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table sql_fn_with_body (c text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into sql_fn_with_body values ('a'), ('b')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function sql_fn_with_body()
+             returns setof sql_fn_with_body
+             stable language sql
+             as $$ with cte as (select * from sql_fn_with_body) select * from cte $$",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select * from sql_fn_with_body() order by c"
+        ),
+        vec![vec![Value::Text("a".into())], vec![Value::Text("b".into())],]
+    );
+}
+
+#[test]
+fn sql_function_accepts_begin_atomic_body() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function sql_fn_begin_atomic(value text) returns text
+             begin atomic
+               select value || '_ok';
+             end",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select sql_fn_begin_atomic('body')"),
+        vec![vec![Value::Text("body_ok".into())]]
+    );
+}
+
+#[test]
+fn sql_function_set_config_updates_current_statement_guc() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function sql_fn_set_config(value text) returns text
+             begin atomic
+               select set_config('custom.sqlfunc.test', value, true)
+                      || ':' || current_setting('custom.sqlfunc.test');
+             end",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select sql_fn_set_config('body')"),
+        vec![vec![Value::Text("body:body".into())]]
+    );
+}
+
+#[test]
+fn set_config_row_security_returns_postgres_bool_text() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select set_config('row_security', 'false', true)"
+        ),
+        vec![vec![Value::Text("off".into())]]
+    );
+}
+
+#[test]
 fn sql_function_from_item_resolves_qualified_utility_function() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
@@ -33676,6 +33765,9 @@ fn custom_gucs_can_be_set_reset_and_reject_invalid_names() {
         session_query_rows(&mut session, &db, "show custom.my_guc"),
         vec![vec![Value::Text("".into())]]
     );
+    session
+        .execute(&db, "reset custom.previously_unknown_guc")
+        .unwrap();
 
     match session.execute(&db, "set custom.\"bad-guc\" = 1") {
         Err(ExecError::DetailedError {

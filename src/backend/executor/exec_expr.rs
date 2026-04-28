@@ -2345,6 +2345,84 @@ fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecE
     )))
 }
 
+fn eval_set_config(values: &[Value], ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
+    let (name, new_value, _is_local) = match values {
+        [Value::Null, _, _] => {
+            return Err(ExecError::DetailedError {
+                message: "SET requires parameter name".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "22004",
+            });
+        }
+        [Value::Text(name), Value::Null, Value::Bool(is_local)] => {
+            (normalize_guc_name(name), None, *is_local)
+        }
+        [Value::Text(name), Value::Null, Value::Null] => (normalize_guc_name(name), None, false),
+        [Value::Text(name), Value::Text(value), Value::Bool(is_local)] => {
+            (normalize_guc_name(name), Some(value.to_string()), *is_local)
+        }
+        [Value::Text(name), Value::Text(value), Value::Null] => {
+            (normalize_guc_name(name), Some(value.to_string()), false)
+        }
+        [Value::Text(_), other, _] => {
+            return Err(ExecError::TypeMismatch {
+                op: "set_config",
+                left: other.clone(),
+                right: Value::Text("".into()),
+            });
+        }
+        [other, _, _] => {
+            return Err(ExecError::TypeMismatch {
+                op: "set_config",
+                left: other.clone(),
+                right: Value::Text("".into()),
+            });
+        }
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "set_config(name, value, is_local)",
+                actual: format!("SetConfig({} args)", values.len()),
+            }));
+        }
+    };
+
+    match new_value {
+        Some(value) => {
+            let stored_value = normalize_set_config_value(&name, &value)?;
+            ctx.gucs.insert(name.clone(), stored_value.clone());
+            if name == "row_security"
+                && let Some(db) = &ctx.database
+            {
+                db.install_row_security_enabled(ctx.client_id, stored_value == "on");
+                db.plan_cache.invalidate_all();
+            }
+            Ok(Value::Text(stored_value.into()))
+        }
+        None => {
+            ctx.gucs.remove(&name);
+            Ok(Value::Text(String::new().into()))
+        }
+    }
+}
+
+fn normalize_set_config_value(name: &str, value: &str) -> Result<String, ExecError> {
+    match name {
+        "row_security" => parse_bool_config_value(value)
+            .map(|enabled| if enabled { "on" } else { "off" }.to_string())
+            .ok_or_else(|| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))),
+        _ => Ok(value.to_string()),
+    }
+}
+
+fn parse_bool_config_value(value: &str) -> Option<bool> {
+    match normalize_guc_name(value).as_str() {
+        "on" | "true" | "yes" | "1" | "t" => Some(true),
+        "off" | "false" | "no" | "0" | "f" => Some(false),
+        _ => None,
+    }
+}
+
 fn eval_pg_settings_get_flags(values: &[Value]) -> Result<Value, ExecError> {
     let name = match values {
         [Value::Text(name)] => normalize_guc_name(name),
@@ -2804,6 +2882,7 @@ fn ensure_builtin_side_effects_allowed(
         func,
         BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::SetVal
+            | BuiltinScalarFunction::SetConfig
             | BuiltinScalarFunction::PgNotify
             | BuiltinScalarFunction::LoCreate
             | BuiltinScalarFunction::LoUnlink
@@ -2830,6 +2909,7 @@ fn ensure_builtin_side_effects_allowed(
                 match func {
                     BuiltinScalarFunction::NextVal => "nextval",
                     BuiltinScalarFunction::SetVal => "setval",
+                    BuiltinScalarFunction::SetConfig => "set_config",
                     BuiltinScalarFunction::PgNotify => "pg_notify",
                     BuiltinScalarFunction::LoCreate => "lo_create",
                     BuiltinScalarFunction::LoUnlink => "lo_unlink",
@@ -9086,6 +9166,12 @@ fn eval_plpgsql_builtin_function(
             execute_builtin_scalar_function_value_call(func, &values)
         }
         BuiltinScalarFunction::CurrentSetting => eval_current_setting_without_context(&values),
+        BuiltinScalarFunction::SetConfig => Err(ExecError::DetailedError {
+            message: "set_config requires executor context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        }),
         BuiltinScalarFunction::PgSettingsGetFlags => eval_pg_settings_get_flags(&values),
         BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
         BuiltinScalarFunction::PgColumnToastChunkId => {
@@ -11143,6 +11229,7 @@ pub(crate) fn eval_builtin_function(
             Ok(Value::Bool(true))
         }
         BuiltinScalarFunction::CurrentSetting => eval_current_setting(&values, ctx),
+        BuiltinScalarFunction::SetConfig => eval_set_config(&values, ctx),
         BuiltinScalarFunction::PgSettingsGetFlags => eval_pg_settings_get_flags(&values),
         BuiltinScalarFunction::PgNotify => unreachable!("pg_notify handled earlier"),
         BuiltinScalarFunction::PgNotificationQueueUsage => {

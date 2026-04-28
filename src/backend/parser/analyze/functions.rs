@@ -2269,6 +2269,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgRustTestInt44Out => args.len() == 1,
             BuiltinScalarFunction::PgRustTestPtInWidget => args.len() == 2,
             BuiltinScalarFunction::CurrentSetting => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::SetConfig => args.len() == 3,
             BuiltinScalarFunction::PgSettingsGetFlags => args.len() == 1,
             BuiltinScalarFunction::AmValidate | BuiltinScalarFunction::BtEqualImage => {
                 args.len() == 1
@@ -2962,7 +2963,7 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::TsRank | BuiltinScalarFunction::TsRankCd => {
             return Some(SqlType::new(SqlTypeKind::Float4));
         }
-        BuiltinScalarFunction::CurrentSetting => {
+        BuiltinScalarFunction::CurrentSetting | BuiltinScalarFunction::SetConfig => {
             return Some(SqlType::new(SqlTypeKind::Text));
         }
         BuiltinScalarFunction::CurrentSchemas => {
@@ -3702,6 +3703,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgNotificationQueueUsage,
         ),
         ("current_setting", BuiltinScalarFunction::CurrentSetting),
+        ("set_config", BuiltinScalarFunction::SetConfig),
         (
             "pg_column_compression",
             BuiltinScalarFunction::PgColumnCompression,

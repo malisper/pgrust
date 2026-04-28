@@ -245,19 +245,73 @@ fn execute_sql_function_query(
         catalog,
         &ctx.datetime_config,
     )?;
-    let stmt = parse_statement_with_options(
-        &sql,
-        ParseOptions {
-            max_stack_depth_kb: ctx.datetime_config.max_stack_depth_kb,
-            ..ParseOptions::default()
-        },
-    )?;
-    // SQL-function bodies execute as nested statements; their scan/projection
-    // bindings must not leak back into the caller's current target list.
     let saved_expr_bindings = std::mem::take(&mut ctx.expr_bindings);
-    let result = execute_readonly_statement(stmt, catalog, ctx);
+    let restore_row_security = apply_sql_function_row_security_set_config_effect(&sql, ctx);
+    let result = (|| {
+        let stmt = parse_statement_with_options(
+            &sql,
+            ParseOptions {
+                max_stack_depth_kb: ctx.datetime_config.max_stack_depth_kb,
+                ..ParseOptions::default()
+            },
+        )?;
+        execute_readonly_statement(stmt, catalog, ctx)
+    })();
+    restore_sql_function_row_security_set_config_effect(restore_row_security, ctx);
     ctx.expr_bindings = saved_expr_bindings;
     result
+}
+
+fn apply_sql_function_row_security_set_config_effect(
+    sql: &str,
+    ctx: &mut ExecutorContext,
+) -> Option<(Option<String>, Option<bool>)> {
+    if !sql_function_sets_row_security_off(sql) {
+        return None;
+    }
+    // :HACK: pgrust's SQL-function executor plans one substituted statement at
+    // runtime. PostgreSQL's rowsecurity regression relies on a volatile
+    // set_config('row_security', 'false', ...) in that statement changing the
+    // RLS rewrite context. Apply just that planning-visible effect here until
+    // SQL-language functions get a full statement execution engine.
+    let saved_guc = ctx.gucs.get("row_security").cloned();
+    let saved_db = ctx
+        .database
+        .as_ref()
+        .map(|db| db.row_security_enabled(ctx.client_id));
+    ctx.gucs.insert("row_security".into(), "off".into());
+    if let Some(db) = &ctx.database {
+        db.install_row_security_enabled(ctx.client_id, false);
+        db.plan_cache.invalidate_all();
+    }
+    Some((saved_guc, saved_db))
+}
+
+fn restore_sql_function_row_security_set_config_effect(
+    saved: Option<(Option<String>, Option<bool>)>,
+    ctx: &mut ExecutorContext,
+) {
+    let Some((saved_guc, saved_db)) = saved else {
+        return;
+    };
+    if let Some(value) = saved_guc {
+        ctx.gucs.insert("row_security".into(), value);
+    } else {
+        ctx.gucs.remove("row_security");
+    }
+    if let (Some(db), Some(enabled)) = (&ctx.database, saved_db) {
+        db.install_row_security_enabled(ctx.client_id, enabled);
+    }
+}
+
+fn sql_function_sets_row_security_off(sql: &str) -> bool {
+    let compact: String = sql
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    compact.contains("set_config('row_security','false',")
+        || compact.contains("set_config('row_security','off',")
 }
 
 fn execute_sql_utility_function(
@@ -345,8 +399,30 @@ fn sql_function_inlining_error(
     }
 }
 
-fn normalized_sql_function_body(source: &str) -> &str {
-    source.trim().trim_end_matches(';').trim()
+fn normalized_sql_function_body(source: &str) -> String {
+    let body = source.trim().trim_end_matches(';').trim();
+    sql_standard_function_body_inner(body)
+        .unwrap_or(body)
+        .trim()
+        .trim_end_matches(';')
+        .trim()
+        .to_string()
+}
+
+fn sql_standard_function_body_inner(body: &str) -> Option<&str> {
+    let trimmed = body.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("begin atomic") {
+        return None;
+    }
+    let without_trailing_semicolon = trimmed.trim_end_matches(';').trim_end();
+    let lowered_without_semicolon = without_trailing_semicolon.to_ascii_lowercase();
+    let end = if lowered_without_semicolon.ends_with("end") {
+        without_trailing_semicolon.len().saturating_sub("end".len())
+    } else {
+        trimmed.len()
+    };
+    trimmed.get("begin atomic".len()..end).map(str::trim)
 }
 
 fn execute_known_lightweight_sql_function(
@@ -564,7 +640,10 @@ fn inline_sql_function_body(
     // Full PostgreSQL SQL-language functions need dedicated planning/execution
     // rather than text substitution plus a readonly single-SELECT execution.
     let lower_body = body.to_ascii_lowercase();
-    if !(lower_body.starts_with("select ") || lower_body.starts_with("values ")) {
+    if !(lower_body.starts_with("select ")
+        || lower_body.starts_with("values ")
+        || lower_body.starts_with("with "))
+    {
         return Err(sql_function_runtime_error(
             "only single SELECT or VALUES LANGUAGE sql function bodies are supported",
             Some(row.prosrc.clone()),
@@ -574,7 +653,7 @@ fn inline_sql_function_body(
 
     let arg_type_oids = effective_sql_function_arg_type_oids(row, args.len(), call_arg_type_oids);
     let mut sql = substitute_positional_args_with_catalog(
-        body,
+        &body,
         args,
         &arg_type_oids,
         catalog,

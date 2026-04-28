@@ -5064,6 +5064,7 @@ fn split_simple_query_statements(sql: &str, standard_conforming_strings: bool) -
     let mut double_quote = false;
     let mut line_comment = false;
     let mut dollar_quote: Option<String> = None;
+    let mut sql_function_atomic_body = false;
 
     while i < bytes.len() {
         if line_comment {
@@ -5168,8 +5169,26 @@ fn split_simple_query_statements(sql: &str, standard_conforming_strings: bool) -
             i += 1;
             continue;
         }
+        if paren_depth == 0
+            && !sql_function_atomic_body
+            && simple_query_keyword_at(sql, i, "begin").is_some()
+            && simple_query_current_statement_is_create_function(sql, start, i)
+        {
+            let begin_end = simple_query_keyword_at(sql, i, "begin").unwrap_or(i);
+            let atomic_start = simple_query_skip_whitespace(sql, begin_end);
+            if simple_query_keyword_at(sql, atomic_start, "atomic").is_some() {
+                sql_function_atomic_body = true;
+            }
+        }
         if bytes[i] == b';' && paren_depth == 0 {
+            if sql_function_atomic_body
+                && !simple_query_prefix_ends_with_keyword(&sql[start..i], "end")
+            {
+                i += 1;
+                continue;
+            }
             statements.push(&sql[start..=i]);
+            sql_function_atomic_body = false;
             start = i + 1;
         }
         i += 1;
@@ -5179,6 +5198,54 @@ fn split_simple_query_statements(sql: &str, standard_conforming_strings: bool) -
         statements.push(&sql[start..]);
     }
     statements
+}
+
+fn simple_query_current_statement_is_create_function(
+    sql: &str,
+    start: usize,
+    keyword_pos: usize,
+) -> bool {
+    let prefix = sql[start..keyword_pos].trim_start().to_ascii_lowercase();
+    prefix.starts_with("create function ") || prefix.starts_with("create or replace function ")
+}
+
+fn simple_query_keyword_at(sql: &str, pos: usize, keyword: &str) -> Option<usize> {
+    let end = pos.checked_add(keyword.len())?;
+    let candidate = sql.get(pos..end)?;
+    if !candidate.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let bytes = sql.as_bytes();
+    if pos > 0 && simple_query_ident_byte(bytes[pos - 1]) {
+        return None;
+    }
+    if end < bytes.len() && simple_query_ident_byte(bytes[end]) {
+        return None;
+    }
+    Some(end)
+}
+
+fn simple_query_skip_whitespace(sql: &str, mut pos: usize) -> usize {
+    let bytes = sql.as_bytes();
+    while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+    pos
+}
+
+fn simple_query_prefix_ends_with_keyword(prefix: &str, keyword: &str) -> bool {
+    let trimmed = prefix.trim_end();
+    let Some(start) = trimmed.len().checked_sub(keyword.len()) else {
+        return false;
+    };
+    if !trimmed[start..].eq_ignore_ascii_case(keyword) {
+        return false;
+    }
+    start == 0 || !simple_query_ident_byte(trimmed.as_bytes()[start - 1])
+}
+
+fn simple_query_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
 }
 
 fn role_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
@@ -14643,6 +14710,20 @@ ORDER BY 1, 2;";
             split_simple_query_statements(sql, true),
             vec![
                 "create rule r as on update to widgets do also (\n    update other set id = new.id where id = old.id;\n    delete from audit where id = old.id\n);",
+                "\nselect 1;",
+                "\n",
+            ]
+        );
+    }
+
+    #[test]
+    fn split_simple_query_statements_keeps_sql_standard_function_body_together() {
+        let sql = "create function f(text) returns text\nbegin atomic\n select $1 || ';';\nend;\nselect 1;\n";
+
+        assert_eq!(
+            split_simple_query_statements(sql, true),
+            vec![
+                "create function f(text) returns text\nbegin atomic\n select $1 || ';';\nend;",
                 "\nselect 1;",
                 "\n",
             ]

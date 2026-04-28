@@ -509,6 +509,7 @@ pub enum BuiltinScalarFunction {
     PgRustIsCatalogTextUniqueIndexOid,
     PgRustTablesampleBernoulli,
     CurrentSetting,
+    SetConfig,
     PgSettingsGetFlags,
     PgNotify,
     PgNotificationQueueUsage,

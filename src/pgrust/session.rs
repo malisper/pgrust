@@ -11738,9 +11738,12 @@ impl Session {
             let normalized = normalize_guc_name(name);
             let is_builtin = is_postgres_guc(&normalized);
             if !is_builtin && !self.gucs.contains_key(&normalized) {
-                return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
-                    normalized,
-                )));
+                if !normalized.contains('.') {
+                    return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
+                        normalized,
+                    )));
+                }
+                validate_custom_guc_for_set(&normalized, self.plpgsql_loaded)?;
             }
             if is_builtin && (is_checkpoint_guc(&normalized) || is_autovacuum_guc(&normalized)) {
                 return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(

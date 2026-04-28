@@ -218,6 +218,24 @@ EXPLAIN DELETE bucket:
 - Added a focused test covering `ONLY` and inherited DELETE plan rendering with
   RLS filters.
 - Focused EXPLAIN DELETE test passed.
+
+SQL function/GUC bucket:
+- SQL-language functions now accept single-statement `WITH` bodies and
+  SQL-standard `BEGIN ATOMIC ... END` bodies.
+- The simple-query splitter keeps `CREATE FUNCTION ... BEGIN ATOMIC ... END;`
+  together instead of executing the inner `END;` as a transaction command.
+- Added `set_config(text, text, bool)` as a volatile builtin for the
+  rowsecurity paths, including PostgreSQL-style `row_security` bool display
+  (`off`/`on`) and a narrow SQL-function planning shim for
+  `set_config('row_security', 'false', ...)`.
+- `RESET custom.name` now accepts valid custom GUC placeholders even when the
+  setting only came from the SQL-function path.
+- Focused SQL-function, simple-query splitting, custom GUC, and `row_security`
+  tests passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result:
+  `697/774` matched, `77` mismatches, `1225` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.
 - Latest rowsecurity regression result with a 300s file timeout:
   `677/774` matched, `97` mismatches, `1825` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
@@ -449,3 +467,24 @@ UPDATE FROM source-RLS bucket:
   `/tmp/diffs/rowsecurity.diff`.
 - Remaining UPDATE FROM gaps include target-side RLS in some joined-input plan
   shapes, join algorithm/order differences, and EXPLAIN formatting.
+
+SQL function/GUC follow-up bucket:
+- SQL-language functions now accept single-statement `WITH` bodies and
+  SQL-standard `BEGIN ATOMIC ... END` bodies.
+- The simple-query splitter keeps `CREATE FUNCTION ... BEGIN ATOMIC ... END;`
+  together instead of executing the inner `END;` as a transaction command.
+- Added `set_config(text, text, bool)` as a volatile builtin for the
+  rowsecurity SQL-function paths, including PostgreSQL-style `row_security`
+  bool display (`off`/`on`) and a narrow SQL-function planning shim for
+  `set_config('row_security', 'false', ...)`.
+- `RESET custom.name` now accepts valid custom GUC placeholders even when the
+  setting only came from the SQL-function path.
+- Focused SQL-function, simple-query splitting, custom GUC, and `row_security`
+  tests passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result:
+  `697/774` matched, `77` mismatches, `1225` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.
+- Remaining in this area: the final `DROP SCHEMA` cascade count still differs
+  because earlier recursive-policy views are not created, not because of the
+  SQL-function/set_config block.
