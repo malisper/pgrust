@@ -1925,29 +1925,15 @@ fn analyze_join_using_creates_join_rte_alias_vars() {
             assert_eq!(*joinmergedcols, 1);
             assert_eq!(joinleftcols, &vec![1, 2, 3]);
             assert_eq!(joinrightcols, &vec![1, 2]);
-            match &joinaliasvars[0] {
-                Expr::Coalesce(left, right) => {
-                    assert_eq!(
-                        left.as_ref(),
-                        &Expr::Var(Var {
-                            varno: 1,
-                            varattno: 1,
-                            varlevelsup: 0,
-                            vartype: SqlType::new(SqlTypeKind::Int4),
-                        })
-                    );
-                    assert_eq!(
-                        right.as_ref(),
-                        &Expr::Var(Var {
-                            varno: 2,
-                            varattno: 1,
-                            varlevelsup: 0,
-                            vartype: SqlType::new(SqlTypeKind::Int4),
-                        })
-                    );
-                }
-                other => panic!("expected merged join alias expr, got {other:?}"),
-            }
+            assert_eq!(
+                joinaliasvars[0],
+                Expr::Var(Var {
+                    varno: 1,
+                    varattno: 1,
+                    varlevelsup: 0,
+                    vartype: SqlType::new(SqlTypeKind::Int4),
+                })
+            );
         }
         other => panic!("expected join rte, got {other:?}"),
     }
