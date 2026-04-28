@@ -209,3 +209,15 @@ TABLESAMPLE bucket:
 - Latest rowsecurity regression result with a 300s file timeout:
   `675/774` matched, `99` mismatches, `1854` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+EXPLAIN DELETE bucket:
+- Added `EXPLAIN DELETE` support for direct heap/index target scans and inherited
+  target append plans, including RLS/user filter display.
+- Reuses the auto-updatable view DELETE rewrite before rendering so view DELETE
+  plans are at least based on the rewritten target relation.
+- Added a focused test covering `ONLY` and inherited DELETE plan rendering with
+  RLS filters.
+- Focused EXPLAIN DELETE test passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `677/774` matched, `97` mismatches, `1825` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.

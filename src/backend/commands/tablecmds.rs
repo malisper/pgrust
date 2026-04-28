@@ -34,7 +34,8 @@ use crate::backend::parser::{
     SqlTypeKind, Statement, TableAsObjectType, TruncateTableStatement, UpdateStatement,
     VacuumStatement, bind_create_table, bind_delete, bind_expr_with_outer_and_ctes,
     bind_generated_expr, bind_insert, bind_referenced_by_foreign_keys, bind_relation_constraints,
-    bind_scalar_expr_in_scope, bind_update, parse_expr, scope_for_relation,
+    bind_scalar_expr_in_scope, bind_update, parse_expr, rewrite_bound_delete_auto_view_target,
+    scope_for_relation,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -825,7 +826,10 @@ fn execute_explain_delete(
         )));
     }
 
-    let bound = finalize_bound_delete_stmt(bind_delete(&stmt, catalog)?, catalog);
+    let bound = bind_delete(&stmt, catalog)?;
+    let bound = rewrite_bound_delete_auto_view_target(bound, catalog)
+        .map_err(|err| ExecError::Parse(ParseError::FeatureNotSupported(format!("{err:?}"))))?;
+    let bound = finalize_bound_delete_stmt(bound, catalog);
     let lines = explain_delete_lines(&stmt, &bound, catalog, costs, verbose);
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("QUERY PLAN")],
@@ -914,12 +918,21 @@ fn explain_delete_lines(
     push_explain_line(
         &format!(
             "Delete on {}",
-            explain_update_target_name(&stmt.table_name, verbose)
+            explain_delete_target_name(stmt, bound, verbose)
         ),
         crate::include::nodes::plannodes::PlanEstimate::default(),
         show_costs,
         &mut lines,
     );
+    if verbose && !bound.returning.is_empty() {
+        lines.push(format!(
+            "  Output: {}",
+            render_delete_returning_targets(
+                &explain_delete_target_name(stmt, bound, false),
+                &bound.returning
+            )
+        ));
+    }
     let child_targets = bound
         .targets
         .iter()
@@ -977,6 +990,31 @@ fn explain_delete_lines(
         push_delete_target_scan_lines(stmt, &live_targets, show_costs, 2, &mut lines);
     }
     lines
+}
+
+fn explain_delete_target_name(
+    stmt: &DeleteStatement,
+    bound: &BoundDeleteStatement,
+    verbose: bool,
+) -> String {
+    let name = if bound.targets.len() == 1 {
+        bound
+            .targets
+            .first()
+            .map(|target| target.relation_name.as_str())
+            .unwrap_or(stmt.table_name.as_str())
+    } else {
+        stmt.table_name.as_str()
+    };
+    explain_update_target_name(name, verbose)
+}
+
+fn render_delete_returning_targets(target_name: &str, returning: &[TargetEntry]) -> String {
+    returning
+        .iter()
+        .map(|target| format!("{target_name}.{}", target.name))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn delete_explain_subplan_without_target_filter(plan: &Plan) -> &Plan {

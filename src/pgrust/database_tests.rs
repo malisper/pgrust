@@ -2384,6 +2384,16 @@ fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Ve
     }
 }
 
+fn query_text_column(session: &mut Session, db: &Database, sql: &str) -> Vec<String> {
+    session_query_rows(session, db, sql)
+        .into_iter()
+        .map(|row| match row.first() {
+            Some(Value::Text(text)) => text.to_string(),
+            other => panic!("expected text row, got {other:?}"),
+        })
+        .collect()
+}
+
 fn assert_sqlstate(err: ExecError, expected_sqlstate: &str, expected_message_part: &str) {
     match err {
         ExecError::DetailedError {
@@ -43567,6 +43577,108 @@ fn explain_insert_select_shows_rewritten_source_plan() {
     assert!(
         lines.iter().any(|line| line.contains("(a % 2) = 0")),
         "expected source RLS filter under insert, got {lines:?}"
+    );
+}
+
+#[test]
+fn explain_delete_shows_target_scans_with_rls_filters() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut app = Session::new(2);
+
+    owner
+        .execute(&db, "create role delete_owner nologin")
+        .unwrap();
+    owner
+        .execute(&db, "create role delete_app nologin")
+        .unwrap();
+    owner
+        .execute(&db, "set session authorization delete_owner")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table delete_parent (id int4 primary key, a int4, b text)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table delete_child (extra int4) inherits (delete_parent)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into delete_parent values (1, 1, 'one'), (2, 2, 'two')",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into delete_child(id, a, b, extra) values (3, 3, 'three', 30), (4, 4, 'four', 40)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "grant all on delete_parent, delete_child to delete_app",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy delete_even on delete_parent using (a % 2 = 0)",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "alter table delete_parent enable row level security")
+        .unwrap();
+
+    app.execute(&db, "set session authorization delete_app")
+        .unwrap();
+    let only_lines = query_text_column(
+        &mut app,
+        &db,
+        "explain (costs off) delete from only delete_parent where b <> 'skip'",
+    );
+    assert_eq!(
+        only_lines.first().map(String::as_str),
+        Some("Delete on delete_parent")
+    );
+    assert!(
+        only_lines
+            .iter()
+            .any(|line| line.trim() == "->  Seq Scan on delete_parent"),
+        "expected parent scan, got {only_lines:?}"
+    );
+    assert!(
+        only_lines
+            .iter()
+            .any(|line| line.contains("(a % 2) = 0") && line.contains("b <> 'skip'::text")),
+        "expected RLS and user filter, got {only_lines:?}"
+    );
+
+    let inherited_lines = query_text_column(
+        &mut app,
+        &db,
+        "explain (costs off) delete from delete_parent where b <> 'skip'",
+    );
+    assert!(
+        inherited_lines.iter().any(|line| line == "  ->  Append"),
+        "expected append, got {inherited_lines:?}"
+    );
+    assert!(
+        inherited_lines
+            .iter()
+            .any(|line| line.trim() == "Delete on delete_parent delete_parent_1"),
+        "expected parent delete child label, got {inherited_lines:?}"
+    );
+    assert!(
+        inherited_lines
+            .iter()
+            .any(|line| line.trim() == "->  Seq Scan on delete_child delete_parent_2"),
+        "expected inherited child scan, got {inherited_lines:?}"
     );
 }
 
