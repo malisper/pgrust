@@ -7526,7 +7526,7 @@ fn create_index_on_partitioned_table_builds_index_tree() {
         query_rows(
             &db,
             1,
-            "select relname, relkind::text, relhassubclass \
+            "select relname, relkind::text, relispartition, relhassubclass \
                from pg_class \
               where relname in ('idxpart_a_idx', 'idxpart1_a_idx', 'idxpart2_a_idx', 'idxpart2a_a_idx') \
               order by relname",
@@ -7535,21 +7535,25 @@ fn create_index_on_partitioned_table_builds_index_tree() {
             vec![
                 Value::Text("idxpart1_a_idx".into()),
                 Value::Text("i".into()),
+                Value::Bool(true),
                 Value::Bool(false),
             ],
             vec![
                 Value::Text("idxpart2_a_idx".into()),
                 Value::Text("I".into()),
                 Value::Bool(true),
+                Value::Bool(true),
             ],
             vec![
                 Value::Text("idxpart2a_a_idx".into()),
                 Value::Text("i".into()),
+                Value::Bool(true),
                 Value::Bool(false),
             ],
             vec![
                 Value::Text("idxpart_a_idx".into()),
                 Value::Text("I".into()),
+                Value::Bool(false),
                 Value::Bool(true),
             ],
         ]
@@ -7578,6 +7582,61 @@ fn create_index_on_partitioned_table_builds_index_tree() {
                 Value::Text("idxpart2_a_idx".into()),
                 Value::Text("idxpart_a_idx".into()),
             ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_partition_root('idxpart2a_a_idx')::regclass::text",
+        ),
+        vec![vec![Value::Text("idxpart_a_idx".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relid::regclass::text, parentrelid::regclass::text, level, isleaf \
+               from pg_partition_tree('idxpart_a_idx') \
+              order by level, relid::regclass::text",
+        ),
+        vec![
+            vec![
+                Value::Text("idxpart_a_idx".into()),
+                Value::Null,
+                Value::Int32(0),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("idxpart1_a_idx".into()),
+                Value::Text("idxpart_a_idx".into()),
+                Value::Int32(1),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("idxpart2_a_idx".into()),
+                Value::Text("idxpart_a_idx".into()),
+                Value::Int32(1),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("idxpart2a_a_idx".into()),
+                Value::Text("idxpart2_a_idx".into()),
+                Value::Int32(2),
+                Value::Bool(true),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relid::regclass::text from pg_partition_ancestors('idxpart2a_a_idx')",
+        ),
+        vec![
+            vec![Value::Text("idxpart2a_a_idx".into())],
+            vec![Value::Text("idxpart2_a_idx".into())],
+            vec![Value::Text("idxpart_a_idx".into())],
         ]
     );
     assert_eq!(
