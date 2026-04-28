@@ -16216,11 +16216,9 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             }
             let item = source.ok_or(ParseError::UnexpectedEof)?;
             if alias.is_none() && !column_aliases.is_empty() {
-                alias = default_alias_for_column_definition_source(&item, &column_aliases);
+                alias = default_alias_for_column_definition_source(&item);
             }
             if let Some(alias) = alias {
-                let alias =
-                    relation_alias_or_implicit_function_alias(&item, alias, &column_aliases)?;
                 Ok(FromItem::Alias {
                     source: Box::new(item),
                     alias,
@@ -16289,11 +16287,9 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             }
             let item = source.ok_or(ParseError::UnexpectedEof)?;
             if alias.is_none() && !column_aliases.is_empty() {
-                alias = default_alias_for_column_definition_source(&item, &column_aliases);
+                alias = default_alias_for_column_definition_source(&item);
             }
             if let Some(alias) = alias {
-                let alias =
-                    relation_alias_or_implicit_function_alias(&item, alias, &column_aliases)?;
                 Ok(FromItem::Alias {
                     source: Box::new(item),
                     alias,
@@ -16735,16 +16731,10 @@ fn collect_identifiers(pair: Pair<'_, Rule>, out: &mut Vec<String>) {
     }
 }
 
-fn default_alias_for_column_definition_source(
-    item: &FromItem,
-    column_aliases: &AliasColumnSpec,
-) -> Option<String> {
-    match (item, column_aliases) {
-        (FromItem::FunctionCall { .. }, AliasColumnSpec::Definitions(_)) => Some(String::new()),
-        (FromItem::FunctionCall { name, .. }, _) => Some(name.clone()),
-        (FromItem::Lateral(inner), _) => {
-            default_alias_for_column_definition_source(inner, column_aliases)
-        }
+fn default_alias_for_column_definition_source(item: &FromItem) -> Option<String> {
+    match item {
+        FromItem::FunctionCall { name, .. } => Some(name.clone()),
+        FromItem::Lateral(inner) => default_alias_for_column_definition_source(inner),
         _ => None,
     }
 }
@@ -16770,20 +16760,6 @@ fn build_relation_alias(
         return Err(ParseError::UnexpectedEof);
     }
     Ok((alias, column_aliases))
-}
-
-fn relation_alias_or_implicit_function_alias(
-    item: &FromItem,
-    alias: String,
-    column_aliases: &AliasColumnSpec,
-) -> Result<String, ParseError> {
-    if !alias.is_empty() {
-        return Ok(alias);
-    }
-    match (item, column_aliases) {
-        (FromItem::FunctionCall { .. }, AliasColumnSpec::Definitions(_)) => Ok(String::new()),
-        _ => Err(ParseError::UnexpectedEof),
-    }
 }
 
 fn build_alias_column_spec(pair: Pair<'_, Rule>) -> Result<AliasColumnSpec, ParseError> {

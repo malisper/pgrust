@@ -286,7 +286,7 @@ fn concrete_declared_arg_types_for_candidate(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
 ) -> Option<Vec<SqlType>> {
-    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    let declared_oids = candidate_declared_arg_oids(row, candidate)?;
     let anyelement = resolve_anyelement_result_type(row, candidate);
     let anyenum = resolve_anyenum_result_type(row, candidate);
     let anyarray = resolve_anyarray_result_type(row, candidate);
@@ -302,7 +302,8 @@ fn concrete_declared_arg_types_for_candidate(
             .into_iter()
             .zip(candidate.declared_arg_types.iter().copied())
             .map(|(declared_oid, actual_type)| match declared_oid {
-                ANYOID | ANYELEMENTOID => anyelement.unwrap_or(actual_type),
+                ANYOID => actual_type,
+                ANYELEMENTOID => anyelement.unwrap_or(actual_type),
                 ANYENUMOID => anyenum.unwrap_or(actual_type),
                 ANYARRAYOID => anyarray.unwrap_or(actual_type),
                 ANYRANGEOID => anyrange.unwrap_or(actual_type),
@@ -315,6 +316,25 @@ fn concrete_declared_arg_types_for_candidate(
             })
             .collect(),
     )
+}
+
+fn candidate_declared_arg_oids(
+    row: &crate::include::catalog::PgProcRow,
+    candidate: &CandidateMatch,
+) -> Option<Vec<u32>> {
+    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    if row.provariadic == 0 || candidate.declared_arg_types.len() <= declared_oids.len() {
+        return Some(declared_oids);
+    }
+
+    let fixed_prefix_len = declared_oids.len().saturating_sub(1);
+    let mut expanded = Vec::with_capacity(candidate.declared_arg_types.len());
+    expanded.extend_from_slice(&declared_oids[..fixed_prefix_len]);
+    expanded.extend(std::iter::repeat_n(
+        row.provariadic,
+        candidate.declared_arg_types.len() - fixed_prefix_len,
+    ));
+    Some(expanded)
 }
 
 fn ordinary_polymorphic_base_type(declared_oid: u32, actual_type: SqlType) -> Option<SqlType> {

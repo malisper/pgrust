@@ -903,9 +903,6 @@ pub(super) fn bind_from_item_with_ctes(
                 AliasColumnSpec::Definitions(_) => &AliasColumnSpec::None,
                 _ => column_aliases,
             };
-            if alias.is_empty() {
-                return Ok((plan, scope));
-            }
             apply_relation_alias(
                 plan,
                 scope,
