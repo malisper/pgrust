@@ -8,7 +8,7 @@ use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_heap_relation_for_alter_table, map_catalog_error,
 };
-use crate::pgrust::database::sequences::apply_sequence_option_patch;
+use crate::pgrust::database::sequences::{apply_sequence_option_patch, pg_sequence_row};
 
 fn identity_column_index(relation: &BoundRelation, column_name: &str) -> Result<usize, ExecError> {
     relation
@@ -418,6 +418,24 @@ impl Database {
         next.options = next_options;
         if let Some(state) = restart {
             next.state = state;
+        }
+        if relation.relpersistence != 't' {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid,
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .upsert_sequence_row_mvcc(pg_sequence_row(sequence_oid, &next), &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
         }
         sequence_effects.push(self.sequences.apply_upsert(
             sequence_oid,

@@ -1790,7 +1790,15 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgPartitionRoot
             | BuiltinScalarFunction::PgGetPartKeyDef
             | BuiltinScalarFunction::PgTableIsVisible
-            | BuiltinScalarFunction::PgTypeIsVisible => args.len() == 1,
+            | BuiltinScalarFunction::PgTypeIsVisible
+            | BuiltinScalarFunction::PgOperatorIsVisible
+            | BuiltinScalarFunction::PgOpclassIsVisible
+            | BuiltinScalarFunction::PgOpfamilyIsVisible
+            | BuiltinScalarFunction::PgConversionIsVisible
+            | BuiltinScalarFunction::PgTsParserIsVisible
+            | BuiltinScalarFunction::PgTsDictIsVisible
+            | BuiltinScalarFunction::PgTsTemplateIsVisible
+            | BuiltinScalarFunction::PgTsConfigIsVisible => args.len() == 1,
             BuiltinScalarFunction::DatePart | BuiltinScalarFunction::Extract => args.len() == 2,
             BuiltinScalarFunction::DateTrunc => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::DateBin => args.len() == 3,
@@ -1843,6 +1851,9 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgColumnToastChunkId
             | BuiltinScalarFunction::PgColumnSize => args.len() == 1,
             BuiltinScalarFunction::PgRelationSize => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgTableSize | BuiltinScalarFunction::PgTablespaceLocation => {
+                args.len() == 1
+            }
             BuiltinScalarFunction::PgRelationFilenode => args.len() == 1,
             BuiltinScalarFunction::PgFilenodeRelation => args.len() == 2,
             BuiltinScalarFunction::NumNulls | BuiltinScalarFunction::NumNonNulls => {
@@ -3113,12 +3124,48 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_filenode_relation",
             BuiltinScalarFunction::PgFilenodeRelation,
         ),
+        (
+            "pg_tablespace_location",
+            BuiltinScalarFunction::PgTablespaceLocation,
+        ),
         ("pg_get_partkeydef", BuiltinScalarFunction::PgGetPartKeyDef),
         (
             "pg_table_is_visible",
             BuiltinScalarFunction::PgTableIsVisible,
         ),
         ("pg_type_is_visible", BuiltinScalarFunction::PgTypeIsVisible),
+        (
+            "pg_operator_is_visible",
+            BuiltinScalarFunction::PgOperatorIsVisible,
+        ),
+        (
+            "pg_opclass_is_visible",
+            BuiltinScalarFunction::PgOpclassIsVisible,
+        ),
+        (
+            "pg_opfamily_is_visible",
+            BuiltinScalarFunction::PgOpfamilyIsVisible,
+        ),
+        (
+            "pg_conversion_is_visible",
+            BuiltinScalarFunction::PgConversionIsVisible,
+        ),
+        (
+            "pg_ts_parser_is_visible",
+            BuiltinScalarFunction::PgTsParserIsVisible,
+        ),
+        (
+            "pg_ts_dict_is_visible",
+            BuiltinScalarFunction::PgTsDictIsVisible,
+        ),
+        (
+            "pg_ts_template_is_visible",
+            BuiltinScalarFunction::PgTsTemplateIsVisible,
+        ),
+        (
+            "pg_ts_config_is_visible",
+            BuiltinScalarFunction::PgTsConfigIsVisible,
+        ),
         ("pg_my_temp_schema", BuiltinScalarFunction::PgMyTempSchema),
         (
             "pg_rust_internal_binary_coercible",
@@ -3196,6 +3243,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("pg_column_size", BuiltinScalarFunction::PgColumnSize),
         ("pg_relation_size", BuiltinScalarFunction::PgRelationSize),
+        ("pg_table_size", BuiltinScalarFunction::PgTableSize),
         ("pg_num_nulls", BuiltinScalarFunction::NumNulls),
         ("num_nulls", BuiltinScalarFunction::NumNulls),
         ("pg_num_nonnulls", BuiltinScalarFunction::NumNonNulls),
@@ -4675,6 +4723,14 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetPartKeyDef
             | BuiltinScalarFunction::PgTableIsVisible
             | BuiltinScalarFunction::PgTypeIsVisible
+            | BuiltinScalarFunction::PgOperatorIsVisible
+            | BuiltinScalarFunction::PgOpclassIsVisible
+            | BuiltinScalarFunction::PgOpfamilyIsVisible
+            | BuiltinScalarFunction::PgConversionIsVisible
+            | BuiltinScalarFunction::PgTsParserIsVisible
+            | BuiltinScalarFunction::PgTsDictIsVisible
+            | BuiltinScalarFunction::PgTsTemplateIsVisible
+            | BuiltinScalarFunction::PgTsConfigIsVisible
             | BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::CurrVal
             | BuiltinScalarFunction::SetVal
@@ -4700,6 +4756,8 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgFunctionIsVisible
             | BuiltinScalarFunction::PgColumnSize
             | BuiltinScalarFunction::PgRelationSize
+            | BuiltinScalarFunction::PgTableSize
+            | BuiltinScalarFunction::PgTablespaceLocation
             | BuiltinScalarFunction::PgRelationIsPublishable
             | BuiltinScalarFunction::PgIndexAmHasProperty
             | BuiltinScalarFunction::PgIndexHasProperty

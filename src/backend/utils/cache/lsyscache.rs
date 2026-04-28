@@ -28,10 +28,12 @@ use crate::include::access::brin_page::{
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
     PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
-    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgEnumRow, PgIndexRow,
-    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
-    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
+    PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow,
+    PgEnumRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
+    PgOperatorRow, PgOpfamilyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
+    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::SqlType;
@@ -1729,6 +1731,12 @@ impl CatalogLookup for LazyCatalogLookup {
             .unwrap_or_default()
     }
 
+    fn conversion_rows(&self) -> Vec<PgConversionRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|cache| cache.conversion_rows())
+            .unwrap_or_default()
+    }
+
     fn current_user_oid(&self) -> u32 {
         self.db.auth_state(self.client_id).current_user_oid()
     }
@@ -1897,12 +1905,48 @@ impl CatalogLookup for LazyCatalogLookup {
         ensure_opclass_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
+    fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|cache| cache.opfamily_rows())
+            .unwrap_or_default()
+    }
+
     fn amproc_rows(&self) -> Vec<PgAmprocRow> {
         ensure_amproc_rows(&self.db, self.client_id, self.txn_ctx)
     }
 
     fn amop_rows(&self) -> Vec<PgAmopRow> {
         ensure_amop_rows(&self.db, self.client_id, self.txn_ctx)
+    }
+
+    fn ts_config_rows(&self) -> Vec<PgTsConfigRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|cache| cache.ts_config_rows())
+            .unwrap_or_default()
+    }
+
+    fn ts_parser_rows(&self) -> Vec<PgTsParserRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|cache| cache.ts_parser_rows())
+            .unwrap_or_default()
+    }
+
+    fn ts_dict_rows(&self) -> Vec<PgTsDictRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|cache| cache.ts_dict_rows())
+            .unwrap_or_default()
+    }
+
+    fn ts_template_rows(&self) -> Vec<PgTsTemplateRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|cache| cache.ts_template_rows())
+            .unwrap_or_default()
+    }
+
+    fn ts_config_map_rows(&self) -> Vec<PgTsConfigMapRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|cache| cache.ts_config_map_rows())
+            .unwrap_or_default()
     }
 
     fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<PgAggregateRow> {

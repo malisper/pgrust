@@ -114,7 +114,7 @@ pub const fn relam_for_relkind(relkind: char) -> u32 {
     }
 }
 
-pub fn bootstrap_pg_class_rows() -> [PgClassRow; 36] {
+pub fn bootstrap_pg_class_rows() -> [PgClassRow; 37] {
     [
         bootstrap_pg_class_row(BootstrapCatalogKind::PgNamespace),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgType),
@@ -143,6 +143,7 @@ pub fn bootstrap_pg_class_rows() -> [PgClassRow; 36] {
         bootstrap_pg_class_row(BootstrapCatalogKind::PgInherits),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgPartitionedTable),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgRewrite),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgSequence),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgStatistic),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgStatisticExt),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgStatisticExtData),

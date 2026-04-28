@@ -3,7 +3,8 @@ use crate::backend::parser::{BoundRelation, CatalogLookup, SequenceOwnedByClause
 use crate::include::catalog::INT8_TYPE_OID;
 use crate::pgrust::database::ddl::{ensure_relation_owner, relation_kind_name};
 use crate::pgrust::database::sequences::{
-    apply_sequence_option_patch, initial_sequence_state, resolve_sequence_options_spec,
+    apply_sequence_option_patch, initial_sequence_state, pg_sequence_row,
+    resolve_sequence_options_spec,
 };
 use std::collections::BTreeMap;
 
@@ -218,6 +219,16 @@ impl Database {
                     Ok((entry, effect)) => {
                         self.apply_catalog_mutation_effect_immediate(&effect)?;
                         catalog_effects.push(effect);
+                        let pg_sequence_effect = self
+                            .catalog
+                            .write()
+                            .upsert_sequence_row_mvcc(
+                                pg_sequence_row(entry.relation_oid, &data),
+                                &ctx,
+                            )
+                            .map_err(map_catalog_error)?;
+                        self.apply_catalog_mutation_effect_immediate(&pg_sequence_effect)?;
+                        catalog_effects.push(pg_sequence_effect);
                         sequence_effects.push(self.sequences.apply_upsert(
                             entry.relation_oid,
                             data,
@@ -268,6 +279,7 @@ impl Database {
         )?;
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
         let mut sequence_effects = Vec::new();
         let result = self.execute_alter_sequence_stmt_in_transaction_with_search_path(
             client_id,
@@ -275,9 +287,17 @@ impl Database {
             xid,
             0,
             configured_search_path,
+            &mut catalog_effects,
             &mut sequence_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &[], &[], &sequence_effects);
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            result,
+            &catalog_effects,
+            &[],
+            &sequence_effects,
+        );
         guard.disarm();
         self.table_locks.unlock_table(relation.rel, client_id);
         result
@@ -290,6 +310,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
         sequence_effects: &mut Vec<SequenceMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
@@ -320,6 +341,24 @@ impl Database {
         next.options = options;
         if let Some(state) = restart {
             next.state = state;
+        }
+        if relation.relpersistence != 't' {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid,
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .upsert_sequence_row_mvcc(pg_sequence_row(relation.relation_oid, &next), &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
         }
         sequence_effects.push(self.sequences.apply_upsert(
             relation.relation_oid,

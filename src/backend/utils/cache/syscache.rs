@@ -728,6 +728,7 @@ fn merge_catcaches(shared: CatCache, local: CatCache) -> CatCache {
         local.inherit_rows(),
         local.index_rows(),
         local.rewrite_rows(),
+        local.sequence_rows(),
         local.trigger_rows(),
         local.policy_rows(),
         local.publication_rows(),

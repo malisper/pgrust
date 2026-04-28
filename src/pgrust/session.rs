@@ -5082,6 +5082,13 @@ impl Session {
         Ok(StatementResult::AffectedRows(0))
     }
 
+    pub(crate) fn prepared_statement_rows(&self) -> Vec<(String, String)> {
+        self.prepared_selects
+            .iter()
+            .map(|(name, prepared)| (name.clone(), prepared.query_sql.clone()))
+            .collect()
+    }
+
     fn resolve_prepared_select(
         &self,
         execute_stmt: &ExecuteStatement,
@@ -6485,6 +6492,7 @@ impl Session {
                     xid,
                     cid,
                     search_path.as_deref(),
+                    &mut txn.catalog_effects,
                     &mut txn.sequence_effects,
                 )
             }
@@ -9016,6 +9024,7 @@ impl Session {
             }
             DiscardTarget::All => {
                 self.close_all_cursors();
+                self.prepared_selects.clear();
                 db.cleanup_client_temp_relations(self.client_id)?;
                 db.async_notify_runtime.disconnect(self.client_id);
                 db.advisory_locks.unlock_all_session(self.client_id);
@@ -12464,6 +12473,51 @@ mod tests {
             crate::backend::executor::render_tsvector_text(vector),
             "'book':3 'sky':1"
         );
+    }
+
+    #[test]
+    fn sql_prepare_execute_and_deallocate_use_session_state() {
+        let db = Database::open_ephemeral(32).expect("open ephemeral database");
+        let mut session = Session::new(1);
+
+        assert!(matches!(
+            session.execute(&db, "prepare q as select 1 as x").unwrap(),
+            StatementResult::AffectedRows(0)
+        ));
+
+        match session.execute(&db, "execute q").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+
+        assert!(matches!(
+            session.execute(&db, "deallocate q").unwrap(),
+            StatementResult::AffectedRows(0)
+        ));
+
+        let err = session.execute(&db, "execute q").unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::Parse(ParseError::DetailedError {
+                message,
+                sqlstate,
+                ..
+            }) if message == "prepared statement \"q\" does not exist" && sqlstate == "26000"
+        ));
+
+        session.execute(&db, "prepare q as select 2 as x").unwrap();
+        session.execute(&db, "discard all").unwrap();
+        let err = session.execute(&db, "execute q").unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::Parse(ParseError::DetailedError {
+                message,
+                sqlstate,
+                ..
+            }) if message == "prepared statement \"q\" does not exist" && sqlstate == "26000"
+        ));
     }
 
     #[test]

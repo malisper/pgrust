@@ -35,6 +35,7 @@ use crate::include::nodes::primnodes::{
     SqlJsonTableColumnKind, SqlXmlTableColumnKind, Var, attrno_index,
 };
 use crate::pgrust::database::ddl::{append_view_check_option, format_sql_type_name};
+use crate::pgrust::database::sequences::pg_sequence_row;
 use crate::pgrust::database::{
     DomainConstraintEntry, DomainConstraintKind, SequenceData, SequenceRuntime,
     default_sequence_name_base, format_nextval_default_oid, initial_sequence_state,
@@ -2497,6 +2498,13 @@ impl Database {
                     .map_err(map_catalog_error)?;
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
+                let pg_sequence_effect = self
+                    .catalog
+                    .write()
+                    .upsert_sequence_row_mvcc(pg_sequence_row(entry.relation_oid, &data), &ctx)
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&pg_sequence_effect)?;
+                catalog_effects.push(pg_sequence_effect);
                 sequence_effects.push(self.sequences.apply_upsert(entry.relation_oid, data, true));
                 entry.relation_oid
             }

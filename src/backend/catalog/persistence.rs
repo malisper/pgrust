@@ -372,6 +372,7 @@ fn catalog_row_identity_key(kind: BootstrapCatalogKind, values: &[Value]) -> Cat
         | BootstrapCatalogKind::PgConstraint
         | BootstrapCatalogKind::PgIndex
         | BootstrapCatalogKind::PgPartitionedTable
+        | BootstrapCatalogKind::PgSequence
         | BootstrapCatalogKind::PgPublication
         | BootstrapCatalogKind::PgPublicationRel
         | BootstrapCatalogKind::PgPublicationNamespace => {
@@ -433,6 +434,7 @@ fn physical_catalog_rows_empty(rows: &PhysicalCatalogRows) -> bool {
         && rows.user_mappings.is_empty()
         && rows.indexes.is_empty()
         && rows.rewrites.is_empty()
+        && rows.sequences.is_empty()
         && rows.triggers.is_empty()
         && rows.ams.is_empty()
         && rows.amops.is_empty()
@@ -475,7 +477,8 @@ fn catalog_row_identity_matches(
         | BootstrapCatalogKind::PgStatisticExt
         | BootstrapCatalogKind::PgConversion
         | BootstrapCatalogKind::PgProc
-        | BootstrapCatalogKind::PgAggregate => catalog_value_eq(left.first(), right.first()),
+        | BootstrapCatalogKind::PgAggregate
+        | BootstrapCatalogKind::PgSequence => catalog_value_eq(left.first(), right.first()),
         BootstrapCatalogKind::PgAttribute => {
             catalog_value_eq(left.first(), right.first())
                 && catalog_value_eq(left.get(4), right.get(4))
