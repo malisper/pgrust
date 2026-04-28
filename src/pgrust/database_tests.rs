@@ -49733,6 +49733,53 @@ fn plpgsql_return_query_execute_supports_using() {
 }
 
 #[test]
+fn plpgsql_return_query_updates_found() {
+    let dir = temp_dir("plpgsql_return_query_found");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function return_query_found_flags() returns table(val int4, seen bool, rc int8) language plpgsql as $$
+         begin
+           return query values (10, false, -1);
+           get diagnostics rc = row_count;
+           val := 20;
+           seen := found;
+           return next;
+           return query select 30, false, -1 where 1 = 0;
+           get diagnostics rc = row_count;
+           val := 40;
+           seen := found;
+           return next;
+           return query execute 'values (50, false, -1)';
+           get diagnostics rc = row_count;
+           val := 60;
+           seen := found;
+           return next;
+           return query execute 'select 70, false, -1 where 1 = 0';
+           get diagnostics rc = row_count;
+           val := 80;
+           seen := found;
+           return next;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from return_query_found_flags()"),
+        vec![
+            vec![Value::Int32(10), Value::Bool(false), Value::Int64(-1)],
+            vec![Value::Int32(20), Value::Bool(true), Value::Int64(1)],
+            vec![Value::Int32(40), Value::Bool(false), Value::Int64(0)],
+            vec![Value::Int32(50), Value::Bool(false), Value::Int64(-1)],
+            vec![Value::Int32(60), Value::Bool(true), Value::Int64(1)],
+            vec![Value::Int32(80), Value::Bool(false), Value::Int64(0)],
+        ]
+    );
+}
+
+#[test]
 fn plpgsql_return_query_select_into_reports_no_tuples() {
     let dir = temp_dir("plpgsql_return_query_select_into_no_tuples");
     let db = Database::open(&dir, 64).unwrap();

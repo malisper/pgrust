@@ -176,6 +176,7 @@ struct FunctionState {
     cursors: HashMap<String, FunctionCursor>,
     local_guc_writes: HashSet<String>,
     session_guc_writes: HashSet<String>,
+    last_row_count: usize,
     current_exception: Option<PlpgsqlExceptionData>,
 }
 
@@ -612,6 +613,7 @@ pub fn execute_user_defined_trigger_function(
         cursors: HashMap::new(),
         local_guc_writes: HashSet::new(),
         session_guc_writes: HashSet::new(),
+        last_row_count: 0,
         current_exception: None,
     };
     state.values[compiled.found_slot] = Value::Bool(false);
@@ -1358,6 +1360,7 @@ fn execute_compiled_function(
         cursors: HashMap::new(),
         local_guc_writes: HashSet::new(),
         session_guc_writes: HashSet::new(),
+        last_row_count: 0,
         current_exception: None,
     };
     state.values[compiled.found_slot] = Value::Bool(false);
@@ -2595,6 +2598,7 @@ fn exec_function_return_query(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let result = execute_for_query_source(source, compiled, state, ctx)?;
+    let row_count = result.rows.len();
     for row in result.rows {
         state.rows.push(coerce_function_result_row(
             row,
@@ -2602,6 +2606,8 @@ fn exec_function_return_query(
             expected_record_shape,
         )?);
     }
+    state.last_row_count = row_count;
+    state.values[compiled.found_slot] = Value::Bool(row_count != 0);
     Ok(())
 }
 
@@ -4377,7 +4383,7 @@ fn exec_function_get_diagnostics(
             }
         } else {
             match item.as_str() {
-                "row_count" => Value::Int64(0),
+                "row_count" => Value::Int64(state.last_row_count as i64),
                 "found" => Value::Bool(false),
                 "pg_routine_oid" => Value::Int64(compiled.proc_oid as i64),
                 _ => diagnostic_text(None),
@@ -6550,6 +6556,7 @@ mod tests {
             cursors: HashMap::new(),
             local_guc_writes: HashSet::new(),
             session_guc_writes: HashSet::new(),
+            last_row_count: 0,
             current_exception: None,
         };
 
@@ -6614,6 +6621,7 @@ mod tests {
             cursors: HashMap::new(),
             local_guc_writes: HashSet::new(),
             session_guc_writes: HashSet::new(),
+            last_row_count: 0,
             current_exception: None,
         };
 
