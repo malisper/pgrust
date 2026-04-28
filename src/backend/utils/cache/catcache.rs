@@ -762,6 +762,13 @@ impl CatCache {
         self.types_by_oid.get(&oid)
     }
 
+    pub fn type_by_name_namespace(&self, name: &str, namespace_oid: u32) -> Option<&PgTypeRow> {
+        let normalized = normalize_catalog_name(name);
+        self.types_by_oid.values().find(|row| {
+            row.typnamespace == namespace_oid && row.typname.eq_ignore_ascii_case(normalized)
+        })
+    }
+
     pub fn extend_type_rows(&mut self, rows: impl IntoIterator<Item = PgTypeRow>) {
         for row in rows {
             self.types_by_name

@@ -74,7 +74,7 @@ pub(super) fn relation_may_satisfy_own_partition_bound(
                 .filter_map(|row| catalog.relation_by_oid(row.inhrelid))
                 .filter_map(|rel| {
                     rel.relpartbound
-                        .and_then(|text| deserialize_partition_bound(&text).ok())
+                        .and_then(|text| deserialize_partition_bound(text.as_str()).ok())
                 })
                 .collect::<Vec<_>>();
             expr_may_match_bound(filter, &spec, &bound, &sibling_bounds, Some(catalog))

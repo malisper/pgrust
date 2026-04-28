@@ -11,7 +11,8 @@ use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::plannodes::PlannedStmt;
 use crate::include::nodes::primnodes::JoinType;
 use crate::include::nodes::primnodes::{
-    SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, TargetEntry, Var, expr_contains_set_returning,
+    INNER_VAR, OUTER_VAR, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, TargetEntry, Var,
+    expr_contains_set_returning,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +32,7 @@ pub struct BoundInsertStatement {
     pub overriding: Option<OverridingKind>,
     pub source: BoundInsertSource,
     pub on_conflict: Option<BoundOnConflictClause>,
+    pub raw_on_conflict: Option<crate::include::nodes::parsenodes::OnConflictClause>,
     pub returning: Vec<TargetEntry>,
     pub(crate) rls_write_checks: Vec<RlsWriteCheck>,
     pub subplans: Vec<Plan>,
@@ -133,6 +135,7 @@ pub struct BoundMergeStatement {
     pub target_ctid_index: usize,
     pub source_present_index: usize,
     pub when_clauses: Vec<BoundMergeWhenClause>,
+    pub returning: Vec<TargetEntry>,
     pub input_plan: crate::include::nodes::plannodes::PlannedStmt,
 }
 
@@ -699,6 +702,107 @@ fn bind_returning_targets(
     }
 }
 
+fn returning_pseudo_output_exprs(desc: &RelationDesc, varno: usize) -> Vec<Expr> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            Expr::Var(Var {
+                varno,
+                varattno: user_attrno(index),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+            })
+        })
+        .collect()
+}
+
+fn scope_with_returning_pseudo_rows(scope: BoundScope, desc: &RelationDesc) -> BoundScope {
+    scope_with_returning_pseudo_row_exprs(
+        scope,
+        desc,
+        returning_pseudo_output_exprs(desc, OUTER_VAR),
+        returning_pseudo_output_exprs(desc, INNER_VAR),
+    )
+}
+
+fn scope_with_returning_pseudo_row_exprs(
+    mut scope: BoundScope,
+    desc: &RelationDesc,
+    old_output_exprs: Vec<Expr>,
+    new_output_exprs: Vec<Expr>,
+) -> BoundScope {
+    for (relation_name, varno) in [("old", OUTER_VAR), ("new", INNER_VAR)] {
+        scope.desc.columns.extend(desc.columns.iter().cloned());
+        scope.output_exprs.extend(if varno == OUTER_VAR {
+            old_output_exprs.clone()
+        } else {
+            new_output_exprs.clone()
+        });
+        scope
+            .columns
+            .extend(desc.columns.iter().map(|column| ScopeColumn {
+                output_name: column.name.clone(),
+                hidden: true,
+                qualified_only: true,
+                relation_names: vec![relation_name.to_string()],
+                hidden_invalid_relation_names: vec![],
+                hidden_missing_relation_names: vec![],
+                source_relation_oid: None,
+                source_attno: None,
+                source_columns: Vec::new(),
+            }));
+        scope.relations.push(ScopeRelation {
+            relation_names: vec![relation_name.to_string()],
+            hidden_invalid_relation_names: vec![],
+            hidden_missing_relation_names: vec![],
+            system_varno: None,
+            relation_oid: None,
+        });
+    }
+    scope
+}
+
+fn projected_output_exprs(desc: &RelationDesc, start_index: usize) -> Vec<Expr> {
+    desc.columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(start_index + index),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+            })
+        })
+        .collect()
+}
+
+fn projected_output_exprs_with_width(
+    desc: &RelationDesc,
+    start_index: usize,
+    width: usize,
+) -> Vec<Expr> {
+    desc.columns
+        .iter()
+        .take(width)
+        .enumerate()
+        .map(|(index, column)| {
+            Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(start_index + index),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+            })
+        })
+        .collect()
+}
+
+fn scope_with_output_exprs(mut scope: BoundScope, output_exprs: Vec<Expr>) -> BoundScope {
+    scope.output_exprs = output_exprs;
+    scope
+}
+
 fn with_merge_target_ctid(from: AnalyzedFrom, target_desc: &RelationDesc) -> (AnalyzedFrom, usize) {
     let mut targets = merge_projection_targets(&from.output_columns, &from.output_exprs);
     let ctid_resno = targets.len() + 1;
@@ -865,6 +969,190 @@ fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>
     }
 }
 
+fn merge_mutating_event(stmt: &MergeStatement) -> Option<ViewDmlEvent> {
+    stmt.when_clauses
+        .iter()
+        .find_map(|clause| match clause.action {
+            MergeAction::Update { .. } => Some(ViewDmlEvent::Update),
+            MergeAction::Delete => Some(ViewDmlEvent::Delete),
+            MergeAction::Insert { .. } => Some(ViewDmlEvent::Insert),
+            MergeAction::DoNothing => None,
+        })
+}
+
+fn map_merge_view_rewrite_error(relation_name: &str, err: ViewDmlRewriteError) -> ParseError {
+    match err {
+        ViewDmlRewriteError::DeferredFeature(detail) => ParseError::FeatureNotSupported(detail),
+        ViewDmlRewriteError::NonUpdatableColumn {
+            column_name,
+            reason,
+        } => ParseError::DetailedError {
+            message: format!(
+                "cannot merge into column \"{}\" of view \"{}\"",
+                column_name, relation_name
+            ),
+            detail: Some(reason.detail().into()),
+            hint: None,
+            sqlstate: "55000",
+        },
+        ViewDmlRewriteError::MultipleAssignments(column_name) => {
+            ParseError::UnexpectedToken {
+                expected: "single assignment per base column",
+                actual: format!("multiple assignments to same column \"{}\"", column_name),
+            }
+        }
+        other => ParseError::DetailedError {
+            message: format!("cannot execute MERGE on view \"{}\"", relation_name),
+            detail: Some(other.detail()),
+            hint: Some(
+                "To enable MERGE on the view, provide suitable INSTEAD OF triggers or unconditional DO INSTEAD rules."
+                    .into(),
+            ),
+            sqlstate: "55000",
+        },
+    }
+}
+
+fn rewrite_merge_when_clause_auto_view(
+    clause: BoundMergeWhenClause,
+    view_desc: &RelationDesc,
+    resolved: &crate::backend::rewrite::ResolvedAutoViewTarget,
+) -> Result<BoundMergeWhenClause, ViewDmlRewriteError> {
+    let action = match clause.action {
+        BoundMergeAction::Update { assignments } => {
+            let assignments = assignments
+                .into_iter()
+                .map(|assignment| {
+                    let column_index = map_auto_view_column_index(
+                        view_desc,
+                        &resolved.updatable_column_map,
+                        &resolved.non_updatable_column_reasons,
+                        assignment.column_index,
+                    )?;
+                    Ok(BoundAssignment {
+                        column_index,
+                        target_sql_type: resolved.base_relation.desc.columns[column_index].sql_type,
+                        ..assignment
+                    })
+                })
+                .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
+            reject_duplicate_auto_view_targets(
+                &resolved.base_relation.desc,
+                assignments.iter().map(|assignment| assignment.column_index),
+            )?;
+            BoundMergeAction::Update { assignments }
+        }
+        BoundMergeAction::Insert {
+            target_columns,
+            values,
+        } => {
+            let target_columns = target_columns
+                .into_iter()
+                .map(|target| {
+                    let column_index = map_auto_view_column_index(
+                        view_desc,
+                        &resolved.updatable_column_map,
+                        &resolved.non_updatable_column_reasons,
+                        target.column_index,
+                    )?;
+                    Ok(BoundAssignmentTarget {
+                        column_index,
+                        target_sql_type: resolved.base_relation.desc.columns[column_index].sql_type,
+                        ..target
+                    })
+                })
+                .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
+            reject_duplicate_auto_view_targets(
+                &resolved.base_relation.desc,
+                target_columns.iter().map(|target| target.column_index),
+            )?;
+            BoundMergeAction::Insert {
+                target_columns,
+                values,
+            }
+        }
+        other => other,
+    };
+    Ok(BoundMergeWhenClause { action, ..clause })
+}
+
+fn is_merge_action_returning_call(expr: &SqlExpr) -> bool {
+    match expr {
+        SqlExpr::FuncCall {
+            name,
+            args,
+            order_by,
+            within_group,
+            distinct,
+            func_variadic,
+            filter,
+            null_treatment,
+            over,
+        } => {
+            name.eq_ignore_ascii_case("merge_action")
+                && matches!(args, SqlCallArgs::Args(args) if args.is_empty())
+                && order_by.is_empty()
+                && within_group.is_none()
+                && !distinct
+                && !func_variadic
+                && filter.is_none()
+                && null_treatment.is_none()
+                && over.is_none()
+        }
+        _ => false,
+    }
+}
+
+fn bind_merge_returning_targets(
+    targets: &[crate::include::nodes::parsenodes::SelectItem],
+    scope: &BoundScope,
+    merge_action_index: usize,
+    catalog: &dyn CatalogLookup,
+    local_ctes: &[BoundCte],
+) -> Result<Vec<TargetEntry>, ParseError> {
+    let mut entries = Vec::new();
+    for item in targets {
+        if is_merge_action_returning_call(&item.expr) {
+            entries.push(
+                TargetEntry::new(
+                    item.output_name.clone(),
+                    Expr::Var(Var {
+                        varno: 1,
+                        varattno: user_attrno(merge_action_index),
+                        varlevelsup: 0,
+                        vartype: SqlType::new(SqlTypeKind::Text),
+                    }),
+                    SqlType::new(SqlTypeKind::Text),
+                    entries.len() + 1,
+                )
+                .with_input_resno(merge_action_index + 1),
+            );
+            continue;
+        }
+        let BoundSelectTargets::Plain(bound) = bind_select_targets(
+            std::slice::from_ref(item),
+            scope,
+            catalog,
+            &[],
+            None,
+            local_ctes,
+        )?;
+        for mut target in bound {
+            target.resno = entries.len() + 1;
+            entries.push(target);
+        }
+    }
+    if entries
+        .iter()
+        .any(|target| expr_contains_set_returning(&target.expr))
+    {
+        return Err(ParseError::FeatureNotSupported(
+            "set-returning functions are not allowed in RETURNING".into(),
+        ));
+    }
+    Ok(entries)
+}
+
 pub fn plan_merge(
     stmt: &MergeStatement,
     catalog: &dyn CatalogLookup,
@@ -878,31 +1166,56 @@ pub fn plan_merge(
         &[],
         &[],
     )?;
-    let entry = lookup_relation(catalog, &stmt.target_table)?;
-    if relation_has_row_security(entry.relation_oid, catalog) {
+    let entry = lookup_modify_relation(catalog, &stmt.target_table)?;
+    let auto_view_target = if entry.relkind == 'v'
+        && let Some(event) = merge_mutating_event(stmt)
+    {
+        Some(
+            resolve_auto_updatable_view_target(
+                entry.relation_oid,
+                &entry.desc,
+                event,
+                catalog,
+                &[],
+            )
+            .map_err(|err| map_merge_view_rewrite_error(&stmt.target_table, err))?,
+        )
+    } else {
+        None
+    };
+    let execution_relation = auto_view_target
+        .as_ref()
+        .map(|target| target.base_relation.clone())
+        .unwrap_or_else(|| entry.clone());
+    if relation_has_row_security(execution_relation.relation_oid, catalog) {
         return Err(unsupported_with_row_security("MERGE"));
     }
-    let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &local_ctes)?;
+    let column_defaults =
+        bind_insert_column_defaults(&execution_relation.desc, catalog, &local_ctes)?;
     let target_relation_name = merge_target_relation_name(stmt);
     let explain_target_name = merge_explain_target_name(stmt);
     let mut target_base = AnalyzedFrom::relation(
         target_relation_name.clone(),
-        entry.rel,
-        entry.relation_oid,
-        entry.relkind,
-        entry.relispopulated,
-        entry.toast,
-        !stmt.target_only,
-        entry.desc.clone(),
+        execution_relation.rel,
+        execution_relation.relation_oid,
+        execution_relation.relkind,
+        execution_relation.relispopulated,
+        execution_relation.toast,
+        !stmt.target_only && execution_relation.relkind == 'r',
+        execution_relation.desc.clone(),
     );
-    target_base.output_exprs = generated_relation_output_exprs(&entry.desc, catalog)?;
-    let (target_from, target_visible_count) = with_merge_target_ctid(target_base, &entry.desc);
-    let target_scope = scope_for_base_relation_with_generated(
+    target_base.output_exprs = generated_relation_output_exprs(&execution_relation.desc, catalog)?;
+    let (target_from, target_visible_count) =
+        with_merge_target_ctid(target_base, &execution_relation.desc);
+    let mut target_scope = scope_for_base_relation_with_generated(
         &target_relation_name,
         &entry.desc,
         Some(entry.relation_oid),
         catalog,
     )?;
+    if let Some(resolved) = auto_view_target.as_ref() {
+        target_scope.output_exprs = resolved.visible_output_exprs.clone();
+    }
     let (source_base, source_scope_raw) =
         bind_from_item_with_ctes(&stmt.source, catalog, &[], None, &local_ctes, &[])?;
     let (source_from, source_visible_count) = with_merge_source_present(source_base);
@@ -926,22 +1239,89 @@ pub fn plan_merge(
         None,
         &local_ctes,
     )?;
+    let join_condition = and_predicates(
+        Some(join_condition),
+        auto_view_target
+            .as_ref()
+            .and_then(|target| target.combined_predicate.clone()),
+    )
+    .unwrap_or(Expr::Const(Value::Bool(true)));
 
-    let when_clauses = stmt
+    let projected_target_output_exprs = projected_output_exprs(&execution_relation.desc, 0);
+    let action_target_output_exprs = if let Some(resolved) = auto_view_target.as_ref() {
+        resolved
+            .visible_output_exprs
+            .iter()
+            .cloned()
+            .map(|expr| {
+                rewrite_local_vars_for_output_exprs(expr, 1, &projected_target_output_exprs)
+            })
+            .collect()
+    } else {
+        projected_target_output_exprs.clone()
+    };
+    let action_target_scope =
+        scope_with_output_exprs(target_scope.clone(), action_target_output_exprs);
+    let action_source_scope = scope_with_output_exprs(
+        source_scope.clone(),
+        projected_output_exprs_with_width(
+            &source_scope.desc,
+            execution_relation.desc.columns.len(),
+            source_visible_count,
+        ),
+    );
+    let action_merged_scope = combine_scopes(&action_target_scope, &action_source_scope);
+
+    let returning_visible_column_count =
+        execution_relation.desc.columns.len() + source_visible_count;
+    let returning_scope = if let Some(resolved) = auto_view_target.as_ref() {
+        scope_with_returning_pseudo_row_exprs(
+            action_merged_scope.clone(),
+            &entry.desc,
+            view_returning_pseudo_output_exprs(
+                &resolved.visible_output_exprs,
+                &resolved.base_relation.desc,
+                OUTER_VAR,
+            ),
+            view_returning_pseudo_output_exprs(
+                &resolved.visible_output_exprs,
+                &resolved.base_relation.desc,
+                INNER_VAR,
+            ),
+        )
+    } else {
+        scope_with_returning_pseudo_rows(action_merged_scope.clone(), &execution_relation.desc)
+    };
+    let returning = bind_merge_returning_targets(
+        &stmt.returning,
+        &returning_scope,
+        returning_visible_column_count,
+        catalog,
+        &local_ctes,
+    )?;
+
+    let mut when_clauses = stmt
         .when_clauses
         .iter()
         .map(|clause| {
             bind_merge_when_clause(
                 clause,
-                &target_scope,
-                &source_scope,
-                &merged_scope,
+                &action_target_scope,
+                &action_source_scope,
+                &action_merged_scope,
                 catalog,
                 &local_ctes,
                 &entry.desc,
             )
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
+    if let Some(resolved) = auto_view_target.as_ref() {
+        when_clauses = when_clauses
+            .into_iter()
+            .map(|clause| rewrite_merge_when_clause_auto_view(clause, &entry.desc, resolved))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| map_merge_view_rewrite_error(&stmt.target_table, err))?;
+    }
 
     let joined = AnalyzedFrom::join(
         target_from,
@@ -950,13 +1330,13 @@ pub fn plan_merge(
         join_condition,
         None,
     );
-    let visible_column_count = entry.desc.columns.len() + source_visible_count;
+    let visible_column_count = returning_visible_column_count;
     let target_ctid_index = visible_column_count;
     let source_present_index = visible_column_count + 1;
     let joined_target_columns = joined.output_columns.clone();
     let joined_output_exprs = joined.output_exprs.clone();
     let mut projection_targets = Vec::with_capacity(visible_column_count + 2);
-    for index in 0..entry.desc.columns.len() {
+    for index in 0..execution_relation.desc.columns.len() {
         projection_targets.push(
             TargetEntry::new(
                 joined_target_columns[index].name.clone(),
@@ -1003,23 +1383,23 @@ pub fn plan_merge(
 
     Ok(BoundMergeStatement {
         relation_name: stmt.target_table.clone(),
-        rel: entry.rel,
-        relation_oid: entry.relation_oid,
-        toast: entry.toast,
-        toast_index: first_toast_index(catalog, entry.toast),
-        desc: entry.desc.clone(),
+        rel: execution_relation.rel,
+        relation_oid: execution_relation.relation_oid,
+        toast: execution_relation.toast,
+        toast_index: first_toast_index(catalog, execution_relation.toast),
+        desc: execution_relation.desc.clone(),
         relation_constraints: bind_relation_constraints(
             Some(&stmt.target_table),
-            entry.relation_oid,
-            &entry.desc,
+            execution_relation.relation_oid,
+            &execution_relation.desc,
             catalog,
         )?,
         referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
-            entry.relation_oid,
-            &entry.desc,
+            execution_relation.relation_oid,
+            &execution_relation.desc,
             catalog,
         )?,
-        indexes: catalog.index_relations_for_heap(entry.relation_oid),
+        indexes: catalog.index_relations_for_heap(execution_relation.relation_oid),
         column_defaults,
         target_relation_name,
         explain_target_name,
@@ -1027,6 +1407,7 @@ pub fn plan_merge(
         target_ctid_index,
         source_present_index,
         when_clauses,
+        returning,
         input_plan: crate::backend::optimizer::fold_query_constants(query)
             .map(|query| crate::backend::optimizer::planner(query, catalog))??,
     })
@@ -1399,14 +1780,233 @@ fn reject_duplicate_auto_view_targets(
 fn rewrite_auto_view_returning_targets(
     targets: Vec<TargetEntry>,
     output_exprs: &[Expr],
+    base_desc: &RelationDesc,
 ) -> Vec<TargetEntry> {
+    let old_view_output_exprs =
+        view_returning_pseudo_output_exprs(output_exprs, base_desc, OUTER_VAR);
+    let new_view_output_exprs =
+        view_returning_pseudo_output_exprs(output_exprs, base_desc, INNER_VAR);
     targets
         .into_iter()
         .map(|target| TargetEntry {
-            expr: rewrite_local_vars_for_output_exprs(target.expr, 1, output_exprs),
+            expr: rewrite_local_vars_for_output_exprs(
+                rewrite_local_vars_for_output_exprs(
+                    rewrite_local_vars_for_output_exprs(target.expr, 1, output_exprs),
+                    OUTER_VAR,
+                    &old_view_output_exprs,
+                ),
+                INNER_VAR,
+                &new_view_output_exprs,
+            ),
             ..target
         })
         .collect()
+}
+
+fn view_returning_pseudo_output_exprs(
+    output_exprs: &[Expr],
+    base_desc: &RelationDesc,
+    varno: usize,
+) -> Vec<Expr> {
+    let base_output_exprs = returning_pseudo_output_exprs(base_desc, varno);
+    output_exprs
+        .iter()
+        .cloned()
+        .map(|expr| rewrite_local_vars_for_output_exprs(expr, 1, &base_output_exprs))
+        .collect()
+}
+
+fn scope_for_pseudo_relation(relation_name: &str, desc: &RelationDesc, varno: usize) -> BoundScope {
+    BoundScope {
+        desc: desc.clone(),
+        output_exprs: returning_pseudo_output_exprs(desc, varno),
+        columns: desc
+            .columns
+            .iter()
+            .map(|column| ScopeColumn {
+                output_name: column.name.clone(),
+                hidden: column.dropped,
+                qualified_only: false,
+                relation_names: vec![relation_name.to_string()],
+                hidden_invalid_relation_names: vec![],
+                hidden_missing_relation_names: vec![],
+                source_relation_oid: None,
+                source_attno: None,
+                source_columns: Vec::new(),
+            })
+            .collect(),
+        relations: vec![ScopeRelation {
+            relation_names: vec![relation_name.to_string()],
+            hidden_invalid_relation_names: vec![],
+            hidden_missing_relation_names: vec![],
+            system_varno: None,
+            relation_oid: None,
+        }],
+    }
+}
+
+fn bind_auto_view_on_conflict_clause(
+    clause: &crate::include::nodes::parsenodes::OnConflictClause,
+    view_relation_name: &str,
+    base_relation_name: &str,
+    view_desc: &RelationDesc,
+    resolved: &crate::backend::rewrite::ResolvedAutoViewTarget,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundOnConflictClause, ViewDmlRewriteError> {
+    let arbiters = super::on_conflict::resolve_arbiters(
+        clause,
+        base_relation_name,
+        resolved.base_relation.relation_oid,
+        &resolved.base_relation.desc,
+        catalog,
+    )
+    .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?;
+    let action = match clause.action {
+        crate::include::nodes::parsenodes::OnConflictAction::Nothing => {
+            BoundOnConflictAction::Nothing
+        }
+        crate::include::nodes::parsenodes::OnConflictAction::Update => {
+            if !arbiters.temporal_constraints.is_empty() {
+                return Err(ViewDmlRewriteError::UnsupportedViewShape(
+                    ParseError::DetailedError {
+                        message: "ON CONFLICT DO UPDATE not supported with exclusion constraints"
+                            .into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "0A000",
+                    }
+                    .to_string(),
+                ));
+            }
+            if clause.target.is_none() {
+                return Err(ViewDmlRewriteError::UnsupportedViewShape(
+                    ParseError::UnexpectedToken {
+                        expected: "ON CONFLICT inference specification or constraint name",
+                        actual:
+                            "ON CONFLICT DO UPDATE requires inference specification or constraint name"
+                                .into(),
+                    }
+                    .to_string(),
+                ));
+            }
+            let target_scope = scope_for_relation(Some(view_relation_name), view_desc);
+            let excluded_scope = scope_for_pseudo_relation("excluded", view_desc, 2);
+            let raw_scope = combine_scopes(&target_scope, &excluded_scope);
+            let base_old_output_exprs =
+                returning_pseudo_output_exprs(&resolved.base_relation.desc, OUTER_VAR);
+            let base_new_output_exprs =
+                returning_pseudo_output_exprs(&resolved.base_relation.desc, INNER_VAR);
+            let old_view_output_exprs = resolved
+                .visible_output_exprs
+                .iter()
+                .cloned()
+                .map(|expr| rewrite_local_vars_for_output_exprs(expr, 1, &base_old_output_exprs))
+                .collect::<Vec<_>>();
+            let new_view_output_exprs = resolved
+                .visible_output_exprs
+                .iter()
+                .cloned()
+                .map(|expr| rewrite_local_vars_for_output_exprs(expr, 1, &base_new_output_exprs))
+                .collect::<Vec<_>>();
+            let assignments = clause
+                .assignments
+                .iter()
+                .map(|assignment| {
+                    let target =
+                        bind_assignment_target(&assignment.target, &target_scope, catalog, &[])
+                            .map_err(|err| {
+                                ViewDmlRewriteError::UnsupportedViewShape(err.to_string())
+                            })?;
+                    ensure_generated_assignment_allowed(view_desc, &target, Some(&assignment.expr))
+                        .map_err(|err| {
+                            ViewDmlRewriteError::UnsupportedViewShape(err.to_string())
+                        })?;
+                    let column_index = map_auto_view_column_index(
+                        view_desc,
+                        &resolved.updatable_column_map,
+                        &resolved.non_updatable_column_reasons,
+                        target.column_index,
+                    )?;
+                    let target = BoundAssignmentTarget {
+                        column_index,
+                        subscripts: rewrite_assignment_subscripts(
+                            &target.subscripts,
+                            &resolved.visible_output_exprs,
+                        ),
+                        field_path: target.field_path,
+                        indirection: rewrite_assignment_indirection(
+                            &target.indirection,
+                            &resolved.visible_output_exprs,
+                        ),
+                        target_sql_type: resolved.base_relation.desc.columns[column_index].sql_type,
+                    };
+                    ensure_generated_assignment_allowed(
+                        &resolved.base_relation.desc,
+                        &target,
+                        Some(&assignment.expr),
+                    )
+                    .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?;
+                    let expr = if matches!(assignment.expr, SqlExpr::Default)
+                        && resolved.base_relation.desc.columns[column_index]
+                            .generated
+                            .is_some()
+                    {
+                        Expr::Const(Value::Null)
+                    } else {
+                        bind_expr_with_outer_and_ctes(
+                            &assignment.expr,
+                            &raw_scope,
+                            catalog,
+                            &[],
+                            None,
+                            &[],
+                        )
+                        .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))?
+                    };
+                    let expr = rewrite_local_vars_for_output_exprs(expr, 1, &old_view_output_exprs);
+                    let expr = rewrite_local_vars_for_output_exprs(expr, 2, &new_view_output_exprs);
+                    Ok(BoundAssignment {
+                        column_index: target.column_index,
+                        subscripts: target.subscripts,
+                        field_path: target.field_path,
+                        indirection: target.indirection,
+                        target_sql_type: target.target_sql_type,
+                        expr,
+                    })
+                })
+                .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
+            reject_duplicate_auto_view_targets(
+                &resolved.base_relation.desc,
+                assignments.iter().map(|assignment| assignment.column_index),
+            )?;
+            let predicate = clause
+                .where_clause
+                .as_ref()
+                .map(|expr| {
+                    let expr =
+                        bind_expr_with_outer_and_ctes(expr, &raw_scope, catalog, &[], None, &[])
+                            .map_err(|err| {
+                                ViewDmlRewriteError::UnsupportedViewShape(err.to_string())
+                            })?;
+                    let expr = rewrite_local_vars_for_output_exprs(expr, 1, &old_view_output_exprs);
+                    Ok(rewrite_local_vars_for_output_exprs(
+                        expr,
+                        2,
+                        &new_view_output_exprs,
+                    ))
+                })
+                .transpose()?;
+            BoundOnConflictAction::Update {
+                assignments,
+                predicate,
+            }
+        }
+    };
+    Ok(BoundOnConflictClause {
+        arbiter_indexes: arbiters.indexes,
+        arbiter_temporal_constraints: arbiters.temporal_constraints,
+        action,
+    })
 }
 
 pub(crate) fn rewrite_bound_insert_auto_view_target(
@@ -1424,12 +2024,6 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         catalog,
         &[],
     )?;
-    if stmt.on_conflict.is_some() {
-        return Err(ViewDmlRewriteError::DeferredFeature(
-            "INSERT ... ON CONFLICT on automatically updatable views is not supported yet.".into(),
-        ));
-    }
-
     let relation_name = relation_display_name(
         catalog,
         resolved.base_relation.relation_oid,
@@ -1463,6 +2057,17 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         &resolved.base_relation.desc,
         target_columns.iter().map(|target| target.column_index),
     )?;
+    let on_conflict = match stmt.raw_on_conflict.as_ref() {
+        Some(clause) => Some(bind_auto_view_on_conflict_clause(
+            clause,
+            &stmt.relation_name,
+            &relation_name,
+            &stmt.desc,
+            &resolved,
+            catalog,
+        )?),
+        None => stmt.on_conflict,
+    };
 
     Ok(BoundInsertStatement {
         relation_name: relation_name.clone(),
@@ -1491,10 +2096,12 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         target_columns,
         overriding: stmt.overriding,
         source: stmt.source,
-        on_conflict: None,
+        on_conflict,
+        raw_on_conflict: None,
         returning: rewrite_auto_view_returning_targets(
             stmt.returning,
             &resolved.visible_output_exprs,
+            &resolved.base_relation.desc,
         ),
         rls_write_checks: stmt
             .rls_write_checks
@@ -1626,6 +2233,7 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         returning: rewrite_auto_view_returning_targets(
             stmt.returning,
             &resolved.visible_output_exprs,
+            &resolved.base_relation.desc,
         ),
         ..stmt
     })
@@ -1686,6 +2294,7 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
         returning: rewrite_auto_view_returning_targets(
             stmt.returning,
             &resolved.visible_output_exprs,
+            &resolved.base_relation.desc,
         ),
         subplans: stmt.subplans,
     })
@@ -2152,9 +2761,10 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         catalog,
     )?;
     let expr_scope = empty_scope();
+    let returning_scope = scope_with_returning_pseudo_rows(target_scope.clone(), &entry.desc);
     let returning = bind_returning_targets(
         &stmt.returning,
-        &target_scope,
+        &returning_scope,
         catalog,
         outer_scopes,
         &visible_ctes,
@@ -2328,6 +2938,7 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         on_conflict: stmt
             .on_conflict
             .as_ref()
+            .filter(|_| entry.relkind != 'v')
             .map(|clause| {
                 super::on_conflict::bind_on_conflict_clause(
                     clause,
@@ -2339,6 +2950,9 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                 )
             })
             .transpose()?,
+        raw_on_conflict: (entry.relkind == 'v')
+            .then(|| stmt.on_conflict.clone())
+            .flatten(),
         returning,
         rls_write_checks: target_rls.write_checks,
         subplans: Vec::new(),
@@ -2402,6 +3016,7 @@ fn bind_simple_update(
         Some(entry.relation_oid),
         catalog,
     )?;
+    let returning_scope = scope_with_returning_pseudo_rows(scope.clone(), &entry.desc);
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, local_ctes)?;
     let predicate = stmt
         .where_clause
@@ -2410,8 +3025,13 @@ fn bind_simple_update(
             bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, local_ctes)
         })
         .transpose()?;
-    let returning =
-        bind_returning_targets(&stmt.returning, &scope, catalog, outer_scopes, local_ctes)?;
+    let returning = bind_returning_targets(
+        &stmt.returning,
+        &returning_scope,
+        catalog,
+        outer_scopes,
+        local_ctes,
+    )?;
     let target_rls = build_target_relation_row_security(
         &stmt.table_name,
         entry.relation_oid,
@@ -2571,6 +3191,7 @@ fn bind_update_from(
     let projected = joined.with_projection(projection);
     let mut eval_scope = combine_scopes(&target_scope, &source_scope);
     eval_scope.output_exprs = projected.output_exprs[..visible_column_count].to_vec();
+    let returning_scope = scope_with_returning_pseudo_rows(eval_scope.clone(), &entry.desc);
 
     let target_rls = build_target_relation_row_security(
         &stmt.table_name,
@@ -2656,7 +3277,7 @@ fn bind_update_from(
         .collect::<Result<Vec<_>, ParseError>>()?;
     let returning = bind_returning_targets(
         &stmt.returning,
-        &eval_scope,
+        &returning_scope,
         catalog,
         outer_scopes,
         local_ctes,
@@ -2828,6 +3449,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
     )?;
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
     let scope = scope_for_relation_with_generated(Some(&stmt.table_name), &entry.desc, catalog)?;
+    let returning_scope = scope_with_returning_pseudo_rows(scope.clone(), &entry.desc);
     let predicate = stmt
         .where_clause
         .as_ref()
@@ -2835,8 +3457,13 @@ pub(crate) fn bind_delete_with_outer_scopes(
             bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, &local_ctes)
         })
         .transpose()?;
-    let returning =
-        bind_returning_targets(&stmt.returning, &scope, catalog, outer_scopes, &local_ctes)?;
+    let returning = bind_returning_targets(
+        &stmt.returning,
+        &returning_scope,
+        catalog,
+        outer_scopes,
+        &local_ctes,
+    )?;
     let target_rls = build_target_relation_row_security(
         &stmt.table_name,
         entry.relation_oid,

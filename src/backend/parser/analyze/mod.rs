@@ -71,7 +71,8 @@ static NEXT_CTE_ID: AtomicUsize = AtomicUsize::new(1);
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
-    build_pg_rules_rows, build_pg_stats_rows, build_pg_user_mappings_rows, build_pg_views_rows,
+    build_pg_rules_rows, build_pg_stats_ext_exprs_rows, build_pg_stats_ext_rows,
+    build_pg_stats_rows, build_pg_user_mappings_rows, build_pg_views_rows,
     current_pg_stat_progress_copy_rows,
 };
 use agg::*;
@@ -1306,7 +1307,10 @@ pub trait CatalogLookup {
     }
 
     fn attribute_rows(&self) -> Vec<PgAttributeRow> {
-        Vec::new()
+        self.class_rows()
+            .into_iter()
+            .flat_map(|class| self.attribute_rows_for_relation(class.oid))
+            .collect()
     }
 
     fn class_rows(&self) -> Vec<PgClassRow> {
@@ -1423,6 +1427,27 @@ pub trait CatalogLookup {
 
     fn pg_stats_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
+    }
+
+    fn pg_stats_ext_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_stats_ext_rows(
+            self.namespace_rows(),
+            self.authid_rows(),
+            self.class_rows(),
+            self.attribute_rows(),
+            self.statistic_ext_rows(),
+            self.statistic_ext_data_rows(),
+        )
+    }
+
+    fn pg_stats_ext_exprs_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_stats_ext_exprs_rows(
+            self.namespace_rows(),
+            self.authid_rows(),
+            self.class_rows(),
+            self.statistic_ext_rows(),
+            self.statistic_ext_data_rows(),
+        )
     }
 
     fn pg_settings_rows(&self) -> Vec<Vec<Value>> {

@@ -446,13 +446,11 @@ fn type_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<PgTypeRow> {
-    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::TypeOid, oid_key(oid))
-        .ok()?
-        .into_iter()
-        .find_map(|tuple| match tuple {
-            SysCacheTuple::Type(row) => Some(row),
-            _ => None,
-        })
+    super::syscache::with_backend_catcache(db, client_id, txn_ctx, |catcache| {
+        catcache.type_by_oid(oid).cloned()
+    })
+    .ok()
+    .flatten()
 }
 
 fn type_row_by_name_namespace(
@@ -462,25 +460,14 @@ fn type_row_by_name_namespace(
     name: &str,
     namespace_oid: u32,
 ) -> Option<PgTypeRow> {
-    search_sys_cache2_db(
-        db,
-        client_id,
-        txn_ctx,
-        SysCacheId::TypeNameNsp,
-        catalog_name_key(name),
-        oid_key(namespace_oid),
-    )
-    .ok()?
-    .into_iter()
-    .filter_map(|tuple| match tuple {
-        SysCacheTuple::Type(row) => Some(row),
-        _ => None,
+    super::syscache::with_backend_catcache(db, client_id, txn_ctx, |catcache| {
+        catcache
+            .type_by_name_namespace(name, namespace_oid)
+            .cloned()
     })
-    .find(|row| {
-        row.typnamespace == namespace_oid
-            && row.typname.eq_ignore_ascii_case(name)
-            && !db.other_session_temp_namespace_oid(client_id, row.typnamespace)
-    })
+    .ok()
+    .flatten()
+    .filter(|row| !db.other_session_temp_namespace_oid(client_id, row.typnamespace))
 }
 
 pub(crate) fn dynamic_type_rows_for_search_path(
@@ -1707,20 +1694,13 @@ impl CatalogLookup for LazyCatalogLookup {
         source_type_oid: u32,
         target_type_oid: u32,
     ) -> Option<PgCastRow> {
-        search_sys_cache2_db(
-            &self.db,
-            self.client_id,
-            self.txn_ctx,
-            SysCacheId::CastSourceTarget,
-            oid_key(source_type_oid),
-            oid_key(target_type_oid),
-        )
-        .ok()?
-        .into_iter()
-        .find_map(|tuple| match tuple {
-            SysCacheTuple::Cast(row) => Some(row),
-            _ => None,
+        super::syscache::with_backend_catcache(&self.db, self.client_id, self.txn_ctx, |catcache| {
+            catcache
+                .cast_by_source_target(source_type_oid, target_type_oid)
+                .cloned()
         })
+        .ok()
+        .flatten()
     }
 
     fn cast_rows(&self) -> Vec<PgCastRow> {
