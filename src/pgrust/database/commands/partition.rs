@@ -6,18 +6,22 @@ use std::time::Duration;
 use super::super::*;
 use super::typed_table::reject_typed_table_ddl;
 use crate::backend::commands::partition::{
-    validate_default_partition_rows_for_new_bound, validate_new_partition_bound,
-    validate_partition_relation_compatibility, validate_relation_rows_for_partition_bound,
+    validate_attach_partition_constraints, validate_default_partition_rows_for_new_bound,
+    validate_new_partition_bound, validate_partition_relation_compatibility,
+    validate_relation_rows_for_partition_bound,
 };
 use crate::backend::executor::ExecutorContext;
+use crate::backend::executor::exec_expr::partition_constraint_conditions_for_catalog;
 use crate::backend::parser::{
     AlterTableAttachPartitionStatement, AlterTableDetachPartitionStatement, BoundRelation,
-    CatalogLookup, DetachPartitionMode, lower_partition_bound_for_relation,
-    serialize_partition_bound,
+    CatalogLookup, DetachPartitionMode, deserialize_partition_bound,
+    lower_partition_bound_for_relation, serialize_partition_bound,
 };
 use crate::backend::storage::lmgr::{TableLockMode, lock_table_requests_interruptible};
 use crate::backend::utils::misc::interrupts::check_for_interrupts;
-use crate::include::catalog::{CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, PgInheritsRow};
+use crate::include::catalog::{
+    CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, PgInheritsRow,
+};
 
 fn add_lock_request(
     requests: &mut BTreeMap<RelFileLocator, TableLockMode>,
@@ -41,6 +45,7 @@ fn lookup_partition_alter_parent(
     catalog: &dyn CatalogLookup,
     table_name: &str,
     if_exists: bool,
+    unsupported_action: &'static str,
 ) -> Result<Option<BoundRelation>, ExecError> {
     let Some(parent) = catalog.lookup_any_relation(table_name) else {
         if if_exists {
@@ -51,10 +56,15 @@ fn lookup_partition_alter_parent(
         )));
     };
     if parent.relkind != 'p' || parent.partitioned_table.is_none() {
-        return Err(ExecError::Parse(ParseError::WrongObjectType {
-            name: table_name.to_string(),
-            expected: "partitioned table",
-        }));
+        let relation_name = relation_name_for_oid(catalog, parent.relation_oid);
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "ALTER action {unsupported_action} cannot be performed on relation \"{relation_name}\""
+            ),
+            detail: Some("This operation is not supported for tables.".into()),
+            hint: None,
+            sqlstate: "42809",
+        });
     }
     Ok(Some(parent))
 }
@@ -65,7 +75,55 @@ fn lookup_partition_alter_child(
 ) -> Result<BoundRelation, ExecError> {
     catalog
         .lookup_any_relation(table_name)
-        .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(table_name.to_string())))
+        .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(table_name.to_string())))
+}
+
+fn detach_unsupported_action(mode: &DetachPartitionMode) -> &'static str {
+    match mode {
+        DetachPartitionMode::Finalize => "DETACH PARTITION ... FINALIZE",
+        DetachPartitionMode::Immediate | DetachPartitionMode::Concurrently => "DETACH PARTITION",
+    }
+}
+
+fn reject_typed_attach_partition_child(child: &BoundRelation) -> Result<(), ExecError> {
+    if child.of_type_oid == 0 {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: "cannot attach a typed table as partition".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42809",
+    })
+}
+
+fn column_attnum_by_name(relation: &BoundRelation, column_name: &str) -> Option<i16> {
+    relation
+        .desc
+        .columns
+        .iter()
+        .enumerate()
+        .find_map(|(index, column)| {
+            (!column.dropped && column.name.eq_ignore_ascii_case(column_name))
+                .then_some(index.saturating_add(1) as i16)
+        })
+}
+
+fn not_null_constraint_for_attnum(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    attnum: i16,
+) -> Option<crate::include::catalog::PgConstraintRow> {
+    catalog
+        .constraint_rows_for_relation(relation_oid)
+        .into_iter()
+        .find(|row| {
+            row.contype == CONSTRAINT_NOTNULL
+                && row
+                    .conkey
+                    .as_ref()
+                    .is_some_and(|keys| keys.contains(&attnum))
+        })
 }
 
 fn partition_inheritance_row(
@@ -162,6 +220,85 @@ fn validate_detach_inheritance_state(
     Ok(row)
 }
 
+fn unwrap_constraint_condition(condition: String) -> String {
+    if !condition.starts_with('(') || !condition.ends_with(')') {
+        return condition;
+    }
+    let mut depth = 0i32;
+    for (index, ch) in condition.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 && index + ch.len_utf8() < condition.len() {
+                    return condition;
+                }
+            }
+            _ => {}
+        }
+    }
+    condition[1..condition.len() - 1].to_string()
+}
+
+fn detached_partition_bound_check(
+    catalog: &dyn CatalogLookup,
+    parent: &BoundRelation,
+    child: &BoundRelation,
+) -> Result<Option<(String, String)>, ExecError> {
+    let Some(bound_text) = child.relpartbound.as_deref() else {
+        return Ok(None);
+    };
+    let Some(partitioned) = parent.partitioned_table.as_ref() else {
+        return Ok(None);
+    };
+    let Some(first_attnum) = partitioned
+        .partattrs
+        .first()
+        .copied()
+        .filter(|attnum| *attnum > 0)
+    else {
+        return Ok(None);
+    };
+    let Some(parent_column) = parent
+        .desc
+        .columns
+        .get(first_attnum.saturating_sub(1) as usize)
+        .filter(|column| !column.dropped)
+    else {
+        return Ok(None);
+    };
+    let child_column_name = child
+        .desc
+        .columns
+        .iter()
+        .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(&parent_column.name))
+        .map(|column| column.name.clone())
+        .unwrap_or_else(|| parent_column.name.clone());
+    let child_name = relation_name_for_oid(catalog, child.relation_oid);
+    let constraint_name = format!("{child_name}_{child_column_name}_check");
+    if catalog
+        .constraint_rows_for_relation(child.relation_oid)
+        .into_iter()
+        .any(|row| row.conname.eq_ignore_ascii_case(&constraint_name))
+    {
+        return Ok(None);
+    }
+    let bound = deserialize_partition_bound(bound_text).map_err(ExecError::Parse)?;
+    let Some(conditions) = partition_constraint_conditions_for_catalog(catalog, parent, &bound)?
+    else {
+        return Ok(None);
+    };
+    if conditions.is_empty() {
+        return Ok(None);
+    }
+    let expr_sql = conditions
+        .into_iter()
+        .map(unwrap_constraint_condition)
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    Ok(Some((constraint_name, expr_sql)))
+}
+
 fn detach_lock_requests(
     parent: &BoundRelation,
     child: &BoundRelation,
@@ -176,7 +313,7 @@ fn detach_lock_requests(
 
 fn ddl_executor_context(
     db: &Database,
-    _catalog: &dyn CatalogLookup,
+    catalog: crate::backend::utils::cache::lsyscache::LazyCatalogLookup,
     client_id: ClientId,
     xid: TransactionId,
     cid: CommandId,
@@ -228,7 +365,7 @@ fn ddl_executor_context(
         database: Some(db.clone()),
         pending_catalog_effects: Vec::new(),
         pending_table_locks: Vec::new(),
-        catalog: None,
+        catalog: Some(crate::backend::executor::executor_catalog(catalog)),
         scalar_function_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: db.plpgsql_function_cache(client_id),
         pinned_cte_tables: std::collections::HashMap::new(),
@@ -249,8 +386,12 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(parent) =
-            lookup_partition_alter_parent(&catalog, &stmt.parent_table, stmt.if_exists)?
+        let Some(parent) = lookup_partition_alter_parent(
+            &catalog,
+            &stmt.parent_table,
+            stmt.if_exists,
+            "ATTACH PARTITION",
+        )?
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
@@ -307,8 +448,12 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(parent) =
-            lookup_partition_alter_parent(&catalog, &stmt.parent_table, stmt.if_exists)?
+        let Some(parent) = lookup_partition_alter_parent(
+            &catalog,
+            &stmt.parent_table,
+            stmt.if_exists,
+            "ATTACH PARTITION",
+        )?
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
@@ -316,7 +461,7 @@ impl Database {
         ensure_relation_owner(self, client_id, &parent, &stmt.parent_table)?;
         ensure_relation_owner(self, client_id, &child, &stmt.partition_table)?;
         reject_typed_table_ddl(&parent, "attach partition to")?;
-        reject_typed_table_ddl(&child, "attach a typed table as partition of")?;
+        reject_typed_attach_partition_child(&child)?;
         validate_partition_relation_compatibility(
             &catalog,
             &parent,
@@ -330,7 +475,7 @@ impl Database {
             .map_err(ExecError::Parse)?;
         let mut ctx = ddl_executor_context(
             self,
-            &catalog,
+            catalog.clone(),
             client_id,
             xid,
             cid.saturating_add(1),
@@ -345,6 +490,7 @@ impl Database {
             &bound,
             Some(child.relation_oid),
         )?;
+        validate_attach_partition_constraints(&catalog, &parent, &child)?;
 
         let inherit_ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -367,6 +513,15 @@ impl Database {
         self.apply_catalog_mutation_effect_immediate(&inherit_effect)?;
         catalog_effects.push(inherit_effect);
 
+        let next_cid = self.mark_attached_partition_inheritance_metadata_in_transaction(
+            client_id,
+            xid,
+            cid.saturating_add(3),
+            parent.relation_oid,
+            child.relation_oid,
+            configured_search_path,
+            catalog_effects,
+        )?;
         let relpartbound = Some(serialize_partition_bound(&bound).map_err(ExecError::Parse)?);
         let updated_child = self.replace_relation_partition_metadata_in_transaction(
             client_id,
@@ -375,17 +530,18 @@ impl Database {
             relpartbound,
             child.partitioned_table.clone(),
             xid,
-            cid.saturating_add(3),
+            next_cid,
             configured_search_path,
             catalog_effects,
         )?;
+        let next_cid = next_cid.saturating_add(1);
         if bound.is_default() {
             self.update_partitioned_table_default_partition_in_transaction(
                 client_id,
                 parent.relation_oid,
                 updated_child.relation_oid,
                 xid,
-                cid.saturating_add(4),
+                next_cid,
                 configured_search_path,
                 catalog_effects,
             )?;
@@ -393,7 +549,7 @@ impl Database {
         let next_cid = self.reconcile_partitioned_parent_keys_for_attached_child_in_transaction(
             client_id,
             xid,
-            cid.saturating_add(5),
+            next_cid.saturating_add(1),
             parent.relation_oid,
             updated_child.relation_oid,
             configured_search_path,
@@ -431,6 +587,110 @@ impl Database {
         Ok(StatementResult::AffectedRows(0))
     }
 
+    fn mark_attached_partition_inheritance_metadata_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        mut cid: CommandId,
+        parent_oid: u32,
+        child_oid: u32,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let parent = catalog
+            .relation_by_oid(parent_oid)
+            .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(parent_oid.to_string())))?;
+        let child = catalog
+            .relation_by_oid(child_oid)
+            .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(child_oid.to_string())))?;
+
+        for parent_column in parent.desc.columns.iter().filter(|column| !column.dropped) {
+            let Some(child_attnum) = column_attnum_by_name(&child, &parent_column.name) else {
+                continue;
+            };
+            let child_not_null =
+                if parent_column.storage.nullable || parent_column.not_null_constraint_no_inherit {
+                    None
+                } else {
+                    not_null_constraint_for_attnum(&catalog, child.relation_oid, child_attnum)
+                        .map(|_| (Some(1), Some(false)))
+                };
+            let (not_null_inhcount, not_null_is_local) = child_not_null.unwrap_or((None, None));
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid,
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .update_relation_column_inheritance_mvcc(
+                    child.relation_oid,
+                    &parent_column.name,
+                    1,
+                    false,
+                    not_null_inhcount,
+                    not_null_is_local,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            cid = cid.saturating_add(1);
+        }
+
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let child_check_constraints = catalog
+            .constraint_rows_for_relation(child.relation_oid)
+            .into_iter()
+            .filter(|row| row.contype == CONSTRAINT_CHECK)
+            .collect::<Vec<_>>();
+        for parent_constraint in catalog
+            .constraint_rows_for_relation(parent.relation_oid)
+            .into_iter()
+            .filter(|row| row.contype == CONSTRAINT_CHECK && !row.connoinherit)
+        {
+            let Some(child_constraint) = child_check_constraints
+                .iter()
+                .find(|row| row.conname.eq_ignore_ascii_case(&parent_constraint.conname))
+            else {
+                continue;
+            };
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid,
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .update_check_constraint_inheritance_mvcc(
+                    child.relation_oid,
+                    child_constraint.oid,
+                    parent_constraint.oid,
+                    false,
+                    1,
+                    false,
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            cid = cid.saturating_add(1);
+        }
+
+        Ok(cid)
+    }
+
     pub(crate) fn execute_alter_table_detach_partition_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -447,8 +707,12 @@ impl Database {
 
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(parent) =
-            lookup_partition_alter_parent(&catalog, &stmt.parent_table, stmt.if_exists)?
+        let Some(parent) = lookup_partition_alter_parent(
+            &catalog,
+            &stmt.parent_table,
+            stmt.if_exists,
+            detach_unsupported_action(&stmt.mode),
+        )?
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
@@ -504,7 +768,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         match stmt.mode {
             DetachPartitionMode::Concurrently => Err(ExecError::Parse(
-                ParseError::ActiveSqlTransaction("ALTER TABLE ... DETACH PARTITION CONCURRENTLY"),
+                ParseError::ActiveSqlTransaction("ALTER TABLE ... DETACH CONCURRENTLY"),
             )),
             DetachPartitionMode::Immediate => self.finalize_detach_partition_in_transaction(
                 client_id,
@@ -535,18 +799,20 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(parent) =
-            lookup_partition_alter_parent(&catalog, &stmt.parent_table, stmt.if_exists)?
+        let Some(parent) = lookup_partition_alter_parent(
+            &catalog,
+            &stmt.parent_table,
+            stmt.if_exists,
+            detach_unsupported_action(&stmt.mode),
+        )?
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
         let child = lookup_partition_alter_child(&catalog, &stmt.partition_table)?;
         validate_detach_inheritance_state(&catalog, &parent, &child, stmt, Some(false))?;
-        if parent
-            .partitioned_table
-            .as_ref()
-            .is_some_and(|row| row.partdefid != 0)
-        {
+        if parent.partitioned_table.as_ref().is_some_and(|row| {
+            row.partdefid != 0 && catalog.relation_by_oid(row.partdefid).is_some()
+        }) {
             return Err(ExecError::DetailedError {
                 message: "cannot detach partitions concurrently when a default partition exists"
                     .into(),
@@ -598,6 +864,7 @@ impl Database {
             &catalog,
             &finalize_stmt.parent_table,
             finalize_stmt.if_exists,
+            detach_unsupported_action(&finalize_stmt.mode),
         )?
         else {
             return Ok(StatementResult::AffectedRows(0));
@@ -660,8 +927,12 @@ impl Database {
         expect_pending: Option<bool>,
     ) -> Result<Option<(BoundRelation, BoundRelation, PgInheritsRow)>, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(parent) =
-            lookup_partition_alter_parent(&catalog, &stmt.parent_table, stmt.if_exists)?
+        let Some(parent) = lookup_partition_alter_parent(
+            &catalog,
+            &stmt.parent_table,
+            stmt.if_exists,
+            detach_unsupported_action(&stmt.mode),
+        )?
         else {
             return Ok(None);
         };
@@ -697,11 +968,10 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        if parent
-            .partitioned_table
-            .as_ref()
-            .is_some_and(|row| row.partdefid != 0)
-        {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        if parent.partitioned_table.as_ref().is_some_and(|row| {
+            row.partdefid != 0 && catalog.relation_by_oid(row.partdefid).is_some()
+        }) {
             return Err(ExecError::DetailedError {
                 message: "cannot detach partitions concurrently when a default partition exists"
                     .into(),
@@ -731,6 +1001,52 @@ impl Database {
         self.plan_cache.invalidate_all();
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn add_detached_partition_bound_check_in_transaction(
+        &self,
+        client_id: ClientId,
+        parent: &BoundRelation,
+        child: &BoundRelation,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let Some((constraint_name, expr_sql)) =
+            detached_partition_bound_check(&catalog, parent, child)?
+        else {
+            return Ok(cid);
+        };
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .create_check_constraint_mvcc(
+                child.relation_oid,
+                constraint_name,
+                true,
+                true,
+                false,
+                expr_sql,
+                0,
+                true,
+                0,
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        Ok(cid.saturating_add(1))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -777,6 +1093,17 @@ impl Database {
             configured_search_path,
             catalog_effects,
         )?;
+        if expect_pending {
+            next_cid = self.add_detached_partition_bound_check_in_transaction(
+                client_id,
+                &parent,
+                &child,
+                xid,
+                next_cid,
+                configured_search_path,
+                catalog_effects,
+            )?;
+        }
 
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -920,6 +1247,7 @@ mod tests {
     };
     use crate::pgrust::database::Database;
     use crate::pgrust::session::Session;
+    use crate::pl::plpgsql::{clear_notices, take_notices};
     use std::path::PathBuf;
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -931,6 +1259,13 @@ mod tests {
             StatementResult::Query { rows, .. } => rows,
             other => panic!("expected query result, got {other:?}"),
         }
+    }
+
+    fn take_notice_messages() -> Vec<String> {
+        take_notices()
+            .into_iter()
+            .map(|notice| notice.message)
+            .collect()
     }
 
     #[test]
@@ -1243,15 +1578,15 @@ mod tests {
         ) {
             Err(ExecError::DetailedError {
                 message,
-                detail: Some(detail),
+                detail,
                 sqlstate,
                 ..
             }) => {
                 assert_eq!(
                     message,
-                    "new row for relation \"child_bad\" violates partition constraint"
+                    "partition constraint of relation \"child_bad\" is violated by some row"
                 );
-                assert!(detail.contains("(15)"));
+                assert_eq!(detail, None);
                 assert_eq!(sqlstate, "23514");
             }
             other => panic!("expected attach validation failure, got {other:?}"),
@@ -1276,6 +1611,256 @@ mod tests {
             }
             other => panic!("expected overlap failure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn attach_partition_like_child_preserves_collation_before_overlap_check() {
+        let base = temp_dir("attach_like_collation");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(
+                &db,
+                "create table list_parted_like (
+                    a int not null,
+                    b char(2) collate \"C\",
+                    constraint check_a check (a > 0)
+                 ) partition by list (a)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create table part_like (
+                    a int not null,
+                    b char(2) collate \"C\",
+                    constraint check_a check (a > 0)
+                 )",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "alter table list_parted_like attach partition part_like for values in (1)",
+            )
+            .unwrap();
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select attcollation from pg_attribute
+                   where attrelid = 'part_like'::regclass and attname = 'b'",
+            ),
+            vec![vec![Value::Int64(i64::from(
+                crate::include::catalog::C_COLLATION_OID
+            ))]]
+        );
+        session
+            .execute(
+                &db,
+                "create table fail_like (like part_like including constraints)",
+            )
+            .unwrap();
+
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select attcollation from pg_attribute
+                   where attrelid = 'fail_like'::regclass and attname = 'b'",
+            ),
+            vec![vec![Value::Int64(i64::from(
+                crate::include::catalog::C_COLLATION_OID
+            ))]]
+        );
+
+        match session.execute(
+            &db,
+            "alter table list_parted_like attach partition fail_like for values in (1)",
+        ) {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(
+                    message,
+                    "partition \"fail_like\" would overlap partition \"part_like\""
+                );
+                assert_eq!(sqlstate, "42P17");
+            }
+            other => panic!("expected overlap failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inherited_partition_check_added_with_not_null_cannot_be_dropped_from_child() {
+        let base = temp_dir("partition_check_drop");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(
+                &db,
+                "create table list_parted_check (
+                    a int,
+                    b char(1)
+                 ) partition by list (a)",
+            )
+            .unwrap();
+        session
+            .execute(&db, "create table part_check (like list_parted_check)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "alter table list_parted_check attach partition part_check for values in (2)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "alter table list_parted_check alter b set not null,
+                 add constraint check_a2 check (a > 0)",
+            )
+            .unwrap();
+
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select conislocal, coninhcount from pg_constraint
+                   where conrelid = 'part_check'::regclass and conname = 'check_a2'",
+            ),
+            vec![vec![Value::Bool(false), Value::Int16(1)]]
+        );
+
+        match session.execute(&db, "alter table part_check drop constraint check_a2") {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(
+                    message,
+                    "cannot drop inherited constraint \"check_a2\" of relation \"part_check\""
+                );
+                assert_eq!(sqlstate, "42P16");
+            }
+            other => panic!("expected inherited constraint drop failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_partition_from_parent_statement_trigger_reports_active_query() {
+        let base = temp_dir("attach_active_trigger");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(
+                &db,
+                "create table tab_part_attach (a int) partition by list (a)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create function func_part_attach() returns trigger language plpgsql as $$
+                 begin
+                   execute 'create table tab_part_attach_1 (a int)';
+                   execute 'alter table tab_part_attach attach partition tab_part_attach_1 for values in (1)';
+                   return null;
+                 end $$",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create trigger trig_part_attach before insert on tab_part_attach
+                 for each statement execute procedure func_part_attach()",
+            )
+            .unwrap();
+
+        fn detailed_error(err: &ExecError) -> Option<(&str, &str)> {
+            match err {
+                ExecError::DetailedError {
+                    message, sqlstate, ..
+                } => Some((message.as_str(), *sqlstate)),
+                ExecError::WithContext { source, .. } => detailed_error(source),
+                _ => None,
+            }
+        }
+
+        match session.execute(&db, "insert into tab_part_attach values (1)") {
+            Err(err) if detailed_error(&err).is_some() => {
+                let (message, sqlstate) = detailed_error(&err).unwrap();
+                assert_eq!(
+                    message,
+                    "cannot ALTER TABLE \"tab_part_attach\" because it is being used by active queries in this session"
+                );
+                assert_eq!(sqlstate, "55006");
+            }
+            other => panic!("expected active-query attach failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn partitioned_update_parent_transition_table_sees_attached_default_rows() {
+        let base = temp_dir("partition_update_transition");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(
+                &db,
+                "create table upd_bar1 (a integer, b integer not null default 1)
+                   partition by range (a)",
+            )
+            .unwrap();
+        session
+            .execute(&db, "create table upd_bar2 (a integer)")
+            .unwrap();
+        session
+            .execute(&db, "insert into upd_bar2 values (1)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "alter table upd_bar2 add column b integer not null default 1",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "alter table upd_bar1 attach partition upd_bar2 default",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create function upd_xtrig() returns trigger language plpgsql as $$
+                 declare r record;
+                 begin
+                   for r in select * from old loop
+                     raise info 'a=%, b=%', r.a, r.b;
+                   end loop;
+                   return null;
+                 end $$",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create trigger upd_xtrig
+                   after update on upd_bar1
+                   referencing old table as old
+                   for each statement execute procedure upd_xtrig()",
+            )
+            .unwrap();
+
+        clear_notices();
+        session
+            .execute(&db, "update upd_bar1 set a = a + 1")
+            .unwrap();
+        assert_eq!(take_notice_messages(), vec!["a=1, b=1".to_string()]);
     }
 
     #[test]
@@ -1396,15 +1981,15 @@ mod tests {
         ) {
             Err(ExecError::DetailedError {
                 message,
-                detail: Some(detail),
+                detail,
                 sqlstate,
                 ..
             }) => {
                 assert_eq!(
                     message,
-                    "new row for relation \"attach_default_fallback\" violates partition constraint"
+                    "updated partition constraint for default partition \"attach_default_fallback\" would be violated by some row"
                 );
-                assert!(detail.contains("(1)"));
+                assert_eq!(detail, None);
                 assert_eq!(sqlstate, "23514");
             }
             other => panic!("expected default partition validation failure, got {other:?}"),
@@ -1594,7 +2179,9 @@ mod tests {
         session
             .execute(
                 &db,
-                "create table detach_region (a int4, b int4) partition by list (a)",
+                "create table detach_region \
+                 (a int4, b int4, constraint detach_region_a_pos check (a > 0)) \
+                 partition by list (a)",
             )
             .unwrap();
         session
@@ -1660,6 +2247,27 @@ mod tests {
                     Value::Text("detach_region_one".into()),
                 ],
             ]
+        );
+        session
+            .execute(
+                &db,
+                "alter table detach_region_one drop constraint detach_region_a_pos",
+            )
+            .unwrap();
+        session
+            .execute(&db, "insert into detach_region_one values (-1, 5)")
+            .unwrap();
+        assert_eq!(
+            query_rows(
+                &mut session,
+                &db,
+                "select tableoid::regclass::text, a, b from detach_region_one",
+            ),
+            vec![vec![
+                Value::Text("detach_region_one_lo".into()),
+                Value::Int32(-1),
+                Value::Int32(5),
+            ]]
         );
     }
 
@@ -1810,7 +2418,7 @@ mod tests {
             "alter table detach_conc_parent detach partition detach_conc_p1 concurrently",
         ) {
             Err(ExecError::Parse(ParseError::ActiveSqlTransaction(stmt))) => {
-                assert_eq!(stmt, "ALTER TABLE ... DETACH PARTITION CONCURRENTLY");
+                assert_eq!(stmt, "ALTER TABLE ... DETACH CONCURRENTLY");
             }
             other => panic!("expected active transaction error, got {other:?}"),
         }

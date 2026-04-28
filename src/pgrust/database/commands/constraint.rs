@@ -175,6 +175,15 @@ fn cannot_drop_inherited_constraint_error(constraint_name: &str, relation_name: 
     }
 }
 
+fn column_marked_not_null_in_parent_error(column_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("column \"{column_name}\" is marked NOT NULL in parent table"),
+        detail: None,
+        hint: None,
+        sqlstate: "42P16",
+    }
+}
+
 fn not_null_pk_incompatible_error(
     row: &PgConstraintRow,
     column_name: &str,
@@ -1952,6 +1961,27 @@ impl Database {
                 }
             }
             crate::backend::parser::NormalizedAlterTableConstraint::Check(action) => {
+                if relation.relkind == 'p' && action.no_inherit {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot add NO INHERIT constraint to partitioned table \"{table_name}\""
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P16",
+                    });
+                }
+                if alter_stmt.only
+                    && !action.no_inherit
+                    && !direct_inheritance_children(&catalog, relation.relation_oid)?.is_empty()
+                {
+                    return Err(ExecError::DetailedError {
+                        message: "constraint must be added to child tables too".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P16",
+                    });
+                }
                 crate::backend::parser::bind_check_constraint_expr(
                     &action.expr_sql,
                     Some(&table_name),
@@ -3135,6 +3165,101 @@ impl Database {
         Ok(())
     }
 
+    fn propagate_drop_check_constraint_to_inheritors(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent_relation_oid: u32,
+        constraint_name: &str,
+        recurse: bool,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        for child_relation in direct_inheritance_children(&catalog, parent_relation_oid)? {
+            let Some(child_row) = catalog
+                .constraint_rows_for_relation(child_relation.relation_oid)
+                .into_iter()
+                .find(|row| {
+                    row.contype == CONSTRAINT_CHECK
+                        && row.conname.eq_ignore_ascii_case(constraint_name)
+                })
+            else {
+                continue;
+            };
+            if child_row.coninhcount <= 0 {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "inherited CHECK constraint",
+                    actual: format!(
+                        "relation {} has non-inherited constraint \"{}\"",
+                        child_relation.relation_oid, child_row.conname
+                    ),
+                }));
+            }
+
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: cid.saturating_add(catalog_effects.len() as u32),
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            if recurse && child_row.coninhcount == 1 && !child_row.conislocal {
+                let (_removed, effect) = self
+                    .catalog
+                    .write()
+                    .drop_relation_constraint_mvcc(
+                        child_relation.relation_oid,
+                        &child_row.conname,
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+                self.propagate_drop_check_constraint_to_inheritors(
+                    client_id,
+                    xid,
+                    cid.saturating_add(1),
+                    child_relation.relation_oid,
+                    &child_row.conname,
+                    recurse,
+                    configured_search_path,
+                    catalog_effects,
+                )?;
+            } else {
+                let new_inhcount = child_row.coninhcount.saturating_sub(1);
+                let new_is_local = if recurse {
+                    child_row.conislocal
+                } else {
+                    child_row.conislocal || new_inhcount == 0
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .update_check_constraint_inheritance_mvcc(
+                        child_relation.relation_oid,
+                        child_row.oid,
+                        if new_inhcount == 0 {
+                            0
+                        } else {
+                            child_row.conparentid
+                        },
+                        new_is_local,
+                        new_inhcount,
+                        child_row.connoinherit,
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn execute_alter_table_drop_constraint_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -3232,6 +3357,12 @@ impl Database {
 
         match row.contype {
             CONSTRAINT_CHECK | CONSTRAINT_FOREIGN => {
+                if row.coninhcount > 0 {
+                    return Err(cannot_drop_inherited_constraint_error(
+                        &row.conname,
+                        relation_basename(&drop_stmt.table_name),
+                    ));
+                }
                 if row.contype == CONSTRAINT_FOREIGN {
                     if relation.relkind == 'p' {
                         self.drop_partition_child_foreign_key_constraints_in_transaction(
@@ -3270,7 +3401,20 @@ impl Database {
                         &ctx,
                     )
                     .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
+                if row.contype == CONSTRAINT_CHECK && !row.connoinherit {
+                    self.propagate_drop_check_constraint_to_inheritors(
+                        client_id,
+                        xid,
+                        cid.saturating_add(1),
+                        relation.relation_oid,
+                        &row.conname,
+                        !drop_stmt.only,
+                        configured_search_path,
+                        catalog_effects,
+                    )?;
+                }
             }
             CONSTRAINT_NOTNULL => {
                 let attnum = *attnums_from_constraint(&row)?
@@ -3773,6 +3917,27 @@ impl Database {
                 ),
             })
         })?;
+        if relation.relispartition {
+            for parent_row in catalog
+                .inheritance_parents(relation.relation_oid)
+                .into_iter()
+                .filter(|row| !row.inhdetachpending)
+            {
+                if let Some(parent) = catalog.relation_by_oid(parent_row.inhparent) {
+                    if parent.desc.columns.iter().any(|column| {
+                        !column.dropped
+                            && column
+                                .name
+                                .eq_ignore_ascii_case(&relation.desc.columns[column_index].name)
+                            && !column.storage.nullable
+                    }) {
+                        return Err(column_marked_not_null_in_parent_error(
+                            &relation.desc.columns[column_index].name,
+                        ));
+                    }
+                }
+            }
+        }
         if not_null_row.coninhcount > 0 {
             return Err(cannot_drop_inherited_constraint_error(
                 &not_null_row.conname,

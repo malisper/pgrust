@@ -2283,7 +2283,11 @@ impl Session {
         {
             drop(catalog);
             if let Some((xid, cid)) = self.catalog_txn_ctx() {
-                self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                self.lock_table_if_needed(
+                    db,
+                    crate::pgrust::database::relation_lock_tag(&relation),
+                    TableLockMode::AccessExclusive,
+                )?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 return db.execute_alter_view_set_options_stmt_in_transaction_with_search_path(
@@ -5911,7 +5915,7 @@ impl Session {
                         txn.failed = true;
                     }
                     return Err(ExecError::Parse(ParseError::ActiveSqlTransaction(
-                        "ALTER TABLE ... DETACH PARTITION CONCURRENTLY",
+                        "ALTER TABLE ... DETACH CONCURRENTLY",
                     )));
                 }
                 if self.active_txn.is_some() {
@@ -8100,7 +8104,11 @@ impl Session {
                                 alter_stmt.relation_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_owner_stmt_in_transaction_with_search_path(
@@ -8142,7 +8150,11 @@ impl Session {
                                 alter_stmt.relation_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_set_schema_stmt_in_transaction_with_search_path(
@@ -8237,7 +8249,11 @@ impl Session {
                                 rename_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_view_rename_stmt_in_transaction_with_search_path(
@@ -8258,7 +8274,11 @@ impl Session {
                                 rename_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_view_rename_column_stmt_in_transaction_with_search_path(
@@ -8279,7 +8299,11 @@ impl Session {
                                 alter_stmt.relation_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_view_set_schema_stmt_in_transaction_with_search_path(
@@ -8301,7 +8325,11 @@ impl Session {
                                 alter_stmt.relation_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_materialized_view_set_schema_stmt_in_transaction_with_search_path(
@@ -8323,7 +8351,11 @@ impl Session {
                                 alter_stmt.relation_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_materialized_view_set_access_method_stmt_in_transaction_with_search_path(
@@ -8344,7 +8376,11 @@ impl Session {
                                 alter_stmt.relation_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_view_owner_stmt_in_transaction_with_search_path(
@@ -8365,7 +8401,11 @@ impl Session {
                                 alter_stmt.sequence_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_sequence_stmt_in_transaction_with_search_path(
@@ -8387,7 +8427,11 @@ impl Session {
                                 alter_stmt.relation_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_sequence_owner_stmt_in_transaction_with_search_path(
@@ -8408,7 +8452,11 @@ impl Session {
                                 rename_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_sequence_rename_stmt_in_transaction_with_search_path(
@@ -8430,7 +8478,11 @@ impl Session {
                                 rename_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_rename_column_stmt_in_transaction_with_search_path(
@@ -8451,7 +8503,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_add_column_stmt_in_transaction_with_search_path(
@@ -8495,7 +8551,11 @@ impl Session {
                                 drop_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_drop_column_stmt_in_transaction_with_search_path(
@@ -8516,7 +8576,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let datetime_config = self.datetime_config.clone();
                     let txn = self.active_txn.as_mut().unwrap();
@@ -8539,7 +8603,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_alter_column_default_stmt_in_transaction_with_search_path(
@@ -8560,7 +8628,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_alter_column_expression_stmt_in_transaction_with_search_path(
@@ -8581,7 +8653,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_alter_column_compression_stmt_in_transaction_with_search_path(
@@ -8602,7 +8678,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_alter_column_storage_stmt_in_transaction_with_search_path(
@@ -8623,7 +8703,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_alter_column_options_stmt_in_transaction_with_search_path(
@@ -8644,7 +8728,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_alter_column_statistics_stmt_in_transaction_with_search_path(
@@ -8665,7 +8753,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_alter_column_identity_stmt_in_transaction_with_search_path(
@@ -8712,7 +8804,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_drop_constraint_stmt_in_transaction_with_search_path(
@@ -8733,7 +8829,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_alter_constraint_stmt_in_transaction_with_search_path(
@@ -8754,7 +8854,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_rename_constraint_stmt_in_transaction_with_search_path(
@@ -8775,7 +8879,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_set_not_null_stmt_in_transaction_with_search_path(
@@ -8796,7 +8904,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_drop_not_null_stmt_in_transaction_with_search_path(
@@ -8925,7 +9037,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_of_stmt_in_transaction_with_search_path(
@@ -8946,7 +9062,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_not_of_stmt_in_transaction_with_search_path(
@@ -9014,7 +9134,7 @@ impl Session {
                 Statement::AlterTableDetachPartition(ref alter_stmt) => {
                     if alter_stmt.mode == DetachPartitionMode::Concurrently {
                         return Err(ExecError::Parse(ParseError::ActiveSqlTransaction(
-                            "ALTER TABLE ... DETACH PARTITION CONCURRENTLY",
+                            "ALTER TABLE ... DETACH CONCURRENTLY",
                         )));
                     }
                     let catalog = self.catalog_lookup_for_command(db, xid, cid);
@@ -9066,7 +9186,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_set_row_security_stmt_in_transaction_with_search_path(
@@ -9092,7 +9216,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_policy_stmt_in_transaction_with_search_path(
@@ -9113,7 +9241,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_table_reset_stmt_in_transaction_with_search_path(
@@ -9425,7 +9557,11 @@ impl Session {
                             hint: None,
                             sqlstate: "42P01",
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_comment_on_table_stmt_in_transaction_with_search_path(
@@ -9451,7 +9587,11 @@ impl Session {
                             hint: None,
                             sqlstate: "42P01",
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_comment_on_column_stmt_in_transaction_with_search_path(
@@ -9485,7 +9625,11 @@ impl Session {
                             });
                         }
                     };
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_comment_on_view_stmt_in_transaction_with_search_path(
@@ -9513,7 +9657,11 @@ impl Session {
                             )));
                         }
                     };
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_comment_on_index_stmt_in_transaction_with_search_path(
@@ -9577,7 +9725,11 @@ impl Session {
                             )));
                         }
                     };
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_comment_on_constraint_stmt_in_transaction_with_search_path(
@@ -9605,7 +9757,11 @@ impl Session {
                             )));
                         }
                     };
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_comment_on_rule_stmt_in_transaction_with_search_path(
@@ -9626,7 +9782,11 @@ impl Session {
                                 comment_stmt.table_name.clone(),
                             ))
                         })?;
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_comment_on_trigger_stmt_in_transaction_with_search_path(
@@ -10368,7 +10528,11 @@ impl Session {
                             )));
                         }
                     };
-                    self.lock_table_if_needed(db, crate::pgrust::database::relation_lock_tag(&relation), TableLockMode::AccessExclusive)?;
+                    self.lock_table_if_needed(
+                        db,
+                        crate::pgrust::database::relation_lock_tag(&relation),
+                        TableLockMode::AccessExclusive,
+                    )?;
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_create_rule_stmt_in_transaction_with_search_path(

@@ -282,6 +282,31 @@ fn timezone_is_utc_for_alter_column_type(time_zone: &str) -> bool {
     )
 }
 
+fn reject_direct_inherited_column_type_change(
+    catalog: &dyn CatalogLookup,
+    target_relation_oids: &BTreeSet<u32>,
+    relation: &crate::backend::parser::BoundRelation,
+    column_index: usize,
+) -> Result<(), ExecError> {
+    let column = &relation.desc.columns[column_index];
+    if column.attinhcount <= 0 {
+        return Ok(());
+    }
+    let recursing_from_parent = catalog
+        .inheritance_parents(relation.relation_oid)
+        .into_iter()
+        .any(|parent| target_relation_oids.contains(&parent.inhparent));
+    if recursing_from_parent {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("cannot alter inherited column \"{}\"", column.name),
+        detail: None,
+        hint: None,
+        sqlstate: "42P16",
+    })
+}
+
 fn collect_alter_column_type_targets(
     db: &Database,
     catalog: &dyn CatalogLookup,
@@ -333,6 +358,12 @@ fn collect_alter_column_type_targets(
                         .then_some(index)
                 })
         {
+            reject_direct_inherited_column_type_change(
+                catalog,
+                &target_relation_oids,
+                &target_relation,
+                column_index,
+            )?;
             reject_partition_key_type_change(
                 &target_relation,
                 &relation_name_for_error(catalog, target_relation.relation_oid),
@@ -344,6 +375,7 @@ fn collect_alter_column_type_targets(
             &target_relation.desc,
             &alter_stmt.column_name,
             &alter_stmt.ty,
+            alter_stmt.collation.as_deref(),
             if *relation_oid == relation.relation_oid {
                 alter_stmt.using_expr.as_ref()
             } else {

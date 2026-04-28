@@ -2709,6 +2709,7 @@ pub struct AlterTableAlterColumnTypeStatement {
     pub table_name: String,
     pub column_name: String,
     pub ty: RawTypeName,
+    pub collation: Option<String>,
     pub using_expr: Option<SqlExpr>,
 }
 

@@ -3415,7 +3415,7 @@ fn partition_value_bound_literal(value: &SerializedPartitionValue) -> String {
     }
 }
 
-fn partition_constraint_conditions_for_catalog(
+pub(crate) fn partition_constraint_conditions_for_catalog(
     catalog: &dyn CatalogLookup,
     parent: &crate::backend::parser::BoundRelation,
     bound: &PartitionBoundSpec,

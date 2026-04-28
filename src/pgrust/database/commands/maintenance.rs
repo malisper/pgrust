@@ -2708,6 +2708,14 @@ impl Database {
         };
         reject_typed_table_ddl(&relation, "add column to")?;
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
+        if relation.relispartition {
+            return Err(ExecError::DetailedError {
+                message: "cannot add column to a partition".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
         if relation.desc.columns.iter().any(|existing| {
             !existing.dropped && existing.name.eq_ignore_ascii_case(&alter_stmt.column.name)
         }) {

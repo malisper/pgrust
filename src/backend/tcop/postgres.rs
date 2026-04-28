@@ -9,6 +9,7 @@ use std::thread;
 
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::commands::copyto::CopyToSink;
+use crate::backend::executor::exec_expr::partition_constraint_conditions_for_catalog;
 use crate::backend::executor::{ExecError, QueryColumn, StatementResult};
 use crate::backend::libpq::pqcomm::{
     cstr_from_bytes, read_byte, read_cstr, read_i16_bytes, read_i32, read_i32_bytes,
@@ -5586,17 +5587,30 @@ fn psql_describe_partition_of_query_rows(
             inherits.inhparent,
         )
         .unwrap_or_else(|| inherits.inhparent.to_string());
-    let bound = db
-        .describe_relation_by_oid(session.client_id, txn_ctx, oid)
-        .and_then(|relation| relation.relpartbound)
-        .and_then(|text| crate::backend::parser::deserialize_partition_bound(&text).ok())
-        .map(|bound| psql_partition_bound_text(&bound))
+    let child = catalog.relation_by_oid(oid);
+    let parsed_bound = child
+        .as_ref()
+        .and_then(|relation| relation.relpartbound.as_deref())
+        .and_then(|text| crate::backend::parser::deserialize_partition_bound(text).ok());
+    let bound = parsed_bound
+        .as_ref()
+        .map(psql_partition_bound_text)
         .unwrap_or_default();
+    let constraint = catalog
+        .relation_by_oid(inherits.inhparent)
+        .zip(parsed_bound.as_ref())
+        .and_then(|(parent, bound)| {
+            partition_constraint_conditions_for_catalog(&catalog, &parent, bound)
+                .ok()
+                .flatten()
+        })
+        .map(|conditions| Value::Text(format!("({})", conditions.join(" AND ")).into()))
+        .unwrap_or(Value::Null);
     vec![vec![
         Value::Text(parent_name.into()),
         Value::Text(bound.into()),
         Value::Bool(inherits.inhdetachpending),
-        Value::Null,
+        constraint,
     ]]
 }
 
@@ -7045,12 +7059,13 @@ fn format_check_expr_for_constraint_display(
     relation: Option<&crate::backend::utils::cache::relcache::RelCacheEntry>,
 ) -> String {
     let Some(relation) = relation else {
-        return expr_sql.to_string();
+        return normalize_check_expr_operator_spacing(expr_sql);
     };
     if expr_sql.contains("::") {
         return expr_sql.to_string();
     }
-    let trimmed = expr_sql.trim();
+    let normalized = normalize_check_expr_operator_spacing(expr_sql);
+    let trimmed = normalized.trim();
     let operators = [">=", "<=", "<>", "!=", "=", ">", "<"];
     for operator in operators {
         let needle = format!(" {operator} ");
@@ -7059,6 +7074,14 @@ fn format_check_expr_for_constraint_display(
         };
         let left = trimmed[..index].trim();
         let right = trimmed[index + needle.len()..].trim();
+        if relation.desc.columns.iter().any(|column| {
+            !column.dropped
+                && matches!(column.sql_type.kind, SqlTypeKind::Char)
+                && check_expr_column_matches(left, &column.name)
+        }) && is_simple_sql_string_literal(right)
+        {
+            return format!("{left} {operator} {right}::bpchar");
+        }
         if !is_plain_numeric_literal(right) {
             continue;
         }
@@ -7070,7 +7093,49 @@ fn format_check_expr_for_constraint_display(
             return format!("{left} {operator} {right}::double precision");
         }
     }
-    expr_sql.to_string()
+    normalized
+}
+
+fn normalize_check_expr_operator_spacing(expr_sql: &str) -> String {
+    let chars = expr_sql.chars().collect::<Vec<_>>();
+    let mut out = String::with_capacity(expr_sql.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let op = if matches!(chars.get(index), Some('>' | '<' | '!' | '='))
+            && matches!(chars.get(index + 1), Some('='))
+        {
+            Some(2)
+        } else if matches!(chars.get(index), Some('<')) && matches!(chars.get(index + 1), Some('>'))
+        {
+            Some(2)
+        } else if matches!(chars.get(index), Some('>' | '<' | '='))
+            && !matches!(chars.get(index + 1), Some('>'))
+        {
+            Some(1)
+        } else {
+            None
+        };
+        let Some(op_len) = op else {
+            out.push(chars[index]);
+            index += 1;
+            continue;
+        };
+        if !out.ends_with(' ') {
+            out.push(' ');
+        }
+        for offset in 0..op_len {
+            out.push(chars[index + offset]);
+        }
+        if !matches!(chars.get(index + op_len), Some(' ')) {
+            out.push(' ');
+        }
+        index += op_len;
+    }
+    out
+}
+
+fn is_simple_sql_string_literal(value: &str) -> bool {
+    value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2
 }
 
 fn check_expr_column_matches(expr: &str, column_name: &str) -> bool {

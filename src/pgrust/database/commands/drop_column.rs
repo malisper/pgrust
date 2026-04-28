@@ -156,6 +156,37 @@ fn partition_key_references_column(
         .any(|expr| expr_references_column(expr, column_index)))
 }
 
+fn reject_descendant_partition_key_drop(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+    column_name: &str,
+) -> Result<(), ExecError> {
+    for descendant_oid in catalog.find_all_inheritors(relation.relation_oid) {
+        if descendant_oid == relation.relation_oid {
+            continue;
+        }
+        let Some(descendant) = catalog.lookup_relation_by_oid(descendant_oid) else {
+            continue;
+        };
+        let Some(descendant_column_index) = visible_column_index(&descendant, column_name) else {
+            continue;
+        };
+        if partition_key_references_column(&descendant, descendant_column_index)? {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot drop column \"{}\" because it is part of the partition key of relation \"{}\"",
+                    descendant.desc.columns[descendant_column_index].name,
+                    display_relation_name(catalog, &descendant)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+    }
+    Ok(())
+}
+
 fn relation_column_by_name<'a>(
     relation: &'a BoundRelation,
     column_name: &str,
@@ -435,10 +466,11 @@ impl Database {
                 message: "cannot drop column from only the partitioned table when partitions exist"
                     .into(),
                 detail: None,
-                hint: None,
+                hint: Some("Do not specify the ONLY keyword.".into()),
                 sqlstate: "42P16",
             });
         }
+        reject_descendant_partition_key_drop(&catalog, &relation, &drop_stmt.column_name)?;
         let dependent_generated_indices =
             generated_columns_to_drop_for_column(&catalog, &relation, column_index)?;
         let relation_display_name = display_relation_name(&catalog, &relation);

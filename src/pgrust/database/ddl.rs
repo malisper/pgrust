@@ -2187,6 +2187,7 @@ pub(super) fn validate_alter_table_alter_column_type(
     desc: &RelationDesc,
     column_name: &str,
     ty: &RawTypeName,
+    collation: Option<&str>,
     using_expr: Option<&SqlExpr>,
 ) -> Result<AlterColumnTypePlan, ExecError> {
     if is_system_column_name(column_name) {
@@ -2302,6 +2303,21 @@ pub(super) fn validate_alter_table_alter_column_type(
         target_sql_type,
         current_column.storage.nullable,
     );
+    if let Some(collation) = collation {
+        if !is_collatable_type(target_sql_type) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "collations are not supported by type {}",
+                    sql_type_name(target_sql_type)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+        new_column.collation_oid =
+            resolve_collation_oid(collation, catalog).map_err(ExecError::Parse)?;
+    }
     new_column.storage.attstorage = current_column.storage.attstorage;
     new_column.storage.attcompression = current_column.storage.attcompression;
     new_column.attstattarget = current_column.attstattarget;

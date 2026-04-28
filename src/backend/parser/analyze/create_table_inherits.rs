@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::access::common::toast_compression::compression_name;
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
+use crate::include::catalog::DEFAULT_COLLATION_OID;
 
 use super::create_table::{LoweredCreateTable, lower_create_table};
 use super::{
@@ -84,7 +85,7 @@ pub fn lower_create_table_with_catalog(
             });
         }
     }
-    let merged_columns = merge_inherited_columns(stmt, &parents)?;
+    let merged_columns = merge_inherited_columns(stmt, &parents, catalog)?;
     let inherited_constraints = inherited_table_constraints(&parents, catalog);
     let local_constraints = merge_local_table_constraints(&inherited_constraints, stmt)?;
     let mut synthetic = stmt.clone();
@@ -322,6 +323,14 @@ fn resolve_parent_relations(
                 sqlstate: "42P16",
             });
         }
+        if !allow_partitioned_parent && parent.relispartition {
+            return Err(ParseError::DetailedError {
+                message: format!("cannot inherit from partition \"{parent_name}\""),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
         if allow_partitioned_parent && parent.relkind != 'p' {
             return Err(ParseError::DetailedError {
                 message: format!("\"{parent_name}\" is not partitioned"),
@@ -395,6 +404,7 @@ fn partition_persistence_error(child: char, parent: char, parent_name: &str) -> 
 fn merge_inherited_columns(
     stmt: &CreateTableStatement,
     parents: &[BoundRelation],
+    catalog: &dyn CatalogLookup,
 ) -> Result<Vec<MergedColumnSpec>, ParseError> {
     let mut merged = Vec::new();
     let mut column_lookup = BTreeMap::<String, usize>::new();
@@ -413,7 +423,9 @@ fn merge_inherited_columns(
             let inherited = crate::backend::parser::ColumnDef {
                 name: column.name.clone(),
                 ty: RawTypeName::Builtin(column.sql_type),
-                collation: None,
+                collation: (column.collation_oid != 0
+                    && column.collation_oid != DEFAULT_COLLATION_OID)
+                    .then(|| collation_name(catalog, column.collation_oid)),
                 default_expr: if generated.is_some() {
                     None
                 } else {
@@ -522,6 +534,15 @@ fn merge_inherited_columns(
     }
 
     Ok(merged)
+}
+
+fn collation_name(catalog: &dyn CatalogLookup, oid: u32) -> String {
+    catalog
+        .collation_rows()
+        .into_iter()
+        .find(|row| row.oid == oid)
+        .map(|row| row.collname)
+        .unwrap_or_else(|| oid.to_string())
 }
 
 fn mark_local_table_not_null(

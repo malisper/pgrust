@@ -28,9 +28,13 @@ fn reject_regular_inheritance_with_partitioned_relations(
     parent: &BoundRelation,
     parent_name: &str,
 ) -> Result<(), ExecError> {
-    if relation.relkind == 'p' {
+    if relation.relkind == 'p' || relation.relispartition {
         return Err(ExecError::DetailedError {
-            message: "cannot change inheritance of partitioned table".into(),
+            message: if relation.relispartition {
+                "cannot change inheritance of a partition".into()
+            } else {
+                "cannot change inheritance of partitioned table".into()
+            },
             detail: None,
             hint: None,
             sqlstate: "42P16",
@@ -40,6 +44,14 @@ fn reject_regular_inheritance_with_partitioned_relations(
         let parent_name = parent_name.rsplit('.').next().unwrap_or(parent_name);
         return Err(ExecError::DetailedError {
             message: format!("cannot inherit from partitioned table \"{parent_name}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+    if parent.relispartition {
+        return Err(ExecError::DetailedError {
+            message: "cannot inherit from a partition".into(),
             detail: None,
             hint: None,
             sqlstate: "42P16",

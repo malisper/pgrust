@@ -73,6 +73,7 @@ pub struct BoundUpdateTarget {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
     pub relkind: char,
+    pub partition_update_root_oid: Option<u32>,
     pub toast: Option<ToastRelationRef>,
     pub toast_index: Option<BoundIndexRelation>,
     pub desc: RelationDesc,
@@ -1783,6 +1784,7 @@ fn build_update_target(
     parent_assignments: &[BoundAssignment],
     parent_predicate: Option<&Expr>,
     parent_rls_write_checks: &[RlsWriteCheck],
+    partition_update_root_oid: Option<u32>,
     child: &BoundRelation,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundUpdateTarget, ParseError> {
@@ -1834,6 +1836,7 @@ fn build_update_target(
         rel: child.rel,
         relation_oid: child.relation_oid,
         relkind: child.relkind,
+        partition_update_root_oid,
         toast: child.toast,
         toast_index: first_toast_index(catalog, child.toast),
         desc: child.desc.clone(),
@@ -1863,6 +1866,7 @@ fn build_update_target_from_joined_input(
     parent_assignments: &[BoundAssignment],
     parent_predicate: Option<&Expr>,
     parent_rls_write_checks: &[RlsWriteCheck],
+    partition_update_root_oid: Option<u32>,
     child: &BoundRelation,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundUpdateTarget, ParseError> {
@@ -1902,6 +1906,7 @@ fn build_update_target_from_joined_input(
         rel: child.rel,
         relation_oid: child.relation_oid,
         relkind: child.relkind,
+        partition_update_root_oid,
         toast: child.toast,
         toast_index: first_toast_index(catalog, child.toast),
         desc: child.desc.clone(),
@@ -2469,6 +2474,7 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
                 &assignments,
                 predicate.as_ref(),
                 &target.rls_write_checks,
+                None,
                 &child,
                 catalog,
             )
@@ -3371,6 +3377,8 @@ fn bind_simple_update(
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
 
+    let partition_update_root_oid =
+        (entry.relkind == 'p' && !stmt.only).then_some(entry.relation_oid);
     let targets = partitioned_update_target_oids(catalog, &entry, stmt.only)
         .into_iter()
         .map(|relation_oid| {
@@ -3383,6 +3391,7 @@ fn bind_simple_update(
                 &assignments,
                 predicate.as_ref(),
                 &target_rls.write_checks,
+                partition_update_root_oid,
                 &child,
                 catalog,
             )
@@ -3560,6 +3569,8 @@ fn bind_update_from(
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
         .map(|query| crate::backend::optimizer::planner(query, catalog))??;
 
+    let partition_update_root_oid =
+        (entry.relkind == 'p' && !stmt.only).then_some(entry.relation_oid);
     let targets = if stmt.only {
         vec![entry.relation_oid]
     } else {
@@ -3576,6 +3587,7 @@ fn bind_update_from(
             &assignments,
             predicate.as_ref(),
             &target_rls.write_checks,
+            partition_update_root_oid,
             &child,
             catalog,
         )
