@@ -16,6 +16,9 @@
     Normal runs use `210m`; short values are useful for abort-path smoke tests.
   - `jobs`: number of concurrent isolated regression workers. Normal runs use
     `4`.
+- Timeouts: CI runs use a `15s` SQL `statement_timeout` and a `300s`
+  per-file wall-clock timeout. Base-cluster dependency setup also has its own
+  longer setup timeout in `scripts/run_regression.sh`.
 - PostgreSQL source is checked out at the pinned PG18 SHA in `POSTGRES_REF`.
   Bump this only when the team decides to track a newer upstream corpus.
 
