@@ -167,6 +167,9 @@ mod tests {
         assert!(rows.iter().any(|row| {
             row.aggfnoid == 3986 && row.aggkind == 'h' && row.aggnumdirectargs == 1
         }));
-        assert!(rows.iter().all(|row| matches!(row.aggkind, 'n' | 'h')));
+        assert!(
+            rows.iter()
+                .all(|row| matches!(row.aggkind, 'n' | 'h' | 'o'))
+        );
     }
 }

@@ -5654,6 +5654,7 @@ fn remap_child_row_to_parent(
 fn parse_tid_text(value: &Value) -> Result<Option<ItemPointerData>, ExecError> {
     let text = match value {
         Value::Null => return Ok(None),
+        Value::Tid(tid) => return Ok(Some(*tid)),
         Value::Text(text) => text.as_str(),
         Value::TextRef(_, _) => {
             return Err(ExecError::DetailedError {

@@ -1033,9 +1033,9 @@ fn with_merge_target_ctid(from: AnalyzedFrom, target_desc: &RelationDesc) -> (An
                 varno: 1,
                 varattno: SELF_ITEM_POINTER_ATTR_NO,
                 varlevelsup: 0,
-                vartype: SqlType::new(SqlTypeKind::Text),
+                vartype: SqlType::new(SqlTypeKind::Tid),
             }),
-            SqlType::new(SqlTypeKind::Text),
+            SqlType::new(SqlTypeKind::Tid),
             ctid_resno,
         )
         .with_input_resno(ctid_resno),
@@ -1606,7 +1606,7 @@ pub fn plan_merge(
         TargetEntry::new(
             merge_hidden_ctid_name(),
             joined_output_exprs[target_visible_count].clone(),
-            SqlType::new(SqlTypeKind::Text),
+            SqlType::new(SqlTypeKind::Tid),
             projection_targets.len() + 1,
         )
         .with_input_resno(target_visible_count + 1),

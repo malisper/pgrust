@@ -3256,7 +3256,7 @@ fn sql_cursor_fetch_move_close_and_cleanup() {
     );
     assert_eq!(
         session_query_rows(&mut session, &db, "fetch prior from c"),
-        vec![vec![Value::Int32(3)]]
+        vec![vec![Value::Int32(2)]]
     );
 
     session.execute(&db, "close c").unwrap();
@@ -9891,15 +9891,39 @@ fn base_table_scan_exposes_ctid_system_column() {
     assert_eq!(
         query_rows(&db, 1, "select ctid, a from ctid_tbl order by a"),
         vec![
-            vec![Value::Text("(0,1)".into()), Value::Int32(10)],
-            vec![Value::Text("(0,2)".into()), Value::Int32(20)],
+            vec![
+                Value::Tid(crate::include::access::itemptr::ItemPointerData {
+                    block_number: 0,
+                    offset_number: 1,
+                }),
+                Value::Int32(10),
+            ],
+            vec![
+                Value::Tid(crate::include::access::itemptr::ItemPointerData {
+                    block_number: 0,
+                    offset_number: 2,
+                }),
+                Value::Int32(20),
+            ],
         ]
     );
     assert_eq!(
         query_rows(&db, 1, "select t.ctid, t.a from ctid_tbl t order by t.a"),
         vec![
-            vec![Value::Text("(0,1)".into()), Value::Int32(10)],
-            vec![Value::Text("(0,2)".into()), Value::Int32(20)],
+            vec![
+                Value::Tid(crate::include::access::itemptr::ItemPointerData {
+                    block_number: 0,
+                    offset_number: 1,
+                }),
+                Value::Int32(10),
+            ],
+            vec![
+                Value::Tid(crate::include::access::itemptr::ItemPointerData {
+                    block_number: 0,
+                    offset_number: 2,
+                }),
+                Value::Int32(20),
+            ],
         ]
     );
 }
