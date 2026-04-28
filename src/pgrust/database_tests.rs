@@ -35801,6 +35801,35 @@ fn plpgsql_select_into_leading_form_splits_tight_targets() {
 }
 
 #[test]
+fn plpgsql_multidimensional_array_element_assignment_preserves_shape() {
+    let base = temp_dir("plpgsql_multidim_array_assignment");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_multidim_array_assignment() returns text[] language plpgsql as $$
+         declare
+           arr text[];
+           lr text;
+           i int;
+         begin
+           arr := array[array['foo','bar'], array['baz','quux']];
+           lr := 'fool';
+           i := 1;
+           arr[(select i)][(select i + 1)] := (select lr);
+           return arr;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_multidim_array_assignment()::text"),
+        vec![vec![Value::Text("{{foo,fool},{baz,quux}}".into())]]
+    );
+}
+
+#[test]
 fn plpgsql_assignment_query_expr_from_clause_uses_sql_scope() {
     let base = temp_dir("plpgsql_assignment_query_expr_from");
     let db = Database::open(&base, 16).unwrap();

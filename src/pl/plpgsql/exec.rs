@@ -4803,6 +4803,19 @@ fn assign_array_index(
         });
     }
 
+    if let Value::PgArray(array) = &current
+        && array.dimensions.len() > 1
+    {
+        return assign_multidimensional_array_index(
+            array.clone(),
+            array_ty,
+            index,
+            rest,
+            replacement,
+            ctx,
+        );
+    }
+
     let element_ty = assignment_array_element_type(array_ty);
     let (mut lower_bound, mut elements, element_type_oid, prefer_pg_array) = match current {
         Value::PgArray(array) => (
@@ -4876,6 +4889,95 @@ fn assign_array_index(
     } else {
         Ok(Value::Array(elements))
     }
+}
+
+fn assign_multidimensional_array_index(
+    array: ArrayValue,
+    array_ty: SqlType,
+    index: i32,
+    rest: &[RuntimeAssignIndirection],
+    replacement: Value,
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let mut lower_bounds = array
+        .dimensions
+        .iter()
+        .map(|dimension| dimension.lower_bound)
+        .collect::<Vec<_>>();
+    let lower_bound = array.lower_bound(0).unwrap_or(index);
+    let mut elements = array.to_nested_values();
+    let nested_dimensions = array.dimensions.get(1..).unwrap_or(&[]);
+
+    if elements.is_empty() {
+        lower_bounds = std::iter::once(index)
+            .chain(
+                nested_dimensions
+                    .iter()
+                    .map(|dimension| dimension.lower_bound),
+            )
+            .collect();
+    }
+    if index < lower_bound {
+        let prepend = usize::try_from(i64::from(lower_bound) - i64::from(index))
+            .map_err(|_| array_assignment_limit_error())?;
+        checked_assignment_array_item_count(
+            elements
+                .len()
+                .checked_add(prepend)
+                .ok_or_else(array_assignment_limit_error)?,
+        )?;
+        let mut expanded = vec![null_multidimensional_array_item(nested_dimensions); prepend];
+        expanded.extend(elements);
+        elements = expanded;
+        lower_bounds[0] = index;
+    }
+    let upper_bound = lower_bounds[0]
+        .checked_add(i32::try_from(elements.len()).map_err(|_| array_assignment_limit_error())?)
+        .and_then(|upper| upper.checked_sub(1))
+        .ok_or_else(array_assignment_limit_error)?;
+    if index > upper_bound {
+        let append = usize::try_from(i64::from(index) - i64::from(upper_bound))
+            .map_err(|_| array_assignment_limit_error())?;
+        let new_len = elements
+            .len()
+            .checked_add(append)
+            .ok_or_else(array_assignment_limit_error)?;
+        checked_assignment_array_item_count(new_len)?;
+        elements.extend(
+            std::iter::repeat_with(|| null_multidimensional_array_item(nested_dimensions))
+                .take(append),
+        );
+    }
+
+    let item_index = usize::try_from(i64::from(index) - i64::from(lower_bounds[0]))
+        .map_err(|_| array_assignment_limit_error())?;
+    elements[item_index] = assign_indirect_value(
+        elements[item_index].clone(),
+        array_ty,
+        rest,
+        replacement,
+        ctx,
+    )?;
+
+    let mut rebuilt =
+        ArrayValue::from_nested_values(elements, lower_bounds).map_err(|details| {
+            ExecError::InvalidStorageValue {
+                column: "<array>".into(),
+                details,
+            }
+        })?;
+    rebuilt.element_type_oid = array.element_type_oid;
+    Ok(Value::PgArray(rebuilt))
+}
+
+fn null_multidimensional_array_item(dimensions: &[ArrayDimension]) -> Value {
+    let elements = dimensions.iter().fold(1usize, |acc, dimension| {
+        acc.saturating_mul(dimension.length)
+    });
+    Value::PgArray(ArrayValue::from_dimensions(
+        dimensions.to_vec(),
+        vec![Value::Null; elements],
+    ))
 }
 
 const MAX_ASSIGNMENT_ARRAY_ITEMS: usize = i32::MAX as usize;
