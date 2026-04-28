@@ -677,6 +677,20 @@ fn bind_select_list_srf_call(
                         actual: format!("{arg:?}"),
                     });
                 };
+                if args.len() == 1
+                    && let Some(columns) = unnest_composite_output_columns(element_type, catalog)?
+                {
+                    bound_args.push(bind_expr_with_outer_and_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?);
+                    output_columns.extend(columns);
+                    continue;
+                }
                 let column_name = if idx == 0 {
                     "unnest".to_string()
                 } else {
@@ -1125,6 +1139,50 @@ fn unnest_element_type(arg_type: SqlType) -> Option<SqlType> {
         SqlTypeKind::OidVector => Some(SqlType::new(SqlTypeKind::Oid)),
         _ => None,
     }
+}
+
+fn unnest_composite_output_columns(
+    element_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Vec<QueryColumn>>, ParseError> {
+    let fields =
+        if matches!(element_type.kind, SqlTypeKind::Composite) && element_type.typrelid != 0 {
+            let relation = catalog
+                .lookup_relation_by_oid(element_type.typrelid)
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "named composite type",
+                    actual: format!("type relation {} not found", element_type.typrelid),
+                })?;
+            relation
+                .desc
+                .columns
+                .into_iter()
+                .filter(|column| !column.dropped)
+                .map(|column| (column.name, column.sql_type))
+                .collect::<Vec<_>>()
+        } else if matches!(element_type.kind, SqlTypeKind::Record)
+            && element_type.typmod > 0
+            && let Some(descriptor) = lookup_anonymous_record_descriptor(element_type.typmod)
+        {
+            descriptor
+                .fields
+                .into_iter()
+                .map(|field| (field.name, field.sql_type))
+                .collect::<Vec<_>>()
+        } else {
+            return Ok(None);
+        };
+
+    Ok(Some(
+        fields
+            .into_iter()
+            .map(|(name, sql_type)| QueryColumn {
+                name,
+                sql_type,
+                wire_type_oid: None,
+            })
+            .collect(),
+    ))
 }
 
 fn bind_json_table_srf_args(

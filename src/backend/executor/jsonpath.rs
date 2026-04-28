@@ -3318,6 +3318,32 @@ fn jsonpath_syntax_error_end() -> ExecError {
     exec_jsonpath_error("syntax error at end of jsonpath input")
 }
 
+fn is_jsonpath_delimiter(ch: char) -> bool {
+    matches!(
+        ch,
+        '(' | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '.'
+            | ','
+            | ':'
+            | '?'
+            | '@'
+            | '$'
+            | '+'
+            | '-'
+            | '*'
+            | '/'
+            | '%'
+            | '='
+            | '!'
+            | '<'
+            | '>'
+    )
+}
+
 fn jsonpath_numeric_trailing_junk_error(token: &str) -> ExecError {
     exec_jsonpath_error(&format!(
         "trailing junk after numeric literal at or near \"{token}\" of jsonpath input"
@@ -3724,9 +3750,16 @@ impl<'a> Parser<'a> {
             PathMode::Lax
         };
         let expr = self.parse_or_expr()?;
+        let expr_end = self.offset;
         self.skip_ws();
         if !self.is_eof() {
-            return Err(jsonpath_syntax_error_end());
+            if expr_end == self.offset
+                && matches!(&expr, Expr::Literal(JsonbValue::Numeric(_)))
+                && self.peek().is_some_and(is_jsonpath_other_char)
+            {
+                return Err(jsonpath_syntax_error_end());
+            }
+            return Err(jsonpath_syntax_error_near(self.syntax_error_token()));
         }
         Ok(JsonPath { mode, expr })
     }
@@ -4033,9 +4066,16 @@ impl<'a> Parser<'a> {
             return Ok(Expr::Literal(number));
         }
         if matches!(self.peek(), Some(ch) if ch == '_' || ch.is_ascii_alphabetic()) {
+            let _ = self.take_while(|ch| ch == '_' || ch.is_ascii_alphanumeric());
+            if matches!(self.peek(), Some(ch) if ch.is_whitespace()) {
+                return Err(jsonpath_syntax_error_near(" "));
+            }
             return Err(jsonpath_syntax_error_end());
         }
-        Err(exec_jsonpath_error("invalid jsonpath expression"))
+        if let Some(ch) = self.peek() {
+            return Err(jsonpath_syntax_error_near(ch.to_string()));
+        }
+        Err(jsonpath_syntax_error_end())
     }
 
     fn parse_path(&mut self, base: Base) -> Result<Expr, ExecError> {
@@ -4514,6 +4554,18 @@ impl<'a> Parser<'a> {
 
     fn peek(&self) -> Option<char> {
         self.input[self.offset..].chars().next()
+    }
+
+    fn syntax_error_token(&self) -> String {
+        match self.peek() {
+            Some(ch) if ch.is_whitespace() => " ".into(),
+            Some(ch) if is_jsonpath_delimiter(ch) => ch.to_string(),
+            Some(_) => self.input[self.offset..]
+                .chars()
+                .take_while(|ch| !ch.is_whitespace() && !is_jsonpath_delimiter(*ch))
+                .collect(),
+            None => String::new(),
+        }
     }
 
     fn bump(&mut self) {

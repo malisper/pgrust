@@ -14,6 +14,7 @@ use crate::include::catalog::{
     ANYOID, PG_LANGUAGE_INTERNAL_OID, builtin_scalar_function_for_proc_oid,
     builtin_type_name_for_oid, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
+use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, CaseExpr as BoundCaseExpr,
     CaseTestExpr as BoundCaseTestExpr, CaseWhen as BoundCaseWhen, ExprArraySubscript, OpExprKind,
@@ -219,7 +220,7 @@ fn bind_sql_json_query_function(
         return Err(ParseError::DetailedError {
             message: format!(
                 "JSON path expression must be of type jsonpath, not of type {}",
-                sql_type_name(raw_path_type)
+                catalog_sql_type_name(raw_path_type, catalog)
             ),
             detail: None,
             hint: None,
@@ -974,21 +975,51 @@ pub(crate) fn bind_expr_with_outer(
     bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, &[])
 }
 
-fn build_whole_row_expr(fields: Vec<(String, Expr)>) -> Expr {
-    Expr::Row {
-        descriptor: assign_anonymous_record_descriptor(
-            fields
-                .iter()
-                .map(|(field_name, expr)| {
-                    (
-                        field_name.clone(),
-                        expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
-                    )
-                })
-                .collect(),
-        ),
-        fields,
+fn build_whole_row_expr(fields: Vec<(String, Expr)>, named_row_type: Option<(u32, u32)>) -> Expr {
+    let descriptor_fields = fields
+        .iter()
+        .map(|(field_name, expr)| {
+            (
+                field_name.clone(),
+                expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let descriptor = if let Some((type_oid, typrelid)) = named_row_type {
+        RecordDescriptor::named(type_oid, typrelid, -1, descriptor_fields)
+    } else {
+        assign_anonymous_record_descriptor(descriptor_fields)
+    };
+    Expr::Row { descriptor, fields }
+}
+
+fn relation_row_type_identity(
+    catalog: &dyn CatalogLookup,
+    relation_oid: Option<u32>,
+) -> Option<(u32, u32)> {
+    let relation_oid = relation_oid?;
+    if let Some(relation) = catalog.lookup_relation_by_oid(relation_oid) {
+        if relation.of_type_oid != 0 {
+            let typrelid = catalog
+                .type_by_oid(relation.of_type_oid)
+                .map(|row| row.typrelid)
+                .filter(|typrelid| *typrelid != 0)
+                .unwrap_or(relation_oid);
+            return Some((relation.of_type_oid, typrelid));
+        }
     }
+    let type_oid = catalog
+        .class_row_by_oid(relation_oid)
+        .map(|row| row.reltype)
+        .filter(|type_oid| *type_oid != 0)
+        .or_else(|| {
+            catalog
+                .type_rows()
+                .into_iter()
+                .find(|row| row.typrelid == relation_oid)
+                .map(|row| row.oid)
+        })?;
+    (type_oid != 0).then_some((type_oid, relation_oid))
 }
 
 fn bind_row_expr_fields(
@@ -1305,8 +1336,8 @@ fn build_row_ordering_comparison(make: OpExprKind, parts: Vec<Expr>) -> Result<E
         make,
         SqlType::new(SqlTypeKind::Bool),
         vec![
-            build_whole_row_expr(left_fields),
-            build_whole_row_expr(right_fields),
+            build_whole_row_expr(left_fields, None),
+            build_whole_row_expr(right_fields, None),
         ],
         collation_oid,
     ))
@@ -2477,10 +2508,11 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         }
         SqlExpr::Column(name) => {
             if let Some(relation_name) = name.strip_suffix(".*") {
-                let fields =
-                    resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
+                let resolved =
+                    resolve_relation_row_expr_ref_with_outer(scope, outer_scopes, relation_name)
                         .ok_or_else(|| ParseError::UnknownColumn(name.clone()))?;
-                build_whole_row_expr(fields)
+                let named_row_type = relation_row_type_identity(catalog, resolved.relation_oid);
+                build_whole_row_expr(resolved.fields, named_row_type)
             } else if let Some(system_column) =
                 resolve_system_column_with_outer(scope, outer_scopes, name)?
             {
@@ -2507,11 +2539,12 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                             )
                         }),
                     Err(ParseError::UnknownColumn(_))
-                        if resolve_relation_row_expr_with_outer(scope, outer_scopes, name).is_some() =>
+                        if resolve_relation_row_expr_ref_with_outer(scope, outer_scopes, name).is_some() =>
                     {
-                        let fields = resolve_relation_row_expr_with_outer(scope, outer_scopes, name)
+                        let resolved = resolve_relation_row_expr_ref_with_outer(scope, outer_scopes, name)
                             .expect("checked above");
-                        build_whole_row_expr(fields)
+                        let named_row_type = relation_row_type_identity(catalog, resolved.relation_oid);
+                        build_whole_row_expr(resolved.fields, named_row_type)
                     }
                     Err(err) => return Err(err),
                 }
@@ -5404,11 +5437,12 @@ fn bind_field_select_expr(
 ) -> Result<Expr, ParseError> {
     let bound_inner = match expr {
         SqlExpr::Column(name)
-            if resolve_relation_row_expr_with_outer(scope, outer_scopes, name).is_some() =>
+            if resolve_relation_row_expr_ref_with_outer(scope, outer_scopes, name).is_some() =>
         {
-            let fields = resolve_relation_row_expr_with_outer(scope, outer_scopes, name)
+            let resolved = resolve_relation_row_expr_ref_with_outer(scope, outer_scopes, name)
                 .expect("checked above");
-            build_whole_row_expr(fields)
+            let named_row_type = relation_row_type_identity(catalog, resolved.relation_oid);
+            build_whole_row_expr(resolved.fields, named_row_type)
         }
         _ => {
             bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?
@@ -5769,6 +5803,24 @@ fn catalog_sql_type_name(ty: SqlType, catalog: &dyn CatalogLookup) -> String {
         && let Some(row) = catalog.type_by_oid(ty.type_oid)
     {
         return row.typname;
+    }
+    if !ty.is_array && ty.typrelid != 0 {
+        if let Some(row) = catalog
+            .type_rows()
+            .into_iter()
+            .find(|row| row.typrelid == ty.typrelid && row.oid == ty.type_oid)
+            .or_else(|| {
+                catalog
+                    .type_rows()
+                    .into_iter()
+                    .find(|row| row.typrelid == ty.typrelid)
+            })
+        {
+            return row.typname;
+        }
+        if let Some(row) = catalog.class_row_by_oid(ty.typrelid) {
+            return row.relname;
+        }
     }
     sql_type_name(ty)
 }

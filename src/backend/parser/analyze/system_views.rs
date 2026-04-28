@@ -1,11 +1,14 @@
 use super::query::AnalyzedFrom;
 use super::*;
-use crate::backend::rewrite::{ViewDmlEvent, load_view_return_query, load_view_return_select};
+use crate::backend::rewrite::{
+    ViewDmlEvent, load_view_return_query, load_view_return_select,
+    render_relation_expr_sql_for_information_schema,
+};
 use crate::backend::utils::cache::system_view_registry::{
     SyntheticSystemViewKind, synthetic_system_view,
 };
 use crate::backend::utils::trigger::format_trigger_definition;
-use crate::include::catalog::{PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID};
+use crate::include::catalog::{CONSTRAINT_CHECK, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID};
 use crate::include::nodes::parsenodes::{JoinTreeNode, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
     SetReturningCall, attrno_index, is_system_attr, set_returning_call_exprs,
@@ -288,6 +291,9 @@ pub(super) fn bind_builtin_system_view(
         }
         SyntheticSystemViewKind::InformationSchemaColumnColumnUsage => {
             information_schema_column_column_usage_rows(catalog)
+        }
+        SyntheticSystemViewKind::InformationSchemaCheckConstraints => {
+            information_schema_check_constraint_rows(catalog)
         }
         SyntheticSystemViewKind::InformationSchemaTriggers => {
             information_schema_trigger_rows(catalog)
@@ -617,6 +623,71 @@ fn information_schema_column_column_usage_rows(catalog: &dyn CatalogLookup) -> V
             ]
         })
         .collect()
+}
+
+fn information_schema_check_constraint_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
+    let mut rows = catalog
+        .constraint_rows()
+        .into_iter()
+        .filter(|row| row.contype == CONSTRAINT_CHECK)
+        .filter_map(|row| {
+            let namespace = catalog.namespace_row_by_oid(row.connamespace)?;
+            let check_clause = information_schema_check_clause(catalog, &row)?;
+            Some(vec![
+                Value::Text(REGRESSION_DATABASE_NAME.into()),
+                Value::Text(namespace.nspname.into()),
+                Value::Text(row.conname.into()),
+                Value::Text(check_clause.into()),
+            ])
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        value_text(left.get(1))
+            .cmp(value_text(right.get(1)))
+            .then_with(|| value_text(left.get(2)).cmp(value_text(right.get(2))))
+    });
+    rows
+}
+
+fn information_schema_check_clause(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgConstraintRow,
+) -> Option<String> {
+    let raw = row.conbin.as_deref()?;
+    let rendered = canonicalize_check_clause_sql(catalog, row).unwrap_or_else(|| raw.to_string());
+    let trimmed = rendered.trim();
+    if trimmed.starts_with("JSON_EXISTS(") || trimmed.starts_with('(') {
+        Some(trimmed.to_string())
+    } else {
+        Some(format!("({trimmed})"))
+    }
+}
+
+fn canonicalize_check_clause_sql(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgConstraintRow,
+) -> Option<String> {
+    let expr_sql = row.conbin.as_deref()?;
+    if !contains_sql_json_query_function(expr_sql) {
+        return None;
+    }
+    let relation = catalog.lookup_relation_by_oid(row.conrelid)?;
+    let relation_name = catalog
+        .class_row_by_oid(row.conrelid)
+        .map(|row| row.relname);
+    let bound =
+        bind_relation_expr(expr_sql, relation_name.as_deref(), &relation.desc, catalog).ok()?;
+    Some(render_relation_expr_sql_for_information_schema(
+        &bound,
+        relation_name.as_deref(),
+        &relation.desc,
+        catalog,
+    ))
+}
+
+fn contains_sql_json_query_function(expr_sql: &str) -> bool {
+    let upper = expr_sql.to_ascii_uppercase();
+    upper.contains("JSON_QUERY(") || upper.contains("JSON_VALUE(") || upper.contains("JSON_EXISTS(")
 }
 
 fn information_schema_data_type(sql_type: SqlType, catalog: &dyn CatalogLookup) -> String {

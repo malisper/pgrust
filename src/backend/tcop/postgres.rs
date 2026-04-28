@@ -278,6 +278,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     {
         return Some(position);
     }
+    if suppress_sql_json_query_function_runtime_position(sql, e) {
+        return None;
+    }
     if matches!(e, ExecError::Regex(_))
         && is_jsonpath_sql_surface(sql)
         && let Some(position) = find_jsonpath_literal_position(sql)
@@ -452,6 +455,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return find_last_case_insensitive_token_position(sql, name);
             }
             if let Some(position) = routine_definition_error_position(sql, message) {
+                return Some(position);
+            }
+            if let Some(position) = sql_json_query_function_error_position(sql, message) {
                 return Some(position);
             }
             if let Some(position) = create_table_error_position(sql, message) {
@@ -806,6 +812,166 @@ fn create_table_error_position(sql: &str, message: &str) -> Option<usize> {
             None
         }
     })
+}
+
+fn suppress_sql_json_query_function_runtime_position(sql: &str, e: &ExecError) -> bool {
+    if !is_sql_json_query_function_surface(sql) {
+        return false;
+    }
+    match e {
+        ExecError::WithContext { source, .. } => {
+            suppress_sql_json_query_function_runtime_position(sql, source)
+        }
+        ExecError::Parse(_) => false,
+        ExecError::JsonInput { message, .. } => {
+            message.starts_with("invalid input syntax for type ")
+        }
+        ExecError::ArrayInput { .. }
+        | ExecError::InvalidIntegerInput { .. }
+        | ExecError::IntegerOutOfRange { .. }
+        | ExecError::InvalidNumericInput(_)
+        | ExecError::InvalidUuidInput { .. }
+        | ExecError::InvalidByteaInput { .. }
+        | ExecError::InvalidGeometryInput { .. }
+        | ExecError::InvalidRangeInput { .. }
+        | ExecError::InvalidBitInput { .. }
+        | ExecError::InvalidBooleanInput { .. }
+        | ExecError::InvalidFloatInput { .. }
+        | ExecError::FloatOutOfRange { .. } => true,
+        ExecError::InvalidStorageValue { column, details } => {
+            column == "jsonpath" && is_jsonpath_parse_error(details)
+        }
+        ExecError::DetailedError { message, .. } => {
+            message.starts_with("invalid input syntax for type ")
+                || message.starts_with("malformed range literal: ")
+                || is_jsonpath_parse_error(message)
+        }
+        _ => false,
+    }
+}
+
+fn sql_json_query_function_error_position(sql: &str, message: &str) -> Option<usize> {
+    if !is_sql_json_query_function_surface(sql) {
+        return None;
+    }
+    match message {
+        "cannot specify FORMAT JSON in RETURNING clause of JSON_VALUE()" => {
+            find_sql_json_returning_format_position(sql)
+        }
+        "SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used" => {
+            find_sql_json_query_function_name_position(sql)
+        }
+        "DEFAULT expression must not contain column references"
+        | "DEFAULT expression must not return a set"
+        | "can only specify a constant, non-aggregate function, or operator expression for DEFAULT" => {
+            find_sql_json_default_behavior_expr_position(sql)
+        }
+        "invalid ON ERROR behavior" | "invalid ON EMPTY behavior" => {
+            find_sql_json_behavior_clause_position(sql)
+        }
+        _ if message.starts_with("cannot cast behavior expression of type ") => {
+            find_sql_json_default_behavior_expr_position(sql)
+        }
+        _ if message.starts_with("JSON path expression must be of type jsonpath, not of type ") => {
+            find_sql_json_path_argument_position(sql)
+        }
+        _ => None,
+    }
+}
+
+fn is_sql_json_query_function_surface(sql: &str) -> bool {
+    find_sql_json_query_function_name_index(sql).is_some()
+}
+
+fn find_sql_json_query_function_name_position(sql: &str) -> Option<usize> {
+    find_sql_json_query_function_name_index(sql).map(|index| index + 1)
+}
+
+fn find_sql_json_query_function_name_index(sql: &str) -> Option<usize> {
+    ["json_exists", "json_value", "json_query"]
+        .iter()
+        .filter_map(|name| find_sql_json_query_function_name_index_for(sql, name))
+        .min()
+}
+
+fn find_sql_json_query_function_name_index_for(sql: &str, name: &str) -> Option<usize> {
+    let mut start = 0usize;
+    while let Some(index) = find_ascii_keyword(sql, name, start) {
+        let after_name = skip_ascii_whitespace(sql, index + name.len(), sql.len());
+        if sql.as_bytes().get(after_name) == Some(&b'(') {
+            return Some(index);
+        }
+        start = index + name.len();
+    }
+    None
+}
+
+fn find_sql_json_query_function_call_bounds(sql: &str) -> Option<(usize, usize, usize)> {
+    let name = find_sql_json_query_function_name_index(sql)?;
+    let after_name = sql[name..].find('(')? + name;
+    let close = find_matching_delimiter(sql, after_name, b'(', b')')?;
+    Some((name, after_name, close))
+}
+
+fn find_sql_json_returning_format_position(sql: &str) -> Option<usize> {
+    let (_, open, close) = find_sql_json_query_function_call_bounds(sql)?;
+    let returning = find_ascii_keyword(sql, "returning", open + 1)?;
+    if returning >= close {
+        return None;
+    }
+    let format = find_ascii_keyword(sql, "format", returning + "returning".len())?;
+    (format < close).then_some(format + 1)
+}
+
+fn find_sql_json_path_argument_position(sql: &str) -> Option<usize> {
+    let (_, open, close) = find_sql_json_query_function_call_bounds(sql)?;
+    let comma = top_level_commas(sql, open + 1, close).into_iter().next()?;
+    Some(skip_ascii_whitespace(sql, comma + 1, close) + 1)
+}
+
+fn find_sql_json_default_behavior_expr_position(sql: &str) -> Option<usize> {
+    let (_, open, close) = find_sql_json_query_function_call_bounds(sql)?;
+    let segment = &sql[open + 1..close];
+    let default = find_last_top_level_keyword(segment, "default")?;
+    let expr = skip_ascii_whitespace(segment, default + "default".len(), segment.len());
+    Some(open + 1 + expr + 1)
+}
+
+fn find_sql_json_behavior_clause_position(sql: &str) -> Option<usize> {
+    let (_, open, close) = find_sql_json_query_function_call_bounds(sql)?;
+    let segment = &sql[open + 1..close];
+    let on_position = find_sql_json_behavior_on_position(segment)?;
+    let prefix = &segment[..on_position];
+    [
+        "default", "empty", "error", "true", "false", "unknown", "null",
+    ]
+    .iter()
+    .filter_map(|keyword| find_last_top_level_keyword(prefix, keyword))
+    .max()
+    .map(|index| open + 1 + index + 1)
+}
+
+fn find_sql_json_behavior_on_position(segment: &str) -> Option<usize> {
+    let mut start = 0usize;
+    while let Some(on_position) = find_top_level_keyword_after(segment, start, "on") {
+        let target = skip_ascii_whitespace(segment, on_position + "on".len(), segment.len());
+        let bytes = segment.as_bytes();
+        if ascii_keyword_at(bytes, target, b"error") || ascii_keyword_at(bytes, target, b"empty") {
+            return Some(on_position);
+        }
+        start = on_position + "on".len();
+    }
+    None
+}
+
+fn find_last_top_level_keyword(sql: &str, keyword: &str) -> Option<usize> {
+    let mut start = 0usize;
+    let mut last = None;
+    while let Some(index) = find_top_level_keyword_after(sql, start, keyword) {
+        last = Some(index);
+        start = index + keyword.len();
+    }
+    last
 }
 
 fn find_default_expr_start(sql: &str) -> Option<usize> {
@@ -12469,6 +12635,92 @@ ORDER BY 1, 2;";
             assert_eq!(
                 exec_error_position(sql, &err),
                 sql.find(token).map(|i| i + 1),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn exec_error_position_omits_sql_json_runtime_input_errors() {
+        let sql = "SELECT JSON_VALUE(jsonb '\"aaa\"', '$' RETURNING int ERROR ON ERROR);";
+        let err = ExecError::InvalidIntegerInput {
+            ty: "integer",
+            value: "aaa".into(),
+        };
+        assert_eq!(exec_error_position(sql, &err), None);
+
+        let sql = "SELECT JSON_QUERY(jsonb '\"aaa\"', '$' OMIT QUOTES ERROR ON ERROR);";
+        let err = ExecError::JsonInput {
+            raw_input: "aaa".into(),
+            message: "invalid input syntax for type json".into(),
+            detail: Some("Token \"aaa\" is invalid.".into()),
+            context: Some("JSON data, line 1: aaa".into()),
+            sqlstate: "22P02",
+        };
+        assert_eq!(exec_error_position(sql, &err), None);
+    }
+
+    #[test]
+    fn exec_error_position_points_at_sql_json_validation_nodes() {
+        let cases = [
+            (
+                "SELECT JSON_VALUE(jsonb '[\"1\"]', '$[*]' RETURNING int FORMAT JSON);",
+                "cannot specify FORMAT JSON in RETURNING clause of JSON_VALUE()",
+                "FORMAT",
+            ),
+            (
+                "SELECT JSON_QUERY(jsonb '[1]', '$' WITH WRAPPER OMIT QUOTES);",
+                "SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used",
+                "JSON_QUERY",
+            ),
+            (
+                "SELECT JSON_QUERY(js, '$' RETURNING int DEFAULT ret_setint() ON ERROR) FROM t;",
+                "DEFAULT expression must not return a set",
+                "ret_setint",
+            ),
+            (
+                "SELECT JSON_QUERY(js, '$' RETURNING int DEFAULT (SELECT 1) ON ERROR) FROM t;",
+                "can only specify a constant, non-aggregate function, or operator expression for DEFAULT",
+                "(SELECT",
+            ),
+            (
+                "SELECT JSON_QUERY(jsonb '{\"a\": 123}', ('$' || '.' || 'a' || NULL)::date WITH WRAPPER);",
+                "JSON path expression must be of type jsonpath, not of type date",
+                "('$'",
+            ),
+            (
+                "SELECT json_value('\"aaa\"', jsonpaths RETURNING json) FROM jsonpaths;",
+                "JSON path expression must be of type jsonpath, not of type record",
+                "jsonpaths",
+            ),
+            (
+                "SELECT JSON_EXISTS(jsonb '1', '$' DEFAULT 1 ON ERROR);",
+                "invalid ON ERROR behavior",
+                "DEFAULT",
+            ),
+            (
+                "SELECT JSON_VALUE(jsonb '1', '$' EMPTY ON ERROR);",
+                "invalid ON ERROR behavior",
+                "EMPTY",
+            ),
+            (
+                "SELECT JSON_VALUE(jsonb '1234', '$' RETURNING bit(3) DEFAULT 1 ON ERROR);",
+                "cannot cast behavior expression of type integer to bit",
+                "1 ON ERROR",
+            ),
+        ];
+
+        for (sql, message, token) in cases {
+            let err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+                message: message.into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            });
+
+            assert_eq!(
+                exec_error_position(sql, &err),
+                sql.find(token).map(|index| index + 1),
                 "{sql}"
             );
         }

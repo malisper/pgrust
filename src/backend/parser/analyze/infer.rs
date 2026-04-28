@@ -10,6 +10,7 @@ use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
 };
 use crate::include::catalog::range_type_ref_for_sql_type;
+use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 
 fn array_subscript_element_type(array_type: SqlType) -> SqlType {
@@ -184,23 +185,58 @@ fn child_outer_scopes(scope: &BoundScope, outer_scopes: &[BoundScope]) -> Vec<Bo
 
 fn infer_relation_row_expr_type(
     scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     name: &str,
 ) -> Option<SqlType> {
-    resolve_relation_row_expr_with_outer(scope, outer_scopes, name).map(|fields| {
-        assign_anonymous_record_descriptor(
-            fields
-                .iter()
-                .map(|(field_name, field_expr)| {
-                    (
-                        field_name.clone(),
-                        expr_sql_type_hint(field_expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
-                    )
-                })
-                .collect(),
-        )
-        .sql_type()
+    resolve_relation_row_expr_ref_with_outer(scope, outer_scopes, name).map(|resolved| {
+        let fields = resolved
+            .fields
+            .iter()
+            .map(|(field_name, field_expr)| {
+                (
+                    field_name.clone(),
+                    expr_sql_type_hint(field_expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Some((type_oid, typrelid)) =
+            relation_row_type_identity(catalog, resolved.relation_oid)
+        {
+            RecordDescriptor::named(type_oid, typrelid, -1, fields).sql_type()
+        } else {
+            assign_anonymous_record_descriptor(fields).sql_type()
+        }
     })
+}
+
+fn relation_row_type_identity(
+    catalog: &dyn CatalogLookup,
+    relation_oid: Option<u32>,
+) -> Option<(u32, u32)> {
+    let relation_oid = relation_oid?;
+    if let Some(relation) = catalog.lookup_relation_by_oid(relation_oid) {
+        if relation.of_type_oid != 0 {
+            let typrelid = catalog
+                .type_by_oid(relation.of_type_oid)
+                .map(|row| row.typrelid)
+                .filter(|typrelid| *typrelid != 0)
+                .unwrap_or(relation_oid);
+            return Some((relation.of_type_oid, typrelid));
+        }
+    }
+    let type_oid = catalog
+        .class_row_by_oid(relation_oid)
+        .map(|row| row.reltype)
+        .filter(|type_oid| *type_oid != 0)
+        .or_else(|| {
+            catalog
+                .type_rows()
+                .into_iter()
+                .find(|row| row.typrelid == relation_oid)
+                .map(|row| row.oid)
+        })?;
+    (type_oid != 0).then_some((type_oid, relation_oid))
 }
 
 fn infer_record_field_type(
@@ -330,7 +366,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
     match expr {
         SqlExpr::Column(name) => {
             if let Some(relation_name) = name.strip_suffix(".*") {
-                infer_relation_row_expr_type(scope, outer_scopes, relation_name)
+                infer_relation_row_expr_type(scope, catalog, outer_scopes, relation_name)
                     .unwrap_or(SqlType::new(SqlTypeKind::Text))
             } else {
                 resolve_system_column_with_outer(scope, outer_scopes, name)
@@ -346,7 +382,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                                 .get(depth)
                                 .and_then(|s| s.desc.columns.get(index).map(|c| c.sql_type)),
                             Err(ParseError::UnknownColumn(_)) => {
-                                infer_relation_row_expr_type(scope, outer_scopes, name)
+                                infer_relation_row_expr_type(scope, catalog, outer_scopes, name)
                             }
                             Err(_) => None,
                         }
