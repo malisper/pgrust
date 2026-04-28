@@ -49,6 +49,10 @@ impl LargeObjectRuntime {
         Ok(1)
     }
 
+    pub(crate) fn metadata_row(&self, oid: u32) -> Option<PgLargeobjectMetadataRow> {
+        self.metadata.read().get(&oid).cloned()
+    }
+
     pub(crate) fn metadata_rows(&self) -> Vec<Vec<Value>> {
         self.metadata
             .read()

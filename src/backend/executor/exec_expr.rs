@@ -146,10 +146,12 @@ use crate::include::catalog::{
     BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN,
     CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID,
     DEFAULT_COLLATION_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID,
-    INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID,
-    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
-    PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, POLY_SPGIST_OPCLASS_OID,
+    INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID, PG_AUTHID_RELATION_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_OWNER_OID,
+    PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+    PG_LARGEOBJECT_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID, PG_READ_ALL_DATA_OID,
+    PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID,
+    POLY_SPGIST_OPCLASS_OID, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
     QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID,
     bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
     default_btree_opclass_oid, default_hash_opclass_oid,
@@ -4524,6 +4526,145 @@ fn acl_item_parts(item: &str) -> Option<(&str, &str, &str)> {
     Some((grantee, privileges, grantor))
 }
 
+#[derive(Clone, Copy)]
+struct PrivilegeSpec {
+    acl_char: char,
+    grant_option: bool,
+}
+
+#[derive(Clone, Copy)]
+enum RolePrivilegeSpec {
+    Usage,
+    Member,
+    Set,
+    Admin,
+}
+
+#[derive(Clone, Copy)]
+enum PrivilegeRelationKind {
+    Table,
+    Sequence,
+}
+
+#[derive(Clone, Copy)]
+enum ColumnLookup {
+    Name,
+    Attnum,
+}
+
+fn privilege_catalog<'a>(
+    ctx: &'a ExecutorContext,
+    function_name: &'static str,
+) -> Result<&'a dyn CatalogLookup, ExecError> {
+    ctx.catalog
+        .as_deref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("{function_name} requires catalog context"),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })
+}
+
+fn invalid_privilege_type_error(privilege: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("unrecognized privilege type: \"{privilege}\""),
+        detail: None,
+        hint: None,
+        sqlstate: INVALID_PARAMETER_VALUE_SQLSTATE,
+    }
+}
+
+fn parse_privilege_specs(
+    value: &Value,
+    function_name: &'static str,
+    map: &[(&'static str, char, bool)],
+) -> Result<Vec<PrivilegeSpec>, ExecError> {
+    let Some(privilege_text) = value.as_text() else {
+        return Err(ExecError::TypeMismatch {
+            op: function_name,
+            left: value.clone(),
+            right: Value::Text("".into()),
+        });
+    };
+    privilege_text
+        .split(',')
+        .map(str::trim)
+        .map(|chunk| {
+            map.iter()
+                .find(|(name, _, _)| chunk.eq_ignore_ascii_case(name))
+                .map(|(_, acl_char, grant_option)| PrivilegeSpec {
+                    acl_char: *acl_char,
+                    grant_option: *grant_option,
+                })
+                .ok_or_else(|| invalid_privilege_type_error(chunk))
+        })
+        .collect()
+}
+
+fn parse_role_privilege_specs(value: &Value) -> Result<Vec<RolePrivilegeSpec>, ExecError> {
+    let Some(privilege_text) = value.as_text() else {
+        return Err(ExecError::TypeMismatch {
+            op: "pg_has_role privilege",
+            left: value.clone(),
+            right: Value::Text("".into()),
+        });
+    };
+    privilege_text
+        .split(',')
+        .map(str::trim)
+        .map(|chunk| {
+            if chunk.eq_ignore_ascii_case("USAGE") {
+                Ok(RolePrivilegeSpec::Usage)
+            } else if chunk.eq_ignore_ascii_case("MEMBER") {
+                Ok(RolePrivilegeSpec::Member)
+            } else if chunk.eq_ignore_ascii_case("SET") {
+                Ok(RolePrivilegeSpec::Set)
+            } else if chunk.eq_ignore_ascii_case("USAGE WITH GRANT OPTION")
+                || chunk.eq_ignore_ascii_case("USAGE WITH ADMIN OPTION")
+                || chunk.eq_ignore_ascii_case("MEMBER WITH GRANT OPTION")
+                || chunk.eq_ignore_ascii_case("MEMBER WITH ADMIN OPTION")
+                || chunk.eq_ignore_ascii_case("SET WITH GRANT OPTION")
+                || chunk.eq_ignore_ascii_case("SET WITH ADMIN OPTION")
+            {
+                Ok(RolePrivilegeSpec::Admin)
+            } else {
+                Err(invalid_privilege_type_error(chunk))
+            }
+        })
+        .collect()
+}
+
+fn acl_privileges_contain(privileges: &str, spec: PrivilegeSpec) -> bool {
+    let mut chars = privileges.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == spec.acl_char {
+            return !spec.grant_option || matches!(chars.peek(), Some('*'));
+        }
+    }
+    false
+}
+
+fn acl_grants_privilege_to_names(
+    acl: &[String],
+    effective_names: &std::collections::BTreeSet<String>,
+    spec: PrivilegeSpec,
+) -> bool {
+    acl.iter().any(|item| {
+        acl_item_parts(item).is_some_and(|(grantee, privileges, _)| {
+            effective_names.contains(grantee) && acl_privileges_contain(privileges, spec)
+        })
+    })
+}
+
+fn role_row_by_oid(authid_rows: &[PgAuthIdRow], role_oid: u32) -> Option<&PgAuthIdRow> {
+    authid_rows.iter().find(|role| role.oid == role_oid)
+}
+
+fn role_is_superuser(authid_rows: &[PgAuthIdRow], role_oid: u32) -> bool {
+    role_row_by_oid(authid_rows, role_oid).is_some_and(|role| role.rolsuper)
+}
+
 fn effective_role_names_for_oid(
     catalog: &dyn CatalogLookup,
     role_oid: u32,
@@ -4531,45 +4672,52 @@ fn effective_role_names_for_oid(
     let roles = catalog.authid_rows();
     let memberships = catalog.auth_members_rows();
     let mut names = std::collections::BTreeSet::from([String::new()]);
-    let mut pending = vec![role_oid];
-    let mut seen = std::collections::BTreeSet::new();
-    while let Some(oid) = pending.pop() {
-        if !seen.insert(oid) {
-            continue;
-        }
-        if let Some(role) = roles.iter().find(|role| role.oid == oid) {
+    if role_oid == 0 {
+        return names;
+    }
+    for role in &roles {
+        if crate::backend::catalog::role_memberships::has_effective_membership(
+            role_oid,
+            role.oid,
+            &roles,
+            &memberships,
+        ) {
             names.insert(role.rolname.clone());
         }
-        pending.extend(
-            memberships
-                .iter()
-                .filter(|member| member.member == oid)
-                .map(|member| member.roleid),
-        );
     }
     names
 }
 
-fn role_oid_from_value(value: &Value, ctx: &ExecutorContext) -> Result<u32, ExecError> {
-    let catalog = ctx
-        .catalog
-        .as_deref()
-        .ok_or_else(|| ExecError::DetailedError {
-            message: "has_function_privilege requires catalog context".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        })?;
-    if let Ok(oid) = oid_arg_to_u32(value, "has_function_privilege user") {
+fn numeric_role_oid_from_value(value: &Value) -> Option<u32> {
+    match value {
+        Value::Int32(oid) => u32::try_from(*oid).ok(),
+        Value::Int64(oid) => u32::try_from(*oid).ok(),
+        _ => None,
+    }
+}
+
+fn role_oid_from_value(
+    value: &Value,
+    ctx: &ExecutorContext,
+    function_name: &'static str,
+) -> Result<u32, ExecError> {
+    if let Some(oid) = numeric_role_oid_from_value(value) {
         return Ok(oid);
     }
+    if matches!(value, Value::Int32(_) | Value::Int64(_)) {
+        return Ok(u32::MAX);
+    }
+    let catalog = privilege_catalog(ctx, function_name)?;
     let Some(name) = value.as_text() else {
         return Err(ExecError::TypeMismatch {
-            op: "has_function_privilege user",
+            op: function_name,
             left: value.clone(),
             right: Value::Text("".into()),
         });
     };
+    if name.eq_ignore_ascii_case("public") {
+        return Ok(0);
+    }
     catalog
         .authid_rows()
         .into_iter()
@@ -4581,6 +4729,566 @@ fn role_oid_from_value(value: &Value, ctx: &ExecutorContext) -> Result<u32, Exec
             hint: None,
             sqlstate: "42704",
         })
+}
+
+fn relation_class_from_value(
+    value: &Value,
+    catalog: &dyn CatalogLookup,
+    op: &'static str,
+) -> Result<(Option<PgClassRow>, bool), ExecError> {
+    if let Some(name) = value.as_text() {
+        let relation = catalog
+            .lookup_any_relation(name)
+            .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(name.to_string())))?;
+        let class_row = catalog
+            .class_row_by_oid(relation.relation_oid)
+            .unwrap_or_else(|| PgClassRow {
+                oid: relation.relation_oid,
+                relname: name.to_string(),
+                relnamespace: relation.namespace_oid,
+                reltype: 0,
+                relowner: relation.owner_oid,
+                relam: 0,
+                relfilenode: relation.relation_oid,
+                reltablespace: 0,
+                relpages: 0,
+                reltuples: 0.0,
+                relallvisible: 0,
+                relallfrozen: 0,
+                reltoastrelid: 0,
+                relhasindex: false,
+                relpersistence: relation.relpersistence,
+                relkind: relation.relkind,
+                relnatts: relation.desc.columns.len() as i16,
+                relhassubclass: false,
+                relhastriggers: false,
+                relrowsecurity: false,
+                relforcerowsecurity: false,
+                relispopulated: relation.relispopulated,
+                relispartition: relation.relispartition,
+                relfrozenxid: 0,
+                relpartbound: relation.relpartbound,
+                reloptions: None,
+                relacl: None,
+                relreplident: 'd',
+                reloftype: relation.of_type_oid,
+            });
+        return Ok((Some(class_row), false));
+    }
+    let oid = oid_arg_to_u32(value, op)?;
+    Ok((catalog.class_row_by_oid(oid), true))
+}
+
+fn relation_name_for_error(class_row: &PgClassRow) -> String {
+    class_row.relname.clone()
+}
+
+fn is_protected_system_class(class_row: &PgClassRow) -> bool {
+    matches!(
+        class_row.relnamespace,
+        PG_CATALOG_NAMESPACE_OID | PG_TOAST_NAMESPACE_OID
+    ) && class_row.relkind != 'v'
+}
+
+fn system_catalog_public_select(class_row: &PgClassRow) -> bool {
+    class_row.relnamespace == PG_CATALOG_NAMESPACE_OID
+        && !matches!(
+            class_row.oid,
+            PG_AUTHID_RELATION_OID | PG_LARGEOBJECT_RELATION_OID
+        )
+}
+
+fn role_has_effective_membership(
+    role_oid: u32,
+    target_oid: u32,
+    authid_rows: &[PgAuthIdRow],
+    auth_members_rows: &[PgAuthMembersRow],
+) -> bool {
+    if role_oid == 0 {
+        return false;
+    }
+    crate::backend::catalog::role_memberships::has_effective_membership(
+        role_oid,
+        target_oid,
+        authid_rows,
+        auth_members_rows,
+    )
+}
+
+fn relation_acl_allows_role(
+    catalog: &dyn CatalogLookup,
+    role_oid: u32,
+    class_row: &PgClassRow,
+    spec: PrivilegeSpec,
+) -> bool {
+    let authid_rows = catalog.authid_rows();
+    let auth_members_rows = catalog.auth_members_rows();
+    if !role_is_superuser(&authid_rows, role_oid)
+        && is_protected_system_class(class_row)
+        && matches!(spec.acl_char, 'a' | 'w' | 'd' | 'D' | 'U')
+    {
+        return false;
+    }
+    if role_is_superuser(&authid_rows, role_oid) {
+        return true;
+    }
+    if role_has_effective_membership(
+        role_oid,
+        class_row.relowner,
+        &authid_rows,
+        &auth_members_rows,
+    ) {
+        return true;
+    }
+    if spec.acl_char == 'r' && system_catalog_public_select(class_row) && !spec.grant_option {
+        return true;
+    }
+    if spec.acl_char == 'r'
+        && role_has_effective_membership(
+            role_oid,
+            PG_READ_ALL_DATA_OID,
+            &authid_rows,
+            &auth_members_rows,
+        )
+    {
+        return true;
+    }
+    if matches!(spec.acl_char, 'a' | 'w' | 'd')
+        && role_has_effective_membership(
+            role_oid,
+            PG_WRITE_ALL_DATA_OID,
+            &authid_rows,
+            &auth_members_rows,
+        )
+    {
+        return true;
+    }
+    class_row.relacl.as_deref().is_some_and(|acl| {
+        acl_grants_privilege_to_names(acl, &effective_role_names_for_oid(catalog, role_oid), spec)
+    })
+}
+
+fn eval_has_relation_privilege(
+    kind: PrivilegeRelationKind,
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let (function_name, privilege_map): (&'static str, &[(&'static str, char, bool)]) = match kind {
+        PrivilegeRelationKind::Table => (
+            "has_table_privilege",
+            &[
+                ("SELECT", 'r', false),
+                ("SELECT WITH GRANT OPTION", 'r', true),
+                ("INSERT", 'a', false),
+                ("INSERT WITH GRANT OPTION", 'a', true),
+                ("UPDATE", 'w', false),
+                ("UPDATE WITH GRANT OPTION", 'w', true),
+                ("DELETE", 'd', false),
+                ("DELETE WITH GRANT OPTION", 'd', true),
+                ("TRUNCATE", 'D', false),
+                ("TRUNCATE WITH GRANT OPTION", 'D', true),
+                ("REFERENCES", 'x', false),
+                ("REFERENCES WITH GRANT OPTION", 'x', true),
+                ("TRIGGER", 't', false),
+                ("TRIGGER WITH GRANT OPTION", 't', true),
+                ("MAINTAIN", 'm', false),
+                ("MAINTAIN WITH GRANT OPTION", 'm', true),
+            ],
+        ),
+        PrivilegeRelationKind::Sequence => (
+            "has_sequence_privilege",
+            &[
+                ("USAGE", 'U', false),
+                ("USAGE WITH GRANT OPTION", 'U', true),
+                ("SELECT", 'r', false),
+                ("SELECT WITH GRANT OPTION", 'r', true),
+                ("UPDATE", 'w', false),
+                ("UPDATE WITH GRANT OPTION", 'w', true),
+            ],
+        ),
+    };
+    let catalog = privilege_catalog(ctx, function_name)?;
+    let (role_oid, relation_value, privilege_value) = match values {
+        [relation_value, privilege_value] => {
+            (ctx.current_user_oid, relation_value, privilege_value)
+        }
+        [role_value, relation_value, privilege_value] => (
+            role_oid_from_value(role_value, ctx, function_name)?,
+            relation_value,
+            privilege_value,
+        ),
+        _ => return Err(malformed_expr_error(function_name)),
+    };
+    let specs = parse_privilege_specs(privilege_value, function_name, privilege_map)?;
+    let (class_row, oid_lookup) =
+        relation_class_from_value(relation_value, catalog, function_name)?;
+    let Some(class_row) = class_row else {
+        return if oid_lookup {
+            Ok(Value::Null)
+        } else {
+            unreachable!("relation name lookup errors before returning None")
+        };
+    };
+    if matches!(kind, PrivilegeRelationKind::Sequence) && class_row.relkind != 'S' {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "\"{}\" is not a sequence",
+                relation_name_for_error(&class_row)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+    Ok(Value::Bool(specs.into_iter().any(|spec| {
+        relation_acl_allows_role(catalog, role_oid, &class_row, spec)
+    })))
+}
+
+fn column_attnum_from_value(value: &Value, function_name: &'static str) -> Result<i16, ExecError> {
+    match value {
+        Value::Int16(v) => Ok(*v),
+        Value::Int32(v) => i16::try_from(*v).map_err(|_| ExecError::TypeMismatch {
+            op: function_name,
+            left: value.clone(),
+            right: Value::Int16(0),
+        }),
+        Value::Int64(v) => i16::try_from(*v).map_err(|_| ExecError::TypeMismatch {
+            op: function_name,
+            left: value.clone(),
+            right: Value::Int16(0),
+        }),
+        _ => Err(ExecError::TypeMismatch {
+            op: function_name,
+            left: value.clone(),
+            right: Value::Int16(0),
+        }),
+    }
+}
+
+fn column_lookup_kind(value: &Value) -> ColumnLookup {
+    if value.as_text().is_some() {
+        ColumnLookup::Name
+    } else {
+        ColumnLookup::Attnum
+    }
+}
+
+fn attribute_from_value(
+    relation: &PgClassRow,
+    column_value: &Value,
+    catalog: &dyn CatalogLookup,
+    function_name: &'static str,
+) -> Result<Option<PgAttributeRow>, ExecError> {
+    let attributes = catalog.attribute_rows_for_relation(relation.oid);
+    match column_lookup_kind(column_value) {
+        ColumnLookup::Name => {
+            let name = column_value.as_text().expect("text column value");
+            if let Some(attr) = attributes
+                .into_iter()
+                .find(|attr| attr.attname.eq_ignore_ascii_case(name))
+            {
+                return Ok((!attr.attisdropped).then_some(attr));
+            }
+            Err(ExecError::DetailedError {
+                message: format!(
+                    "column \"{name}\" of relation \"{}\" does not exist",
+                    relation.relname
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42703",
+            })
+        }
+        ColumnLookup::Attnum => {
+            let attnum = column_attnum_from_value(column_value, function_name)?;
+            Ok(attributes
+                .into_iter()
+                .find(|attr| attr.attnum == attnum && !attr.attisdropped))
+        }
+    }
+}
+
+fn eval_has_column_privilege(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let function_name = "has_column_privilege";
+    let catalog = privilege_catalog(ctx, function_name)?;
+    let (role_oid, relation_value, column_value, privilege_value) = match values {
+        [relation_value, column_value, privilege_value] => (
+            ctx.current_user_oid,
+            relation_value,
+            column_value,
+            privilege_value,
+        ),
+        [role_value, relation_value, column_value, privilege_value] => (
+            role_oid_from_value(role_value, ctx, function_name)?,
+            relation_value,
+            column_value,
+            privilege_value,
+        ),
+        _ => return Err(malformed_expr_error(function_name)),
+    };
+    let specs = parse_privilege_specs(
+        privilege_value,
+        function_name,
+        &[
+            ("SELECT", 'r', false),
+            ("SELECT WITH GRANT OPTION", 'r', true),
+            ("INSERT", 'a', false),
+            ("INSERT WITH GRANT OPTION", 'a', true),
+            ("UPDATE", 'w', false),
+            ("UPDATE WITH GRANT OPTION", 'w', true),
+            ("REFERENCES", 'x', false),
+            ("REFERENCES WITH GRANT OPTION", 'x', true),
+        ],
+    )?;
+    let (relation, oid_lookup) = relation_class_from_value(relation_value, catalog, function_name)?;
+    let Some(relation) = relation else {
+        return if oid_lookup {
+            Ok(Value::Null)
+        } else {
+            unreachable!("relation name lookup errors before returning None")
+        };
+    };
+    let Some(attribute) = attribute_from_value(&relation, column_value, catalog, function_name)?
+    else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::Bool(specs.into_iter().any(|spec| {
+        relation_acl_allows_role(catalog, role_oid, &relation, spec)
+            || attribute.attacl.as_deref().is_some_and(|acl| {
+                acl_grants_privilege_to_names(
+                    acl,
+                    &effective_role_names_for_oid(catalog, role_oid),
+                    spec,
+                )
+            })
+    })))
+}
+
+fn eval_has_any_column_privilege(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let function_name = "has_any_column_privilege";
+    let catalog = privilege_catalog(ctx, function_name)?;
+    let (role_oid, relation_value, privilege_value) = match values {
+        [relation_value, privilege_value] => {
+            (ctx.current_user_oid, relation_value, privilege_value)
+        }
+        [role_value, relation_value, privilege_value] => (
+            role_oid_from_value(role_value, ctx, function_name)?,
+            relation_value,
+            privilege_value,
+        ),
+        _ => return Err(malformed_expr_error(function_name)),
+    };
+    let specs = parse_privilege_specs(
+        privilege_value,
+        function_name,
+        &[
+            ("SELECT", 'r', false),
+            ("SELECT WITH GRANT OPTION", 'r', true),
+            ("INSERT", 'a', false),
+            ("INSERT WITH GRANT OPTION", 'a', true),
+            ("UPDATE", 'w', false),
+            ("UPDATE WITH GRANT OPTION", 'w', true),
+            ("REFERENCES", 'x', false),
+            ("REFERENCES WITH GRANT OPTION", 'x', true),
+        ],
+    )?;
+    let (relation, oid_lookup) = relation_class_from_value(relation_value, catalog, function_name)?;
+    let Some(relation) = relation else {
+        return if oid_lookup {
+            Ok(Value::Null)
+        } else {
+            unreachable!("relation name lookup errors before returning None")
+        };
+    };
+    let effective_names = effective_role_names_for_oid(catalog, role_oid);
+    Ok(Value::Bool(specs.into_iter().any(|spec| {
+        relation_acl_allows_role(catalog, role_oid, &relation, spec)
+            || catalog
+                .attribute_rows_for_relation(relation.oid)
+                .into_iter()
+                .filter(|attr| attr.attnum > 0 && !attr.attisdropped)
+                .filter_map(|attr| attr.attacl)
+                .any(|acl| acl_grants_privilege_to_names(&acl, &effective_names, spec))
+    })))
+}
+
+fn eval_has_largeobject_privilege(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let function_name = "has_largeobject_privilege";
+    let catalog = privilege_catalog(ctx, function_name)?;
+    let (role_oid, object_value, privilege_value) = match values {
+        [object_value, privilege_value] => (ctx.current_user_oid, object_value, privilege_value),
+        [role_value, object_value, privilege_value] => (
+            role_oid_from_value(role_value, ctx, function_name)?,
+            object_value,
+            privilege_value,
+        ),
+        _ => return Err(malformed_expr_error(function_name)),
+    };
+    let specs = parse_privilege_specs(
+        privilege_value,
+        function_name,
+        &[
+            ("SELECT", 'r', false),
+            ("SELECT WITH GRANT OPTION", 'r', true),
+            ("UPDATE", 'w', false),
+            ("UPDATE WITH GRANT OPTION", 'w', true),
+        ],
+    )?;
+    let oid = oid_arg_to_u32(object_value, function_name)?;
+    let Some(row) = large_object_runtime(ctx)?.metadata_row(oid) else {
+        return Ok(Value::Null);
+    };
+    let authid_rows = catalog.authid_rows();
+    let auth_members_rows = catalog.auth_members_rows();
+    Ok(Value::Bool(specs.into_iter().any(|spec| {
+        role_is_superuser(&authid_rows, role_oid)
+            || role_has_effective_membership(
+                role_oid,
+                row.lomowner,
+                &authid_rows,
+                &auth_members_rows,
+            )
+            || acl_grants_privilege_to_names(
+                &row.lomacl,
+                &effective_role_names_for_oid(catalog, role_oid),
+                spec,
+            )
+    })))
+}
+
+fn membership_path_with(
+    start_member: u32,
+    target_role: u32,
+    rows: &[PgAuthMembersRow],
+    edge_allows: impl Fn(&PgAuthMembersRow) -> bool,
+) -> bool {
+    let mut pending = std::collections::VecDeque::from([start_member]);
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some(member) = pending.pop_front() {
+        if !visited.insert(member) {
+            continue;
+        }
+        for edge in rows
+            .iter()
+            .filter(|row| row.member == member && edge_allows(row))
+        {
+            if edge.roleid == target_role {
+                return true;
+            }
+            pending.push_back(edge.roleid);
+        }
+    }
+    false
+}
+
+fn current_database_owner_oid(catalog: &dyn CatalogLookup, ctx: &ExecutorContext) -> Option<u32> {
+    catalog
+        .database_rows()
+        .into_iter()
+        .find(|row| row.datname.eq_ignore_ascii_case(&ctx.current_database_name))
+        .map(|row| row.datdba)
+}
+
+fn effective_pg_has_role_target(
+    target_oid: u32,
+    catalog: &dyn CatalogLookup,
+    ctx: &ExecutorContext,
+) -> Option<u32> {
+    if target_oid == PG_DATABASE_OWNER_OID {
+        current_database_owner_oid(catalog, ctx)
+    } else {
+        Some(target_oid)
+    }
+}
+
+fn role_privilege_allowed(
+    role_oid: u32,
+    target_oid: u32,
+    spec: RolePrivilegeSpec,
+    catalog: &dyn CatalogLookup,
+    ctx: &ExecutorContext,
+) -> bool {
+    let authid_rows = catalog.authid_rows();
+    let auth_members_rows = catalog.auth_members_rows();
+    if role_is_superuser(&authid_rows, role_oid) {
+        return true;
+    }
+    let Some(effective_target_oid) = effective_pg_has_role_target(target_oid, catalog, ctx) else {
+        return false;
+    };
+    match spec {
+        RolePrivilegeSpec::Usage => role_has_effective_membership(
+            role_oid,
+            effective_target_oid,
+            &authid_rows,
+            &auth_members_rows,
+        ),
+        RolePrivilegeSpec::Member => {
+            role_oid == effective_target_oid
+                || membership_path_with(role_oid, effective_target_oid, &auth_members_rows, |_| {
+                    true
+                })
+        }
+        RolePrivilegeSpec::Set => {
+            role_oid == effective_target_oid
+                || membership_path_with(
+                    role_oid,
+                    effective_target_oid,
+                    &auth_members_rows,
+                    |edge| edge.set_option,
+                )
+        }
+        RolePrivilegeSpec::Admin => {
+            target_oid != PG_DATABASE_OWNER_OID
+                && membership_path_with(
+                    role_oid,
+                    effective_target_oid,
+                    &auth_members_rows,
+                    |edge| edge.admin_option,
+                )
+        }
+    }
+}
+
+fn eval_pg_has_role(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let function_name = "pg_has_role";
+    let catalog = privilege_catalog(ctx, function_name)?;
+    let (role_oid, target_value, privilege_value) = match values {
+        [target_value, privilege_value] => (ctx.current_user_oid, target_value, privilege_value),
+        [role_value, target_value, privilege_value] => (
+            role_oid_from_value(role_value, ctx, function_name)?,
+            target_value,
+            privilege_value,
+        ),
+        _ => return Err(malformed_expr_error(function_name)),
+    };
+    let target_oid = role_oid_from_value(target_value, ctx, function_name)?;
+    let specs = parse_role_privilege_specs(privilege_value)?;
+    Ok(Value::Bool(specs.into_iter().any(|spec| {
+        role_privilege_allowed(role_oid, target_oid, spec, catalog, ctx)
+    })))
 }
 
 fn function_oid_from_signature(
@@ -4692,7 +5400,7 @@ fn eval_has_function_privilege(
             (ctx.current_user_oid, function_value, privilege_value)
         }
         [role_value, function_value, privilege_value] => (
-            role_oid_from_value(role_value, ctx)?,
+            role_oid_from_value(role_value, ctx, "has_function_privilege")?,
             function_value,
             privilege_value,
         ),
@@ -8343,6 +9051,18 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
             eval_pg_log_backend_memory_contexts(values)
         }
         BuiltinScalarFunction::HasFunctionPrivilege => eval_has_function_privilege(values, ctx),
+        BuiltinScalarFunction::HasTablePrivilege => {
+            eval_has_relation_privilege(PrivilegeRelationKind::Table, values, ctx)
+        }
+        BuiltinScalarFunction::HasSequencePrivilege => {
+            eval_has_relation_privilege(PrivilegeRelationKind::Sequence, values, ctx)
+        }
+        BuiltinScalarFunction::HasAnyColumnPrivilege => eval_has_any_column_privilege(values, ctx),
+        BuiltinScalarFunction::HasColumnPrivilege => eval_has_column_privilege(values, ctx),
+        BuiltinScalarFunction::HasLargeObjectPrivilege => {
+            eval_has_largeobject_privilege(values, ctx)
+        }
+        BuiltinScalarFunction::PgHasRole => eval_pg_has_role(values, ctx),
         BuiltinScalarFunction::PgCurrentLogfile => eval_pg_current_logfile(values),
         BuiltinScalarFunction::PgReadFile => eval_pg_read_file(values, ctx, false),
         BuiltinScalarFunction::PgReadBinaryFile => eval_pg_read_file(values, ctx, true),
@@ -9019,6 +9739,18 @@ pub(crate) fn eval_builtin_function(
             eval_pg_log_backend_memory_contexts(&values)
         }
         BuiltinScalarFunction::HasFunctionPrivilege => eval_has_function_privilege(&values, ctx),
+        BuiltinScalarFunction::HasTablePrivilege => {
+            eval_has_relation_privilege(PrivilegeRelationKind::Table, &values, ctx)
+        }
+        BuiltinScalarFunction::HasSequencePrivilege => {
+            eval_has_relation_privilege(PrivilegeRelationKind::Sequence, &values, ctx)
+        }
+        BuiltinScalarFunction::HasAnyColumnPrivilege => eval_has_any_column_privilege(&values, ctx),
+        BuiltinScalarFunction::HasColumnPrivilege => eval_has_column_privilege(&values, ctx),
+        BuiltinScalarFunction::HasLargeObjectPrivilege => {
+            eval_has_largeobject_privilege(&values, ctx)
+        }
+        BuiltinScalarFunction::PgHasRole => eval_pg_has_role(&values, ctx),
         BuiltinScalarFunction::PgCurrentLogfile => eval_pg_current_logfile(&values),
         BuiltinScalarFunction::PgReadFile => eval_pg_read_file(&values, ctx, false),
         BuiltinScalarFunction::PgReadBinaryFile => eval_pg_read_file(&values, ctx, true),

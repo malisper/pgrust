@@ -1534,6 +1534,12 @@ pub(super) fn validate_scalar_function_arity(
             }
             BuiltinScalarFunction::PgLogBackendMemoryContexts => args.len() == 1,
             BuiltinScalarFunction::HasFunctionPrivilege => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::HasTablePrivilege
+            | BuiltinScalarFunction::HasSequencePrivilege
+            | BuiltinScalarFunction::HasAnyColumnPrivilege
+            | BuiltinScalarFunction::HasLargeObjectPrivilege
+            | BuiltinScalarFunction::PgHasRole => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::HasColumnPrivilege => matches!(args.len(), 3 | 4),
             BuiltinScalarFunction::PgCurrentLogfile => matches!(args.len(), 0 | 1),
             BuiltinScalarFunction::PgReadFile | BuiltinScalarFunction::PgReadBinaryFile => {
                 matches!(args.len(), 1 | 2 | 3 | 4)
@@ -2908,6 +2914,165 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "has_function_privilege_id",
             BuiltinScalarFunction::HasFunctionPrivilege,
+        ),
+        (
+            "has_table_privilege",
+            BuiltinScalarFunction::HasTablePrivilege,
+        ),
+        (
+            "has_table_privilege_name_name",
+            BuiltinScalarFunction::HasTablePrivilege,
+        ),
+        (
+            "has_table_privilege_name_id",
+            BuiltinScalarFunction::HasTablePrivilege,
+        ),
+        (
+            "has_table_privilege_id_name",
+            BuiltinScalarFunction::HasTablePrivilege,
+        ),
+        (
+            "has_table_privilege_id_id",
+            BuiltinScalarFunction::HasTablePrivilege,
+        ),
+        (
+            "has_table_privilege_name",
+            BuiltinScalarFunction::HasTablePrivilege,
+        ),
+        (
+            "has_table_privilege_id",
+            BuiltinScalarFunction::HasTablePrivilege,
+        ),
+        (
+            "has_sequence_privilege",
+            BuiltinScalarFunction::HasSequencePrivilege,
+        ),
+        (
+            "has_sequence_privilege_name_name",
+            BuiltinScalarFunction::HasSequencePrivilege,
+        ),
+        (
+            "has_sequence_privilege_name_id",
+            BuiltinScalarFunction::HasSequencePrivilege,
+        ),
+        (
+            "has_sequence_privilege_id_name",
+            BuiltinScalarFunction::HasSequencePrivilege,
+        ),
+        (
+            "has_sequence_privilege_id_id",
+            BuiltinScalarFunction::HasSequencePrivilege,
+        ),
+        (
+            "has_sequence_privilege_name",
+            BuiltinScalarFunction::HasSequencePrivilege,
+        ),
+        (
+            "has_sequence_privilege_id",
+            BuiltinScalarFunction::HasSequencePrivilege,
+        ),
+        ("pg_has_role", BuiltinScalarFunction::PgHasRole),
+        ("pg_has_role_name_name", BuiltinScalarFunction::PgHasRole),
+        ("pg_has_role_name_id", BuiltinScalarFunction::PgHasRole),
+        ("pg_has_role_id_name", BuiltinScalarFunction::PgHasRole),
+        ("pg_has_role_id_id", BuiltinScalarFunction::PgHasRole),
+        ("pg_has_role_name", BuiltinScalarFunction::PgHasRole),
+        ("pg_has_role_id", BuiltinScalarFunction::PgHasRole),
+        (
+            "has_column_privilege",
+            BuiltinScalarFunction::HasColumnPrivilege,
+        ),
+        (
+            "has_column_privilege_name_name_name",
+            BuiltinScalarFunction::HasColumnPrivilege,
+        ),
+        (
+            "has_column_privilege_name_name_attnum",
+            BuiltinScalarFunction::HasColumnPrivilege,
+        ),
+        (
+            "has_column_privilege_name_id_name",
+            BuiltinScalarFunction::HasColumnPrivilege,
+        ),
+        (
+            "has_column_privilege_name_id_attnum",
+            BuiltinScalarFunction::HasColumnPrivilege,
+        ),
+        (
+            "has_column_privilege_id_name_name",
+            BuiltinScalarFunction::HasColumnPrivilege,
+        ),
+        (
+            "has_column_privilege_id_name_attnum",
+            BuiltinScalarFunction::HasColumnPrivilege,
+        ),
+        (
+            "has_column_privilege_id_id_name",
+            BuiltinScalarFunction::HasColumnPrivilege,
+        ),
+        (
+            "has_column_privilege_id_id_attnum",
+            BuiltinScalarFunction::HasColumnPrivilege,
+        ),
+        (
+            "has_column_privilege_name_name",
+            BuiltinScalarFunction::HasColumnPrivilege,
+        ),
+        (
+            "has_column_privilege_name_attnum",
+            BuiltinScalarFunction::HasColumnPrivilege,
+        ),
+        (
+            "has_column_privilege_id_name",
+            BuiltinScalarFunction::HasColumnPrivilege,
+        ),
+        (
+            "has_column_privilege_id_attnum",
+            BuiltinScalarFunction::HasColumnPrivilege,
+        ),
+        (
+            "has_any_column_privilege",
+            BuiltinScalarFunction::HasAnyColumnPrivilege,
+        ),
+        (
+            "has_any_column_privilege_name_name",
+            BuiltinScalarFunction::HasAnyColumnPrivilege,
+        ),
+        (
+            "has_any_column_privilege_name_id",
+            BuiltinScalarFunction::HasAnyColumnPrivilege,
+        ),
+        (
+            "has_any_column_privilege_id_name",
+            BuiltinScalarFunction::HasAnyColumnPrivilege,
+        ),
+        (
+            "has_any_column_privilege_id_id",
+            BuiltinScalarFunction::HasAnyColumnPrivilege,
+        ),
+        (
+            "has_any_column_privilege_name",
+            BuiltinScalarFunction::HasAnyColumnPrivilege,
+        ),
+        (
+            "has_any_column_privilege_id",
+            BuiltinScalarFunction::HasAnyColumnPrivilege,
+        ),
+        (
+            "has_largeobject_privilege",
+            BuiltinScalarFunction::HasLargeObjectPrivilege,
+        ),
+        (
+            "has_largeobject_privilege_name_id",
+            BuiltinScalarFunction::HasLargeObjectPrivilege,
+        ),
+        (
+            "has_largeobject_privilege_id",
+            BuiltinScalarFunction::HasLargeObjectPrivilege,
+        ),
+        (
+            "has_largeobject_privilege_id_id",
+            BuiltinScalarFunction::HasLargeObjectPrivilege,
         ),
         (
             "pg_current_logfile",

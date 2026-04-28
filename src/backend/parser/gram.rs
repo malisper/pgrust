@@ -6618,6 +6618,7 @@ fn parse_table_privilege_item(
         "references" => GrantObjectPrivilege::ReferencesOnTable,
         "trigger" if columns.is_empty() => GrantObjectPrivilege::TriggerOnTable,
         "maintain" if columns.is_empty() => GrantObjectPrivilege::MaintainOnTable,
+        "usage" if columns.is_empty() => GrantObjectPrivilege::TablePrivileges("U".into()),
         _ if columns.is_empty() => return Ok(None),
         _ => {
             return Err(ParseError::UnexpectedToken {
@@ -6646,7 +6647,7 @@ fn table_privilege_chars_for_parser(privilege: &GrantObjectPrivilege) -> Option<
 }
 
 fn canonicalize_table_privilege_chars(chars: &str) -> String {
-    TABLE_ALL_PRIVILEGE_CHARS
+    "arwdDxtmU"
         .chars()
         .filter(|ch| chars.contains(*ch))
         .collect()
@@ -6663,6 +6664,7 @@ fn table_privilege_from_chars(chars: String) -> GrantObjectPrivilege {
         "x" => GrantObjectPrivilege::ReferencesOnTable,
         "t" => GrantObjectPrivilege::TriggerOnTable,
         "m" => GrantObjectPrivilege::MaintainOnTable,
+        "U" => GrantObjectPrivilege::TablePrivileges(chars),
         _ => GrantObjectPrivilege::TablePrivileges(chars),
     }
 }
