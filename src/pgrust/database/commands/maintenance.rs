@@ -2879,6 +2879,15 @@ impl Database {
             if target.relation.relation_oid == relation.relation_oid
                 && let Some(created_sequence) = created_owned_sequence.as_ref()
             {
+                let sequence_dependency_ctx = CatalogWriteContext {
+                    pool: ctx.pool.clone(),
+                    txns: ctx.txns.clone(),
+                    xid: ctx.xid,
+                    cid: cid.saturating_add(1),
+                    client_id: ctx.client_id,
+                    waiter: ctx.waiter.clone(),
+                    interrupts: ctx.interrupts.clone(),
+                };
                 let effect = self
                     .catalog
                     .write()
@@ -2888,7 +2897,7 @@ impl Database {
                             target.relation.relation_oid,
                             created_sequence.column_index.saturating_add(1) as i32,
                         )),
-                        &ctx,
+                        &sequence_dependency_ctx,
                     )
                     .map_err(map_catalog_error)?;
                 self.apply_catalog_mutation_effect_immediate(&effect)?;

@@ -3120,8 +3120,8 @@ mod tests {
     }
 
     #[test]
-    fn alter_publication_owner_to_requires_superuser_for_all_tables_publication() {
-        let base = temp_dir("owner_for_all_tables_superuser");
+    fn superuser_can_transfer_for_all_tables_publication_to_non_superuser() {
+        let base = temp_dir("owner_for_all_tables_non_superuser");
         let db = Database::open(&base, 16).unwrap();
         let mut session = Session::new(1);
         session.execute(&db, "create role target").unwrap();
@@ -3132,20 +3132,15 @@ mod tests {
             .execute(&db, "create publication pub for all tables")
             .unwrap();
 
-        let err = session
+        session
             .execute(&db, "alter publication pub owner to target")
-            .unwrap_err();
-        assert!(
-            format!("{err:?}").contains(
-                "new owner of FOR ALL TABLES or ALL SEQUENCES or TABLES IN SCHEMA publication must be superuser"
-            )
-        );
-        assert_eq!(publication_owner_name(&db, "pub"), "postgres");
+            .unwrap();
+        assert_eq!(publication_owner_name(&db, "pub"), "target");
     }
 
     #[test]
-    fn alter_publication_owner_to_requires_superuser_for_schema_publication() {
-        let base = temp_dir("owner_schema_publication_superuser");
+    fn superuser_can_transfer_schema_publication_to_non_superuser() {
+        let base = temp_dir("owner_schema_publication_non_superuser");
         let db = Database::open(&base, 16).unwrap();
         let mut session = Session::new(1);
         session.execute(&db, "create role target").unwrap();
@@ -3157,15 +3152,45 @@ mod tests {
             .execute(&db, "create publication pub for tables in schema pub_test")
             .unwrap();
 
-        let err = session
+        session
+            .execute(&db, "alter publication pub owner to target")
+            .unwrap();
+        assert_eq!(publication_owner_name(&db, "pub"), "target");
+    }
+
+    #[test]
+    fn non_superuser_owner_to_requires_superuser_for_all_tables_publication() {
+        let base = temp_dir("owner_for_all_tables_target_superuser");
+        let db = Database::open(&base, 16).unwrap();
+        let mut superuser = Session::new(1);
+        superuser.execute(&db, "create role tenant").unwrap();
+        superuser.execute(&db, "create role target").unwrap();
+        superuser
+            .execute(&db, "grant create on database regression to tenant")
+            .unwrap();
+        superuser
+            .execute(&db, "grant create on database regression to target")
+            .unwrap();
+        superuser
+            .execute(&db, "grant target to tenant with inherit false, set true")
+            .unwrap();
+        superuser
+            .execute(&db, "create publication pub for all tables")
+            .unwrap();
+        superuser
+            .execute(&db, "alter publication pub owner to tenant")
+            .unwrap();
+
+        let mut tenant = Session::new(2);
+        tenant.set_session_authorization_oid(role_oid(&db, "tenant"));
+        let err = tenant
             .execute(&db, "alter publication pub owner to target")
             .unwrap_err();
         assert!(
-            format!("{err:?}").contains(
-                "new owner of FOR ALL TABLES or ALL SEQUENCES or TABLES IN SCHEMA publication must be superuser"
-            )
+            format!("{err:?}")
+                .contains("The owner of a FOR ALL TABLES publication must be a superuser.")
         );
-        assert_eq!(publication_owner_name(&db, "pub"), "postgres");
+        assert_eq!(publication_owner_name(&db, "pub"), "tenant");
     }
 
     #[test]
@@ -3186,9 +3211,7 @@ mod tests {
         match table_err {
             ExecError::DetailedError { detail, .. } => assert_eq!(
                 detail.as_deref(),
-                Some(
-                    "Tables or sequences cannot be added to or dropped from FOR ALL TABLES publications."
-                )
+                Some("Tables cannot be added to or dropped from FOR ALL TABLES publications.")
             ),
             other => panic!("expected detailed error, got {other:?}"),
         }
