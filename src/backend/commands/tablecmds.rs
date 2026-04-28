@@ -556,6 +556,9 @@ pub(crate) fn execute_explain(
         let execution_buffer_stats = ctx.pool.usage_stats();
         let (state, row_count, elapsed) = exec_result?;
         format_explain_lines_with_options(state.as_ref(), 0, true, costs, timing, &mut lines);
+        if !buffers {
+            lines.retain(|line| !line.trim_start().starts_with("Buffers:"));
+        }
         if buffers {
             lines.push("Planning:".into());
             lines.push(format!("  {}", format_buffer_usage(planning_buffer_stats)));
