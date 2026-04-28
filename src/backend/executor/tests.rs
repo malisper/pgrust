@@ -10176,19 +10176,20 @@ fn xml_mapping_functions_report_unsupported_xml_feature() {
 }
 
 #[test]
-fn xmlforest_reports_unsupported_xml_feature() {
-    let base = temp_dir("xmlforest_unsupported");
+fn xmlforest_constructs_xml() {
+    let base = temp_dir("xmlforest_constructs_xml");
     let txns = TransactionManager::new_durable(&base).unwrap();
 
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select xmlforest(1 as a)",
-    )
-    .unwrap_err();
-
-    assert_eq!(format_exec_error(&err), "unsupported XML feature");
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select xmlforest(1 as a)",
+        )
+        .unwrap(),
+        vec![vec![Value::Xml("<a>1</a>".into())]],
+    );
 }
 
 #[test]
