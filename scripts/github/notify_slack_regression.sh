@@ -71,6 +71,8 @@ latest_url = f"https://github.com/{repo}/tree/regression-history/runs/latest"
 
 status_emoji = {
     "completed": ":test_tube:",
+    "partial":   ":warning:",
+    "deadline":  ":warning:",
     "aborted":   ":warning:",
     "missing":   ":x:",
 }.get(summary.get("status", ""), ":test_tube:")

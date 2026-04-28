@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run PostgreSQL regression tests against pgrust and report pass/fail statistics.
 #
-# Usage: scripts/run_regression.sh [--port PORT] [--skip-build] [--skip-server] [--timeout SECS] [--jobs N] [--schedule FILE] [--test TESTNAME] [--upstream-setup] [--ignore-deps]
+# Usage: scripts/run_regression.sh [--port PORT] [--skip-build] [--skip-server] [--timeout SECS] [--jobs N] [--schedule FILE] [--test TESTNAME] [--upstream-setup] [--ignore-deps] [--shard-index N --shard-total N] [--deadline-secs SECS]
 #
 # By default, this script:
 #   1. Builds pgrust_server in release mode, or dev mode for --test
@@ -23,6 +23,9 @@
 #   --results-dir DIR Directory for results (default: unique temp dir)
 #   --data-dir DIR    Directory for the pgrust cluster (default: unique temp dir)
 #   --upstream-setup Use upstream test_setup.sql instead of the pgrust bootstrap (default: use pgrust bootstrap)
+#   --shard-index N   Run only schedule groups assigned to shard N (0-based)
+#   --shard-total N   Total number of schedule-group shards
+#   --deadline-secs N Stop scheduling new files after N seconds and write a partial summary
 #   --ignore-deps     Don't fail if test dependencies fail to set up (default: fail on dependency errors)
 
 set -euo pipefail
@@ -781,6 +784,9 @@ DATA_DIR_PROVIDED=false
 SERVER_PID=""
 USE_PGRUST_SETUP=true
 IGNORE_DEPS=false
+SHARD_INDEX=0
+SHARD_TOTAL=1
+DEADLINE_SECS=0
 REGRESS_USER="${PGRUST_REGRESS_USER:-${PGUSER:-$(id -un)}}"
 REGRESS_TABLESPACE_DIR=""
 STARTUP_WAIT_SECS="${PGRUST_STARTUP_WAIT_SECS:-300}"
@@ -809,6 +815,9 @@ while [[ $# -gt 0 ]]; do
         --pgrust-setup) USE_PGRUST_SETUP=true; shift ;;
         --upstream-setup) USE_PGRUST_SETUP=false; shift ;;
         --ignore-deps) IGNORE_DEPS=true; shift ;;
+        --shard-index) SHARD_INDEX="$2"; shift 2 ;;
+        --shard-total) SHARD_TOTAL="$2"; shift 2 ;;
+        --deadline-secs) DEADLINE_SECS="$2"; shift 2 ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
@@ -816,6 +825,28 @@ done
 if ! [[ "$JOBS" =~ ^[0-9]+$ ]] || [[ "$JOBS" -lt 1 ]]; then
     echo "ERROR: --jobs must be a positive integer"
     exit 1
+fi
+if ! [[ "$SHARD_INDEX" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: --shard-index must be a non-negative integer"
+    exit 1
+fi
+if ! [[ "$SHARD_TOTAL" =~ ^[0-9]+$ ]] || [[ "$SHARD_TOTAL" -lt 1 ]]; then
+    echo "ERROR: --shard-total must be a positive integer"
+    exit 1
+fi
+if [[ "$SHARD_INDEX" -ge "$SHARD_TOTAL" ]]; then
+    echo "ERROR: --shard-index must be less than --shard-total"
+    exit 1
+fi
+if ! [[ "$DEADLINE_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: --deadline-secs must be a non-negative integer"
+    exit 1
+fi
+
+RUN_START_EPOCH="$(date +%s)"
+RUN_DEADLINE_EPOCH=0
+if [[ "$DEADLINE_SECS" -gt 0 ]]; then
+    RUN_DEADLINE_EPOCH=$((RUN_START_EPOCH + DEADLINE_SECS))
 fi
 
 if [[ "$JOBS" -gt 1 && "$SKIP_SERVER" == false ]]; then
@@ -1323,6 +1354,10 @@ build_isolated_regression_bases() {
 echo "Per-query statement_timeout: ${STATEMENT_TIMEOUT}s"
 echo "Per-file timeout: ${TIMEOUT}s"
 echo "Base setup timeout: ${BASE_SETUP_TIMEOUT}s"
+echo "Schedule shard: ${SHARD_INDEX}/${SHARD_TOTAL}"
+if [[ "$DEADLINE_SECS" -gt 0 ]]; then
+    echo "Shard scheduling deadline: ${DEADLINE_SECS}s"
+fi
 
 if [[ "$ISOLATED_PARALLEL" == true ]]; then
     echo "Parallel isolation: each concurrent test gets its own pgrust server, port, data dir, and tablespace."
@@ -1340,8 +1375,9 @@ if [[ -n "$SINGLE_TEST" ]]; then
     fi
 else
     TEST_FILES=()
+    ALL_TEST_GROUPS=()
     while IFS= read -r sql_file; do
-        [[ -n "$sql_file" ]] && TEST_GROUPS+=("$sql_file")
+        [[ -n "$sql_file" ]] && ALL_TEST_GROUPS+=("$sql_file")
     done < <(
         build_scheduled_test_groups \
             "$SQL_DIR" \
@@ -1349,6 +1385,18 @@ else
             "$([[ "$USE_PGRUST_SETUP" == false ]] && echo true || echo false)" \
             "$([[ "$SCHEDULE_OVERRIDE" == true ]] && echo false || echo true)"
     )
+
+    group_idx=0
+    for group in "${ALL_TEST_GROUPS[@]}"; do
+        if [[ $((group_idx % SHARD_TOTAL)) -eq "$SHARD_INDEX" ]]; then
+            TEST_GROUPS+=("$group")
+        fi
+        group_idx=$((group_idx + 1))
+    done
+
+    if [[ "$SHARD_TOTAL" -gt 1 ]]; then
+        echo "Selected ${#TEST_GROUPS[@]} of ${#ALL_TEST_GROUPS[@]} schedule groups for shard ${SHARD_INDEX}/${SHARD_TOTAL}."
+    fi
 
     for group in "${TEST_GROUPS[@]}"; do
         for sql_file in $group; do
@@ -1426,6 +1474,10 @@ write_summary() {
     cat > "$RESULTS_DIR/summary.json" <<EOF
 {
   "status": "$status",
+  "shard": {
+    "index": $SHARD_INDEX,
+    "total": $SHARD_TOTAL
+  },
   "tests": {
     "planned": ${#TEST_FILES[@]},
     "total": $TOTAL,
@@ -1681,6 +1733,41 @@ write_test_status() {
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$status" "$test_name" "$q_matched" "$q_mismatched" "$q_total" "$diff_lines" \
         > "$status_file"
+}
+
+deadline_exceeded() {
+    [[ "$RUN_DEADLINE_EPOCH" -gt 0 ]] && [[ "$(date +%s)" -ge "$RUN_DEADLINE_EPOCH" ]]
+}
+
+status_file_for_sql() {
+    local sql_file="$1"
+    local test_name="$(basename "$sql_file" .sql)"
+    printf '%s/status/%s.status\n' "$RESULTS_DIR" "$test_name"
+}
+
+mark_unstarted_tests_timed_out() {
+    local reason="$1"
+    shift
+    local sql_file=""
+    local test_name=""
+    local output_file=""
+    local status_file=""
+
+    for sql_file in "$@"; do
+        test_name="$(basename "$sql_file" .sql)"
+        status_file="$(status_file_for_sql "$sql_file")"
+        if [[ -f "$status_file" ]]; then
+            continue
+        fi
+
+        output_file="$RESULTS_DIR/output/${test_name}.out"
+        {
+            echo "TIMEOUT"
+            echo "$reason"
+        } > "$output_file"
+        write_test_status "$status_file" "timeout" "$test_name" 0 0 0 0
+        collect_test_status "$sql_file" || true
+    done
 }
 
 run_one_regression_test() {
@@ -2070,9 +2157,12 @@ run_test_batch() {
         fi
     done
 
+    write_summary "$RUN_STATUS"
+
     if [[ "$batch_needs_restart" == true ]]; then
         if ! restart_server "Restarting after failed parallel batch..."; then
             RUN_STATUS="aborted"
+            write_summary "$RUN_STATUS"
             return 1
         fi
     fi
@@ -2085,6 +2175,7 @@ run_schedule_group() {
     local -a group_files=()
     local -a batch=()
     local sql_file=""
+    local i=0
 
     for sql_file in $group; do
         group_files+=("$sql_file")
@@ -2094,13 +2185,26 @@ run_schedule_group() {
         echo "parallel group (${#group_files[@]} tests):"
     fi
 
-    for sql_file in "${group_files[@]}"; do
+    for ((i = 0; i < ${#group_files[@]}; i++)); do
+        sql_file="${group_files[$i]}"
+        if deadline_exceeded; then
+            RUN_STATUS="deadline"
+            mark_unstarted_tests_timed_out \
+                "Shard deadline reached before scheduling this test." \
+                "${group_files[@]:$i}"
+            write_summary "$RUN_STATUS"
+            return 0
+        fi
+
         batch+=("$sql_file")
         if [[ ${#batch[@]} -ge "$JOBS" ]]; then
             if ! run_test_batch "${batch[@]}"; then
                 return 1
             fi
             batch=()
+            if deadline_exceeded; then
+                RUN_STATUS="deadline"
+            fi
         fi
     done
 
@@ -2113,8 +2217,37 @@ run_schedule_group() {
     return 0
 }
 
-for group in "${TEST_GROUPS[@]}"; do
+for ((group_idx = 0; group_idx < ${#TEST_GROUPS[@]}; group_idx++)); do
+    group="${TEST_GROUPS[$group_idx]}"
+    if deadline_exceeded; then
+        RUN_STATUS="deadline"
+        remaining_files=()
+        for ((remaining_group_idx = group_idx; remaining_group_idx < ${#TEST_GROUPS[@]}; remaining_group_idx++)); do
+            for sql_file in ${TEST_GROUPS[$remaining_group_idx]}; do
+                remaining_files+=("$sql_file")
+            done
+        done
+        mark_unstarted_tests_timed_out \
+            "Shard deadline reached before scheduling this schedule group." \
+            "${remaining_files[@]}"
+        write_summary "$RUN_STATUS"
+        break
+    fi
+
     if ! run_schedule_group "$group"; then
+        break
+    fi
+    if [[ "$RUN_STATUS" == "deadline" ]]; then
+        remaining_files=()
+        for ((remaining_group_idx = group_idx + 1; remaining_group_idx < ${#TEST_GROUPS[@]}; remaining_group_idx++)); do
+            for sql_file in ${TEST_GROUPS[$remaining_group_idx]}; do
+                remaining_files+=("$sql_file")
+            done
+        done
+        mark_unstarted_tests_timed_out \
+            "Shard deadline reached before scheduling this schedule group." \
+            "${remaining_files[@]}"
+        write_summary "$RUN_STATUS"
         break
     fi
 done
