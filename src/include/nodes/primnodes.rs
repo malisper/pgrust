@@ -962,6 +962,7 @@ pub enum JsonTableFunction {
     ArrayElements,
     ArrayElementsText,
     JsonbPathQuery,
+    JsonbPathQueryTz,
     JsonbObjectKeys,
     JsonbEach,
     JsonbEachText,
@@ -1137,6 +1138,38 @@ pub struct SqlJsonTable {
     pub on_error: SqlJsonTableBehavior,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlXmlTable {
+    pub namespaces: Vec<SqlXmlTableNamespace>,
+    pub row_path: Expr,
+    pub document: Expr,
+    pub columns: Vec<SqlXmlTableColumn>,
+    pub output_columns: Vec<QueryColumn>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlXmlTableNamespace {
+    pub name: Option<String>,
+    pub uri: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlXmlTableColumn {
+    pub name: String,
+    pub sql_type: SqlType,
+    pub kind: SqlXmlTableColumnKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SqlXmlTableColumnKind {
+    Ordinality,
+    Regular {
+        path: Option<Expr>,
+        default: Option<Expr>,
+        not_null: bool,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JsonRecordFunction {
     PopulateRecord,
@@ -1230,6 +1263,7 @@ pub enum SetReturningCall {
         with_ordinality: bool,
     },
     SqlJsonTable(SqlJsonTable),
+    SqlXmlTable(SqlXmlTable),
     JsonRecordFunction {
         func_oid: u32,
         func_variadic: bool,
@@ -1306,6 +1340,7 @@ impl SetReturningCall {
             | SetReturningCall::Unnest { output_columns, .. }
             | SetReturningCall::JsonTableFunction { output_columns, .. }
             | SetReturningCall::SqlJsonTable(SqlJsonTable { output_columns, .. })
+            | SetReturningCall::SqlXmlTable(SqlXmlTable { output_columns, .. })
             | SetReturningCall::JsonRecordFunction { output_columns, .. }
             | SetReturningCall::RegexTableFunction { output_columns, .. }
             | SetReturningCall::StringTableFunction { output_columns, .. }
@@ -1337,6 +1372,10 @@ impl SetReturningCall {
                 ..
             }
             | SetReturningCall::SqlJsonTable(SqlJsonTable {
+                output_columns: existing,
+                ..
+            })
+            | SetReturningCall::SqlXmlTable(SqlXmlTable {
                 output_columns: existing,
                 ..
             })
@@ -1422,7 +1461,7 @@ impl SetReturningCall {
             | SetReturningCall::UserDefined {
                 with_ordinality, ..
             } => *with_ordinality,
-            SetReturningCall::SqlJsonTable(_) => false,
+            SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_) => false,
         }
     }
 
@@ -1545,6 +1584,9 @@ impl SetReturningCall {
             SetReturningCall::SqlJsonTable(table) => {
                 SetReturningCall::SqlJsonTable(map_sql_json_table_exprs(table, &mut map))
             }
+            SetReturningCall::SqlXmlTable(table) => {
+                SetReturningCall::SqlXmlTable(map_sql_xml_table_exprs(table, &mut map))
+            }
             SetReturningCall::JsonRecordFunction {
                 func_oid,
                 func_variadic,
@@ -1625,6 +1667,9 @@ impl SetReturningCall {
         Ok(match self {
             SetReturningCall::SqlJsonTable(table) => {
                 SetReturningCall::SqlJsonTable(try_map_sql_json_table_exprs(table, &mut map)?)
+            }
+            SetReturningCall::SqlXmlTable(table) => {
+                SetReturningCall::SqlXmlTable(try_map_sql_xml_table_exprs(table, &mut map)?)
             }
             other => other.map_exprs(|expr| map(expr).ok().expect("fallible mapper failed")),
         })
@@ -1777,6 +1822,99 @@ fn map_sql_json_table_column_kind(
         SqlJsonTableColumnKind::Exists { path, on_error } => SqlJsonTableColumnKind::Exists {
             path,
             on_error: on_error.map_exprs(map),
+        },
+    }
+}
+
+fn try_map_sql_xml_table_exprs<E>(
+    table: SqlXmlTable,
+    map: &mut impl FnMut(Expr) -> Result<Expr, E>,
+) -> Result<SqlXmlTable, E> {
+    Ok(SqlXmlTable {
+        namespaces: table
+            .namespaces
+            .into_iter()
+            .map(|namespace| {
+                Ok(SqlXmlTableNamespace {
+                    name: namespace.name,
+                    uri: map(namespace.uri)?,
+                })
+            })
+            .collect::<Result<Vec<_>, E>>()?,
+        row_path: map(table.row_path)?,
+        document: map(table.document)?,
+        columns: table
+            .columns
+            .into_iter()
+            .map(|column| {
+                Ok(SqlXmlTableColumn {
+                    name: column.name,
+                    sql_type: column.sql_type,
+                    kind: try_map_sql_xml_table_column_kind(column.kind, map)?,
+                })
+            })
+            .collect::<Result<Vec<_>, E>>()?,
+        output_columns: table.output_columns,
+    })
+}
+
+fn try_map_sql_xml_table_column_kind<E>(
+    kind: SqlXmlTableColumnKind,
+    map: &mut impl FnMut(Expr) -> Result<Expr, E>,
+) -> Result<SqlXmlTableColumnKind, E> {
+    Ok(match kind {
+        SqlXmlTableColumnKind::Ordinality => SqlXmlTableColumnKind::Ordinality,
+        SqlXmlTableColumnKind::Regular {
+            path,
+            default,
+            not_null,
+        } => SqlXmlTableColumnKind::Regular {
+            path: path.map(&mut *map).transpose()?,
+            default: default.map(&mut *map).transpose()?,
+            not_null,
+        },
+    })
+}
+
+fn map_sql_xml_table_exprs(table: SqlXmlTable, map: &mut impl FnMut(Expr) -> Expr) -> SqlXmlTable {
+    SqlXmlTable {
+        namespaces: table
+            .namespaces
+            .into_iter()
+            .map(|namespace| SqlXmlTableNamespace {
+                name: namespace.name,
+                uri: map(namespace.uri),
+            })
+            .collect(),
+        row_path: map(table.row_path),
+        document: map(table.document),
+        columns: table
+            .columns
+            .into_iter()
+            .map(|column| SqlXmlTableColumn {
+                name: column.name,
+                sql_type: column.sql_type,
+                kind: map_sql_xml_table_column_kind(column.kind, map),
+            })
+            .collect(),
+        output_columns: table.output_columns,
+    }
+}
+
+fn map_sql_xml_table_column_kind(
+    kind: SqlXmlTableColumnKind,
+    map: &mut impl FnMut(Expr) -> Expr,
+) -> SqlXmlTableColumnKind {
+    match kind {
+        SqlXmlTableColumnKind::Ordinality => SqlXmlTableColumnKind::Ordinality,
+        SqlXmlTableColumnKind::Regular {
+            path,
+            default,
+            not_null,
+        } => SqlXmlTableColumnKind::Regular {
+            path: path.map(&mut *map),
+            default: default.map(&mut *map),
+            not_null,
         },
     }
 }
@@ -2673,6 +2811,23 @@ pub fn set_returning_call_exprs(call: &SetReturningCall) -> Vec<&Expr> {
                 }
             }
             push_sql_json_behavior_expr(&table.on_error, &mut exprs);
+            exprs
+        }
+        SetReturningCall::SqlXmlTable(table) => {
+            let mut exprs = Vec::with_capacity(2 + table.namespaces.len() + table.columns.len());
+            exprs.push(&table.row_path);
+            exprs.push(&table.document);
+            exprs.extend(table.namespaces.iter().map(|namespace| &namespace.uri));
+            for column in &table.columns {
+                if let SqlXmlTableColumnKind::Regular { path, default, .. } = &column.kind {
+                    if let Some(path) = path {
+                        exprs.push(path);
+                    }
+                    if let Some(default) = default {
+                        exprs.push(default);
+                    }
+                }
+            }
             exprs
         }
     }

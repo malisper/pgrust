@@ -1,6 +1,7 @@
 use super::{
     Catalog, ExecError, ExecutorContext, ParseError, Plan, PlannedStmt, QueryDesc, Statement,
     StatementResult, TransactionId, TupleSlot, Value, bind_delete, bind_insert, bind_update,
+    check_planned_stmt_select_for_update_privileges, check_planned_stmt_select_privileges,
     create_query_desc, eval_expr, execute_analyze, execute_create_index, execute_create_table,
     execute_delete, execute_drop_table, execute_explain, execute_insert, execute_merge,
     execute_truncate_table, execute_update, execute_vacuum, executor_start, parse_statement,
@@ -142,10 +143,19 @@ fn execute_statement_with_source(
     let result = (|| match stmt {
         Statement::Do(stmt) => execute_do(&stmt),
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx, PlannerConfig::default()),
-        Statement::Select(stmt) => execute_query_desc(
-            create_query_desc(pg_plan_query(&stmt, catalog)?, source_text.map(str::to_string)),
-            ctx,
-        ),
+        Statement::Select(stmt) => {
+            let requires_update = stmt.locking_clause.is_some();
+            let planned = pg_plan_query(&stmt, catalog)?;
+            if requires_update {
+                check_planned_stmt_select_for_update_privileges(&planned, ctx)?;
+            } else {
+                check_planned_stmt_select_privileges(&planned, ctx)?;
+            }
+            execute_query_desc(
+                create_query_desc(planned, source_text.map(str::to_string)),
+                ctx,
+            )
+        }
         Statement::Values(stmt) => execute_query_desc(
             create_query_desc(
                 pg_plan_values_query(&stmt, catalog)?,
@@ -682,10 +692,9 @@ pub fn execute_readonly_statement_with_config(
                     sqlstate: "25006",
                 });
             }
-            execute_planned_stmt(
-                pg_plan_query_with_config(&stmt, catalog, planner_config)?,
-                ctx,
-            )
+            let planned = pg_plan_query_with_config(&stmt, catalog, planner_config)?;
+            check_planned_stmt_select_privileges(&planned, ctx)?;
+            execute_planned_stmt(planned, ctx)
         }
         Statement::Values(stmt) => execute_planned_stmt(
             pg_plan_values_query_with_config(&stmt, catalog, planner_config)?,

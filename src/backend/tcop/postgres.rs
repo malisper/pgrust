@@ -465,6 +465,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(position) = find_detailed_operator_position(sql, message) {
                 return Some(position);
             }
+            if message == "conflicting constraint properties" {
+                return find_constraint_enforcement_attribute_position(sql);
+            }
             if message == "range lower bound must be less than or equal to range upper bound" {
                 return find_range_literal_position(sql);
             }
@@ -504,7 +507,18 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             ) {
                 return find_case_insensitive_token_position(sql, "ON UPDATE");
             }
+            if message == "constraint declared INITIALLY DEFERRED must be DEFERRABLE" {
+                return find_case_insensitive_token_position(sql, "INITIALLY");
+            }
+            if message == "multiple ENFORCED/NOT ENFORCED clauses not allowed" {
+                return find_constraint_enforcement_attribute_position(sql);
+            }
             return None;
+        }
+        ExecError::DetailedError { message, .. }
+            if message == "constraints cannot be altered to be NOT VALID" =>
+        {
+            return find_case_insensitive_token_position(sql, "NOT VALID");
         }
         ExecError::Parse(crate::backend::parser::ParseError::InvalidPublicationTableName(name))
         | ExecError::Parse(crate::backend::parser::ParseError::InvalidPublicationSchemaName(
@@ -547,6 +561,14 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::InvalidFloatInput { value, .. } => value.as_str(),
         ExecError::FloatOutOfRange { value, .. } => value.as_str(),
         ExecError::InvalidStorageValue { details, .. } => {
+            if is_jsonpath_syntax_error(details)
+                && let Some(position) = find_jsonpath_literal_position(sql)
+            {
+                return Some(position);
+            }
+            if is_jsonpath_sql_surface(sql) && is_jsonpath_datetime_error(details, sql) {
+                return None;
+            }
             if let Some(zone) = extract_unrecognized_time_zone(details) {
                 let lower = sql.to_ascii_lowercase();
                 if lower.contains(" at time zone ")
@@ -568,6 +590,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::DetailedError {
             message, detail, ..
         } => {
+            if is_jsonpath_sql_surface(sql) && is_jsonpath_datetime_error(message, sql) {
+                return None;
+            }
             if matches!(
                 message.as_str(),
                 "parallel option requires a value between 0 and 1024"
@@ -1180,6 +1205,78 @@ fn extract_quoted_error_value(message: &str) -> Option<&str> {
     rest.strip_suffix('"')
 }
 
+fn is_jsonpath_syntax_error(message: &str) -> bool {
+    message.starts_with("syntax error at or near ") && message.ends_with(" of jsonpath input")
+}
+
+fn is_jsonpath_sql_surface(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    lower.contains("jsonb_path_")
+        || lower.contains(" jsonpath")
+        || lower.contains("@?")
+        || lower.contains("@@")
+}
+
+fn is_jsonpath_datetime_error(message: &str, sql: &str) -> bool {
+    matches!(
+        message
+            .split_once(':')
+            .map(|(prefix, _)| prefix)
+            .unwrap_or(message),
+        "datetime format is not recognized"
+            | "date format is not recognized"
+            | "time format is not recognized"
+            | "time_tz format is not recognized"
+            | "timestamp format is not recognized"
+            | "timestamp_tz format is not recognized"
+            | "invalid datetime format separator"
+    ) || (message.starts_with("invalid value \"") && sql.contains(".datetime("))
+}
+
+fn find_jsonpath_literal_position(sql: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b'\'' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        let mut content = String::new();
+        while index < bytes.len() {
+            if bytes[index] == b'\'' {
+                if bytes.get(index + 1) == Some(&b'\'') {
+                    content.push('\'');
+                    index += 2;
+                    continue;
+                }
+                index += 1;
+                if looks_like_jsonpath_literal(content.trim()) {
+                    return Some(start + 1);
+                }
+                break;
+            }
+            if let Some(ch) = sql[index..].chars().next() {
+                content.push(ch);
+                index += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+    }
+    None
+}
+
+fn looks_like_jsonpath_literal(text: &str) -> bool {
+    text.starts_with('$')
+        || text.starts_with('@')
+        || text.starts_with("strict ")
+        || text.starts_with("lax ")
+        || text.starts_with("exists(")
+        || text.contains('$')
+}
+
 fn extract_missing_column_name(message: &str) -> Option<&str> {
     message
         .strip_prefix("column \"")?
@@ -1771,6 +1868,16 @@ fn find_last_case_insensitive_token_position(sql: &str, token: &str) -> Option<u
     sql.to_ascii_lowercase()
         .rfind(&token_lower)
         .map(|index| index + 1)
+}
+
+fn find_constraint_enforcement_attribute_position(sql: &str) -> Option<usize> {
+    [
+        find_case_insensitive_token_position(sql, "NOT ENFORCED"),
+        find_case_insensitive_token_position(sql, "ENFORCED"),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
 }
 
 fn find_type_name_before_typmod_position(sql: &str) -> Option<usize> {
@@ -3743,9 +3850,13 @@ fn execute_streaming_select_statement(
                 }
             }
             let succeeded = err.is_none();
-            state
+            if let Err(finish_err) = state
                 .session
-                .finish_streaming_select_guard(db, &mut guard, succeeded);
+                .finish_streaming_select_guard(db, &mut guard, succeeded)
+                && err.is_none()
+            {
+                err = Some(finish_err);
+            }
             drop(guard);
 
             if let Some(e) = err {
@@ -7704,6 +7815,18 @@ fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem
                         if raw_expr_contains_pg_notify(expr)
                 )
         }
+        crate::backend::parser::FromItem::XmlTable(table) => {
+            table
+                .namespaces
+                .iter()
+                .any(|namespace| raw_expr_contains_pg_notify(&namespace.uri))
+                || raw_expr_contains_pg_notify(&table.row_path)
+                || raw_expr_contains_pg_notify(&table.document)
+                || table
+                    .columns
+                    .iter()
+                    .any(raw_xml_table_column_contains_pg_notify)
+        }
         crate::backend::parser::FromItem::Lateral(inner)
         | crate::backend::parser::FromItem::Alias { source: inner, .. } => {
             raw_from_item_contains_pg_notify(inner)
@@ -7728,6 +7851,18 @@ fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem
                     | crate::backend::parser::JoinConstraint::Natural => false,
                 }
         }
+    }
+}
+
+fn raw_xml_table_column_contains_pg_notify(
+    column: &crate::backend::parser::XmlTableColumn,
+) -> bool {
+    match column {
+        crate::backend::parser::XmlTableColumn::Regular { path, default, .. } => {
+            path.as_ref().is_some_and(raw_expr_contains_pg_notify)
+                || default.as_ref().is_some_and(raw_expr_contains_pg_notify)
+        }
+        crate::backend::parser::XmlTableColumn::Ordinality { .. } => false,
     }
 }
 
@@ -11218,6 +11353,7 @@ ORDER BY 1, 2;";
         let sql = "SELECT pubname AS \"Name\", \
              pg_catalog.pg_get_userbyid(pubowner) AS \"Owner\", \
              puballtables AS \"All tables\", \
+             puballsequences AS \"All sequences\", \
              pubinsert AS \"Inserts\", \
              pubupdate AS \"Updates\", \
              pubdelete AS \"Deletes\", \
@@ -11238,6 +11374,7 @@ ORDER BY 1, 2;";
             vec![vec![
                 Value::Text("pub".into()),
                 Value::Text("postgres".into()),
+                Value::Bool(false),
                 Value::Bool(false),
                 Value::Bool(true),
                 Value::Bool(true),
@@ -11312,7 +11449,7 @@ ORDER BY 1, 2;";
 
         let sql = "SELECT oid, pubname, \
              pg_catalog.pg_get_userbyid(pubowner) AS owner, \
-             puballtables, pubinsert, pubupdate, pubdelete, pubtruncate, \
+             puballtables, puballsequences, pubinsert, pubupdate, pubdelete, pubtruncate, \
              (CASE pubgencols WHEN 'n' THEN 'none' WHEN 's' THEN 'stored' END) AS \"Generated columns\", \
              pubviaroot \
              FROM pg_catalog.pg_publication \
@@ -11326,8 +11463,9 @@ ORDER BY 1, 2;";
         assert_eq!(rows[0][1], Value::Text("pub".into()));
         assert_eq!(rows[0][2], Value::Text("postgres".into()));
         assert_eq!(rows[0][3], Value::Bool(false));
-        assert_eq!(rows[0][8], Value::Text("none".into()));
-        assert_eq!(rows[0][9], Value::Bool(false));
+        assert_eq!(rows[0][4], Value::Bool(false));
+        assert_eq!(rows[0][9], Value::Text("none".into()));
+        assert_eq!(rows[0][10], Value::Bool(false));
     }
 
     #[test]
@@ -12337,6 +12475,45 @@ ORDER BY 1, 2;";
         );
 
         assert_eq!(exec_error_position(sql, &err), Some(91));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_alter_constraint_fk_options() {
+        let initially_sql = "ALTER TABLE fktable ALTER CONSTRAINT fktable_fk_fkey NOT DEFERRABLE INITIALLY DEFERRED;";
+        let initially_err = ExecError::Parse(
+            crate::backend::parser::ParseError::FeatureNotSupportedMessage(
+                "constraint declared INITIALLY DEFERRED must be DEFERRABLE".into(),
+            ),
+        );
+        assert_eq!(
+            exec_error_position(initially_sql, &initially_err),
+            find_case_insensitive_token_position(initially_sql, "INITIALLY")
+        );
+
+        let not_valid_sql = "ALTER TABLE fktable ALTER CONSTRAINT fktable_fk_fkey NOT VALID;";
+        let not_valid_err = ExecError::DetailedError {
+            message: "constraints cannot be altered to be NOT VALID".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        };
+        assert_eq!(
+            exec_error_position(not_valid_sql, &not_valid_err),
+            find_case_insensitive_token_position(not_valid_sql, "NOT VALID")
+        );
+
+        let enforced_sql =
+            "ALTER TABLE fktable ALTER CONSTRAINT fktable_fk_fkey ENFORCED NOT ENFORCED;";
+        let enforced_err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "conflicting constraint properties".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+        assert_eq!(
+            exec_error_position(enforced_sql, &enforced_err),
+            find_case_insensitive_token_position(enforced_sql, "ENFORCED")
+        );
     }
 
     #[test]

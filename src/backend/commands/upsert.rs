@@ -16,8 +16,9 @@ use crate::pl::plpgsql::TriggerOperation;
 use super::tablecmds::{
     WriteUpdatedRowResult, apply_assignment_target, build_index_insert_context,
     index_key_values_for_row, insert_index_entry_for_row, materialize_generated_columns,
-    rollback_inserted_row, row_matches_index_predicate, slot_toast_context,
-    temporal_arbiter_conflicts_with_existing_row, write_insert_heap_row, write_updated_row,
+    project_returning_row_with_old_new, rollback_inserted_row, row_matches_index_predicate,
+    slot_toast_context, temporal_arbiter_conflicts_with_existing_row,
+    validate_pending_no_action_checks, write_insert_heap_row, write_updated_row,
 };
 use super::trigger::{RuntimeTriggers, TriggerTransitionCapture};
 
@@ -27,7 +28,10 @@ enum EvaluatedConflictAction {
 }
 
 enum ConflictActionResult {
-    Updated(Vec<Value>),
+    Updated {
+        old_values: Vec<Value>,
+        new_values: Vec<Value>,
+    },
     Skipped,
     Retry,
 }
@@ -266,14 +270,18 @@ fn run_conflict_update(
         None,
     )?;
     match write_result {
-        WriteUpdatedRowResult::Updated(_new_tid) => {
+        WriteUpdatedRowResult::Updated(_new_tid, no_action_checks) => {
+            validate_pending_no_action_checks(no_action_checks, ctx)?;
             if let Some(triggers) = triggers {
                 if let Some(capture) = transition_capture {
                     triggers.capture_update_row(capture, &current_old_values, &new_values);
                 }
                 triggers.after_row_update(&current_old_values, &new_values, ctx)?;
             }
-            Ok(ConflictActionResult::Updated(new_values))
+            Ok(ConflictActionResult::Updated {
+                old_values: current_old_values,
+                new_values,
+            })
         }
         WriteUpdatedRowResult::TupleUpdated(_new_tid) => Ok(ConflictActionResult::Retry),
         WriteUpdatedRowResult::AlreadyModified => Ok(ConflictActionResult::Retry),
@@ -575,8 +583,23 @@ pub(crate) fn execute_insert_on_conflict_rows(
                         update_triggers.as_ref(),
                         update_capture.as_mut(),
                     )? {
-                        ConflictActionResult::Updated(updated_values) => {
-                            affected_rows.push(updated_values);
+                        ConflictActionResult::Updated {
+                            old_values,
+                            new_values,
+                        } => {
+                            if stmt.returning.is_empty() {
+                                affected_rows.push(new_values);
+                            } else {
+                                affected_rows.push(project_returning_row_with_old_new(
+                                    &stmt.returning,
+                                    &new_values,
+                                    None,
+                                    None,
+                                    Some(&old_values),
+                                    Some(&new_values),
+                                    ctx,
+                                )?);
+                            }
                             break;
                         }
                         ConflictActionResult::Skipped => break,
@@ -644,7 +667,19 @@ pub(crate) fn execute_insert_on_conflict_rows(
                 }
                 triggers.after_row_insert(&inserted_values, ctx)?;
             }
-            affected_rows.push(inserted_values);
+            if stmt.returning.is_empty() {
+                affected_rows.push(inserted_values);
+            } else {
+                affected_rows.push(project_returning_row_with_old_new(
+                    &stmt.returning,
+                    &inserted_values,
+                    Some(heap_tid),
+                    Some(stmt.relation_oid),
+                    None,
+                    Some(&inserted_values),
+                    ctx,
+                )?);
+            }
             break;
         }
     }

@@ -1,13 +1,18 @@
-use std::{cell::RefCell, collections::BTreeMap};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use crate::backend::executor::Value;
 use crate::backend::rewrite::format_stored_rule_definition;
 use crate::backend::utils::cache::system_view_registry::synthetic_system_views;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, NAME_TYPE_OID, PG_LANGUAGE_INTERNAL_OID, PgAmRow, PgAttributeRow,
-    PgAuthIdRow, PgClassRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow,
-    PgIndexRow, PgNamespaceRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
-    PgUserMappingRow, PolicyCommand,
+    BOOTSTRAP_SUPERUSER_OID, NAME_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID,
+    PG_TOAST_NAMESPACE_OID, PUBLISH_GENCOLS_STORED, PgAmRow, PgAttributeRow, PgAuthIdRow,
+    PgClassRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow,
+    PgInheritsRow, PgNamespaceRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow, PgUserMappingRow,
+    PolicyCommand,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::pgrust::database::DatabaseStatsStore;
@@ -79,6 +84,507 @@ pub(crate) fn current_pg_stat_progress_copy_rows() -> Vec<Vec<Value>> {
             })
             .unwrap_or_default()
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PgPublicationTableInfo {
+    pub pubid: u32,
+    pub relid: u32,
+    pub attrs: Vec<i16>,
+    pub qual: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PublicationTableSource {
+    attrs: Option<Vec<i16>>,
+    qual: Option<String>,
+    ignores_relation_options: bool,
+}
+
+pub(crate) fn build_pg_get_publication_tables_info(
+    publications: Vec<PgPublicationRow>,
+    publication_rels: Vec<PgPublicationRelRow>,
+    publication_namespaces: Vec<PgPublicationNamespaceRow>,
+    classes: Vec<PgClassRow>,
+    attributes: Vec<PgAttributeRow>,
+    inherits: Vec<PgInheritsRow>,
+    publication_names: &[String],
+) -> Vec<PgPublicationTableInfo> {
+    let class_by_oid = classes
+        .iter()
+        .cloned()
+        .map(|class| (class.oid, class))
+        .collect::<BTreeMap<_, _>>();
+    let attrs_by_relid = attributes_by_relation(attributes);
+    let children_by_parent = inheritance_children_by_parent(&inherits);
+    let parents_by_child = inheritance_parents_by_child(&inherits);
+    let publication_by_name = publications
+        .iter()
+        .cloned()
+        .map(|publication| (publication.pubname.clone(), publication))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut out = Vec::new();
+    let mut has_pub_via_root = false;
+    for publication_name in publication_names {
+        let Some(publication) = publication_by_name.get(publication_name) else {
+            continue;
+        };
+        has_pub_via_root |= publication.pubviaroot;
+        out.extend(publication_table_infos_for_publication(
+            publication,
+            &publication_rels,
+            &publication_namespaces,
+            &class_by_oid,
+            &attrs_by_relid,
+            &children_by_parent,
+            &parents_by_child,
+        ));
+    }
+    if has_pub_via_root {
+        let published = out.iter().map(|info| info.relid).collect::<BTreeSet<_>>();
+        out.retain(|info| !has_published_ancestor(info.relid, &published, &parents_by_child));
+    }
+    out
+}
+
+pub(crate) fn build_pg_get_publication_tables_rows(
+    publications: Vec<PgPublicationRow>,
+    publication_rels: Vec<PgPublicationRelRow>,
+    publication_namespaces: Vec<PgPublicationNamespaceRow>,
+    classes: Vec<PgClassRow>,
+    attributes: Vec<PgAttributeRow>,
+    inherits: Vec<PgInheritsRow>,
+    publication_names: &[String],
+) -> Vec<Vec<Value>> {
+    build_pg_get_publication_tables_info(
+        publications,
+        publication_rels,
+        publication_namespaces,
+        classes,
+        attributes,
+        inherits,
+        publication_names,
+    )
+    .into_iter()
+    .map(|info| {
+        vec![
+            Value::Int64(i64::from(info.pubid)),
+            Value::Int64(i64::from(info.relid)),
+            publication_attr_vector_value(&info.attrs),
+            nullable_text(info.qual),
+        ]
+    })
+    .collect()
+}
+
+pub fn build_pg_publication_tables_rows(
+    publications: Vec<PgPublicationRow>,
+    publication_rels: Vec<PgPublicationRelRow>,
+    publication_namespaces: Vec<PgPublicationNamespaceRow>,
+    namespaces: Vec<PgNamespaceRow>,
+    classes: Vec<PgClassRow>,
+    attributes: Vec<PgAttributeRow>,
+    inherits: Vec<PgInheritsRow>,
+) -> Vec<Vec<Value>> {
+    let publication_names = publications
+        .iter()
+        .map(|publication| publication.pubname.clone())
+        .collect::<Vec<_>>();
+    let publication_by_oid = publications
+        .iter()
+        .map(|publication| (publication.oid, publication.pubname.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let namespace_by_oid = namespaces
+        .into_iter()
+        .map(|namespace| (namespace.oid, namespace.nspname))
+        .collect::<BTreeMap<_, _>>();
+    let class_by_oid = classes
+        .iter()
+        .map(|class| (class.oid, class.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let attrs_by_relid = attributes_by_relation(attributes.clone());
+
+    let mut publication_infos = Vec::new();
+    for publication_name in &publication_names {
+        publication_infos.extend(build_pg_get_publication_tables_info(
+            publications.clone(),
+            publication_rels.clone(),
+            publication_namespaces.clone(),
+            classes.clone(),
+            attributes.clone(),
+            inherits.clone(),
+            std::slice::from_ref(publication_name),
+        ));
+    }
+
+    let mut rows = publication_infos
+        .into_iter()
+        .filter_map(|info| {
+            let pubname = publication_by_oid.get(&info.pubid)?.clone();
+            let class = class_by_oid.get(&info.relid)?;
+            let schemaname = namespace_by_oid.get(&class.relnamespace)?.clone();
+            Some((
+                pubname.clone(),
+                schemaname.clone(),
+                class.relname.clone(),
+                vec![
+                    Value::Text(pubname.into()),
+                    Value::Text(schemaname.into()),
+                    Value::Text(class.relname.clone().into()),
+                    publication_attr_names_value(attrs_by_relid.get(&info.relid), &info.attrs),
+                    nullable_text(info.qual),
+                ],
+            ))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    rows.into_iter().map(|(_, _, _, row)| row).collect()
+}
+
+fn publication_table_infos_for_publication(
+    publication: &PgPublicationRow,
+    publication_rels: &[PgPublicationRelRow],
+    publication_namespaces: &[PgPublicationNamespaceRow],
+    class_by_oid: &BTreeMap<u32, PgClassRow>,
+    attrs_by_relid: &BTreeMap<u32, Vec<PgAttributeRow>>,
+    children_by_parent: &BTreeMap<u32, Vec<u32>>,
+    parents_by_child: &BTreeMap<u32, Vec<u32>>,
+) -> Vec<PgPublicationTableInfo> {
+    let namespace_oids = publication_namespaces
+        .iter()
+        .filter(|row| row.pnpubid == publication.oid)
+        .map(|row| row.pnnspid)
+        .collect::<BTreeSet<_>>();
+    let except_relids = publication_rels
+        .iter()
+        .filter(|row| row.prpubid == publication.oid && row.prexcept)
+        .map(|row| row.prrelid)
+        .collect::<BTreeSet<_>>();
+    let mut by_relid = BTreeMap::<u32, PublicationTableSource>::new();
+
+    if publication.puballtables {
+        for class in class_by_oid.values() {
+            if !publication_class_is_publishable(class) || except_relids.contains(&class.oid) {
+                continue;
+            }
+            add_publication_relation(
+                publication,
+                class.oid,
+                PublicationTableSource {
+                    attrs: None,
+                    qual: None,
+                    ignores_relation_options: true,
+                },
+                &mut by_relid,
+                class_by_oid,
+                attrs_by_relid,
+                children_by_parent,
+            );
+        }
+    } else {
+        for rel in publication_rels
+            .iter()
+            .filter(|row| row.prpubid == publication.oid && !row.prexcept)
+        {
+            add_publication_relation(
+                publication,
+                rel.prrelid,
+                PublicationTableSource {
+                    attrs: rel.prattrs.clone(),
+                    qual: rel.prqual.clone(),
+                    ignores_relation_options: false,
+                },
+                &mut by_relid,
+                class_by_oid,
+                attrs_by_relid,
+                children_by_parent,
+            );
+        }
+        for class in class_by_oid
+            .values()
+            .filter(|class| namespace_oids.contains(&class.relnamespace))
+        {
+            if !publication_class_is_publishable(class) {
+                continue;
+            }
+            add_publication_relation(
+                publication,
+                class.oid,
+                PublicationTableSource {
+                    attrs: None,
+                    qual: None,
+                    ignores_relation_options: true,
+                },
+                &mut by_relid,
+                class_by_oid,
+                attrs_by_relid,
+                children_by_parent,
+            );
+        }
+    }
+
+    if publication.pubviaroot {
+        filter_partition_children(&mut by_relid, parents_by_child);
+    }
+
+    by_relid
+        .into_iter()
+        .map(|(relid, source)| {
+            let attrs = source.attrs.unwrap_or_else(|| {
+                default_publication_attr_numbers(
+                    attrs_by_relid.get(&relid),
+                    publication.pubgencols == PUBLISH_GENCOLS_STORED,
+                )
+            });
+            PgPublicationTableInfo {
+                pubid: publication.oid,
+                relid,
+                attrs,
+                qual: source.qual,
+            }
+        })
+        .collect()
+}
+
+fn add_publication_relation(
+    publication: &PgPublicationRow,
+    relid: u32,
+    source: PublicationTableSource,
+    by_relid: &mut BTreeMap<u32, PublicationTableSource>,
+    class_by_oid: &BTreeMap<u32, PgClassRow>,
+    attrs_by_relid: &BTreeMap<u32, Vec<PgAttributeRow>>,
+    children_by_parent: &BTreeMap<u32, Vec<u32>>,
+) {
+    let relids = publication_output_relids(
+        publication,
+        relid,
+        class_by_oid,
+        attrs_by_relid,
+        children_by_parent,
+    );
+    for relid in relids {
+        upsert_publication_relation_source(by_relid, relid, source.clone());
+    }
+}
+
+fn upsert_publication_relation_source(
+    by_relid: &mut BTreeMap<u32, PublicationTableSource>,
+    relid: u32,
+    source: PublicationTableSource,
+) {
+    match by_relid.get_mut(&relid) {
+        Some(existing) if existing.ignores_relation_options => {}
+        Some(existing) if source.ignores_relation_options => {
+            *existing = source;
+        }
+        Some(_) => {}
+        None => {
+            by_relid.insert(relid, source);
+        }
+    }
+}
+
+fn publication_output_relids(
+    publication: &PgPublicationRow,
+    relid: u32,
+    class_by_oid: &BTreeMap<u32, PgClassRow>,
+    attrs_by_relid: &BTreeMap<u32, Vec<PgAttributeRow>>,
+    children_by_parent: &BTreeMap<u32, Vec<u32>>,
+) -> Vec<u32> {
+    let Some(class) = class_by_oid.get(&relid) else {
+        return Vec::new();
+    };
+    if publication.pubviaroot || class.relkind != 'p' {
+        return vec![relid];
+    }
+
+    let descendants =
+        leaf_publishable_descendants(relid, class_by_oid, attrs_by_relid, children_by_parent);
+    if descendants.is_empty() {
+        vec![relid]
+    } else {
+        descendants
+    }
+}
+
+fn leaf_publishable_descendants(
+    relid: u32,
+    class_by_oid: &BTreeMap<u32, PgClassRow>,
+    attrs_by_relid: &BTreeMap<u32, Vec<PgAttributeRow>>,
+    children_by_parent: &BTreeMap<u32, Vec<u32>>,
+) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut pending = children_by_parent.get(&relid).cloned().unwrap_or_default();
+    while let Some(child_oid) = pending.pop() {
+        let Some(child) = class_by_oid.get(&child_oid) else {
+            continue;
+        };
+        if child.relkind == 'p' {
+            let child_children = children_by_parent
+                .get(&child_oid)
+                .cloned()
+                .unwrap_or_default();
+            if child_children.is_empty() && publication_class_is_publishable(child) {
+                out.push(child_oid);
+            } else {
+                pending.extend(child_children);
+            }
+        } else if publication_class_is_publishable(child) && attrs_by_relid.contains_key(&child_oid)
+        {
+            out.push(child_oid);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn filter_partition_children(
+    by_relid: &mut BTreeMap<u32, PublicationTableSource>,
+    parents_by_child: &BTreeMap<u32, Vec<u32>>,
+) {
+    let relids = by_relid.keys().copied().collect::<BTreeSet<_>>();
+    let to_remove = relids
+        .iter()
+        .copied()
+        .filter(|relid| has_published_ancestor(*relid, &relids, parents_by_child))
+        .collect::<Vec<_>>();
+    for relid in to_remove {
+        by_relid.remove(&relid);
+    }
+}
+
+fn has_published_ancestor(
+    relid: u32,
+    published: &BTreeSet<u32>,
+    parents_by_child: &BTreeMap<u32, Vec<u32>>,
+) -> bool {
+    let mut pending = parents_by_child.get(&relid).cloned().unwrap_or_default();
+    let mut seen = BTreeSet::new();
+    while let Some(parent_oid) = pending.pop() {
+        if !seen.insert(parent_oid) {
+            continue;
+        }
+        if published.contains(&parent_oid) {
+            return true;
+        }
+        pending.extend(
+            parents_by_child
+                .get(&parent_oid)
+                .cloned()
+                .unwrap_or_default(),
+        );
+    }
+    false
+}
+
+fn publication_class_is_publishable(class: &PgClassRow) -> bool {
+    matches!(class.relkind, 'r' | 'p')
+        && class.relpersistence == 'p'
+        && class.relnamespace != PG_CATALOG_NAMESPACE_OID
+        && class.relnamespace != PG_TOAST_NAMESPACE_OID
+}
+
+fn default_publication_attr_numbers(
+    attrs: Option<&Vec<PgAttributeRow>>,
+    publish_stored_generated: bool,
+) -> Vec<i16> {
+    attrs
+        .into_iter()
+        .flatten()
+        .filter(|attr| attr.attnum > 0 && !attr.attisdropped)
+        .filter(|attr| match attr.attgenerated {
+            '\0' => true,
+            's' => publish_stored_generated,
+            _ => false,
+        })
+        .map(|attr| attr.attnum)
+        .collect()
+}
+
+fn attributes_by_relation(attributes: Vec<PgAttributeRow>) -> BTreeMap<u32, Vec<PgAttributeRow>> {
+    let mut by_relid = BTreeMap::<u32, Vec<PgAttributeRow>>::new();
+    for attr in attributes {
+        by_relid.entry(attr.attrelid).or_default().push(attr);
+    }
+    for attrs in by_relid.values_mut() {
+        attrs.sort_by_key(|attr| attr.attnum);
+    }
+    by_relid
+}
+
+fn inheritance_children_by_parent(inherits: &[PgInheritsRow]) -> BTreeMap<u32, Vec<u32>> {
+    let mut by_parent = BTreeMap::<u32, Vec<u32>>::new();
+    for row in inherits {
+        if row.inhdetachpending {
+            continue;
+        }
+        by_parent
+            .entry(row.inhparent)
+            .or_default()
+            .push(row.inhrelid);
+    }
+    by_parent
+}
+
+fn inheritance_parents_by_child(inherits: &[PgInheritsRow]) -> BTreeMap<u32, Vec<u32>> {
+    let mut by_child = BTreeMap::<u32, Vec<u32>>::new();
+    for row in inherits {
+        if row.inhdetachpending {
+            continue;
+        }
+        by_child
+            .entry(row.inhrelid)
+            .or_default()
+            .push(row.inhparent);
+    }
+    by_child
+}
+
+fn publication_attr_vector_value(attrs: &[i16]) -> Value {
+    if attrs.is_empty() {
+        Value::Null
+    } else {
+        Value::Array(attrs.iter().copied().map(Value::Int16).collect())
+    }
+}
+
+fn publication_attr_names_value(
+    attrs: Option<&Vec<PgAttributeRow>>,
+    attr_numbers: &[i16],
+) -> Value {
+    if attr_numbers.is_empty() {
+        return Value::Null;
+    }
+    let Some(attrs) = attrs else {
+        return Value::Null;
+    };
+    let by_attnum = attrs
+        .iter()
+        .map(|attr| (attr.attnum, attr.attname.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let values = attr_numbers
+        .iter()
+        .filter_map(|attnum| by_attnum.get(attnum).cloned())
+        .map(|attname| Value::Text(attname.into()))
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        Value::Null
+    } else {
+        Value::Array(values)
+    }
+}
+
+fn nullable_text(value: Option<String>) -> Value {
+    value
+        .map(|text| Value::Text(text.into()))
+        .unwrap_or(Value::Null)
 }
 
 pub fn build_pg_views_rows(

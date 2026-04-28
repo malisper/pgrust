@@ -3672,6 +3672,45 @@ fn delete_returning_target_lists() {
 }
 
 #[test]
+fn dml_returning_old_new_pseudo_rows() {
+    let dir = temp_dir("dml_returning_old_new_pseudo_rows");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table returning_old_new_tbl (id int4, name text)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "insert into returning_old_new_tbl values (1, 'alice') returning old.id, new.id",
+        ),
+        vec![vec![Value::Null, Value::Int32(1)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "update returning_old_new_tbl set name = 'bob' returning old.name, new.name",
+        ),
+        vec![vec![Value::Text("alice".into()), Value::Text("bob".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "delete from returning_old_new_tbl returning old.id, new.id",
+        ),
+        vec![vec![Value::Int32(1), Value::Null]]
+    );
+}
+
+#[test]
 fn insert_on_conflict_returning_rows() {
     std::thread::Builder::new()
         .name("db-test-insert-on-conflict-returning".into())
@@ -8083,13 +8122,23 @@ fn attach_partition_creates_missing_keys_and_fk_to_partitioned_key_stays_rejecte
         vec![vec![Value::Int64(1)]]
     );
 
-    match session.execute(
-        &db,
-        "create table fk_to_partitioned_parent (a int references attach_parent(a))",
-    ) {
-        Err(ExecError::Parse(ParseError::FeatureNotSupported(message)))
-            if message == "REFERENCES to partitioned tables" => {}
-        other => panic!("expected FK-to-partitioned-table rejection, got {other:?}"),
+    session
+        .execute(
+            &db,
+            "create table fk_to_partitioned_parent (a int references attach_parent(a))",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into attach_parent values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into fk_to_partitioned_parent values (1)")
+        .unwrap();
+    match session.execute(&db, "insert into fk_to_partitioned_parent values (2)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "fk_to_partitioned_parent_a_fkey");
+        }
+        other => panic!("expected FK-to-partitioned-table violation, got {other:?}"),
     }
 }
 
@@ -9451,6 +9500,257 @@ fn merge_checks_target_and_source_privileges() {
 }
 
 #[test]
+fn relation_privileges_gate_select_dml_copy_and_locking() {
+    fn assert_table_permission_denied(result: Result<StatementResult, ExecError>, table: &str) {
+        match result {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, format!("permission denied for table {table}"));
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected table permission error for {table}, got {other:?}"),
+        }
+    }
+
+    let dir = temp_dir("relation_privileges");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create role rel_owner login").unwrap();
+    session
+        .execute(&db, "create role rel_tenant login")
+        .unwrap();
+    session
+        .execute(&db, "create table rel_acl(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table rel_source(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into rel_acl values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into rel_source values (1)")
+        .unwrap();
+    session
+        .execute(&db, "alter table rel_acl owner to rel_owner")
+        .unwrap();
+    session
+        .execute(&db, "alter table rel_source owner to rel_owner")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization rel_tenant")
+        .unwrap();
+
+    assert_table_permission_denied(session.execute(&db, "select * from rel_acl"), "rel_acl");
+    assert_table_permission_denied(session.execute(&db, "select * from pg_class"), "pg_class");
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant select on rel_acl to rel_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization rel_tenant")
+        .unwrap();
+    session.execute(&db, "select * from rel_acl").unwrap();
+    assert_table_permission_denied(
+        session.execute(
+            &db,
+            "select * from rel_acl where exists (select 1 from rel_source)",
+        ),
+        "rel_source",
+    );
+    assert_table_permission_denied(
+        session.execute(&db, "select * from rel_acl for update"),
+        "rel_acl",
+    );
+    assert_table_permission_denied(
+        session.execute(&db, "insert into rel_acl values (2)"),
+        "rel_acl",
+    );
+    assert_table_permission_denied(
+        session
+            .copy_from_rows_into(&db, "rel_acl", None, &[vec!["2".into()]])
+            .map(StatementResult::AffectedRows),
+        "rel_acl",
+    );
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant insert on rel_acl to rel_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization rel_tenant")
+        .unwrap();
+    session
+        .execute(&db, "insert into rel_acl values (2)")
+        .unwrap();
+    session
+        .copy_from_rows_into(&db, "rel_acl", None, &[vec!["3".into()]])
+        .unwrap();
+    assert_table_permission_denied(
+        session.execute(&db, "update rel_acl set id = id + 1"),
+        "rel_acl",
+    );
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant update on rel_acl to rel_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization rel_tenant")
+        .unwrap();
+    session
+        .execute(&db, "select * from rel_acl for update")
+        .unwrap();
+    session
+        .execute(&db, "update rel_acl set id = id + 1")
+        .unwrap();
+    assert_table_permission_denied(session.execute(&db, "delete from rel_acl"), "rel_acl");
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant delete on rel_acl to rel_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization rel_tenant")
+        .unwrap();
+    session.execute(&db, "delete from rel_acl").unwrap();
+    assert_table_permission_denied(session.execute(&db, "truncate rel_acl"), "rel_acl");
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "grant truncate on rel_acl to rel_tenant")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization rel_tenant")
+        .unwrap();
+    session.execute(&db, "truncate rel_acl").unwrap();
+}
+
+#[test]
+fn merge_returning_projects_action_old_new_and_source() {
+    let dir = temp_dir("merge_returning_projects_action");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table merge_returning_target(id int4 primary key, name text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into merge_returning_target values (1, 'alice'), (2, 'bob')",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into merge_returning_target t using (values (1, 'alicia')) as s(id, name) on t.id = s.id \
+             when matched then update set name = s.name \
+             returning merge_action(), s.name, old.name, new.name, t.name, \
+             (select old.name), (select (select new.name))",
+        ),
+        vec![vec![
+            Value::Text("UPDATE".into()),
+            Value::Text("alicia".into()),
+            Value::Text("alice".into()),
+            Value::Text("alicia".into()),
+            Value::Text("alicia".into()),
+            Value::Text("alice".into()),
+            Value::Text("alicia".into()),
+        ]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into merge_returning_target t using (values (2)) as s(id) on t.id = s.id \
+             when matched then delete \
+             returning merge_action(), old.id, new.id, t.id",
+        ),
+        vec![vec![
+            Value::Text("DELETE".into()),
+            Value::Int32(2),
+            Value::Null,
+            Value::Int32(2),
+        ]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into merge_returning_target t using (values (3, 'carol')) as s(id, name) on t.id = s.id \
+             when not matched then insert values (s.id, s.name) \
+             returning merge_action(), old.id, new.id, t.id",
+        ),
+        vec![vec![
+            Value::Text("INSERT".into()),
+            Value::Null,
+            Value::Int32(3),
+            Value::Int32(3),
+        ]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table merge_returning_view_base(id int4 primary key, name text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into merge_returning_view_base values (1, 'one')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view merge_returning_view as select id, name from merge_returning_view_base where id > 0",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into merge_returning_view t using (values (1, 'uno')) as s(id, name) on t.id = s.id \
+             when matched then update set name = s.name \
+             returning merge_action(), s.name, old.name, new.name, t.name",
+        ),
+        vec![vec![
+            Value::Text("UPDATE".into()),
+            Value::Text("uno".into()),
+            Value::Text("one".into()),
+            Value::Text("uno".into()),
+            Value::Text("uno".into()),
+        ]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "merge into merge_returning_view t using (values (3, 'three')) as s(id, name) on t.id = s.id \
+             when not matched then insert values (s.id, s.name) \
+             returning merge_action(), old.id, new.id, t.id",
+        ),
+        vec![vec![
+            Value::Text("INSERT".into()),
+            Value::Null,
+            Value::Int32(3),
+            Value::Int32(3),
+        ]]
+    );
+}
+
+#[test]
 fn inherited_update_delete_follow_postgres_targeting_rules() {
     let dir = temp_dir("inheritance_guardrails");
     let db = Database::open(&dir, 128).unwrap();
@@ -9888,6 +10188,69 @@ fn create_view_persists_security_reloptions() {
             "select reloptions from pg_class where relname = 'secure_items'",
         ),
         vec![vec![Value::Null]]
+    );
+}
+
+#[test]
+fn security_barrier_inheritance_view_filters_through_subquery_scan() {
+    let dir = temp_dir("security_barrier_inheritance_view");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table sb_parent(a int4, b float8, c text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into sb_parent values (8, 8, 'parent')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table sb_child(extra text) inherits (sb_parent)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into sb_child values (8, 8, 'child', 'extra'), (9, 8, 'child9', 'extra')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view sb_view with (security_barrier=true) as \
+             select *, (select c from sb_child c2 where c2.a = sb_parent.a limit 1) as child_c \
+             from sb_parent \
+             where a > 5 and exists(select 1 from sb_child c3 where c3.a = sb_parent.a)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select a, b, c, child_c from sb_view where b = 8 order by a, c",
+        ),
+        vec![
+            vec![
+                Value::Int32(8),
+                Value::Float64(8.0),
+                Value::Text("child".into()),
+                Value::Text("child".into()),
+            ],
+            vec![
+                Value::Int32(8),
+                Value::Float64(8.0),
+                Value::Text("parent".into()),
+                Value::Text("child".into()),
+            ],
+            vec![
+                Value::Int32(9),
+                Value::Float64(8.0),
+                Value::Text("child9".into()),
+                Value::Text("child9".into()),
+            ],
+        ]
     );
 }
 
@@ -13074,6 +13437,28 @@ fn comment_on_function_uses_pg_proc_description_rows() {
 }
 
 #[test]
+fn comment_on_function_missing_signature_uses_canonical_type_names() {
+    let base = temp_dir("comment_on_function_missing_sig");
+    let db = Database::open(&base, 16).unwrap();
+
+    match db.execute(
+        1,
+        "comment on function missing_bpchar_func(bpchar, integer) is 'missing'",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "function missing_bpchar_func(character, integer) does not exist"
+            );
+            assert_eq!(sqlstate, "42883");
+        }
+        other => panic!("expected missing function error, got {other:?}"),
+    }
+}
+
+#[test]
 fn comment_on_operator_uses_pg_operator_description_rows() {
     let base = temp_dir("comment_on_operator");
     let db = Database::open(&base, 16).unwrap();
@@ -14740,7 +15125,7 @@ fn non_simple_views_reject_auto_dml() {
 }
 
 #[test]
-fn insert_on_conflict_is_rejected_for_auto_updatable_views() {
+fn insert_on_conflict_works_for_auto_updatable_views() {
     let base = temp_dir("auto_view_on_conflict");
     let db = Database::open(&base, 16).unwrap();
 
@@ -14749,12 +15134,20 @@ fn insert_on_conflict_is_rejected_for_auto_updatable_views() {
     db.execute(1, "create view item_view as select id from items")
         .unwrap();
 
-    match db.execute(1, "insert into item_view values (1) on conflict do nothing") {
-        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature))) => {
-            assert!(feature.contains("automatically updatable views"));
-        }
-        other => panic!("expected ON CONFLICT feature rejection, got {other:?}"),
-    }
+    assert_eq!(
+        db.execute(1, "insert into item_view values (1) on conflict do nothing")
+            .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    assert_eq!(
+        db.execute(1, "insert into item_view values (1) on conflict do nothing")
+            .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id from items"),
+        vec![vec![Value::Int32(1)]]
+    );
 }
 
 #[test]
@@ -22102,6 +22495,738 @@ fn self_referential_foreign_key_can_reference_inserted_row() {
 }
 
 #[test]
+fn foreign_key_update_actions_accumulate_on_same_child_row() {
+    let base = temp_dir("foreign_key_action_order_same_child");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table users (
+            id int4 primary key,
+            name text not null
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into users values (1, 'one'), (2, 'two'), (3, 'three')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table tasks (
+            id int4 primary key,
+            owner int4 references users on update cascade on delete set null,
+            worker int4 references users on update cascade on delete set null,
+            checked_by int4 references users on update cascade on delete set null
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into tasks values (1, 1, null, null), (2, 2, 2, null), (3, 3, 3, 3)",
+    )
+    .unwrap();
+
+    db.execute(1, "update users set id = 4 where id = 3")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, owner, worker, checked_by from tasks where id = 3",
+        ),
+        vec![vec![
+            Value::Int32(3),
+            Value::Int32(4),
+            Value::Int32(4),
+            Value::Int32(4),
+        ]]
+    );
+
+    db.execute(1, "delete from users where id = 4").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, owner, worker, checked_by from tasks where id = 3",
+        ),
+        vec![vec![Value::Int32(3), Value::Null, Value::Null, Value::Null,]]
+    );
+}
+
+#[test]
+fn self_referential_foreign_key_cascade_sees_updated_parent_row() {
+    let base = temp_dir("foreign_key_selfref_cascade_update_order");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table selfref (
+            a int4 primary key,
+            b int4,
+            foreign key (b) references selfref(a)
+                on update cascade on delete cascade
+        )",
+    )
+    .unwrap();
+    db.execute(1, "insert into selfref values (0, 0), (1, 1)")
+        .unwrap();
+
+    db.execute(1, "update selfref set a = 123 where a = 0")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from selfref order by a"),
+        vec![
+            vec![Value::Int32(1), Value::Int32(1)],
+            vec![Value::Int32(123), Value::Int32(123)],
+        ]
+    );
+
+    db.execute(1, "update selfref set a = 456 where a = 123")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from selfref order by a"),
+        vec![
+            vec![Value::Int32(1), Value::Int32(1)],
+            vec![Value::Int32(456), Value::Int32(456)],
+        ]
+    );
+}
+
+#[test]
+fn self_referential_no_action_checks_final_statement_state() {
+    let base = temp_dir("foreign_key_selfref_no_action_statement_end");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pktable_base(base1 int not null, base2 int)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pktable(
+            ptest1 int,
+            ptest2 int,
+            primary key(base1, ptest1),
+            foreign key(base2, ptest2) references pktable(base1, ptest1)
+        ) inherits (pktable_base)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into pktable (base1, ptest1, base2, ptest2) values
+            (1, 1, 1, 1),
+            (2, 1, 1, 1),
+            (2, 2, 2, 1),
+            (1, 3, 2, 2)",
+    )
+    .unwrap();
+
+    match db.execute(1, "delete from pktable where base1=2") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint, detail, ..
+        }) => {
+            assert_eq!(constraint, "pktable_base2_ptest2_fkey");
+            assert_eq!(
+                detail.as_deref(),
+                Some("Key (base1, ptest1)=(2, 2) is still referenced from table \"pktable\".")
+            );
+        }
+        other => panic!("expected statement-end no-action violation, got {other:?}"),
+    }
+
+    db.execute(1, "delete from pktable where base2=2").unwrap();
+    db.execute(1, "delete from pktable where base1=2").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select base1, ptest1 from pktable order by base1, ptest1"
+        ),
+        vec![vec![Value::Int32(1), Value::Int32(1)]]
+    );
+}
+
+#[test]
+fn no_action_update_allows_same_statement_replacement_key() {
+    let base = temp_dir("foreign_key_no_action_replacement_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pp (f1 int primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table cc (f1 int references pp on update no action on delete no action)",
+    )
+    .unwrap();
+    db.execute(1, "insert into pp values (12), (11)").unwrap();
+    db.execute(1, "update pp set f1 = f1 + 1").unwrap();
+    db.execute(1, "insert into cc values (13)").unwrap();
+    db.execute(1, "update pp set f1 = f1 + 1").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select f1 from pp order by f1"),
+        vec![vec![Value::Int32(13)], vec![Value::Int32(14)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select f1 from cc"),
+        vec![vec![Value::Int32(13)]]
+    );
+}
+
+#[test]
+fn dropping_fk_child_removes_referenced_table_ri_triggers() {
+    let base = temp_dir("foreign_key_drop_child_parent_triggers");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pktable (ptest1 int primary key, ptest2 text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fktable (
+            ftest1 int constraint fktable_ftest1_fkey
+                references pktable match full on delete cascade on update cascade not enforced,
+            ftest2 int
+        )",
+    )
+    .unwrap();
+    db.execute(1, "insert into fktable values (1, 2), (2, 3)")
+        .unwrap();
+    db.execute(1, "insert into pktable values (1, 'Test1'), (2, 'Test2')")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table fktable alter constraint fktable_ftest1_fkey enforced",
+    )
+    .unwrap();
+    db.execute(1, "delete from pktable where ptest1 = 1")
+        .unwrap();
+    db.execute(1, "update pktable set ptest1 = 1 where ptest1 = 2")
+        .unwrap();
+
+    db.execute(1, "drop table fktable").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_trigger where tgrelid = 'pktable'::regclass",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    db.execute(1, "drop table pktable").unwrap();
+}
+
+#[test]
+fn foreign_key_partition_attach_matches_columns_by_name() {
+    let base = temp_dir("foreign_key_partition_attach_name_layout");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table fk_parent (b int4, a int4) partition by range (a, b)",
+    )
+    .unwrap();
+    db.execute(1, "create table fk_child (a int4, b int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent attach partition fk_child for values from (0, 0) to (100, 100)",
+    )
+    .unwrap();
+    db.execute(1, "insert into fk_parent (a, b) values (1, 2)")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from fk_child"),
+        vec![vec![Value::Int32(1), Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn partitioned_table_drop_column_keeps_attach_layout_name_based() {
+    let base = temp_dir("partitioned_drop_column_attach_layout");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table fk_parent (dropme int4, a int4, b int4) partition by range (a, b)",
+    )
+    .unwrap();
+    db.execute(1, "alter table fk_parent drop column dropme")
+        .unwrap();
+    db.execute(1, "create table fk_child (b int4, a int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent attach partition fk_child for values from (0, 0) to (100, 100)",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into fk_parent (a, b) values (1, 2)")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from fk_child"),
+        vec![vec![Value::Int32(1), Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn multi_level_partition_routing_remaps_dropped_column_layouts() {
+    let base = temp_dir("partitioned_nested_drop_column_routing");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table fk_parent (b int4, dropme int4, a int4) partition by range (a, b)",
+    )
+    .unwrap();
+    db.execute(1, "alter table fk_parent drop column dropme")
+        .unwrap();
+    db.execute(
+        1,
+        "create table fk_mid (dropme int4, b int4, a int4) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(1, "alter table fk_mid drop column dropme")
+        .unwrap();
+    db.execute(1, "create table fk_leaf (a int4, b int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table fk_mid attach partition fk_leaf for values from (0) to (100)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent attach partition fk_mid for values from (0, 0) to (100, 100)",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into fk_parent (a, b) values (1, 2)")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from fk_leaf"),
+        vec![vec![Value::Int32(1), Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn foreign_key_on_partitioned_table_creates_child_constraints() {
+    let base = temp_dir("foreign_key_partitioned_child_constraints");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pk_items (a int4 primary key)")
+        .unwrap();
+    db.execute(1, "insert into pk_items values (1)").unwrap();
+    db.execute(1, "create table fk_parent (a int4) partition by range (a)")
+        .unwrap();
+    db.execute(1, "create table fk_child (a int4)").unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent attach partition fk_child for values from (0) to (100)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent add constraint fk_parent_a_fkey foreign key (a) references pk_items",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.conparentid = parent.oid \
+             from pg_constraint parent, pg_constraint child \
+             where parent.conrelid = 'fk_parent'::regclass \
+               and child.conrelid = 'fk_child'::regclass \
+               and parent.conname = 'fk_parent_a_fkey' \
+               and child.conname = 'fk_parent_a_fkey'",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+    match db.execute(1, "insert into fk_child values (2)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "fk_parent_a_fkey");
+        }
+        other => panic!("expected child partition foreign key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_partitioned_foreign_key_enforced_updates_child_constraints() {
+    let base = temp_dir("foreign_key_partitioned_child_alter_enforced");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pk_items (a int4 primary key)")
+        .unwrap();
+    db.execute(1, "create table fk_parent (a int4) partition by range (a)")
+        .unwrap();
+    db.execute(1, "create table fk_child (a int4)").unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent attach partition fk_child for values from (0) to (100)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent add constraint fk_parent_a_fkey foreign key (a) references pk_items not enforced",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conenforced from pg_constraint where conrelid = 'fk_child'::regclass and conname = 'fk_parent_a_fkey'",
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+
+    db.execute(
+        1,
+        "alter table fk_parent alter constraint fk_parent_a_fkey enforced",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conenforced, convalidated from pg_constraint where conrelid = 'fk_child'::regclass and conname = 'fk_parent_a_fkey'",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_trigger where tgrelid = 'fk_child'::regclass",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+}
+
+#[test]
+fn attach_partition_merges_existing_foreign_key_with_parent() {
+    let base = temp_dir("foreign_key_attach_merges_existing_child");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pk_items (a int4 primary key)")
+        .unwrap();
+    db.execute(1, "create table fk_parent (a int4) partition by range (a)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent add constraint fk_parent_a_fkey foreign key (a) references pk_items",
+    )
+    .unwrap();
+    db.execute(1, "create table fk_child (a int4)").unwrap();
+    db.execute(
+        1,
+        "alter table fk_child add constraint fk_parent_a_fkey foreign key (a) references pk_items not enforced",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent attach partition fk_child for values from (0) to (100)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.conparentid = parent.oid, child.conenforced \
+             from pg_constraint parent, pg_constraint child \
+             where parent.conrelid = 'fk_parent'::regclass \
+               and child.conrelid = 'fk_child'::regclass \
+               and parent.conname = 'fk_parent_a_fkey' \
+               and child.conname = 'fk_parent_a_fkey'",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+    match db.execute(1, "insert into fk_child values (2)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "fk_parent_a_fkey");
+        }
+        other => panic!("expected merged child foreign key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn only_foreign_key_on_partitioned_table_reports_postgres_error() {
+    let base = temp_dir("foreign_key_partitioned_only_error");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pk_items (a int4 primary key)")
+        .unwrap();
+    db.execute(1, "create table fk_parent (a int4) partition by range (a)")
+        .unwrap();
+    match db.execute(
+        1,
+        "alter table only fk_parent add foreign key (a) references pk_items",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "cannot use ONLY for foreign key on partitioned table \"fk_parent\" referencing relation \"pk_items\""
+            );
+            assert_eq!(sqlstate, "42809");
+        }
+        other => panic!("expected ONLY partitioned foreign key error, got {other:?}"),
+    }
+}
+
+#[test]
+fn dropping_partitioned_foreign_key_removes_child_constraints() {
+    let base = temp_dir("foreign_key_partitioned_drop_children");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pk_items (a int4 primary key)")
+        .unwrap();
+    db.execute(1, "create table fk_parent (a int4) partition by range (a)")
+        .unwrap();
+    db.execute(1, "create table fk_child (a int4)").unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent attach partition fk_child for values from (0) to (100)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent add constraint fk_parent_a_fkey foreign key (a) references pk_items",
+    )
+    .unwrap();
+    db.execute(1, "alter table fk_parent drop constraint fk_parent_a_fkey")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint where conname = 'fk_parent_a_fkey'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    db.execute(1, "drop table pk_items, fk_parent").unwrap();
+}
+
+#[test]
+fn create_partitioned_table_with_inline_foreign_key_propagates_on_attach() {
+    let base = temp_dir("foreign_key_partitioned_inline_create");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pk_items (a int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table fk_parent (a int4 references pk_items) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(1, "create table fk_child (a int4)").unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent attach partition fk_child for values from (0) to (100)",
+    )
+    .unwrap();
+    db.execute(1, "insert into pk_items values (1)").unwrap();
+    db.execute(1, "insert into fk_parent values (1)").unwrap();
+    match db.execute(1, "insert into fk_child values (2)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "fk_parent_a_fkey");
+        }
+        other => panic!("expected inline partitioned foreign key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_partitioned_foreign_key_marks_child_constraints() {
+    let base = temp_dir("foreign_key_partitioned_validate_children");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pk_items (a int4 primary key)")
+        .unwrap();
+    db.execute(1, "insert into pk_items values (1)").unwrap();
+    db.execute(1, "create table fk_parent (a int4) partition by range (a)")
+        .unwrap();
+    db.execute(1, "create table fk_child (a int4)").unwrap();
+    db.execute(1, "insert into fk_child values (1)").unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent add constraint fk_parent_a_fkey foreign key (a) references pk_items not valid",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent attach partition fk_child for values from (0) to (100)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent validate constraint fk_parent_a_fkey",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select convalidated from pg_constraint c join pg_class r on r.oid = c.conrelid where conname = 'fk_parent_a_fkey' order by r.relname",
+        ),
+        vec![vec![Value::Bool(true)], vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn foreign_key_can_reference_partitioned_primary_key() {
+    let base = temp_dir("foreign_key_reference_partitioned_pk");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pk_parent (a int4 primary key) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk_parent_1 partition of pk_parent for values from (0) to (100)",
+    )
+    .unwrap();
+    db.execute(1, "create table fk_child (a int4 references pk_parent)")
+        .unwrap();
+    db.execute(1, "insert into pk_parent values (1)").unwrap();
+    db.execute(1, "insert into fk_child values (1)").unwrap();
+    match db.execute(1, "insert into fk_child values (2)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "fk_child_a_fkey");
+        }
+        other => panic!("expected partitioned referenced-key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn foreign_key_insert_requires_select_on_referenced_table() {
+    let base = temp_dir("foreign_key_referenced_table_select_acl");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role regress_foreign_key_user login")
+        .unwrap();
+    session
+        .execute(&db, "create table pktable (id int4 primary key)")
+        .unwrap();
+    session
+        .execute(&db, "create table fktable (id int4 references pktable)")
+        .unwrap();
+    session
+        .execute(&db, "insert into pktable values (1), (2)")
+        .unwrap();
+    session
+        .execute(&db, "grant insert on fktable to regress_foreign_key_user")
+        .unwrap();
+    session
+        .execute(&db, "grant select on pktable to regress_foreign_key_user")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization regress_foreign_key_user")
+        .unwrap();
+    session
+        .execute(&db, "insert into fktable values (1)")
+        .unwrap();
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(
+            &db,
+            "revoke select on pktable from regress_foreign_key_user",
+        )
+        .unwrap();
+    session
+        .execute(&db, "set session authorization regress_foreign_key_user")
+        .unwrap();
+    match session.execute(&db, "insert into fktable values (2)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for table pktable");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected referenced table privilege error, got {other:?}"),
+    }
+}
+
+#[test]
+fn foreign_key_reports_postgres_unique_key_error() {
+    let base = temp_dir("foreign_key_no_matching_unique_key_error");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pktable (ptest1 int4, ptest2 int4, unique (ptest1, ptest2))",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "create table fktable_fail1 (ftest1 int4 references pktable(ptest1))",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(
+                message,
+                "there is no unique constraint matching given keys for referenced table \"pktable\""
+            );
+            assert_eq!(sqlstate, "42830");
+        }
+        other => panic!("expected no matching unique-key error, got {other:?}"),
+    }
+}
+
+#[test]
+fn foreign_key_type_mismatch_reports_first_pair_only() {
+    let base = temp_dir("foreign_key_first_type_mismatch_pair");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pktable (ptest1 int4, ptest2 inet, primary key (ptest1, ptest2))",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "create table fktable (
+            ftest1 cidr,
+            ftest2 timestamp,
+            foreign key (ftest1, ftest2) references pktable
+        )",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        })) => {
+            assert_eq!(
+                message,
+                "foreign key constraint \"fktable_ftest1_ftest2_fkey\" cannot be implemented"
+            );
+            assert_eq!(
+                detail,
+                "Key columns \"ftest1\" of the referencing table and \"ptest1\" of the referenced table are of incompatible types: cidr and integer."
+            );
+            assert_eq!(sqlstate, "42804");
+        }
+        other => panic!("expected first-pair type mismatch error, got {other:?}"),
+    }
+}
+
+#[test]
 fn generated_foreign_key_names_preserve_label_when_truncated_and_suffix_collisions() {
     let base = temp_dir("foreign_key_generated_name_truncation");
     let db = Database::open(&base, 16).unwrap();
@@ -22252,6 +23377,53 @@ fn pg_get_constraintdef_formats_foreign_key_actions_and_delete_columns() {
                         .into(),
                 ),
             ],
+        ]
+    );
+}
+
+#[test]
+fn pg_get_constraintdef_keeps_fk_actions_when_referenced_columns_are_omitted() {
+    let base = temp_dir("pg_get_constraintdef_fk_actions_omitted_refs");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pktable (tid int4, id int4, primary key (tid, id))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fktable (
+            tid int4,
+            id int4,
+            fk_id_del_set_null int4,
+            fk_id_del_set_default int4 default 0,
+            foreign key (tid, fk_id_del_set_null)
+                references pktable on delete set null (fk_id_del_set_null),
+            foreign key (tid, fk_id_del_set_default)
+                references pktable on delete set default (fk_id_del_set_default, fk_id_del_set_default)
+        )",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_constraintdef(oid)
+               from pg_constraint
+              where conrelid = 'fktable'::regclass::oid
+              order by oid",
+        ),
+        vec![
+            vec![Value::Text(
+                "FOREIGN KEY (tid, fk_id_del_set_null) REFERENCES pktable(tid, id) ON DELETE SET NULL (fk_id_del_set_null)"
+                    .into()
+            )],
+            vec![Value::Text(
+                "FOREIGN KEY (tid, fk_id_del_set_default) REFERENCES pktable(tid, id) ON DELETE SET DEFAULT (fk_id_del_set_default)"
+                    .into()
+            )],
         ]
     );
 }
@@ -23265,7 +24437,10 @@ fn prepared_insert_enforces_check_and_not_null_constraints() {
         }) if relation == "items" && constraint == "items_id_positive" => {}
         other => panic!("expected prepared-insert check violation, got {other:?}"),
     }
+    assert!(session.transaction_failed());
+    session.execute(&db, "rollback").unwrap();
 
+    session.execute(&db, "begin").unwrap();
     match session.execute_prepared_insert(&db, &prepared, &[Value::Int32(2), Value::Null]) {
         Err(ExecError::NotNullViolation {
             relation,
@@ -23275,7 +24450,10 @@ fn prepared_insert_enforces_check_and_not_null_constraints() {
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected prepared-insert not-null violation, got {other:?}"),
     }
+    assert!(session.transaction_failed());
+    session.execute(&db, "rollback").unwrap();
 
+    session.execute(&db, "begin").unwrap();
     session
         .execute_prepared_insert(&db, &prepared, &[Value::Int32(3), Value::Text("ok".into())])
         .unwrap();
@@ -23317,6 +24495,10 @@ fn prepared_insert_and_copy_from_enforce_foreign_keys() {
         }
         other => panic!("expected prepared foreign-key violation, got {other:?}"),
     }
+    assert!(session.transaction_failed());
+    session.execute(&db, "rollback").unwrap();
+
+    session.execute(&db, "begin").unwrap();
     session
         .execute_prepared_insert(&db, &prepared, &[Value::Int32(1), Value::Int32(1)])
         .unwrap();
@@ -23955,6 +25137,63 @@ fn alter_table_alter_constraint_updates_foreign_key_deferrability_flags() {
 }
 
 #[test]
+fn foreign_key_triggers_match_action_deferrability() {
+    let base = temp_dir("foreign_key_trigger_deferrability");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (
+            id int4 primary key,
+            parent_id int4 references parents on update cascade on delete cascade
+                deferrable initially deferred
+        )",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tgrelid::regclass::text, tgtype::int4, tgdeferrable, tginitdeferred
+               from pg_trigger
+              where tgconstraint = (
+                    select oid from pg_constraint where conname = 'children_parent_id_fkey'
+              )
+              order by 1, 2",
+        ),
+        vec![
+            vec![
+                Value::Text("children".into()),
+                Value::Int32(5),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("children".into()),
+                Value::Int32(17),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("parents".into()),
+                Value::Int32(9),
+                Value::Bool(false),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("parents".into()),
+                Value::Int32(17),
+                Value::Bool(false),
+                Value::Bool(false),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn foreign_keys_support_not_enforced_and_alter_enforced_state() {
     let base = temp_dir("foreign_keys_not_enforced");
     let db = Database::open(&base, 16).unwrap();
@@ -23976,6 +25215,18 @@ fn foreign_keys_support_not_enforced_and_alter_enforced_state() {
             "select conenforced, convalidated from pg_constraint where conname = 'children_parent_id_fkey'",
         ),
         vec![vec![Value::Bool(false), Value::Bool(false)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*)::int4
+               from pg_trigger
+              where tgconstraint = (
+                    select oid from pg_constraint where conname = 'children_parent_id_fkey'
+              )",
+        ),
+        vec![vec![Value::Int32(0)]]
     );
 
     match db.execute(
@@ -24001,6 +25252,18 @@ fn foreign_keys_support_not_enforced_and_alter_enforced_state() {
             "select conenforced, convalidated from pg_constraint where conname = 'children_parent_id_fkey'",
         ),
         vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*)::int4
+               from pg_trigger
+              where tgconstraint = (
+                    select oid from pg_constraint where conname = 'children_parent_id_fkey'
+              )",
+        ),
+        vec![vec![Value::Int32(4)]]
     );
 
     match db.execute(1, "insert into children values (2, 99)") {
@@ -24028,9 +25291,77 @@ fn foreign_keys_support_not_enforced_and_alter_enforced_state() {
             Value::Bool(false),
         ]]
     );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*)::int4
+               from pg_trigger
+              where tgconstraint = (
+                    select oid from pg_constraint where conname = 'children_parent_id_fkey'
+              )",
+        ),
+        vec![vec![Value::Int32(0)]]
+    );
 
     db.execute(1, "insert into children values (2, 99)")
         .unwrap();
+}
+
+#[test]
+fn alter_foreign_key_constraint_reports_postgres_option_errors() {
+    let base = temp_dir("alter_fk_constraint_option_errors");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4 references parents)",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "alter table children alter constraint children_parent_id_fkey no inherit",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "constraint \"children_parent_id_fkey\" of relation \"children\" is not a not-null constraint"
+            );
+            assert_eq!(sqlstate, "42809");
+        }
+        other => panic!("expected NO INHERIT option error, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "alter table children alter constraint children_parent_id_fkey not valid",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "constraints cannot be altered to be NOT VALID");
+            assert_eq!(sqlstate, "0A000");
+        }
+        other => panic!("expected NOT VALID option error, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "alter table children alter constraint children_parent_id_fkey enforced not enforced",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(message, "conflicting constraint properties");
+            assert_eq!(sqlstate, "42601");
+        }
+        other => panic!("expected conflicting enforceability error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -24326,6 +25657,49 @@ fn alter_table_alter_constraint_initially_deferred_defers_until_commit() {
 
     assert_eq!(
         query_rows(&db, 1, "select count(*) from children"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn failed_transaction_commit_skips_deferred_foreign_key_checks() {
+    let base = temp_dir("failed_txn_commit_deferred_fk");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parents (id int4 primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table children (parent_id int4 references parents deferrable initially deferred)",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into children values (42)")
+        .unwrap();
+    session
+        .execute(&db, "insert into parents values (1)")
+        .unwrap();
+    assert!(
+        session
+            .execute(&db, "insert into parents values (1)")
+            .is_err()
+    );
+    assert!(session.transaction_failed());
+
+    session.execute(&db, "commit").unwrap();
+    assert!(!session.in_transaction());
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from children"),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from parents"),
         vec![vec![Value::Int64(0)]]
     );
 }
@@ -25768,6 +27142,219 @@ fn reciprocal_bpchar_after_triggers_keep_one_visible_row() {
         vec![vec![
             Value::Text("R1                  ".into()),
             Value::Text("L1                  ".into())
+        ]]
+    );
+}
+
+#[test]
+fn plpgsql_select_into_record_preserves_field_types() {
+    let base = temp_dir("plpgsql_record_field_types");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table plpgsql_hub(name char(14), comment text, nslots integer)",
+    )
+    .unwrap();
+    db.execute(1, "insert into plpgsql_hub values ('base.hub1', 'hub', 16)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_hub_over_limit(hname char(14), slotno integer)
+         returns boolean language plpgsql as $$
+         declare
+           hubrec record;
+         begin
+           select into hubrec * from plpgsql_hub where name = hname;
+           return slotno > hubrec.nslots;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_hub_over_limit('base.hub1', 17)"),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn plpgsql_labeled_record_reference_uses_outer_slot_when_shadowed() {
+    let base = temp_dir("plpgsql_labeled_record_shadow");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table plpgsql_label_pslot(slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table plpgsql_label_pline(slotname char(20), comment text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into plpgsql_label_pslot values ('PS.base.a1', 'PL.one')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into plpgsql_label_pline values ('PL.one', 'line')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_label_shadow_lookup() returns text language plpgsql as $$
+         <<outer>>
+         declare
+           rec record;
+         begin
+           select into rec * from plpgsql_label_pslot where slotname = 'PS.base.a1';
+           declare
+             rec record;
+           begin
+             select into rec * from plpgsql_label_pline
+               where slotname = \"outer\".rec.backlink;
+             return trim(\"outer\".rec.backlink) || ':' || rec.comment;
+           end;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select plpgsql_label_shadow_lookup()"),
+        vec![vec![Value::Text("PL.one:line".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_assignment_query_expr_from_clause_uses_sql_scope() {
+    let base = temp_dir("plpgsql_assignment_query_expr_from");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table plpgsql_assignment_hub(name char(14), comment text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table plpgsql_assignment_hslot(slotname char(20), hubname char(14), slotno integer)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into plpgsql_assignment_hub values ('base.hub1', 'hub')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into plpgsql_assignment_hslot values ('HS.base.hub1.1', 'base.hub1', 1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_assignment_hslot_view(sname char(20))
+         returns text language plpgsql as $$
+         declare
+           retval text;
+         begin
+           retval := comment from plpgsql_assignment_hub h, plpgsql_assignment_hslot hs
+             where hs.slotname = sname and h.name = hs.hubname;
+           retval := retval || ' slot ';
+           retval := retval || slotno::text from plpgsql_assignment_hslot
+             where slotname = sname;
+           return retval;
+         end
+         $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select plpgsql_assignment_hslot_view('HS.base.hub1.1')"
+        ),
+        vec![vec![Value::Text("hub slot 1".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_after_trigger_update_keeps_new_row_and_reciprocal_update() {
+    let base = temp_dir("plpgsql_trigger_backlink_update");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table plpgsql_pslot(slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table plpgsql_wslot(slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(1, "insert into plpgsql_pslot values ('PS.base.a1', '')")
+        .unwrap();
+    db.execute(1, "insert into plpgsql_wslot values ('WS.001.1a', '')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_set_wslot(myname char(20), blname char(20))
+         returns integer language plpgsql as $$
+         declare
+           rec record;
+         begin
+           select into rec * from plpgsql_wslot where slotname = myname;
+           if rec.backlink != blname then
+             update plpgsql_wslot set backlink = blname where slotname = myname;
+           end if;
+           return 0;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_pslot_backlink_a() returns trigger language plpgsql as $$
+         declare
+           dummy integer;
+         begin
+           if new.backlink != '' then
+             dummy := plpgsql_set_wslot(new.backlink, new.slotname);
+           end if;
+           return new;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger plpgsql_pslot_backlink_a
+         after update on plpgsql_pslot
+         for each row execute function plpgsql_pslot_backlink_a()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "update plpgsql_pslot set backlink = 'WS.001.1a' where slotname = 'PS.base.a1'",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select trim(p.backlink), trim(w.backlink)
+             from plpgsql_pslot p, plpgsql_wslot w
+             where p.slotname = 'PS.base.a1' and w.slotname = 'WS.001.1a'",
+        ),
+        vec![vec![
+            Value::Text("WS.001.1a".into()),
+            Value::Text("PS.base.a1".into())
         ]]
     );
 }
@@ -34322,10 +35909,18 @@ fn drop_table_is_transactional() {
     writer.execute(&db, "begin").unwrap();
     writer.execute(&db, "drop table drop_me").unwrap();
 
-    assert!(
-        writer.execute(&db, "select count(*) from drop_me").is_err(),
-        "dropping session should stop seeing the table immediately"
-    );
+    match writer
+        .execute(
+            &db,
+            "select count(*) from pg_class where relname = 'drop_me'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected pg_class query, got {other:?}"),
+    }
 
     writer.execute(&db, "commit").unwrap();
 
@@ -35096,6 +36691,295 @@ fn plpgsql_write_inside_explicit_transaction_select_allocates_xid() {
         ),
         vec![vec![Value::Text("new".into())]]
     );
+}
+
+#[test]
+fn plpgsql_write_inside_streaming_select_allocates_and_commits_xid() {
+    let base = temp_dir("plpgsql_write_inside_streaming_select");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table stream_found_items (id int4, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into stream_found_items values (1, 'old'), (2, 'old')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function stream_found_fn() returns bool language plpgsql as $$
+             begin
+               delete from stream_found_items where id = 1;
+               if not found then return false; end if;
+               update stream_found_items set note = 'new' where id = 2;
+               if not found then return false; end if;
+               perform * from stream_found_items where note = 'new';
+               if not found then return false; end if;
+               return true;
+             end $$",
+        )
+        .unwrap();
+    let before = db.txns.read().next_xid();
+    let stmt = crate::backend::parser::parse_statement("select stream_found_fn()").unwrap();
+    let Statement::Select(select_stmt) = stmt else {
+        panic!("expected select statement");
+    };
+
+    let mut guard = session.execute_streaming(&db, &select_stmt).unwrap();
+    let slot = crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx)
+        .unwrap()
+        .expect("streaming row");
+    assert_eq!(slot.values().unwrap(), &[Value::Bool(true)]);
+    assert!(
+        crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx)
+            .unwrap()
+            .is_none()
+    );
+    session
+        .finish_streaming_select_guard(&db, &mut guard, true)
+        .unwrap();
+    drop(guard);
+
+    assert_eq!(db.txns.read().next_xid(), before + 1);
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, note from stream_found_items order by id"
+        ),
+        vec![vec![Value::Int32(2), Value::Text("new".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_return_next_accepts_composite_expression_for_setof_rowtype() {
+    let base = temp_dir("plpgsql_return_next_setof_rowtype");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table return_next_items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into return_next_items values (1, 'one'), (2, 'two')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function return_next_record_items() returns setof return_next_items language plpgsql as $$
+         declare rec record;
+         begin
+           for rec in select * from return_next_items order by id loop
+             return next rec;
+           end loop;
+           return;
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function return_next_row_items() returns setof return_next_items language plpgsql as $$
+         declare row return_next_items%rowtype;
+         begin
+           for row in select * from return_next_items order by id loop
+             return next row;
+           end loop;
+           return;
+         end $$",
+    )
+    .unwrap();
+
+    let expected = vec![
+        vec![Value::Int32(1), Value::Text("one".into())],
+        vec![Value::Int32(2), Value::Text("two".into())],
+    ];
+    assert_eq!(
+        query_rows(&db, 1, "select * from return_next_record_items()"),
+        expected
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select * from return_next_row_items()"),
+        expected
+    );
+}
+
+#[test]
+fn plpgsql_record_returning_function_from_accepts_column_definition_list() {
+    let base = temp_dir("plpgsql_record_function_from_coldefs");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function record_set_func(seed int4) returns setof record language plpgsql as $$
+         declare retval record;
+         begin
+           if seed > 100 then
+             retval := row(5, 10, 15);
+             return next retval;
+             return next retval;
+           else
+             retval := row(50, 5::numeric, 'xxx'::text);
+             return next retval;
+           end if;
+           return;
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function record_one_func(seed int4) returns record language plpgsql as $$
+         declare retval record;
+         begin
+           if seed > 100 then
+             retval := row(5, 10, 15);
+           else
+             retval := row(50, 5::numeric, 'xxx'::text);
+           end if;
+           return retval;
+         end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select * from record_set_func(1500) as (a int4, b int4, c int4)"
+        ),
+        vec![
+            vec![Value::Int32(5), Value::Int32(10), Value::Int32(15)],
+            vec![Value::Int32(5), Value::Int32(10), Value::Int32(15)],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select * from record_one_func(5) as (a int4, b numeric, c text)"
+        ),
+        vec![vec![
+            Value::Int32(50),
+            Value::Numeric(crate::include::nodes::datum::NumericValue::from_i64(5)),
+            Value::Text("xxx".into()),
+        ]]
+    );
+}
+
+#[test]
+fn plpgsql_anycompatible_range_calls_coerce_anchor_arguments() {
+    let base = temp_dir("plpgsql_anycompatible_range_calls");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create type float8range as range (subtype = float8, subtype_diff = float8mi)",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "create function anycompat_range_array(x anycompatiblerange, y anycompatible, z anycompatible)
+         returns anycompatiblearray language plpgsql as $$
+         begin
+           return array[lower(x), upper(x), y, z];
+         end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select anycompat_range_array(int4range(42, 49), 11, 2::smallint)"
+        ),
+        vec![vec![Value::Array(vec![
+            Value::Int32(42),
+            Value::Int32(49),
+            Value::Int32(11),
+            Value::Int32(2),
+        ])]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select anycompat_range_array(float8range(4.5, 7.8), 7.8, 11::real)"
+        ),
+        vec![vec![Value::Array(vec![
+            Value::Float64(4.5),
+            Value::Float64(7.8),
+            Value::Float64(7.8),
+            Value::Float64(11.0),
+        ])]]
+    );
+}
+
+#[test]
+fn plpgsql_polymorphic_out_arguments_compile_concrete_types() {
+    let base = temp_dir("plpgsql_polymorphic_out_args");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function poly_out(a anyelement, b anyarray,
+                                  c anycompatible, d anycompatible,
+                                  out x anyarray, out y anycompatiblearray)
+         language plpgsql as $$
+         begin
+           x := a || b;
+           y := array[c, d];
+         end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select x, y from poly_out(11, array[1, 2], 42, 34.5)"
+        ),
+        vec![vec![
+            Value::Array(vec![Value::Int32(11), Value::Int32(1), Value::Int32(2)]),
+            Value::Array(vec![
+                Value::Numeric(crate::include::nodes::datum::NumericValue::from_i64(42)),
+                Value::Numeric("34.5".into()),
+            ]),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_typeof(x), pg_typeof(y) from poly_out(11, array[1, 2], 42, 34.5)"
+        ),
+        vec![vec![
+            Value::Text("integer[]".into()),
+            Value::Text("numeric[]".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_typeof(x), pg_typeof(y) from poly_out(11, '{1,2}', point(1,2), '(3,4)')"
+        ),
+        vec![vec![
+            Value::Text("integer[]".into()),
+            Value::Text("point[]".into()),
+        ]]
+    );
+    match db.execute(1, "select x from poly_out(11, array[1, 2.2], 42, 34.5)") {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. })) => {
+            assert_eq!(
+                message,
+                "function poly_out(integer, numeric[], integer, numeric) does not exist"
+            );
+        }
+        other => panic!("expected undefined function error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -36918,6 +38802,100 @@ fn pg_get_acl_returns_relation_owner_acl() {
         vec![vec![Value::Null]]
     );
 }
+
+#[test]
+fn mixed_column_privilege_grant_updates_attribute_acls() {
+    fn assert_table_permission_denied(result: Result<StatementResult, ExecError>, table: &str) {
+        match result {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, format!("permission denied for table {table}"));
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected table permission error for {table}, got {other:?}"),
+        }
+    }
+
+    let dir = temp_dir("mixed_column_privilege_grant");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create role acl_user login").unwrap();
+    db.execute(1, "create role acl_user2 login").unwrap();
+    db.execute(1, "create table col_acl(one int, two int, three int)")
+        .unwrap();
+    db.execute(
+        1,
+        "grant select (one), insert (two), update (three) on col_acl to acl_user",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unnest(pg_get_acl('pg_class'::regclass, 'col_acl'::regclass::oid, 1))"
+        ),
+        vec![vec![Value::Text("acl_user=r/postgres".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unnest(pg_get_acl('pg_class'::regclass, 'col_acl'::regclass::oid, 2))"
+        ),
+        vec![vec![Value::Text("acl_user=a/postgres".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unnest(pg_get_acl('pg_class'::regclass, 'col_acl'::regclass::oid, 3))"
+        ),
+        vec![vec![Value::Text("acl_user=w/postgres".into())]]
+    );
+    db.execute(1, "grant all (one) on col_acl to acl_user2")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unnest(pg_get_acl('pg_class'::regclass, 'col_acl'::regclass::oid, 2))"
+        ),
+        vec![vec![Value::Text("acl_user=a/postgres".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unnest(pg_get_acl('pg_class'::regclass, 'col_acl'::regclass::oid, 3))"
+        ),
+        vec![vec![Value::Text("acl_user=w/postgres".into())]]
+    );
+
+    let mut session = Session::new(2);
+    session
+        .execute(&db, "set session authorization acl_user")
+        .unwrap();
+    session
+        .execute(&db, "insert into col_acl (two) values (2)")
+        .unwrap();
+    session
+        .copy_from_rows_into(&db, "col_acl", Some(&["two".into()]), &[vec!["3".into()]])
+        .unwrap();
+    session
+        .execute(&db, "update col_acl set three = 10")
+        .unwrap();
+    assert_table_permission_denied(
+        session.execute(&db, "insert into col_acl (one) values (1)"),
+        "col_acl",
+    );
+    assert_table_permission_denied(
+        session.execute(&db, "update col_acl set one = 1"),
+        "col_acl",
+    );
+}
+
 fn current_database_function_matches_pg_database_name() {
     let dir = temp_dir("current_database_function");
     let db = Database::open(&dir, 64).unwrap();
@@ -37202,6 +39180,66 @@ fn plpgsql_runtime_errors_include_statement_context() {
             assert!(matches!(*source, ExecError::DivisionByZero(_)));
         }
         other => panic!("expected PL/pgSQL context, got {other:?}"),
+    }
+}
+
+#[test]
+fn plpgsql_context_formats_argument_list_without_spaces() {
+    let dir = temp_dir("plpgsql_context_arg_spacing");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function two_arg_context(a int4, b text) returns void language plpgsql as $$ begin raise exception 'boom'; end $$",
+    )
+    .unwrap();
+
+    match db.execute(1, "select two_arg_context(1, 'x')").unwrap_err() {
+        ExecError::WithContext { context, .. } => {
+            assert!(context.contains("PL/pgSQL function two_arg_context(integer,text)"));
+        }
+        other => panic!("expected PL/pgSQL context, got {other:?}"),
+    }
+}
+
+#[test]
+fn plpgsql_context_uses_declared_polymorphic_signature() {
+    let dir = temp_dir("plpgsql_context_polymorphic_sig");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function poly_context(x anyelement) returns anyelement language plpgsql as $$ begin return x + 1; end $$",
+    )
+    .unwrap();
+
+    match db
+        .execute(1, "select poly_context(point(3,4))")
+        .unwrap_err()
+    {
+        ExecError::WithContext { context, .. } => {
+            assert!(context.contains("PL/pgSQL function poly_context(anyelement)"));
+        }
+        other => panic!("expected PL/pgSQL context, got {other:?}"),
+    }
+}
+
+#[test]
+fn plpgsql_return_expr_with_out_parameter_is_compile_error() {
+    let dir = temp_dir("plpgsql_return_expr_out_param");
+    let db = Database::open(&dir, 64).unwrap();
+
+    match db.execute(
+        1,
+        "create function return_out_expr(in i int4, out j int4) returns int4 language plpgsql as $$ begin return i + 1; end $$",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. })) => {
+            assert_eq!(
+                message,
+                "RETURN cannot have a parameter in function with OUT parameters"
+            );
+        }
+        other => panic!("expected RETURN/OUT compile error, got {other:?}"),
     }
 }
 

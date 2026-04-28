@@ -16,6 +16,7 @@ use crate::backend::access::table::toast_helper::toast_tuple_values_for_write;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::catalog::column_desc;
+use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
 use crate::backend::optimizer::{finalize_expr_subqueries, planner};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
@@ -58,7 +59,7 @@ use crate::backend::executor::value_io::{
     coerce_assignment_value_with_config, encode_tuple_values_with_config,
 };
 use crate::backend::executor::{
-    ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef,
+    ConstraintTiming, ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef,
     apply_jsonb_subscript_assignment, cast_value_with_source_type_catalog_and_config,
     compare_order_values, create_query_desc, executor_start,
 };
@@ -71,9 +72,9 @@ use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
     ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID, BOX_TYPE_OID, BPCHAR_TYPE_OID,
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID, HASH_AM_OID,
-    PG_CATALOG_NAMESPACE_OID, PgAmRow, PgOpclassRow, SPGIST_AM_OID, TEXT_TYPE_OID,
-    VARCHAR_TYPE_OID, bootstrap_pg_am_rows, builtin_range_name_for_sql_type,
-    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    PG_CATALOG_NAMESPACE_OID, PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow, PgPublicationRelRow,
+    PgPublicationRow, SPGIST_AM_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_am_rows,
+    builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
@@ -405,6 +406,14 @@ fn finalize_bound_merge(
                 },
             },
             ..clause
+        })
+        .collect();
+    stmt.returning = stmt
+        .returning
+        .into_iter()
+        .map(|target| TargetEntry {
+            expr: finalize_expr_subqueries(target.expr, catalog, &mut subplans),
+            ..target
         })
         .collect();
     stmt.input_plan.subplans = subplans;
@@ -958,11 +967,311 @@ fn validate_maintenance_targets(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) enum WriteUpdatedRowResult {
-    Updated(ItemPointerData),
+    Updated(ItemPointerData, Vec<PendingNoActionForeignKeyCheck>),
     TupleUpdated(ItemPointerData),
     AlreadyModified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicationDmlAction {
+    Update,
+    Delete,
+}
+
+impl PublicationDmlAction {
+    fn publishes(self, publication: &PgPublicationRow) -> bool {
+        match self {
+            Self::Update => publication.pubupdate,
+            Self::Delete => publication.pubdelete,
+        }
+    }
+
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Update => "update",
+            Self::Delete => "delete from",
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Update => "updates",
+            Self::Delete => "deletes",
+        }
+    }
+
+    fn gerund(self) -> &'static str {
+        match self {
+            Self::Update => "updating",
+            Self::Delete => "deleting from",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplicaIdentityColumns {
+    None,
+    Full,
+    Columns,
+}
+
+fn publication_replica_identity_error(
+    relation_name: &str,
+    action: PublicationDmlAction,
+    detail: Option<&'static str>,
+) -> ExecError {
+    match detail {
+        Some(detail) => ExecError::DetailedError {
+            message: format!("cannot {} table \"{relation_name}\"", action.verb()),
+            detail: Some(detail.into()),
+            hint: None,
+            sqlstate: "55000",
+        },
+        None => ExecError::DetailedError {
+            message: format!(
+                "cannot {} table \"{relation_name}\" because it does not have a replica identity and publishes {}",
+                action.verb(),
+                action.noun()
+            ),
+            detail: None,
+            hint: Some(format!(
+                "To enable {} the table, set REPLICA IDENTITY using ALTER TABLE.",
+                action.gerund()
+            )),
+            sqlstate: "55000",
+        },
+    }
+}
+
+fn relation_and_publication_parent_oids(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> Vec<u32> {
+    let mut oids = vec![relation_oid];
+    let mut pending = vec![relation_oid];
+    while let Some(oid) = pending.pop() {
+        for parent in catalog.inheritance_parents(oid) {
+            if !oids.contains(&parent.inhparent) {
+                oids.push(parent.inhparent);
+                pending.push(parent.inhparent);
+            }
+        }
+    }
+    oids
+}
+
+fn active_publication_memberships(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    namespace_oid: u32,
+    action: PublicationDmlAction,
+) -> Vec<(PgPublicationRow, Option<PgPublicationRelRow>)> {
+    let relation_oids = relation_and_publication_parent_oids(catalog, relation_oid);
+    let publication_rows = catalog.publication_rows();
+    let publication_rel_rows = catalog.publication_rel_rows();
+    let publication_namespace_rows = catalog.publication_namespace_rows();
+    let mut memberships = Vec::new();
+
+    for publication in publication_rows {
+        if !action.publishes(&publication) {
+            continue;
+        }
+        let rel_rows = publication_rel_rows
+            .iter()
+            .filter(|row| row.prpubid == publication.oid && relation_oids.contains(&row.prrelid))
+            .collect::<Vec<_>>();
+        let excluded = rel_rows.iter().any(|row| row.prexcept);
+        if let Some(row) = rel_rows.into_iter().find(|row| !row.prexcept) {
+            memberships.push((publication, Some(row.clone())));
+            continue;
+        }
+        if publication.puballtables && !excluded {
+            memberships.push((publication, None));
+            continue;
+        }
+        if publication_namespace_rows
+            .iter()
+            .any(|row| row.pnpubid == publication.oid && row.pnnspid == namespace_oid)
+        {
+            memberships.push((publication, None));
+        }
+    }
+
+    memberships
+}
+
+fn replica_identity_columns(
+    relation_oid: u32,
+    desc: &RelationDesc,
+    indexes: &[BoundIndexRelation],
+    catalog: &dyn CatalogLookup,
+) -> (ReplicaIdentityColumns, Vec<i16>) {
+    match catalog
+        .class_row_by_oid(relation_oid)
+        .map(|row| row.relreplident)
+        .unwrap_or('d')
+    {
+        'f' => (
+            ReplicaIdentityColumns::Full,
+            desc.columns
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, column)| {
+                    (!column.dropped)
+                        .then(|| i16::try_from(idx + 1).ok())
+                        .flatten()
+                })
+                .collect(),
+        ),
+        'i' => indexes
+            .iter()
+            .find(|index| index.index_meta.indisreplident)
+            .map(|index| {
+                (
+                    ReplicaIdentityColumns::Columns,
+                    index.index_meta.indkey.clone(),
+                )
+            })
+            .unwrap_or((ReplicaIdentityColumns::None, Vec::new())),
+        'n' => (ReplicaIdentityColumns::None, Vec::new()),
+        _ => indexes
+            .iter()
+            .find(|index| index.index_meta.indisprimary)
+            .map(|index| {
+                (
+                    ReplicaIdentityColumns::Columns,
+                    index.index_meta.indkey.clone(),
+                )
+            })
+            .unwrap_or((ReplicaIdentityColumns::None, Vec::new())),
+    }
+}
+
+fn relation_column_attnum(desc: &RelationDesc, name: &str) -> Option<i16> {
+    let column_name = name.rsplit('.').next().unwrap_or(name);
+    desc.columns
+        .iter()
+        .enumerate()
+        .find(|(_, column)| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+        .and_then(|(idx, _)| i16::try_from(idx + 1).ok())
+}
+
+fn publication_filter_attnums(qual: &str, desc: &RelationDesc) -> Result<Vec<i16>, ExecError> {
+    let expr = parse_expr(qual).map_err(ExecError::Parse)?;
+    let mut column_names = BTreeSet::new();
+    collect_sql_expr_column_names(&expr, &mut column_names);
+    Ok(column_names
+        .into_iter()
+        .filter_map(|name| relation_column_attnum(desc, &name))
+        .collect())
+}
+
+fn publication_generated_identity_is_published(
+    publication: &PgPublicationRow,
+    membership: Option<&PgPublicationRelRow>,
+    attnum: i16,
+    desc: &RelationDesc,
+) -> bool {
+    let Some(column) = attnum
+        .checked_sub(1)
+        .and_then(|idx| usize::try_from(idx).ok())
+        .and_then(|idx| desc.columns.get(idx))
+    else {
+        return true;
+    };
+    let Some(generated) = column.generated else {
+        return true;
+    };
+    if membership
+        .and_then(|row| row.prattrs.as_ref())
+        .is_some_and(|attrs| attrs.contains(&attnum))
+    {
+        return true;
+    }
+    publication.pubgencols == PUBLISH_GENCOLS_STORED
+        && matches!(
+            generated,
+            crate::include::nodes::parsenodes::ColumnGeneratedKind::Stored
+        )
+}
+
+fn enforce_publication_replica_identity(
+    relation_name: &str,
+    relation_oid: u32,
+    namespace_oid: u32,
+    desc: &RelationDesc,
+    indexes: &[BoundIndexRelation],
+    catalog: &dyn CatalogLookup,
+    action: PublicationDmlAction,
+    require_identity: bool,
+) -> Result<(), ExecError> {
+    let memberships = active_publication_memberships(catalog, relation_oid, namespace_oid, action);
+    if memberships.is_empty() {
+        return Ok(());
+    }
+
+    let (identity_kind, identity_attrs) =
+        replica_identity_columns(relation_oid, desc, indexes, catalog);
+    for (publication, membership) in &memberships {
+        if let Some(attrs) = membership.as_ref().and_then(|row| row.prattrs.as_ref()) {
+            if identity_kind == ReplicaIdentityColumns::Full
+                || identity_attrs.iter().any(|attnum| !attrs.contains(attnum))
+            {
+                return Err(publication_replica_identity_error(
+                    relation_name,
+                    action,
+                    Some(
+                        "Column list used by the publication does not cover the replica identity.",
+                    ),
+                ));
+            }
+        }
+        if let Some(qual) = membership.as_ref().and_then(|row| row.prqual.as_deref()) {
+            let filter_attrs = publication_filter_attnums(qual, desc)?;
+            if filter_attrs
+                .iter()
+                .any(|attnum| !identity_attrs.contains(attnum))
+            {
+                return Err(publication_replica_identity_error(
+                    relation_name,
+                    action,
+                    Some(
+                        "Column used in the publication WHERE expression is not part of the replica identity.",
+                    ),
+                ));
+            }
+        }
+        if identity_attrs.iter().any(|attnum| {
+            !publication_generated_identity_is_published(
+                publication,
+                membership.as_ref(),
+                *attnum,
+                desc,
+            )
+        }) {
+            return Err(publication_replica_identity_error(
+                relation_name,
+                action,
+                Some("Replica identity must not contain unpublished generated columns."),
+            ));
+        }
+    }
+
+    if require_identity && identity_kind == ReplicaIdentityColumns::None {
+        return Err(publication_replica_identity_error(
+            relation_name,
+            action,
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
+fn predicate_is_const_false(predicate: Option<&Expr>) -> bool {
+    matches!(predicate, Some(Expr::Const(Value::Bool(false))))
 }
 
 fn serialization_failure_due_to_concurrent_update() -> ExecError {
@@ -1548,7 +1857,7 @@ pub(crate) fn rollback_inserted_row(
 pub(crate) fn write_updated_row(
     relation_name: &str,
     rel: crate::backend::storage::smgr::RelFileLocator,
-    _relation_oid: u32,
+    relation_oid: u32,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
     desc: &RelationDesc,
@@ -1570,6 +1879,22 @@ pub(crate) fn write_updated_row(
 ) -> Result<WriteUpdatedRowResult, ExecError> {
     let mut current_values = current_values.to_vec();
     materialize_generated_columns(desc, &mut current_values, ctx)?;
+    if let Some(catalog) = ctx.catalog.as_deref() {
+        let namespace_oid = catalog
+            .class_row_by_oid(relation_oid)
+            .map(|row| row.relnamespace)
+            .unwrap_or(0);
+        enforce_publication_replica_identity(
+            relation_name,
+            relation_oid,
+            namespace_oid,
+            desc,
+            indexes,
+            catalog,
+            PublicationDmlAction::Update,
+            true,
+        )?;
+    }
     let old_tuple = if toast.is_some() {
         Some(heap_fetch(&*ctx.pool, ctx.client_id, rel, current_tid)?)
     } else {
@@ -1616,11 +1941,12 @@ pub(crate) fn write_updated_row(
         &current_values,
         ctx,
     )?;
-    let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
+    apply_inbound_foreign_key_actions_on_update(
         relation_name,
         referenced_by_foreign_keys,
         current_old_values,
         &current_values,
+        ForeignKeyActionPhase::BeforeParentWrite,
         ctx,
         xid,
         cid,
@@ -1658,8 +1984,29 @@ pub(crate) fn write_updated_row(
                 Some(current_tid),
                 ctx,
             )?;
+            let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
+                relation_name,
+                referenced_by_foreign_keys,
+                current_old_values,
+                &current_values,
+                ForeignKeyActionPhase::AfterParentWrite,
+                ctx,
+                xid,
+                cid,
+                waiter,
+            )?;
             validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
-            Ok(WriteUpdatedRowResult::Updated(new_tid))
+            let pending_no_action_checks = collect_no_action_checks_on_update(
+                relation_name,
+                referenced_by_foreign_keys,
+                current_old_values,
+                &current_values,
+                ctx,
+            )?;
+            Ok(WriteUpdatedRowResult::Updated(
+                new_tid,
+                pending_no_action_checks,
+            ))
         }
         Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
             cleanup_toast_attempt(toast, &toasted, ctx, xid)?;
@@ -2498,8 +2845,18 @@ fn collect_referencing_rows(
     if key_values.iter().any(|value| matches!(value, Value::Null)) {
         return Ok(Vec::new());
     }
-    if let Some(index) = &constraint.child_index {
-        return collect_matching_rows_index(
+    let original_snapshot = ctx.snapshot.clone();
+    ctx.snapshot.current_cid = CommandId::MAX;
+    let partitioned_catalog = ctx.catalog.as_ref().and_then(|catalog| {
+        catalog
+            .relation_by_oid(constraint.child_relation_oid)
+            .is_some_and(|relation| relation.relkind == 'p')
+            .then(|| catalog.clone())
+    });
+    let result = if let Some(catalog) = partitioned_catalog {
+        partitioned_referencing_rows(constraint, key_values, catalog.as_ref(), ctx)
+    } else if let Some(index) = &constraint.child_index {
+        collect_matching_rows_index(
             constraint.child_rel,
             &constraint.child_desc,
             constraint.child_toast,
@@ -2507,19 +2864,109 @@ fn collect_referencing_rows(
             &build_equality_scan_keys(key_values),
             None,
             ctx,
+        )
+    } else {
+        collect_matching_rows_heap(
+            constraint.child_rel,
+            &constraint.child_desc,
+            constraint.child_toast,
+            None,
+            ctx,
+        )
+        .map(|rows| {
+            rows.into_iter()
+                .filter(|(_, values)| {
+                    row_matches_key(values, &constraint.child_column_indexes, key_values)
+                })
+                .collect()
+        })
+    };
+    ctx.snapshot = original_snapshot;
+    result
+}
+
+fn partitioned_referencing_rows(
+    constraint: &BoundReferencedByForeignKey,
+    key_values: &[Value],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
+    let mut rows = Vec::new();
+    for leaf in partition_leaf_relations(catalog, constraint.child_relation_oid)? {
+        let leaf_key_indexes = map_column_indexes_by_name(
+            &constraint.child_desc,
+            &leaf.desc,
+            &constraint.child_column_indexes,
+        )?;
+        rows.extend(
+            collect_matching_rows_heap(leaf.rel, &leaf.desc, leaf.toast, None, ctx)?
+                .into_iter()
+                .filter(|(_, values)| row_matches_key(values, &leaf_key_indexes, key_values)),
         );
     }
-    let rows = collect_matching_rows_heap(
-        constraint.child_rel,
-        &constraint.child_desc,
-        constraint.child_toast,
-        None,
-        ctx,
-    )?;
-    Ok(rows
-        .into_iter()
-        .filter(|(_, values)| row_matches_key(values, &constraint.child_column_indexes, key_values))
-        .collect())
+    Ok(rows)
+}
+
+fn partition_leaf_relations(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> Result<Vec<crate::backend::parser::BoundRelation>, ExecError> {
+    let mut children = catalog.inheritance_children(relation_oid);
+    children.sort_by_key(|row| (row.inhseqno, row.inhrelid));
+    let mut leaves = Vec::new();
+    for child in children.into_iter().filter(|row| !row.inhdetachpending) {
+        let relation =
+            catalog
+                .relation_by_oid(child.inhrelid)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: "foreign key validation failed".into(),
+                    detail: Some("missing partition relation".into()),
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+        if relation.relkind == 'p' {
+            leaves.extend(partition_leaf_relations(catalog, relation.relation_oid)?);
+        } else {
+            leaves.push(relation);
+        }
+    }
+    Ok(leaves)
+}
+
+fn map_column_indexes_by_name(
+    parent_desc: &RelationDesc,
+    child_desc: &RelationDesc,
+    parent_indexes: &[usize],
+) -> Result<Vec<usize>, ExecError> {
+    parent_indexes
+        .iter()
+        .map(|parent_index| {
+            let parent_column =
+                parent_desc
+                    .columns
+                    .get(*parent_index)
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: "foreign key validation failed".into(),
+                        detail: Some("invalid parent column index".into()),
+                        hint: None,
+                        sqlstate: "XX000",
+                    })?;
+            child_desc
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(_, column)| {
+                    !column.dropped && column.name.eq_ignore_ascii_case(&parent_column.name)
+                })
+                .map(|(index, _)| index)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: "foreign key validation failed".into(),
+                    detail: Some("missing partition foreign key column".into()),
+                    hint: None,
+                    sqlstate: "XX000",
+                })
+        })
+        .collect()
 }
 
 fn evaluate_default_value(
@@ -2613,6 +3060,19 @@ struct PendingSetDefaultRecheck {
     updated_rows: Vec<Vec<Value>>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PendingNoActionForeignKeyCheck {
+    relation_name: String,
+    inbound_constraint: BoundReferencedByForeignKey,
+    old_key_values: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForeignKeyActionPhase {
+    BeforeParentWrite,
+    AfterParentWrite,
+}
+
 fn validate_pending_set_default_rechecks(
     pending: Vec<PendingSetDefaultRecheck>,
     ctx: &mut ExecutorContext,
@@ -2635,6 +3095,187 @@ fn validate_pending_set_default_rechecks(
         }
     }
     Ok(())
+}
+
+pub(crate) fn validate_pending_no_action_checks(
+    pending: Vec<PendingNoActionForeignKeyCheck>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for recheck in pending {
+        if referenced_row_exists_for_no_action(
+            &recheck.inbound_constraint,
+            &recheck.old_key_values,
+            ctx,
+        )? {
+            continue;
+        }
+        crate::backend::executor::enforce_inbound_foreign_key_reference(
+            &recheck.relation_name,
+            &recheck.inbound_constraint,
+            &recheck.old_key_values,
+            ctx,
+        )?;
+    }
+    Ok(())
+}
+
+fn referenced_row_exists_for_no_action(
+    constraint: &BoundReferencedByForeignKey,
+    key_values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    if key_values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(true);
+    }
+    let original_snapshot = ctx.snapshot.clone();
+    ctx.snapshot.current_cid = CommandId::MAX;
+    let partitioned_catalog = ctx.catalog.as_ref().and_then(|catalog| {
+        catalog
+            .relation_by_oid(constraint.referenced_relation_oid)
+            .is_some_and(|relation| relation.relkind == 'p')
+            .then(|| catalog.clone())
+    });
+    let result = if let Some(catalog) = partitioned_catalog {
+        let mut exists = false;
+        for leaf in partition_leaf_relations(catalog.as_ref(), constraint.referenced_relation_oid)?
+        {
+            let leaf_key_indexes = map_column_indexes_by_name(
+                &constraint.referenced_desc,
+                &leaf.desc,
+                &constraint.referenced_column_indexes,
+            )?;
+            if collect_matching_rows_heap(leaf.rel, &leaf.desc, leaf.toast, None, ctx)?
+                .into_iter()
+                .any(|(_, values)| row_matches_key(&values, &leaf_key_indexes, key_values))
+            {
+                exists = true;
+                break;
+            }
+        }
+        Ok(exists)
+    } else {
+        let rows = collect_matching_rows_heap(
+            constraint.referenced_rel,
+            &constraint.referenced_desc,
+            constraint.referenced_toast,
+            None,
+            ctx,
+        )?;
+        Ok(rows.into_iter().any(|(_, values)| {
+            row_matches_key(&values, &constraint.referenced_column_indexes, key_values)
+        }))
+    };
+    ctx.snapshot = original_snapshot;
+    result
+}
+
+fn foreign_key_key_values(values: &[Value], indexes: &[usize]) -> Vec<Value> {
+    indexes
+        .iter()
+        .map(|index| values.get(*index).cloned().unwrap_or(Value::Null))
+        .collect()
+}
+
+fn defer_foreign_key_if_needed(
+    constraint: &BoundReferencedByForeignKey,
+    ctx: &ExecutorContext,
+) -> bool {
+    if ctx.constraint_timing(
+        constraint.constraint_oid,
+        constraint.deferrable,
+        constraint.initially_deferred,
+    ) != ConstraintTiming::Deferred
+    {
+        return false;
+    }
+    if let Some(tracker) = ctx.deferred_foreign_keys.as_ref() {
+        tracker.record(constraint.constraint_oid);
+    }
+    true
+}
+
+fn collect_no_action_checks_on_update(
+    relation_name: &str,
+    constraints: &[BoundReferencedByForeignKey],
+    previous_values: &[Value],
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<PendingNoActionForeignKeyCheck>, ExecError> {
+    let mut pending = Vec::new();
+    for constraint in constraints {
+        if !constraint.enforced
+            || constraint.on_update != ForeignKeyAction::NoAction
+            || !key_columns_changed(
+                previous_values,
+                values,
+                &constraint.referenced_column_indexes,
+            )
+            || !crate::backend::executor::foreign_key_action_trigger_enabled_on_update(
+                constraint, ctx,
+            )
+        {
+            continue;
+        }
+        if defer_foreign_key_if_needed(constraint, ctx) {
+            continue;
+        }
+        if constraint.referenced_period_column_index.is_some() {
+            crate::backend::executor::enforce_inbound_foreign_keys_on_update(
+                relation_name,
+                std::slice::from_ref(constraint),
+                previous_values,
+                values,
+                ctx,
+            )?;
+            continue;
+        }
+        pending.push(PendingNoActionForeignKeyCheck {
+            relation_name: relation_name.to_string(),
+            inbound_constraint: constraint.clone(),
+            old_key_values: foreign_key_key_values(
+                previous_values,
+                &constraint.referenced_column_indexes,
+            ),
+        });
+    }
+    Ok(pending)
+}
+
+fn collect_no_action_checks_on_delete(
+    relation_name: &str,
+    constraints: &[BoundReferencedByForeignKey],
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<PendingNoActionForeignKeyCheck>, ExecError> {
+    let mut pending = Vec::new();
+    for constraint in constraints {
+        if !constraint.enforced
+            || constraint.on_delete != ForeignKeyAction::NoAction
+            || !crate::backend::executor::foreign_key_action_trigger_enabled_on_delete(
+                constraint, ctx,
+            )
+        {
+            continue;
+        }
+        if defer_foreign_key_if_needed(constraint, ctx) {
+            continue;
+        }
+        if constraint.referenced_period_column_index.is_some() {
+            crate::backend::executor::enforce_inbound_foreign_keys_on_delete(
+                relation_name,
+                std::slice::from_ref(constraint),
+                values,
+                ctx,
+            )?;
+            continue;
+        }
+        pending.push(PendingNoActionForeignKeyCheck {
+            relation_name: relation_name.to_string(),
+            inbound_constraint: constraint.clone(),
+            old_key_values: foreign_key_key_values(values, &constraint.referenced_column_indexes),
+        });
+    }
+    Ok(pending)
 }
 
 fn apply_referential_action_to_rows(
@@ -2823,6 +3464,7 @@ fn apply_inbound_foreign_key_actions_on_update(
     constraints: &[BoundReferencedByForeignKey],
     previous_values: &[Value],
     values: &[Value],
+    phase: ForeignKeyActionPhase,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
@@ -2848,7 +3490,11 @@ fn apply_inbound_foreign_key_actions_on_update(
             continue;
         }
         match constraint.on_update {
-            ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => {
+            ForeignKeyAction::NoAction => {}
+            ForeignKeyAction::Restrict => {
+                if phase != ForeignKeyActionPhase::BeforeParentWrite {
+                    continue;
+                }
                 crate::backend::executor::enforce_inbound_foreign_keys_on_update(
                     relation_name,
                     std::slice::from_ref(constraint),
@@ -2858,6 +3504,9 @@ fn apply_inbound_foreign_key_actions_on_update(
                 )?;
             }
             ForeignKeyAction::Cascade => {
+                if phase != ForeignKeyActionPhase::AfterParentWrite {
+                    continue;
+                }
                 let old_key_values = constraint
                     .referenced_column_indexes
                     .iter()
@@ -2881,6 +3530,9 @@ fn apply_inbound_foreign_key_actions_on_update(
                 )?;
             }
             ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault => {
+                if phase != ForeignKeyActionPhase::AfterParentWrite {
+                    continue;
+                }
                 let old_key_values = constraint
                     .referenced_column_indexes
                     .iter()
@@ -2916,6 +3568,7 @@ fn apply_inbound_foreign_key_actions_on_delete(
     relation_name: &str,
     constraints: &[BoundReferencedByForeignKey],
     values: &[Value],
+    phase: ForeignKeyActionPhase,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     waiter: Option<(
@@ -2935,7 +3588,11 @@ fn apply_inbound_foreign_key_actions_on_delete(
             continue;
         }
         match constraint.on_delete {
-            ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => {
+            ForeignKeyAction::NoAction => {}
+            ForeignKeyAction::Restrict => {
+                if phase != ForeignKeyActionPhase::BeforeParentWrite {
+                    continue;
+                }
                 crate::backend::executor::enforce_inbound_foreign_keys_on_delete(
                     relation_name,
                     std::slice::from_ref(constraint),
@@ -2944,6 +3601,9 @@ fn apply_inbound_foreign_key_actions_on_delete(
                 )?;
             }
             ForeignKeyAction::Cascade => {
+                if phase != ForeignKeyActionPhase::AfterParentWrite {
+                    continue;
+                }
                 let key_values = constraint
                     .referenced_column_indexes
                     .iter()
@@ -3003,6 +3663,9 @@ fn apply_inbound_foreign_key_actions_on_delete(
                 triggers.after_statement(Some(&transition_capture), ctx)?;
             }
             ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault => {
+                if phase != ForeignKeyActionPhase::AfterParentWrite {
+                    continue;
+                }
                 let key_values = constraint
                     .referenced_column_indexes
                     .iter()
@@ -3985,6 +4648,7 @@ pub fn execute_truncate_table(
             vec![entry]
         };
         for target in truncate_targets {
+            check_relation_privilege(ctx, target.relation_oid, 'D')?;
             let indexes = catalog.index_relations_for_heap(target.relation_oid);
             let _ = ctx.pool.invalidate_relation(target.rel);
             ctx.pool
@@ -4028,6 +4692,15 @@ pub fn execute_insert(
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_insert(stmt, catalog);
+    check_relation_column_privileges(
+        ctx,
+        stmt.relation_oid,
+        'a',
+        stmt.target_columns.iter().map(|target| target.column_index),
+    )?;
+    for subplan in &stmt.subplans {
+        check_plan_relation_privileges(subplan, ctx, 'r')?;
+    }
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
         let values = materialize_insert_rows(&stmt, catalog, ctx)?;
@@ -4257,11 +4930,13 @@ fn execute_insert_rows_with_routing(
                 let projected_row =
                     remap_child_row_to_parent(leaf_row, &result_rel_info.relation.desc, desc)
                         .unwrap_or_else(|| parent_row.clone());
-                let row = project_returning_row_with_metadata(
+                let row = project_returning_row_with_old_new(
                     returning,
                     &projected_row,
                     None,
                     Some(result_rel_info.relation.relation_oid),
+                    None,
+                    Some(&projected_row),
                     ctx,
                 )?;
                 capture_copy_to_dml_returning_row(row.clone());
@@ -4478,7 +5153,7 @@ fn auth_state_from_executor(ctx: &ExecutorContext) -> AuthState {
     auth
 }
 
-fn relation_acl_allows(
+pub(crate) fn relation_acl_allows(
     ctx: &ExecutorContext,
     relation_oid: u32,
     privilege: char,
@@ -4510,14 +5185,88 @@ fn relation_acl_allows(
     {
         return Ok(true);
     }
-    let Some(acl) = class_row.relacl else {
-        return Ok(false);
-    };
     let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
-    Ok(acl_grants_privilege(&acl, &effective_names, privilege))
+    if class_row
+        .relacl
+        .as_ref()
+        .is_some_and(|acl| acl_grants_privilege(acl, &effective_names, privilege))
+    {
+        return Ok(true);
+    }
+    if matches!(privilege, 'r' | 'a' | 'w' | 'x') {
+        let grants_column_privilege = catalog
+            .attribute_rows_for_relation(relation_oid)
+            .into_iter()
+            .filter(|attr| attr.attnum > 0 && !attr.attisdropped)
+            .filter_map(|attr| attr.attacl)
+            .any(|acl| acl_grants_privilege(&acl, &effective_names, privilege));
+        if grants_column_privilege {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
-fn relation_permission_denied(ctx: &ExecutorContext, relation_oid: u32) -> ExecError {
+pub(crate) fn relation_or_all_column_acls_allow(
+    ctx: &ExecutorContext,
+    relation_oid: u32,
+    privilege: char,
+    column_indices: impl IntoIterator<Item = usize>,
+) -> Result<bool, ExecError> {
+    let catalog = ctx
+        .catalog
+        .as_ref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "catalog is not available for privilege check".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    let class_row =
+        catalog
+            .class_row_by_oid(relation_oid)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("relation with OID {relation_oid} does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+    let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
+    let auth = auth_state_from_executor(ctx);
+    if auth.has_effective_membership(class_row.relowner, &auth_catalog)
+        || auth_catalog
+            .role_by_oid(ctx.current_user_oid)
+            .is_some_and(|role| role.rolsuper)
+    {
+        return Ok(true);
+    }
+    let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
+    if class_row
+        .relacl
+        .as_ref()
+        .is_some_and(|acl| acl_grants_privilege(acl, &effective_names, privilege))
+    {
+        return Ok(true);
+    }
+
+    let attribute_acls = catalog
+        .attribute_rows_for_relation(relation_oid)
+        .into_iter()
+        .filter(|attr| attr.attnum > 0 && !attr.attisdropped)
+        .map(|attr| (attr.attnum as usize - 1, attr.attacl))
+        .collect::<BTreeMap<_, _>>();
+    for column_index in column_indices {
+        let Some(Some(acl)) = attribute_acls.get(&column_index) else {
+            return Ok(false);
+        };
+        if !acl_grants_privilege(acl, &effective_names, privilege) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+pub(crate) fn relation_permission_denied(ctx: &ExecutorContext, relation_oid: u32) -> ExecError {
     let relation_name = ctx
         .catalog
         .as_deref()
@@ -4568,10 +5317,10 @@ fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
             collect_plan_relation_oids(left, oids);
             collect_plan_relation_oids(right, oids);
         }
+        Plan::CteScan { cte_plan, .. } => collect_plan_relation_oids(cte_plan, oids),
         Plan::Result { .. }
         | Plan::Values { .. }
         | Plan::FunctionScan { .. }
-        | Plan::CteScan { .. }
         | Plan::WorkTableScan { .. } => {}
         Plan::RecursiveUnion {
             anchor, recursive, ..
@@ -4585,6 +5334,138 @@ fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
             }
         }
     }
+}
+
+fn collect_planned_stmt_relation_oids(planned_stmt: &PlannedStmt, oids: &mut BTreeSet<u32>) {
+    collect_plan_relation_oids(&planned_stmt.plan_tree, oids);
+    for subplan in &planned_stmt.subplans {
+        collect_plan_relation_oids(subplan, oids);
+    }
+}
+
+fn plan_contains_lock_rows(plan: &Plan) -> bool {
+    match plan {
+        Plan::LockRows { .. } => true,
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::BitmapOr { children, .. } => children.iter().any(plan_contains_lock_rows),
+        Plan::Unique { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => plan_contains_lock_rows(input),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            plan_contains_lock_rows(left) || plan_contains_lock_rows(right)
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => plan_contains_lock_rows(anchor) || plan_contains_lock_rows(recursive),
+        Plan::SetOp { children, .. } => children.iter().any(plan_contains_lock_rows),
+        Plan::CteScan { cte_plan, .. } => plan_contains_lock_rows(cte_plan),
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::BitmapHeapScan { .. }
+        | Plan::Values { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. } => false,
+    }
+}
+
+pub(crate) fn check_relation_privilege(
+    ctx: &ExecutorContext,
+    relation_oid: u32,
+    privilege: char,
+) -> Result<(), ExecError> {
+    if relation_acl_allows(ctx, relation_oid, privilege)? {
+        Ok(())
+    } else {
+        Err(relation_permission_denied(ctx, relation_oid))
+    }
+}
+
+pub(crate) fn check_relation_column_privileges(
+    ctx: &ExecutorContext,
+    relation_oid: u32,
+    privilege: char,
+    column_indices: impl IntoIterator<Item = usize>,
+) -> Result<(), ExecError> {
+    if relation_or_all_column_acls_allow(ctx, relation_oid, privilege, column_indices)? {
+        Ok(())
+    } else {
+        Err(relation_permission_denied(ctx, relation_oid))
+    }
+}
+
+pub(crate) fn check_plan_relation_privileges(
+    plan: &Plan,
+    ctx: &ExecutorContext,
+    privilege: char,
+) -> Result<(), ExecError> {
+    let mut relation_oids = BTreeSet::new();
+    collect_plan_relation_oids(plan, &mut relation_oids);
+    for relation_oid in relation_oids {
+        check_relation_privilege(ctx, relation_oid, privilege)?;
+    }
+    Ok(())
+}
+
+fn check_planned_stmt_relation_privileges_except(
+    planned_stmt: &PlannedStmt,
+    ctx: &ExecutorContext,
+    privilege: char,
+    excluded_oids: &BTreeSet<u32>,
+) -> Result<(), ExecError> {
+    let mut relation_oids = BTreeSet::new();
+    collect_planned_stmt_relation_oids(planned_stmt, &mut relation_oids);
+    for relation_oid in relation_oids {
+        if !excluded_oids.contains(&relation_oid) {
+            check_relation_privilege(ctx, relation_oid, privilege)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn check_planned_stmt_select_privileges(
+    planned_stmt: &PlannedStmt,
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    check_planned_stmt_select_privileges_inner(planned_stmt, ctx, false)
+}
+
+pub(crate) fn check_planned_stmt_select_for_update_privileges(
+    planned_stmt: &PlannedStmt,
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    check_planned_stmt_select_privileges_inner(planned_stmt, ctx, true)
+}
+
+fn check_planned_stmt_select_privileges_inner(
+    planned_stmt: &PlannedStmt,
+    ctx: &ExecutorContext,
+    require_update: bool,
+) -> Result<(), ExecError> {
+    let mut relation_oids = BTreeSet::new();
+    collect_planned_stmt_relation_oids(planned_stmt, &mut relation_oids);
+    for relation_oid in &relation_oids {
+        check_relation_privilege(ctx, *relation_oid, 'r')?;
+    }
+    if require_update || plan_contains_lock_rows(&planned_stmt.plan_tree) {
+        for relation_oid in relation_oids {
+            check_relation_privilege(ctx, relation_oid, 'w')?;
+        }
+    }
+    Ok(())
 }
 
 fn check_merge_privileges(
@@ -4619,15 +5500,23 @@ fn check_merge_privileges(
     Ok(())
 }
 
+struct MergeActionOutput {
+    action: &'static str,
+    old_values: Option<Vec<Value>>,
+    new_values: Option<Vec<Value>>,
+    target_values: Vec<Value>,
+}
+
 fn execute_merge_insert_action(
     stmt: &BoundMergeStatement,
+    catalog: &dyn CatalogLookup,
     target_columns: &[BoundAssignmentTarget],
     values: Option<&[Expr]>,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
-) -> Result<bool, ExecError> {
+) -> Result<Option<Vec<Value>>, ExecError> {
     let mut row_values = vec![Value::Null; stmt.desc.columns.len()];
     let mut default_slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
     for (column_index, expr) in stmt.column_defaults.iter().enumerate() {
@@ -4639,7 +5528,8 @@ fn execute_merge_insert_action(
             apply_assignment_target(&stmt.desc, &mut row_values, target, value, slot, ctx)?;
         }
     }
-    let inserted = execute_insert_values(
+    let inserted = execute_insert_rows_with_routing(
+        catalog,
         &stmt.relation_name,
         stmt.relation_oid,
         stmt.rel,
@@ -4650,16 +5540,19 @@ fn execute_merge_insert_action(
         &[],
         &stmt.indexes,
         &[row_values],
+        None,
         ctx,
         xid,
         cid,
     )?;
-    if inserted > 0 {
+    if let Some(inserted_values) = inserted.into_iter().next() {
         ctx.session_stats
             .write()
             .note_relation_insert(stmt.relation_oid);
+        Ok(Some(inserted_values))
+    } else {
+        Ok(None)
     }
-    Ok(inserted > 0)
 }
 
 fn execute_merge_update_row(
@@ -4671,7 +5564,7 @@ fn execute_merge_update_row(
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
-) -> Result<bool, ExecError> {
+) -> Result<Option<Vec<Value>>, ExecError> {
     let mut updated_values = original_values.to_vec();
     for assignment in assignments {
         let value = eval_expr(&assignment.expr, slot, ctx)?;
@@ -4726,11 +5619,12 @@ fn execute_merge_update_row(
         &updated_values,
         ctx,
     )?;
-    let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
+    apply_inbound_foreign_key_actions_on_update(
         &stmt.relation_name,
         &stmt.referenced_by_foreign_keys,
         original_values,
         &updated_values,
+        ForeignKeyActionPhase::BeforeParentWrite,
         ctx,
         xid,
         cid,
@@ -4769,25 +5663,44 @@ fn execute_merge_update_row(
                 Some(target_tid),
                 ctx,
             )?;
+            let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
+                &stmt.relation_name,
+                &stmt.referenced_by_foreign_keys,
+                original_values,
+                &updated_values,
+                ForeignKeyActionPhase::AfterParentWrite,
+                ctx,
+                xid,
+                cid,
+                None,
+            )?;
             validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
+            let pending_no_action_checks = collect_no_action_checks_on_update(
+                &stmt.relation_name,
+                &stmt.referenced_by_foreign_keys,
+                original_values,
+                &updated_values,
+                ctx,
+            )?;
+            validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
             ctx.session_stats
                 .write()
                 .note_relation_update(stmt.relation_oid);
-            Ok(true)
+            Ok(Some(updated_values))
         }
         Err(HeapError::TupleUpdated(_, _)) => {
             cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
             if ctx.uses_transaction_snapshot() {
                 return Err(serialization_failure_due_to_concurrent_update());
             }
-            Ok(false)
+            Ok(None)
         }
         Err(HeapError::TupleAlreadyModified(_)) => {
             cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
             if ctx.uses_transaction_snapshot() {
                 return Err(serialization_failure_due_to_concurrent_delete());
             }
-            Ok(false)
+            Ok(None)
         }
         Err(err) => {
             cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
@@ -4803,10 +5716,11 @@ fn execute_merge_delete_row(
     ctx: &mut ExecutorContext,
     xid: TransactionId,
 ) -> Result<bool, ExecError> {
-    let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_delete(
+    apply_inbound_foreign_key_actions_on_delete(
         &stmt.relation_name,
         &stmt.referenced_by_foreign_keys,
         original_values,
+        ForeignKeyActionPhase::BeforeParentWrite,
         ctx,
         xid,
         None,
@@ -4830,7 +5744,23 @@ fn execute_merge_delete_row(
             if let (Some(toast), Some(old_tuple)) = (stmt.toast, old_tuple.as_ref()) {
                 delete_external_from_tuple(ctx, toast, &stmt.desc, old_tuple, xid)?;
             }
+            let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_delete(
+                &stmt.relation_name,
+                &stmt.referenced_by_foreign_keys,
+                original_values,
+                ForeignKeyActionPhase::AfterParentWrite,
+                ctx,
+                xid,
+                None,
+            )?;
             validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
+            let pending_no_action_checks = collect_no_action_checks_on_delete(
+                &stmt.relation_name,
+                &stmt.referenced_by_foreign_keys,
+                original_values,
+                ctx,
+            )?;
+            validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
             ctx.session_stats
                 .write()
                 .note_relation_delete(stmt.relation_oid);
@@ -4865,6 +5795,7 @@ pub(crate) fn execute_merge(
     let result = (|| {
         let mut state = executor_start(stmt.input_plan.plan_tree.clone());
         let mut affected_rows = 0usize;
+        let mut returned_rows = Vec::new();
         let mut matched_target_rows = HashSet::new();
         while let Some(slot) = state.exec_proc_node(ctx)? {
             ctx.check_for_interrupts()?;
@@ -4906,6 +5837,7 @@ pub(crate) fn execute_merge(
             let target_matched = target_tid.is_some();
             let visible_values = row_values[..stmt.visible_column_count].to_vec();
             let target_values = visible_values[..stmt.desc.columns.len()].to_vec();
+            let source_values = visible_values[stmt.desc.columns.len()..].to_vec();
             let mut eval_slot = TupleSlot::virtual_row(visible_values);
 
             for clause in &stmt.when_clauses {
@@ -4925,13 +5857,26 @@ pub(crate) fn execute_merge(
                 {
                     continue;
                 }
-                let changed = match &clause.action {
-                    BoundMergeAction::DoNothing => false,
+                let action_output = match &clause.action {
+                    BoundMergeAction::DoNothing => None,
                     BoundMergeAction::Delete => {
-                        if let Some(target_tid) = target_tid {
-                            execute_merge_delete_row(&stmt, target_tid, &target_values, ctx, xid)?
+                        if let Some(target_tid) = target_tid
+                            && execute_merge_delete_row(
+                                &stmt,
+                                target_tid,
+                                &target_values,
+                                ctx,
+                                xid,
+                            )?
+                        {
+                            Some(MergeActionOutput {
+                                action: "DELETE",
+                                old_values: Some(target_values.clone()),
+                                new_values: None,
+                                target_values: target_values.clone(),
+                            })
                         } else {
-                            false
+                            None
                         }
                     }
                     BoundMergeAction::Update { assignments } => {
@@ -4946,8 +5891,14 @@ pub(crate) fn execute_merge(
                                 xid,
                                 cid,
                             )?
+                            .map(|updated_values| MergeActionOutput {
+                                action: "UPDATE",
+                                old_values: Some(target_values.clone()),
+                                new_values: Some(updated_values.clone()),
+                                target_values: updated_values,
+                            })
                         } else {
-                            false
+                            None
                         }
                     }
                     BoundMergeAction::Insert {
@@ -4955,21 +5906,51 @@ pub(crate) fn execute_merge(
                         values,
                     } => execute_merge_insert_action(
                         &stmt,
+                        catalog,
                         target_columns,
                         values.as_deref(),
                         &mut eval_slot,
                         ctx,
                         xid,
                         cid,
-                    )?,
+                    )?
+                    .map(|inserted_values| MergeActionOutput {
+                        action: "INSERT",
+                        old_values: None,
+                        new_values: Some(inserted_values.clone()),
+                        target_values: inserted_values,
+                    }),
                 };
-                if changed {
+                if let Some(action_output) = action_output {
                     affected_rows += 1;
+                    if !stmt.returning.is_empty() {
+                        let mut returning_values = action_output.target_values.clone();
+                        returning_values.extend(source_values.iter().cloned());
+                        returning_values.push(Value::Text(action_output.action.into()));
+                        let row = project_returning_row_with_old_new(
+                            &stmt.returning,
+                            &returning_values,
+                            None,
+                            None,
+                            action_output.old_values.as_deref(),
+                            action_output.new_values.as_deref(),
+                            ctx,
+                        )?;
+                        capture_copy_to_dml_returning_row(row.clone());
+                        returned_rows.push(row);
+                    }
                 }
                 break;
             }
         }
-        Ok(StatementResult::AffectedRows(affected_rows))
+        if stmt.returning.is_empty() {
+            Ok(StatementResult::AffectedRows(affected_rows))
+        } else {
+            Ok(build_returning_result(
+                returning_result_columns(&stmt.returning),
+                returned_rows,
+            ))
+        }
     })();
     ctx.subplans = saved_subplans;
     result
@@ -5174,6 +6155,7 @@ pub(crate) fn materialize_insert_rows(
             let query =
                 crate::backend::optimizer::fold_query_constants(query).map_err(ExecError::Parse)?;
             let planned = planner(query, catalog).map_err(ExecError::Parse)?;
+            check_planned_stmt_select_privileges(&planned, ctx)?;
             let result: Result<Vec<Vec<Value>>, ExecError> = (|| {
                 let saved_subplans = std::mem::replace(&mut ctx.subplans, planned.subplans.clone());
                 let mut state = executor_start(planned.plan_tree.clone());
@@ -6594,7 +7576,7 @@ fn project_returning_row(
     row: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
-    project_returning_row_with_metadata(targets, row, None, None, ctx)
+    project_returning_row_with_old_new(targets, row, None, None, None, None, ctx)
 }
 
 fn project_returning_row_with_metadata(
@@ -6604,13 +7586,46 @@ fn project_returning_row_with_metadata(
     table_oid: Option<u32>,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
+    project_returning_row_with_old_new(targets, row, tid, table_oid, None, None, ctx)
+}
+
+pub(crate) fn project_returning_row_with_old_new(
+    targets: &[TargetEntry],
+    row: &[Value],
+    tid: Option<ItemPointerData>,
+    table_oid: Option<u32>,
+    old_row: Option<&[Value]>,
+    new_row: Option<&[Value]>,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let saved_bindings = ctx.expr_bindings.clone();
+    let pseudo_width = old_row
+        .map(<[Value]>::len)
+        .or_else(|| new_row.map(<[Value]>::len))
+        .unwrap_or(row.len());
+    ctx.expr_bindings.outer_tuple = Some(
+        old_row
+            .map(<[Value]>::to_vec)
+            .unwrap_or_else(|| vec![Value::Null; pseudo_width]),
+    );
+    ctx.expr_bindings.inner_tuple = Some(
+        new_row
+            .map(<[Value]>::to_vec)
+            .unwrap_or_else(|| vec![Value::Null; pseudo_width]),
+    );
+    ctx.expr_bindings.outer_system_bindings.clear();
+    ctx.expr_bindings.inner_system_bindings.clear();
     let mut slot = TupleSlot::virtual_row_with_metadata(row.to_vec(), tid, table_oid);
-    let mut values = targets
+    let result = targets
         .iter()
         .map(|target| eval_expr(&target.expr, &mut slot, ctx).map(|value| value.to_owned_value()))
-        .collect::<Result<Vec<_>, _>>()?;
-    Value::materialize_all(&mut values);
-    Ok(values)
+        .collect::<Result<Vec<_>, _>>();
+    let result = result.map(|mut values| {
+        Value::materialize_all(&mut values);
+        values
+    });
+    ctx.expr_bindings = saved_bindings;
+    result
 }
 
 fn build_returning_result(columns: Vec<QueryColumn>, rows: Vec<Vec<Value>>) -> StatementResult {
@@ -6705,11 +7720,13 @@ pub(crate) fn execute_insert_rows(
             maintain_indexes_for_row(rel, desc, indexes, &values, heap_tid, ctx)?;
             inserted_rows.push(values.clone());
             if let Some(returning) = returning {
-                let row = project_returning_row_with_metadata(
+                let row = project_returning_row_with_old_new(
                     returning,
                     &values,
                     Some(heap_tid),
                     Some(relation_oid),
+                    None,
+                    Some(&values),
                     ctx,
                 )?;
                 capture_copy_to_dml_returning_row(row.clone());
@@ -7003,6 +8020,28 @@ pub fn execute_update_with_waiter(
     )>,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_update(stmt, catalog);
+    let target_oids = stmt
+        .targets
+        .iter()
+        .map(|target| target.relation_oid)
+        .collect::<BTreeSet<_>>();
+    for target in &stmt.targets {
+        check_relation_column_privileges(
+            ctx,
+            target.relation_oid,
+            'w',
+            target
+                .assignments
+                .iter()
+                .map(|assignment| assignment.column_index),
+        )?;
+    }
+    for subplan in &stmt.subplans {
+        check_plan_relation_privileges(subplan, ctx, 'r')?;
+    }
+    if let Some(input_plan) = &stmt.input_plan {
+        check_planned_stmt_relation_privileges_except(input_plan, ctx, 'r', &target_oids)?;
+    }
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
         if stmt.input_plan.is_some() {
@@ -7034,6 +8073,20 @@ pub fn execute_update_with_waiter(
             let mut transition_capture = triggers
                 .as_ref()
                 .map(|triggers| triggers.new_transition_capture());
+            let namespace_oid = catalog
+                .class_row_by_oid(target.relation_oid)
+                .map(|row| row.relnamespace)
+                .unwrap_or(0);
+            enforce_publication_replica_identity(
+                &target.relation_name,
+                target.relation_oid,
+                namespace_oid,
+                &target.desc,
+                &target.indexes,
+                catalog,
+                PublicationDmlAction::Update,
+                !predicate_is_const_false(target.predicate.as_ref()),
+            )?;
 
             let desc = Rc::new(target.desc.clone());
             let attr_descs: Rc<[_]> = desc.attribute_descs().into();
@@ -7060,6 +8113,7 @@ pub fn execute_update_with_waiter(
                     ctx,
                 )?,
             };
+            let mut pending_no_action_checks = Vec::new();
 
             for (tid, original_values) in target_rows {
                 ctx.check_for_interrupts()?;
@@ -7119,13 +8173,21 @@ pub fn execute_update_with_waiter(
                         cid,
                         waiter,
                     ) {
-                        Ok(WriteUpdatedRowResult::Updated(_new_tid)) => {
+                        Ok(WriteUpdatedRowResult::Updated(_new_tid, no_action_checks)) => {
+                            pending_no_action_checks.extend(no_action_checks);
                             ctx.session_stats
                                 .write()
                                 .note_relation_update(target.relation_oid);
                             if !stmt.returning.is_empty() {
-                                let row =
-                                    project_returning_row(&stmt.returning, &triggered_values, ctx)?;
+                                let row = project_returning_row_with_old_new(
+                                    &stmt.returning,
+                                    &triggered_values,
+                                    None,
+                                    None,
+                                    Some(&current_old_values),
+                                    Some(&triggered_values),
+                                    ctx,
+                                )?;
                                 capture_copy_to_dml_returning_row(row.clone());
                                 returned_rows.push(row);
                             }
@@ -7195,6 +8257,7 @@ pub fn execute_update_with_waiter(
                     }
                 }
             }
+            validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
 
             if let Some(triggers) = &triggers {
                 if let Some(capture) = transition_capture.as_ref() {
@@ -7317,6 +8380,7 @@ fn update_from_predicate_matches(
 fn project_update_from_returning_row(
     stmt: &BoundUpdateStatement,
     target: &BoundUpdateTarget,
+    old_values: &[Value],
     new_values: &[Value],
     source_values: &[Value],
     tid: ItemPointerData,
@@ -7324,11 +8388,13 @@ fn project_update_from_returning_row(
 ) -> Result<Vec<Value>, ExecError> {
     let mut visible_values = project_update_target_visible_values(target, new_values, tid, ctx)?;
     visible_values.extend(source_values.iter().cloned());
-    project_returning_row_with_metadata(
+    project_returning_row_with_old_new(
         &stmt.returning,
         &visible_values,
         Some(tid),
         Some(target.relation_oid),
+        Some(old_values),
+        Some(new_values),
         ctx,
     )
 }
@@ -7380,6 +8446,24 @@ fn execute_update_from_joined_input(
     for trigger in triggers.iter().flatten() {
         trigger.before_statement(ctx)?;
     }
+    if let Some(catalog) = ctx.catalog.as_deref() {
+        for target in &stmt.targets {
+            let namespace_oid = catalog
+                .class_row_by_oid(target.relation_oid)
+                .map(|row| row.relnamespace)
+                .unwrap_or(0);
+            enforce_publication_replica_identity(
+                &target.relation_name,
+                target.relation_oid,
+                namespace_oid,
+                &target.desc,
+                &target.indexes,
+                catalog,
+                PublicationDmlAction::Update,
+                true,
+            )?;
+        }
+    }
     let mut transition_captures = triggers
         .iter()
         .map(|trigger| {
@@ -7393,6 +8477,7 @@ fn execute_update_from_joined_input(
         let mut state = executor_start(input_plan.plan_tree.clone());
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
+        let mut pending_no_action_checks = Vec::new();
 
         while let Some(slot) = state.exec_proc_node(ctx)? {
             ctx.check_for_interrupts()?;
@@ -7479,7 +8564,8 @@ fn execute_update_from_joined_input(
                     cid,
                     waiter,
                 )? {
-                    WriteUpdatedRowResult::Updated(new_tid) => {
+                    WriteUpdatedRowResult::Updated(new_tid, no_action_checks) => {
+                        pending_no_action_checks.extend(no_action_checks);
                         ctx.session_stats
                             .write()
                             .note_relation_update(target.relation_oid);
@@ -7487,6 +8573,7 @@ fn execute_update_from_joined_input(
                             let row = project_update_from_returning_row(
                                 stmt,
                                 target,
+                                &current_old_values,
                                 &triggered_values,
                                 &source_values,
                                 new_tid,
@@ -7541,6 +8628,8 @@ fn execute_update_from_joined_input(
             }
         }
 
+        validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
+
         if stmt.returning.is_empty() {
             Ok(StatementResult::AffectedRows(affected_rows))
         } else {
@@ -7587,6 +8676,17 @@ pub fn execute_delete_with_waiter(
     )>,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_delete(stmt, catalog);
+    let target_oids = stmt
+        .targets
+        .iter()
+        .map(|target| target.relation_oid)
+        .collect::<BTreeSet<_>>();
+    for relation_oid in &target_oids {
+        check_relation_privilege(ctx, *relation_oid, 'd')?;
+    }
+    for subplan in &stmt.subplans {
+        check_plan_relation_privileges(subplan, ctx, 'r')?;
+    }
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
         let mut affected_rows = 0;
@@ -7613,6 +8713,21 @@ pub fn execute_delete_with_waiter(
             let mut transition_capture = triggers
                 .as_ref()
                 .map(|triggers| triggers.new_transition_capture());
+            let namespace_oid = catalog
+                .class_row_by_oid(target.relation_oid)
+                .map(|row| row.relnamespace)
+                .unwrap_or(0);
+            let indexes = catalog.index_relations_for_heap(target.relation_oid);
+            enforce_publication_replica_identity(
+                &target.relation_name,
+                target.relation_oid,
+                namespace_oid,
+                &target.desc,
+                &indexes,
+                catalog,
+                PublicationDmlAction::Delete,
+                !predicate_is_const_false(target.predicate.as_ref()),
+            )?;
 
             let desc = Rc::new(target.desc.clone());
             let attr_descs: Rc<[_]> = desc.attribute_descs().into();
@@ -7640,21 +8755,40 @@ pub fn execute_delete_with_waiter(
                 )?,
             };
             let snapshot = ctx.snapshot.clone();
+            let mut pending_no_action_checks = Vec::new();
 
             for (tid, values) in &targets {
                 let mut current_tid = *tid;
                 let mut current_values = values.clone();
                 loop {
+                    if let Some(catalog) = ctx.catalog.as_deref() {
+                        let namespace_oid = catalog
+                            .class_row_by_oid(target.relation_oid)
+                            .map(|row| row.relnamespace)
+                            .unwrap_or(0);
+                        let indexes = catalog.index_relations_for_heap(target.relation_oid);
+                        enforce_publication_replica_identity(
+                            &target.relation_name,
+                            target.relation_oid,
+                            namespace_oid,
+                            &target.desc,
+                            &indexes,
+                            catalog,
+                            PublicationDmlAction::Delete,
+                            true,
+                        )?;
+                    }
                     if let Some(triggers) = &triggers {
                         if !triggers.before_row_delete(&current_values, ctx)? {
                             break;
                         }
                     }
                     capture_copy_to_dml_notices();
-                    let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_delete(
+                    apply_inbound_foreign_key_actions_on_delete(
                         &target.relation_name,
                         &target.referenced_by_foreign_keys,
                         &current_values,
+                        ForeignKeyActionPhase::BeforeParentWrite,
                         ctx,
                         xid,
                         waiter,
@@ -7691,16 +8825,39 @@ pub fn execute_delete_with_waiter(
                                     xid,
                                 )?;
                             }
+                            let pending_set_default_rechecks =
+                                apply_inbound_foreign_key_actions_on_delete(
+                                    &target.relation_name,
+                                    &target.referenced_by_foreign_keys,
+                                    &current_values,
+                                    ForeignKeyActionPhase::AfterParentWrite,
+                                    ctx,
+                                    xid,
+                                    waiter,
+                                )?;
                             validate_pending_set_default_rechecks(
                                 pending_set_default_rechecks,
                                 ctx,
                             )?;
+                            pending_no_action_checks.extend(collect_no_action_checks_on_delete(
+                                &target.relation_name,
+                                &target.referenced_by_foreign_keys,
+                                &current_values,
+                                ctx,
+                            )?);
                             ctx.session_stats
                                 .write()
                                 .note_relation_delete(target.relation_oid);
                             if !stmt.returning.is_empty() {
-                                let row =
-                                    project_returning_row(&stmt.returning, &current_values, ctx)?;
+                                let row = project_returning_row_with_old_new(
+                                    &stmt.returning,
+                                    &current_values,
+                                    None,
+                                    None,
+                                    Some(&current_values),
+                                    None,
+                                    ctx,
+                                )?;
                                 capture_copy_to_dml_returning_row(row.clone());
                                 returned_rows.push(row);
                             }
@@ -7747,6 +8904,7 @@ pub fn execute_delete_with_waiter(
                     }
                 }
             }
+            validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
 
             if let Some(triggers) = &triggers {
                 if let Some(capture) = transition_capture.as_ref() {
@@ -7945,6 +9103,22 @@ pub(crate) fn apply_base_update_row(
     loop {
         ctx.check_for_interrupts()?;
         materialize_generated_columns(&target.desc, &mut current_values, ctx)?;
+        if let Some(catalog) = ctx.catalog.as_deref() {
+            let namespace_oid = catalog
+                .class_row_by_oid(target.relation_oid)
+                .map(|row| row.relnamespace)
+                .unwrap_or(0);
+            enforce_publication_replica_identity(
+                &target.relation_name,
+                target.relation_oid,
+                namespace_oid,
+                &target.desc,
+                &target.indexes,
+                catalog,
+                PublicationDmlAction::Update,
+                true,
+            )?;
+        }
         let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, current_tid)?;
         crate::backend::executor::enforce_row_security_write_checks(
             &target.relation_name,
@@ -7987,11 +9161,12 @@ pub(crate) fn apply_base_update_row(
             &current_values,
             ctx,
         )?;
-        let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
+        apply_inbound_foreign_key_actions_on_update(
             &target.relation_name,
             &target.referenced_by_foreign_keys,
             &current_old_values,
             &current_values,
+            ForeignKeyActionPhase::BeforeParentWrite,
             ctx,
             xid,
             cid,
@@ -8030,7 +9205,26 @@ pub(crate) fn apply_base_update_row(
                     Some(current_tid),
                     ctx,
                 )?;
+                let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
+                    &target.relation_name,
+                    &target.referenced_by_foreign_keys,
+                    &current_old_values,
+                    &current_values,
+                    ForeignKeyActionPhase::AfterParentWrite,
+                    ctx,
+                    xid,
+                    cid,
+                    waiter,
+                )?;
                 validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
+                let pending_no_action_checks = collect_no_action_checks_on_update(
+                    &target.relation_name,
+                    &target.referenced_by_foreign_keys,
+                    &current_old_values,
+                    &current_values,
+                    ctx,
+                )?;
+                validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
                 return Ok(true);
             }
             Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
@@ -8151,10 +9345,28 @@ pub(crate) fn apply_base_delete_row(
     let mut current_values = old_values;
     loop {
         ctx.check_for_interrupts()?;
-        let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_delete(
+        if let Some(catalog) = ctx.catalog.as_deref() {
+            let namespace_oid = catalog
+                .class_row_by_oid(target.relation_oid)
+                .map(|row| row.relnamespace)
+                .unwrap_or(0);
+            let indexes = catalog.index_relations_for_heap(target.relation_oid);
+            enforce_publication_replica_identity(
+                &target.relation_name,
+                target.relation_oid,
+                namespace_oid,
+                &target.desc,
+                &indexes,
+                catalog,
+                PublicationDmlAction::Delete,
+                true,
+            )?;
+        }
+        apply_inbound_foreign_key_actions_on_delete(
             &target.relation_name,
             &target.referenced_by_foreign_keys,
             &current_values,
+            ForeignKeyActionPhase::BeforeParentWrite,
             ctx,
             xid,
             waiter,
@@ -8183,7 +9395,23 @@ pub(crate) fn apply_base_delete_row(
                 if let (Some(toast), Some(old_tuple)) = (target.toast, old_tuple.as_ref()) {
                     delete_external_from_tuple(ctx, toast, &target.desc, old_tuple, xid)?;
                 }
+                let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_delete(
+                    &target.relation_name,
+                    &target.referenced_by_foreign_keys,
+                    &current_values,
+                    ForeignKeyActionPhase::AfterParentWrite,
+                    ctx,
+                    xid,
+                    waiter,
+                )?;
                 validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
+                let pending_no_action_checks = collect_no_action_checks_on_delete(
+                    &target.relation_name,
+                    &target.referenced_by_foreign_keys,
+                    &current_values,
+                    ctx,
+                )?;
+                validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
                 return Ok(true);
             }
             Err(HeapError::TupleAlreadyModified(_)) => {

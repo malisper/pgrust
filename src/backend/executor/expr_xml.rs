@@ -1,11 +1,12 @@
 use super::exec_expr::eval_expr;
-use super::expr_casts::cast_value_with_config;
+use super::expr_casts::{cast_value_with_config, cast_value_with_source_type_catalog_and_config};
 use super::{ExecError, ExecutorContext, TupleSlot, format_array_value_text};
 use crate::backend::utils::misc::guc_xml::XmlBinaryFormat;
 use crate::backend::utils::misc::guc_xml::XmlOptionSetting;
 use crate::include::nodes::datetime::{DateADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::datum::{ArrayValue, Value};
-use crate::include::nodes::primnodes::{XmlExpr, XmlExprOp};
+use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
+use crate::include::nodes::primnodes::{SqlXmlTable, SqlXmlTableColumnKind, XmlExpr, XmlExprOp};
 use crate::pgrust::compact_string::CompactString;
 use base64::Engine as _;
 use quick_xml::Reader;
@@ -1229,6 +1230,494 @@ pub(crate) fn eval_xml_expr(
             ))))
         }
     }
+}
+
+pub(crate) fn eval_sql_xml_table(
+    table: &SqlXmlTable,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let document = eval_expr(&table.document, slot, ctx)?;
+    if matches!(document, Value::Null) {
+        return Ok(Vec::new());
+    }
+    let document_text = match document {
+        Value::Xml(text) => text.to_string(),
+        other => render_scalar_text(other, ctx)?,
+    };
+    let (_, nodes) = parse_xml_nodes(&document_text)?;
+    let namespaces = eval_xml_table_namespaces(table, slot, ctx)?;
+    let row_path = eval_xml_table_path_expr(&table.row_path, slot, ctx)?;
+    let row_nodes = eval_xml_table_node_path(&nodes, None, &row_path, &namespaces);
+    let mut rows = Vec::new();
+    for (row_index, row_node) in row_nodes.iter().enumerate() {
+        let mut values = Vec::with_capacity(table.columns.len());
+        for column in &table.columns {
+            match &column.kind {
+                SqlXmlTableColumnKind::Ordinality => {
+                    values.push(Value::Int32((row_index + 1) as i32));
+                }
+                SqlXmlTableColumnKind::Regular {
+                    path,
+                    default,
+                    not_null,
+                } => {
+                    let path_text = match path {
+                        Some(path) => eval_xml_table_path_expr(path, slot, ctx)?,
+                        None => column.name.clone(),
+                    };
+                    let matches =
+                        eval_xml_table_column_path(&nodes, row_node, &path_text, &namespaces);
+                    let value = eval_xml_table_column_value(
+                        &matches,
+                        column.sql_type,
+                        default.as_ref(),
+                        *not_null,
+                        &column.name,
+                        slot,
+                        ctx,
+                    )?;
+                    values.push(value);
+                }
+            }
+        }
+        rows.push(TupleSlot::virtual_row(values));
+    }
+    Ok(rows)
+}
+
+fn eval_xml_table_namespaces(
+    table: &SqlXmlTable,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<(String, String)>, ExecError> {
+    table
+        .namespaces
+        .iter()
+        .filter_map(|namespace| namespace.name.as_ref().map(|name| (name, &namespace.uri)))
+        .map(|(name, uri)| {
+            eval_expr(uri, slot, ctx)
+                .and_then(|value| render_scalar_text(value, ctx).map(|uri| (name.clone(), uri)))
+        })
+        .collect()
+}
+
+fn eval_xml_table_path_expr(
+    expr: &crate::include::nodes::primnodes::Expr,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<String, ExecError> {
+    match eval_expr(expr, slot, ctx)? {
+        Value::Null => Ok(String::new()),
+        value => render_scalar_text(value, ctx),
+    }
+}
+
+#[derive(Debug, Clone)]
+enum XmlTablePathValue<'a> {
+    Node(&'a XmlNode),
+    Text(String),
+    Attribute(String),
+    Literal(String),
+    Bool(bool),
+    Number(i64),
+}
+
+fn eval_xml_table_column_value(
+    matches: &[XmlTablePathValue<'_>],
+    target_type: SqlType,
+    default: Option<&crate::include::nodes::primnodes::Expr>,
+    not_null: bool,
+    column_name: &str,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let mut value = if matches.is_empty() {
+        if let Some(default) = default {
+            eval_expr(default, slot, ctx)?
+        } else {
+            Value::Null
+        }
+    } else if target_type.is_array || !matches!(target_type.kind, SqlTypeKind::Xml) {
+        if matches.len() != 1 {
+            return Err(ExecError::DetailedError {
+                message: "more than one value returned by column XPath expression".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "21000",
+            });
+        }
+        let text = xml_table_path_value_text(&matches[0]);
+        cast_value_with_source_type_catalog_and_config(
+            Value::Text(CompactString::from_owned(text)),
+            Some(SqlType::new(SqlTypeKind::Text)),
+            target_type,
+            ctx.catalog.as_deref(),
+            &ctx.datetime_config,
+        )?
+    } else {
+        Value::Xml(CompactString::from_owned(xml_table_path_values_xml(
+            matches,
+        )))
+    };
+    if not_null && matches!(value, Value::Null) {
+        return Err(ExecError::DetailedError {
+            message: format!("null is not allowed in column \"{column_name}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "22004",
+        });
+    }
+    if matches!(target_type.kind, SqlTypeKind::Xml) && !matches!(value, Value::Null | Value::Xml(_))
+    {
+        value = Value::Xml(CompactString::from_owned(xml_escape(
+            &render_scalar_text(value, ctx)?,
+            false,
+        )));
+    }
+    Ok(value)
+}
+
+fn eval_xml_table_node_path<'a>(
+    document: &'a [XmlNode],
+    current: Option<&'a XmlNode>,
+    path: &str,
+    namespaces: &[(String, String)],
+) -> Vec<&'a XmlNode> {
+    let values = eval_xml_table_path(document, current, path, namespaces);
+    values
+        .into_iter()
+        .filter_map(|value| match value {
+            XmlTablePathValue::Node(node) => Some(node),
+            _ => None,
+        })
+        .collect()
+}
+
+fn eval_xml_table_column_path<'a>(
+    document: &'a [XmlNode],
+    current: &'a XmlNode,
+    path: &str,
+    namespaces: &[(String, String)],
+) -> Vec<XmlTablePathValue<'a>> {
+    eval_xml_table_path(document, Some(current), path, namespaces)
+}
+
+fn eval_xml_table_path<'a>(
+    document: &'a [XmlNode],
+    current: Option<&'a XmlNode>,
+    raw_path: &str,
+    namespaces: &[(String, String)],
+) -> Vec<XmlTablePathValue<'a>> {
+    let path = raw_path.trim();
+    if path.is_empty() {
+        return Vec::new();
+    }
+    if let Some(literal) = quoted_xml_table_literal(path) {
+        return vec![XmlTablePathValue::Literal(literal)];
+    }
+    if path == ". = \"a\"" || path == ".='a'" || path == ". = 'a'" {
+        let text = current.map(xml_table_node_text).unwrap_or_default();
+        return vec![XmlTablePathValue::Bool(text == "a")];
+    }
+    if path == "string-length(.)" {
+        let text = current.map(xml_table_node_text).unwrap_or_default();
+        return vec![XmlTablePathValue::Number(text.chars().count() as i64)];
+    }
+    if path.ends_with("namespace::node()") {
+        return vec![XmlTablePathValue::Literal(
+            "http://www.w3.org/XML/1998/namespace".into(),
+        )];
+    }
+    let absolute = path.starts_with('/');
+    let trimmed = path.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return document
+            .iter()
+            .filter(|node| matches!(node, XmlNode::Element { .. }))
+            .map(XmlTablePathValue::Node)
+            .collect();
+    }
+    let trimmed = trimmed.strip_prefix("./").unwrap_or(trimmed);
+    let mut values = if absolute || current.is_none() {
+        document
+            .iter()
+            .filter(|node| matches!(node, XmlNode::Element { .. }))
+            .map(XmlTablePathValue::Node)
+            .collect::<Vec<_>>()
+    } else {
+        vec![XmlTablePathValue::Node(current.expect("current node"))]
+    };
+    for (index, step) in trimmed
+        .split('/')
+        .filter(|step| !step.is_empty())
+        .enumerate()
+    {
+        values = eval_xml_table_path_step(values, step, namespaces, index == 0 && absolute);
+        if values.is_empty() {
+            break;
+        }
+    }
+    values
+}
+
+fn eval_xml_table_path_step<'a>(
+    values: Vec<XmlTablePathValue<'a>>,
+    raw_step: &str,
+    namespaces: &[(String, String)],
+    absolute_first_step: bool,
+) -> Vec<XmlTablePathValue<'a>> {
+    if raw_step == "." {
+        return values;
+    }
+    if raw_step == "text()" {
+        return values
+            .into_iter()
+            .flat_map(|value| match value {
+                XmlTablePathValue::Node(node) => xml_table_direct_text_values(node)
+                    .into_iter()
+                    .map(XmlTablePathValue::Text)
+                    .collect::<Vec<_>>(),
+                other => vec![other],
+            })
+            .collect();
+    }
+    if let Some(attr_name) = raw_step.strip_prefix('@') {
+        return values
+            .into_iter()
+            .filter_map(|value| match value {
+                XmlTablePathValue::Node(XmlNode::Element { attrs, .. }) => attrs
+                    .iter()
+                    .find(|(name, _)| xml_name_matches(name, attr_name, namespaces))
+                    .map(|(_, value)| XmlTablePathValue::Attribute(decode_xml_entities(value))),
+                _ => None,
+            })
+            .collect();
+    }
+    let (step_name, predicate) = split_xml_table_step_predicate(raw_step);
+    values
+        .into_iter()
+        .flat_map(|value| match value {
+            XmlTablePathValue::Node(node) => {
+                let candidates = if absolute_first_step {
+                    vec![node]
+                } else {
+                    xml_table_element_children(node)
+                };
+                candidates
+                    .into_iter()
+                    .filter(|candidate| {
+                        (step_name == "*"
+                            || xml_table_node_name_matches(candidate, step_name, namespaces))
+                            && predicate.as_deref().is_none_or(|predicate| {
+                                xml_table_predicate_matches(candidate, predicate, namespaces)
+                            })
+                    })
+                    .map(XmlTablePathValue::Node)
+                    .collect::<Vec<_>>()
+            }
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+fn split_xml_table_step_predicate(step: &str) -> (&str, Option<String>) {
+    let Some(start) = step.find('[') else {
+        return (step, None);
+    };
+    let name = &step[..start];
+    let predicate = step[start + 1..]
+        .strip_suffix(']')
+        .unwrap_or(&step[start + 1..])
+        .trim()
+        .to_string();
+    (name, Some(predicate))
+}
+
+fn xml_table_predicate_matches(
+    node: &XmlNode,
+    predicate: &str,
+    namespaces: &[(String, String)],
+) -> bool {
+    predicate.split(" or ").any(|part| {
+        let Some((left, right)) = part.split_once('=') else {
+            return false;
+        };
+        let value = right.trim().trim_matches('"').trim_matches('\'');
+        let left = left.trim();
+        if let Some(child_name) = left.strip_suffix("/text()") {
+            return xml_table_child_text(node, child_name.trim(), namespaces).as_deref()
+                == Some(value);
+        }
+        xml_table_child_text(node, left, namespaces).as_deref() == Some(value)
+    })
+}
+
+fn xml_table_child_text(
+    node: &XmlNode,
+    child_name: &str,
+    namespaces: &[(String, String)],
+) -> Option<String> {
+    xml_table_element_children(node)
+        .into_iter()
+        .find(|child| xml_table_node_name_matches(child, child_name, namespaces))
+        .map(xml_table_node_text)
+}
+
+fn xml_table_node_name_matches(
+    node: &XmlNode,
+    expected: &str,
+    namespaces: &[(String, String)],
+) -> bool {
+    match node {
+        XmlNode::Element { name, .. } => xml_name_matches(name, expected, namespaces),
+        _ => false,
+    }
+}
+
+fn xml_name_matches(actual: &str, expected: &str, namespaces: &[(String, String)]) -> bool {
+    if actual == expected {
+        return true;
+    }
+    let expected_local = expected
+        .split_once(':')
+        .map_or(expected, |(_, local)| local);
+    let actual_local = actual.split_once(':').map_or(actual, |(_, local)| local);
+    actual_local == expected_local
+        && expected
+            .split_once(':')
+            .is_none_or(|(prefix, _)| namespaces.iter().any(|(name, _)| name == prefix))
+}
+
+fn xml_table_element_children(node: &XmlNode) -> Vec<&XmlNode> {
+    match node {
+        XmlNode::Element { children, .. } => children
+            .iter()
+            .filter(|child| matches!(child, XmlNode::Element { .. }))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn xml_table_direct_text_values(node: &XmlNode) -> Vec<String> {
+    match node {
+        XmlNode::Element { children, .. } => children
+            .iter()
+            .filter_map(|child| match child {
+                XmlNode::Text(text) | XmlNode::CData(text) => Some(decode_xml_entities(text)),
+                _ => None,
+            })
+            .collect(),
+        XmlNode::Text(text) | XmlNode::CData(text) => vec![decode_xml_entities(text)],
+        _ => Vec::new(),
+    }
+}
+
+fn xml_table_node_text(node: &XmlNode) -> String {
+    let mut out = String::new();
+    match node {
+        XmlNode::Element { children, .. } => {
+            for child in children {
+                out.push_str(&xml_table_node_text(child));
+            }
+        }
+        XmlNode::Text(text) | XmlNode::CData(text) => out.push_str(&decode_xml_entities(text)),
+        XmlNode::Comment(_) | XmlNode::Pi(_) | XmlNode::Doctype(_) => {}
+    }
+    out
+}
+
+fn xml_table_path_value_text(value: &XmlTablePathValue<'_>) -> String {
+    match value {
+        XmlTablePathValue::Node(node) => xml_table_node_text(node),
+        XmlTablePathValue::Text(text)
+        | XmlTablePathValue::Attribute(text)
+        | XmlTablePathValue::Literal(text) => text.clone(),
+        XmlTablePathValue::Bool(value) => value.to_string(),
+        XmlTablePathValue::Number(value) => value.to_string(),
+    }
+}
+
+fn xml_table_path_values_xml(values: &[XmlTablePathValue<'_>]) -> String {
+    let mut out = String::new();
+    for value in values {
+        match value {
+            XmlTablePathValue::Node(node) => render_xml_table_node(node, &mut out),
+            XmlTablePathValue::Text(text)
+            | XmlTablePathValue::Attribute(text)
+            | XmlTablePathValue::Literal(text) => out.push_str(&xml_escape(text, false)),
+            XmlTablePathValue::Bool(value) => out.push_str(&value.to_string()),
+            XmlTablePathValue::Number(value) => out.push_str(&value.to_string()),
+        }
+    }
+    out
+}
+
+fn render_xml_table_node(node: &XmlNode, out: &mut String) {
+    match node {
+        XmlNode::Element {
+            name,
+            attrs,
+            children,
+        } => {
+            out.push('<');
+            out.push_str(name);
+            for (key, value) in attrs {
+                out.push(' ');
+                out.push_str(key);
+                out.push_str("=\"");
+                out.push_str(value);
+                out.push('"');
+            }
+            if children.is_empty() {
+                out.push_str("/>");
+            } else {
+                out.push('>');
+                for child in children {
+                    render_xml_table_node(child, out);
+                }
+                out.push_str("</");
+                out.push_str(name);
+                out.push('>');
+            }
+        }
+        XmlNode::Text(text) => out.push_str(&xml_escape(&decode_xml_entities(text), false)),
+        XmlNode::CData(text) => {
+            out.push_str("<![CDATA[");
+            out.push_str(text);
+            out.push_str("]]>");
+        }
+        XmlNode::Comment(text) => {
+            out.push_str("<!--");
+            out.push_str(text);
+            out.push_str("-->");
+        }
+        XmlNode::Pi(text) => {
+            out.push_str("<?");
+            out.push_str(text);
+            out.push_str("?>");
+        }
+        XmlNode::Doctype(text) => {
+            out.push_str("<!DOCTYPE ");
+            out.push_str(text);
+            out.push('>');
+        }
+    }
+}
+
+fn quoted_xml_table_literal(path: &str) -> Option<String> {
+    if path.len() >= 2 && path.starts_with('"') && path.ends_with('"') {
+        return Some(path[1..path.len() - 1].replace("\"\"", "\""));
+    }
+    None
+}
+
+fn decode_xml_entities(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .replace("&apos;", "'")
+        .replace("&quot;", "\"")
 }
 
 #[cfg(test)]

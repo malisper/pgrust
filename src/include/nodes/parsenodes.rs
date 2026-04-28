@@ -1632,6 +1632,7 @@ pub enum FromItem {
         with_ordinality: bool,
     },
     JsonTable(JsonTableExpr),
+    XmlTable(XmlTableExpr),
     Lateral(Box<FromItem>),
     DerivedTable(Box<SelectStatement>),
     Join {
@@ -1684,6 +1685,34 @@ pub struct JsonTableExpr {
     pub passing: Vec<JsonTablePassingArg>,
     pub columns: Vec<JsonTableColumn>,
     pub on_error: Option<JsonTableBehavior>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XmlTableExpr {
+    pub namespaces: Vec<XmlTableNamespace>,
+    pub row_path: SqlExpr,
+    pub document: SqlExpr,
+    pub columns: Vec<XmlTableColumn>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XmlTableNamespace {
+    pub name: Option<String>,
+    pub uri: SqlExpr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum XmlTableColumn {
+    Ordinality {
+        name: String,
+    },
+    Regular {
+        name: String,
+        type_name: RawTypeName,
+        path: Option<SqlExpr>,
+        default: Option<SqlExpr>,
+        not_null: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2513,7 +2542,15 @@ pub struct AlterTableReplicaIdentityStatement {
     pub if_exists: bool,
     pub only: bool,
     pub table_name: String,
-    pub index_name: String,
+    pub identity: ReplicaIdentityKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplicaIdentityKind {
+    Default,
+    Full,
+    Nothing,
+    Index(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2603,6 +2640,8 @@ pub struct AlterTableAlterConstraintStatement {
     pub only: bool,
     pub table_name: String,
     pub constraint_name: String,
+    pub not_valid: bool,
+    pub no_inherit: bool,
     pub deferrable: Option<bool>,
     pub initially_deferred: Option<bool>,
     pub enforced: Option<bool>,
@@ -3050,6 +3089,8 @@ pub enum PublicationObjectSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PublicationTargetSpec {
     pub for_all_tables: bool,
+    pub for_all_sequences: bool,
+    pub except_tables: Vec<PublicationTableSpec>,
     pub objects: Vec<PublicationObjectSpec>,
 }
 
@@ -3413,6 +3454,12 @@ pub struct CommentOnOperatorStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantTableColumnPrivilege {
+    pub privilege: GrantObjectPrivilege,
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrantObjectPrivilege {
     CreateOnDatabase,
     AllPrivilegesOnTable,
@@ -3425,9 +3472,12 @@ pub enum GrantObjectPrivilege {
     TriggerOnTable,
     MaintainOnTable,
     TablePrivileges(String),
+    TableColumnPrivileges(Vec<GrantTableColumnPrivilege>),
     AllPrivilegesOnSchema,
     UsageOnSchema,
     UsageOnType,
+    UsageOnLanguage,
+    AllPrivilegesOnLanguage,
     ExecuteOnFunction,
     ExecuteOnProcedure,
     ExecuteOnRoutine,
@@ -3466,6 +3516,7 @@ pub struct GrantRoleMembershipStatement {
     pub role_names: Vec<String>,
     pub grantee_names: Vec<String>,
     pub admin_option: bool,
+    pub admin_option_specified: bool,
     pub inherit_option: Option<bool>,
     pub set_option: Option<bool>,
     pub granted_by: Option<RoleGrantorSpec>,

@@ -16,10 +16,10 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, CaseExpr as BoundCaseExpr,
-    CaseTestExpr as BoundCaseTestExpr, CaseWhen as BoundCaseWhen, ExprArraySubscript, INDEX_VAR,
-    INNER_VAR, OUTER_VAR, OpExprKind, ScalarFunctionImpl, SqlJsonQueryFunction,
-    SqlJsonQueryFunctionKind, SqlJsonTableBehavior, SqlJsonTablePassingArg, SqlJsonTableQuotes,
-    SqlJsonTableWrapper, WindowFuncKind, expr_contains_set_returning, expr_sql_type_hint,
+    CaseTestExpr as BoundCaseTestExpr, CaseWhen as BoundCaseWhen, ExprArraySubscript, OpExprKind,
+    ScalarFunctionImpl, SqlJsonQueryFunction, SqlJsonQueryFunctionKind, SqlJsonTableBehavior,
+    SqlJsonTablePassingArg, SqlJsonTableQuotes, SqlJsonTableWrapper, WindowFuncKind,
+    expr_contains_set_returning, expr_sql_type_hint,
 };
 
 mod func;
@@ -1433,9 +1433,7 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
     }
     match expr {
         Expr::Var(mut var) => {
-            if !matches!(var.varno, OUTER_VAR | INNER_VAR | INDEX_VAR) {
-                var.varlevelsup += levels;
-            }
+            var.varlevelsup += levels;
             Expr::Var(var)
         }
         Expr::Aggref(mut aggref) => {

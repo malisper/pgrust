@@ -129,12 +129,12 @@ pub(super) fn bind_on_conflict_clause(
     })
 }
 
-struct BoundOnConflictArbiters {
-    indexes: Vec<BoundIndexRelation>,
-    temporal_constraints: Vec<BoundTemporalConstraint>,
+pub(super) struct BoundOnConflictArbiters {
+    pub(super) indexes: Vec<BoundIndexRelation>,
+    pub(super) temporal_constraints: Vec<BoundTemporalConstraint>,
 }
 
-fn resolve_arbiters(
+pub(super) fn resolve_arbiters(
     clause: &OnConflictClause,
     relation_name: &str,
     relation_oid: u32,

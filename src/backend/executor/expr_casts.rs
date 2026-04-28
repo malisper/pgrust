@@ -248,7 +248,9 @@ fn jsonb_type_name(value: &JsonbValue) -> &'static str {
         JsonbValue::Time(_) => "time without time zone",
         JsonbValue::TimeTz(_) => "time with time zone",
         JsonbValue::Timestamp(_) => "timestamp without time zone",
-        JsonbValue::TimestampTz(_) => "timestamp with time zone",
+        JsonbValue::TimestampTz(_) | JsonbValue::TimestampTzWithOffset(_, _) => {
+            "timestamp with time zone"
+        }
         JsonbValue::Array(_) => "array",
         JsonbValue::Object(_) => "object",
     }

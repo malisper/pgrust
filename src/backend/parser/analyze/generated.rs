@@ -1,7 +1,8 @@
 use super::*;
+use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::include::nodes::primnodes::{
-    ExprArraySubscript, ScalarArrayOpExpr, SubLinkType, TABLE_OID_ATTR_NO, WindowFuncKind,
-    attrno_index, set_returning_call_exprs,
+    ExprArraySubscript, ScalarArrayOpExpr, ScalarFunctionImpl, SubLinkType, TABLE_OID_ATTR_NO,
+    WindowFuncKind, attrno_index, set_returning_call_exprs,
 };
 
 pub(crate) fn validate_generated_columns(
@@ -24,7 +25,7 @@ pub(crate) fn bind_generated_expr(
     let Some(column) = desc.columns.get(column_index) else {
         return Ok(None);
     };
-    let Some(_kind) = column.generated else {
+    let Some(kind) = column.generated else {
         return Ok(None);
     };
     let sql = column.default_expr.as_deref().ok_or_else(|| {
@@ -37,6 +38,17 @@ pub(crate) fn bind_generated_expr(
     let scope = scope_for_relation(None, desc);
     let bound = bind_expr_with_outer_and_ctes(&parsed, &scope, catalog, &[], None, &[])?;
     validate_generated_expr(&bound, desc, column_index, catalog)?;
+    if kind == ColumnGeneratedKind::Virtual && expr_uses_user_defined_function(&bound, catalog) {
+        return Err(ParseError::DetailedError {
+            message: "generation expression uses user-defined function".into(),
+            detail: Some(
+                "Virtual generated columns that make use of user-defined functions are not yet supported."
+                    .into(),
+            ),
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
     let from_type = infer_sql_expr_type(&parsed, &scope, catalog, &[], None);
     Ok(Some(coerce_bound_expr(bound, from_type, column.sql_type)))
 }
@@ -308,6 +320,159 @@ fn ensure_immutable_function(proc_oid: u32, catalog: &dyn CatalogLookup) -> Resu
         return Ok(());
     }
     Err(generation_error("generation expression is not immutable"))
+}
+
+fn function_oid_is_user_defined(proc_oid: u32, catalog: &dyn CatalogLookup) -> bool {
+    proc_oid != 0
+        && catalog
+            .proc_row_by_oid(proc_oid)
+            .is_some_and(|row| row.pronamespace != PG_CATALOG_NAMESPACE_OID)
+}
+
+fn expr_uses_user_defined_function(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
+    match expr {
+        Expr::Func(func) => {
+            matches!(func.implementation, ScalarFunctionImpl::UserDefined { .. })
+                || function_oid_is_user_defined(func.funcid, catalog)
+                || func
+                    .args
+                    .iter()
+                    .any(|expr| expr_uses_user_defined_function(expr, catalog))
+        }
+        Expr::Op(op) => {
+            function_oid_is_user_defined(op.opfuncid, catalog)
+                || op
+                    .args
+                    .iter()
+                    .any(|expr| expr_uses_user_defined_function(expr, catalog))
+        }
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|expr| expr_uses_user_defined_function(expr, catalog)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(|expr| expr_uses_user_defined_function(expr, catalog))
+                || case_expr.args.iter().any(|arm| {
+                    expr_uses_user_defined_function(&arm.expr, catalog)
+                        || expr_uses_user_defined_function(&arm.result, catalog)
+                })
+                || expr_uses_user_defined_function(&case_expr.defresult, catalog)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_uses_user_defined_function(&saop.left, catalog)
+                || expr_uses_user_defined_function(&saop.right, catalog)
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(|expr| expr_uses_user_defined_function(expr, catalog)),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(|expr| expr_uses_user_defined_function(expr, catalog)),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_uses_user_defined_function(inner, catalog),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_uses_user_defined_function(expr, catalog)
+                || expr_uses_user_defined_function(pattern, catalog)
+                || escape
+                    .as_deref()
+                    .is_some_and(|expr| expr_uses_user_defined_function(expr, catalog))
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_uses_user_defined_function(left, catalog)
+                || expr_uses_user_defined_function(right, catalog)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|expr| expr_uses_user_defined_function(expr, catalog)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_uses_user_defined_function(expr, catalog)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_uses_user_defined_function(array, catalog)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| expr_uses_user_defined_function(expr, catalog))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| expr_uses_user_defined_function(expr, catalog))
+                })
+        }
+        Expr::Aggref(aggref) => {
+            aggref
+                .args
+                .iter()
+                .any(|expr| expr_uses_user_defined_function(expr, catalog))
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|entry| expr_uses_user_defined_function(&entry.expr, catalog))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(|expr| expr_uses_user_defined_function(expr, catalog))
+        }
+        Expr::WindowFunc(window_func) => match &window_func.kind {
+            WindowFuncKind::Aggregate(aggref) => aggref
+                .args
+                .iter()
+                .any(|expr| expr_uses_user_defined_function(expr, catalog)),
+            WindowFuncKind::Builtin(_) => window_func
+                .args
+                .iter()
+                .any(|expr| expr_uses_user_defined_function(expr, catalog)),
+        },
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_ref()
+            .is_some_and(|expr| expr_uses_user_defined_function(expr, catalog)),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_ref()
+                .is_some_and(|expr| expr_uses_user_defined_function(expr, catalog))
+                || subplan
+                    .args
+                    .iter()
+                    .any(|expr| expr_uses_user_defined_function(expr, catalog))
+        }
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(|expr| expr_uses_user_defined_function(expr, catalog)),
+        Expr::Var(_) | Expr::Const(_) | Expr::Param(_) | Expr::CaseTest(_) | Expr::Random => false,
+        Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
 }
 
 fn expr_references_column_inner(expr: &Expr, column_index: usize) -> bool {

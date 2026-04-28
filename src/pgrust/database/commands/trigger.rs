@@ -45,7 +45,40 @@ impl Database {
         constraint: &PgConstraintRow,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<CommandId, ExecError> {
-        let rows = foreign_key_trigger_rows(constraint);
+        self.create_foreign_key_trigger_rows_in_transaction(
+            client_id,
+            xid,
+            cid,
+            foreign_key_trigger_rows(constraint),
+            catalog_effects,
+        )
+    }
+
+    pub(super) fn create_foreign_key_check_triggers_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        constraint: &PgConstraintRow,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        self.create_foreign_key_trigger_rows_in_transaction(
+            client_id,
+            xid,
+            cid,
+            foreign_key_check_trigger_rows(constraint),
+            catalog_effects,
+        )
+    }
+
+    fn create_foreign_key_trigger_rows_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        rows: Vec<PgTriggerRow>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let next_cid = cid.saturating_add(rows.len() as u32);
         let ctx = CatalogWriteContext {
@@ -98,6 +131,55 @@ impl Database {
                 .catalog
                 .write()
                 .drop_trigger_mvcc(row.tgrelid, &row.tgname, &ctx)
+                .map_err(map_catalog_error)?
+                .1;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
+        if !catalog_effects.is_empty() {
+            self.plan_cache.invalidate_all();
+        }
+        Ok(())
+    }
+
+    pub(super) fn alter_foreign_key_trigger_deferrability_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        constraint: &PgConstraintRow,
+        catalog: &dyn CatalogLookup,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let mut rows = catalog.trigger_rows_for_relation(constraint.conrelid);
+        if constraint.confrelid != constraint.conrelid {
+            rows.extend(catalog.trigger_rows_for_relation(constraint.confrelid));
+        }
+        rows.retain(|row| {
+            row.tgisinternal
+                && row.tgconstraint == constraint.oid
+                && foreign_key_trigger_deferrability_follows_constraint(row.tgfoid)
+                && (row.tgdeferrable != constraint.condeferrable
+                    || row.tginitdeferred != constraint.condeferred)
+        });
+        let interrupts = self.interrupt_state(client_id);
+        for (index, row) in rows.into_iter().enumerate() {
+            let mut replacement = row.clone();
+            replacement.tgdeferrable = constraint.condeferrable;
+            replacement.tginitdeferred = constraint.condeferred;
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: cid.saturating_add(index as u32),
+                client_id,
+                waiter: None,
+                interrupts: Arc::clone(&interrupts),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .replace_trigger_mvcc(&row, replacement, &ctx)
                 .map_err(map_catalog_error)?
                 .1;
             self.apply_catalog_mutation_effect_immediate(&effect)?;
@@ -359,6 +441,7 @@ impl Database {
             .trigger_rows_for_relation(parent_oid)
             .into_iter()
             .filter(trigger_row_is_row)
+            .filter(|row| !internal_constraint_trigger_row(row))
             .collect::<Vec<_>>();
         let mut effects = Vec::new();
         for parent_trigger in parent_triggers {
@@ -393,6 +476,7 @@ impl Database {
             .trigger_rows_for_relation(parent_oid)
             .into_iter()
             .filter(trigger_row_is_row)
+            .filter(|row| !internal_constraint_trigger_row(row))
             .map(|row| row.oid)
             .collect::<BTreeSet<_>>();
         if parent_trigger_oids.is_empty() {
@@ -1004,7 +1088,36 @@ fn cloned_partition_trigger_row(parent: &PgTriggerRow, child_oid: u32) -> PgTrig
     }
 }
 
+fn internal_constraint_trigger_row(row: &PgTriggerRow) -> bool {
+    row.tgisinternal && row.tgconstraint != 0
+}
+
 fn foreign_key_trigger_rows(constraint: &PgConstraintRow) -> Vec<PgTriggerRow> {
+    let mut rows = foreign_key_check_trigger_rows(constraint);
+    rows.extend([
+        foreign_key_trigger_row(
+            constraint,
+            constraint.confrelid,
+            constraint.conrelid,
+            foreign_key_delete_proc_oid(constraint.confdeltype),
+            TRIGGER_TYPE_ROW | TRIGGER_TYPE_DELETE,
+            "a",
+            3,
+        ),
+        foreign_key_trigger_row(
+            constraint,
+            constraint.confrelid,
+            constraint.conrelid,
+            foreign_key_update_proc_oid(constraint.confupdtype),
+            TRIGGER_TYPE_ROW | TRIGGER_TYPE_UPDATE,
+            "a",
+            4,
+        ),
+    ]);
+    rows
+}
+
+fn foreign_key_check_trigger_rows(constraint: &PgConstraintRow) -> Vec<PgTriggerRow> {
     vec![
         foreign_key_trigger_row(
             constraint,
@@ -1024,24 +1137,6 @@ fn foreign_key_trigger_rows(constraint: &PgConstraintRow) -> Vec<PgTriggerRow> {
             "c",
             2,
         ),
-        foreign_key_trigger_row(
-            constraint,
-            constraint.confrelid,
-            constraint.conrelid,
-            foreign_key_delete_proc_oid(constraint.confdeltype),
-            TRIGGER_TYPE_ROW | TRIGGER_TYPE_DELETE,
-            "a",
-            3,
-        ),
-        foreign_key_trigger_row(
-            constraint,
-            constraint.confrelid,
-            constraint.conrelid,
-            foreign_key_update_proc_oid(constraint.confupdtype),
-            TRIGGER_TYPE_ROW | TRIGGER_TYPE_UPDATE,
-            "a",
-            4,
-        ),
     ]
 }
 
@@ -1054,6 +1149,8 @@ fn foreign_key_trigger_row(
     prefix: &str,
     offset: u32,
 ) -> PgTriggerRow {
+    let deferrability_follows_constraint =
+        foreign_key_trigger_deferrability_follows_constraint(tgfoid);
     PgTriggerRow {
         oid: 0,
         tgrelid,
@@ -1070,8 +1167,8 @@ fn foreign_key_trigger_row(
         tgconstrrelid,
         tgconstrindid: constraint.conindid,
         tgconstraint: constraint.oid,
-        tgdeferrable: constraint.condeferrable,
-        tginitdeferred: constraint.condeferred,
+        tgdeferrable: deferrability_follows_constraint && constraint.condeferrable,
+        tginitdeferred: deferrability_follows_constraint && constraint.condeferred,
         tgnargs: 0,
         tgattr: Vec::new(),
         tgargs: Vec::new(),
@@ -1079,6 +1176,16 @@ fn foreign_key_trigger_row(
         tgoldtable: None,
         tgnewtable: None,
     }
+}
+
+fn foreign_key_trigger_deferrability_follows_constraint(tgfoid: u32) -> bool {
+    matches!(
+        tgfoid,
+        RI_FKEY_CHECK_INS_PROC_OID
+            | RI_FKEY_CHECK_UPD_PROC_OID
+            | RI_FKEY_NOACTION_DEL_PROC_OID
+            | RI_FKEY_NOACTION_UPD_PROC_OID
+    )
 }
 
 fn foreign_key_delete_proc_oid(action: char) -> u32 {

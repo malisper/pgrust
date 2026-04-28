@@ -182,6 +182,35 @@ fn build_simple_tlist_from_exprs(output_vars: &[Expr]) -> IndexedTlist {
     }
 }
 
+fn build_base_scan_tlist(
+    root: Option<&PlannerInfo>,
+    source_id: usize,
+    desc: &crate::include::nodes::primnodes::RelationDesc,
+) -> IndexedTlist {
+    let output_vars = slot_output_target(source_id, &desc.columns, |column| column.sql_type).exprs;
+    let mut tlist = build_simple_tlist_from_exprs(&output_vars);
+    if let Some(info) = root.and_then(|root| append_translation(root, source_id)) {
+        for (index, entry) in tlist.entries.iter_mut().enumerate() {
+            if info
+                .translated_vars
+                .get(index)
+                .is_some_and(|translated| translated == &output_vars[index])
+            {
+                entry.match_exprs = dedup_match_exprs(vec![
+                    entry.match_exprs[0].clone(),
+                    Expr::Var(Var {
+                        varno: info.parent_relid,
+                        varattno: user_attrno(index),
+                        varlevelsup: 0,
+                        vartype: entry.sql_type,
+                    }),
+                ]);
+            }
+        }
+    }
+    tlist
+}
+
 fn build_simple_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
     let output_vars = path.output_vars();
     let append_info = root
@@ -566,17 +595,15 @@ fn build_join_tlist(
 fn build_subquery_tlist(
     rtindex: usize,
     _query: &Query,
+    _input: &Path,
     output_columns: &[QueryColumn],
 ) -> IndexedTlist {
     IndexedTlist {
         entries: output_columns
             .iter()
             .enumerate()
-            .map(|(index, column)| IndexedTlistEntry {
-                index,
-                sql_type: column.sql_type,
-                ressortgroupref: 0,
-                match_exprs: dedup_match_exprs(vec![
+            .map(|(index, column)| {
+                let match_exprs = vec![
                     Expr::Var(Var {
                         varno: rtindex,
                         varattno: user_attrno(index),
@@ -584,7 +611,13 @@ fn build_subquery_tlist(
                         vartype: column.sql_type,
                     }),
                     slot_var(rte_slot_id(rtindex), user_attrno(index), column.sql_type),
-                ]),
+                ];
+                IndexedTlistEntry {
+                    index,
+                    sql_type: column.sql_type,
+                    ressortgroupref: 0,
+                    match_exprs: dedup_match_exprs(match_exprs),
+                }
             })
             .collect(),
     }
@@ -627,9 +660,10 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
         Path::SubqueryScan {
             rtindex,
             query,
+            input,
             output_columns,
             ..
-        } => build_subquery_tlist(*rtindex, query, output_columns),
+        } => build_subquery_tlist(*rtindex, query, input, output_columns),
         Path::NestedLoopJoin { left, right, .. }
         | Path::HashJoin { left, right, .. }
         | Path::MergeJoin { left, right, .. } => build_join_tlist(root, path, left, right),
@@ -1404,6 +1438,37 @@ fn rewrite_expr_for_append_rel(
     }
 }
 
+fn fix_immediate_subquery_output_expr(
+    root: Option<&PlannerInfo>,
+    expr: &Expr,
+    input: &Path,
+    input_tlist: &IndexedTlist,
+) -> Option<Expr> {
+    let Path::SubqueryScan {
+        input: subquery_input,
+        ..
+    } = input
+    else {
+        return None;
+    };
+    let input_exprs = subquery_input.semantic_output_vars();
+    input_exprs
+        .iter()
+        .enumerate()
+        .find_map(|(index, input_expr)| {
+            let expanded =
+                fully_expand_output_expr_with_root(root, input_expr.clone(), subquery_input);
+            (exprs_equivalent(root, input_expr, expr) || exprs_equivalent(root, &expanded, expr))
+                .then(|| {
+                    input_tlist
+                        .entries
+                        .get(index)
+                        .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
+                })
+                .flatten()
+        })
+}
+
 fn rewrite_appendrel_expr_for_input_path(root: &PlannerInfo, expr: Expr, path: &Path) -> Expr {
     path_single_relid(path)
         .and_then(|relid| append_translation(root, relid))
@@ -1429,6 +1494,9 @@ fn fix_upper_expr_for_input(
                 return translated_rewritten;
             }
         }
+    }
+    if let Some(rewritten) = fix_immediate_subquery_output_expr(root, &expr, input, input_tlist) {
+        return rewritten;
     }
     expr
 }
@@ -1940,7 +2008,9 @@ fn lower_set_returning_call(
             output_columns,
             with_ordinality,
         },
-        sql @ SetReturningCall::SqlJsonTable(_) => sql.map_exprs(|arg| lower_expr(ctx, arg, mode)),
+        sql @ (SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)) => {
+            sql.map_exprs(|arg| lower_expr(ctx, arg, mode))
+        }
     }
 }
 
@@ -2163,7 +2233,7 @@ fn fix_set_returning_call_upper_exprs(
             output_columns,
             with_ordinality,
         },
-        sql @ SetReturningCall::SqlJsonTable(_) => {
+        sql @ (SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)) => {
             sql.map_exprs(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
         }
     }
@@ -2922,9 +2992,11 @@ fn validate_set_returning_call(
         | SetReturningCall::UserDefined { args, .. } => args
             .iter()
             .for_each(|arg| validate_executable_expr(arg, plan_node, field, allowed_exec_params)),
-        SetReturningCall::SqlJsonTable(_) => set_returning_call_exprs(call)
-            .iter()
-            .for_each(|arg| validate_executable_expr(arg, plan_node, field, allowed_exec_params)),
+        SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_) => {
+            set_returning_call_exprs(call).iter().for_each(|arg| {
+                validate_executable_expr(arg, plan_node, field, allowed_exec_params)
+            })
+        }
     }
 }
 
@@ -3248,7 +3320,7 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
 
 fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
     match expr {
-        Expr::Var(var) if is_executor_special_varno(var.varno) => {
+        Expr::Var(var) if is_executor_special_varno(var.varno) && var.varlevelsup == 0 => {
             panic!("planner path contains executor-only Var in {path_node}.{field}: {var:?}")
         }
         Expr::Param(Param {
@@ -3447,9 +3519,11 @@ fn validate_planner_set_returning_call(
         | SetReturningCall::UserDefined { args, .. } => args
             .iter()
             .for_each(|arg| validate_planner_expr(arg, path_node, field)),
-        SetReturningCall::SqlJsonTable(_) => set_returning_call_exprs(call)
-            .iter()
-            .for_each(|arg| validate_planner_expr(arg, path_node, field)),
+        SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_) => {
+            set_returning_call_exprs(call)
+                .iter()
+                .for_each(|arg| validate_planner_expr(arg, path_node, field))
+        }
     }
 }
 
@@ -4055,9 +4129,7 @@ fn set_bitmap_index_scan_references(
     index_quals: Vec<Expr>,
 ) -> Plan {
     let keys = lower_index_scan_keys(ctx, keys, LowerMode::Scalar);
-    let scan_tlist = build_simple_tlist_from_exprs(
-        &slot_output_target(source_id, &desc.columns, |column| column.sql_type).exprs,
-    );
+    let scan_tlist = build_base_scan_tlist(ctx.root, source_id, &desc);
     let index_quals = index_quals
         .into_iter()
         .map(|expr| {
@@ -4115,9 +4187,7 @@ fn set_bitmap_heap_scan_references(
     recheck_qual: Vec<Expr>,
     filter_qual: Vec<Expr>,
 ) -> Plan {
-    let scan_tlist = build_simple_tlist_from_exprs(
-        &slot_output_target(source_id, &desc.columns, |column| column.sql_type).exprs,
-    );
+    let scan_tlist = build_base_scan_tlist(ctx.root, source_id, &desc);
     let recheck_qual = recheck_qual
         .into_iter()
         .map(|expr| {

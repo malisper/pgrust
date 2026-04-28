@@ -21,14 +21,17 @@ use crate::include::nodes::parsenodes::{
     CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement,
     CreateCompositeTypeStatement, CreateShellTypeStatement, CreateTriggerStatement,
     CreateTypeStatement, DropAggregateStatement, DropCastStatement, DropTriggerStatement,
-    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef,
-    InsertSource, InsertStatement, JoinTreeNode, OverridingKind, PartitionStrategy,
-    PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
-    RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
-    SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec,
-    TriggerLevel, TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
+    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege,
+    GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
+    OverridingKind, PartitionStrategy, PublicationObjectSpec, PublicationOption,
+    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
+    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
+    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
+    TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
 };
-use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
+use crate::include::nodes::primnodes::{
+    AttrNumber, INNER_VAR, JoinType, OUTER_VAR, Var, is_system_attr,
+};
 
 fn desc() -> RelationDesc {
     RelationDesc {
@@ -73,6 +76,7 @@ fn parse_create_publication_mixed_targets_and_options() {
         Statement::CreatePublication(stmt) => {
             assert_eq!(stmt.publication_name, "pub");
             assert!(!stmt.target.for_all_tables);
+            assert!(!stmt.target.for_all_sequences);
             assert_eq!(stmt.target.objects.len(), 2);
             assert!(matches!(
                 &stmt.target.objects[0],
@@ -97,6 +101,104 @@ fn parse_create_publication_mixed_targets_and_options() {
             );
         }
         other => panic!("expected create publication, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_create_publication_all_sequences_targets() {
+    let stmt = parse_statement("create publication pub for all sequences, all tables").unwrap();
+    match stmt {
+        Statement::CreatePublication(stmt) => {
+            assert_eq!(stmt.publication_name, "pub");
+            assert!(stmt.target.for_all_sequences);
+            assert!(stmt.target.for_all_tables);
+            assert!(stmt.target.objects.is_empty());
+        }
+        other => panic!("expected create publication, got {other:?}"),
+    }
+
+    let err =
+        parse_statement("create publication pub for all sequences, all tables, all sequences")
+            .unwrap_err();
+    assert!(matches!(
+        err.unpositioned(),
+        ParseError::DetailedError { message, detail, .. }
+            if message == "invalid publication object list"
+                && detail.as_deref() == Some("ALL SEQUENCES can be specified only once.")
+    ));
+}
+
+#[test]
+fn parse_create_publication_for_all_tables_except() {
+    let stmt = parse_statement(
+        "create publication pub for all tables except (table pub_test.widgets, table only widgets)",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CreatePublication(stmt) => {
+            assert!(stmt.target.for_all_tables);
+            assert!(!stmt.target.for_all_sequences);
+            assert!(stmt.target.objects.is_empty());
+            assert_eq!(stmt.target.except_tables.len(), 2);
+            assert_eq!(
+                stmt.target.except_tables[0].relation_name,
+                "pub_test.widgets"
+            );
+            assert!(!stmt.target.except_tables[0].only);
+            assert_eq!(stmt.target.except_tables[1].relation_name, "widgets");
+            assert!(stmt.target.except_tables[1].only);
+        }
+        other => panic!("expected create publication, got {other:?}"),
+    }
+
+    let err =
+        parse_statement("create publication pub for all tables except (widgets)").unwrap_err();
+    assert!(matches!(
+        err.unpositioned(),
+        ParseError::DetailedError { message, detail, .. }
+            if message == "invalid publication object list"
+                && detail.as_deref() == Some(
+                    "One of TABLE or TABLES IN SCHEMA must be specified before a standalone table or schema name."
+                )
+    ));
+}
+
+#[test]
+fn parse_alter_publication_set_all_sequences() {
+    let stmt = parse_statement("alter publication pub set all sequences").unwrap();
+    match stmt {
+        Statement::AlterPublication(stmt) => {
+            assert_eq!(stmt.publication_name, "pub");
+            assert!(matches!(
+                stmt.action,
+                AlterPublicationAction::SetObjects(target)
+                    if target.for_all_sequences
+                        && !target.for_all_tables
+                        && target.objects.is_empty()
+            ));
+        }
+        other => panic!("expected alter publication, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_alter_publication_set_all_tables_except() {
+    let stmt =
+        parse_statement("alter publication pub set all tables except (table widgets)").unwrap();
+    match stmt {
+        Statement::AlterPublication(stmt) => {
+            assert_eq!(stmt.publication_name, "pub");
+            assert!(matches!(
+                stmt.action,
+                AlterPublicationAction::SetObjects(target)
+                    if target.for_all_tables
+                        && !target.for_all_sequences
+                        && target.objects.is_empty()
+                        && target.except_tables.len() == 1
+                        && target.except_tables[0].relation_name == "widgets"
+            ));
+        }
+        other => panic!("expected alter publication, got {other:?}"),
     }
 }
 
@@ -255,6 +357,7 @@ fn parse_publication_describe_queries() {
         "SELECT pubname AS \"Name\", \
          pg_catalog.pg_get_userbyid(pubowner) AS \"Owner\", \
          puballtables AS \"All tables\", \
+         puballsequences AS \"All sequences\", \
          pubinsert AS \"Inserts\", \
          pubupdate AS \"Updates\", \
          pubdelete AS \"Deletes\", \
@@ -269,7 +372,7 @@ fn parse_publication_describe_queries() {
     parse_statement(
         "SELECT oid, pubname, \
          pg_catalog.pg_get_userbyid(pubowner) AS owner, \
-         puballtables, pubinsert, pubupdate, pubdelete, pubtruncate, \
+         puballtables, puballsequences, pubinsert, pubupdate, pubdelete, pubtruncate, \
          (CASE pubgencols WHEN 'n' THEN 'none' WHEN 's' THEN 'stored' END) AS \"Generated columns\", \
          pubviaroot \
          FROM pg_catalog.pg_publication \
@@ -3387,9 +3490,18 @@ fn parse_alter_table_constraint_statements() {
             if_exists: false,
             only: false,
             table_name: "pets".into(),
-            index_name: "pets_pk".into(),
+            identity: crate::include::nodes::parsenodes::ReplicaIdentityKind::Index(
+                "pets_pk".into()
+            ),
         })
     );
+    assert!(matches!(
+        parse_statement("alter table pets replica identity full").unwrap(),
+        Statement::AlterTableReplicaIdentity(AlterTableReplicaIdentityStatement {
+            identity: crate::include::nodes::parsenodes::ReplicaIdentityKind::Full,
+            ..
+        })
+    ));
 
     let stmt =
         parse_statement("alter table items add constraint items_key unique using index items_idx")
@@ -3475,6 +3587,8 @@ fn parse_alter_table_constraint_statements() {
             only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
+            not_valid: false,
+            no_inherit: false,
             deferrable: Some(true),
             initially_deferred: Some(true),
             enforced: None,
@@ -3492,9 +3606,29 @@ fn parse_alter_table_constraint_statements() {
             only: false,
             table_name: "items".into(),
             constraint_name: "items_id_check".into(),
+            not_valid: false,
+            no_inherit: false,
             deferrable: Some(false),
             initially_deferred: None,
             enforced: Some(false),
+        })
+    );
+
+    let stmt =
+        parse_statement("alter table items alter constraint items_id_check not valid no inherit")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterConstraint(AlterTableAlterConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            constraint_name: "items_id_check".into(),
+            not_valid: true,
+            no_inherit: true,
+            deferrable: None,
+            initially_deferred: None,
+            enforced: None,
         })
     );
 
@@ -3503,8 +3637,8 @@ fn parse_alter_table_constraint_statements() {
             .unwrap_err();
     assert!(matches!(
         err,
-        ParseError::FeatureNotSupportedMessage(message)
-            if message == "multiple ENFORCED/NOT ENFORCED clauses not allowed"
+        ParseError::DetailedError { message, .. }
+            if message == "conflicting constraint properties"
     ));
 
     let stmt =
@@ -4514,6 +4648,7 @@ fn parse_alter_group_add_user_statement() {
             role_names: vec!["regress_group".into()],
             grantee_names: vec!["regress_member".into()],
             admin_option: false,
+            admin_option_specified: false,
             inherit_option: None,
             set_option: None,
             granted_by: None,
@@ -4533,6 +4668,7 @@ fn parse_multiline_alter_group_add_user_statement() {
             role_names: vec!["regress_group".into()],
             grantee_names: vec!["regress_member".into(), "regress_member2".into()],
             admin_option: false,
+            admin_option_specified: false,
             inherit_option: None,
             set_option: None,
             granted_by: None,
@@ -4846,6 +4982,52 @@ fn parse_grant_usage_on_type_statement() {
 }
 
 #[test]
+fn parse_grant_usage_on_domain_statement() {
+    let stmt =
+        parse_statement("grant usage on domain priv_testdomain1 to regress_priv_user2").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnType,
+            columns: Vec::new(),
+            object_names: vec!["priv_testdomain1".into()],
+            grantee_names: vec!["regress_priv_user2".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_all_on_type_statement() {
+    let stmt = parse_statement("grant all privileges on type custom_t to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnType,
+            columns: Vec::new(),
+            object_names: vec!["custom_t".into()],
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_usage_on_language_statement() {
+    let stmt = parse_statement("grant usage on language sql to regress_priv_user1").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnLanguage,
+            columns: Vec::new(),
+            object_names: vec!["sql".into()],
+            grantee_names: vec!["regress_priv_user1".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
 fn parse_grant_usage_on_foreign_data_wrapper_statement() {
     let stmt =
         parse_statement("grant usage on foreign data wrapper foo to regress_test_role").unwrap();
@@ -4908,6 +5090,30 @@ fn parse_grant_column_select_and_insert_on_table_statements() {
         })
     );
 
+    let stmt = parse_statement("grant insert (two) on atest5 to regress_priv_user4").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::InsertOnTable,
+            columns: vec!["two".into()],
+            object_names: vec!["atest5".into()],
+            grantee_names: vec!["regress_priv_user4".into()],
+            with_grant_option: false,
+        })
+    );
+
+    let stmt = parse_statement("grant select (one,two) on atest6 to regress_priv_user4").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::SelectOnTable,
+            columns: vec!["one".into(), "two".into()],
+            object_names: vec!["atest6".into()],
+            grantee_names: vec!["regress_priv_user4".into()],
+            with_grant_option: false,
+        })
+    );
+
     let stmt = parse_statement("grant insert on key_desc to regress_insert_other_user").unwrap();
     assert_eq!(
         stmt,
@@ -4916,6 +5122,52 @@ fn parse_grant_column_select_and_insert_on_table_statements() {
             columns: Vec::new(),
             object_names: vec!["key_desc".into()],
             grantee_names: vec!["regress_insert_other_user".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_mixed_column_privileges_on_table_statement() {
+    let stmt = parse_statement(
+        "grant select (one), insert (two), update (three) on atest5 to regress_priv_user4",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::TableColumnPrivileges(vec![
+                GrantTableColumnPrivilege {
+                    privilege: GrantObjectPrivilege::SelectOnTable,
+                    columns: vec!["one".into()],
+                },
+                GrantTableColumnPrivilege {
+                    privilege: GrantObjectPrivilege::InsertOnTable,
+                    columns: vec!["two".into()],
+                },
+                GrantTableColumnPrivilege {
+                    privilege: GrantObjectPrivilege::UpdateOnTable,
+                    columns: vec!["three".into()],
+                },
+            ]),
+            columns: Vec::new(),
+            object_names: vec!["atest5".into()],
+            grantee_names: vec!["regress_priv_user4".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_on_table_to_group_statement() {
+    let stmt = parse_statement("grant delete on atest3 to group regress_priv_group2").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::DeleteOnTable,
+            columns: Vec::new(),
+            object_names: vec!["atest3".into()],
+            grantee_names: vec!["regress_priv_group2".into()],
             with_grant_option: false,
         })
     );
@@ -5003,6 +5255,22 @@ fn parse_grant_execute_on_function_statement() {
             privilege: GrantObjectPrivilege::ExecuteOnFunction,
             columns: Vec::new(),
             object_names: vec!["f_leak(text)".into()],
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_all_on_function_statement() {
+    let stmt =
+        parse_statement("grant all privileges on function priv_testfunc1(int) to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::ExecuteOnFunction,
+            columns: Vec::new(),
+            object_names: vec!["priv_testfunc1(int)".into()],
             grantee_names: vec!["public".into()],
             with_grant_option: false,
         })
@@ -5098,6 +5366,79 @@ fn parse_revoke_usage_on_type_statement() {
 }
 
 #[test]
+fn parse_revoke_usage_on_domain_statement() {
+    let stmt = parse_statement("revoke usage on domain priv_testdomain1 from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnType,
+            columns: Vec::new(),
+            object_names: vec!["priv_testdomain1".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_all_on_domain_statement() {
+    let stmt = parse_statement("revoke all on domain priv_testdomain1 from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::UsageOnType,
+            columns: Vec::new(),
+            object_names: vec!["priv_testdomain1".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_usage_on_language_statement() {
+    let stmt = parse_statement("revoke all privileges on language sql from public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::AllPrivilegesOnLanguage,
+            columns: Vec::new(),
+            object_names: vec!["sql".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_revoke_column_update_from_group_statement() {
+    let stmt =
+        parse_statement("revoke update (three) on atest5 from group regress_priv_group2").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::UpdateOnTable,
+            columns: vec!["three".into()],
+            object_names: vec!["atest5".into()],
+            grantee_names: vec!["regress_priv_group2".into()],
+            cascade: false,
+        })
+    );
+
+    let stmt = parse_statement("revoke all (one,two) on atest5 from regress_priv_user4").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::TablePrivileges("arwx".into()),
+            columns: vec!["one".into(), "two".into()],
+            object_names: vec!["atest5".into()],
+            grantee_names: vec!["regress_priv_user4".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
 fn parse_revoke_all_on_foreign_data_wrapper_statement() {
     let stmt =
         parse_statement("revoke all on foreign data wrapper foo from regress_test_role").unwrap();
@@ -5129,6 +5470,22 @@ fn parse_revoke_execute_on_function_statement() {
 }
 
 #[test]
+fn parse_revoke_all_on_function_statement() {
+    let stmt = parse_statement("revoke all privileges on function priv_testfunc1(int) from public")
+        .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeObject(RevokeObjectStatement {
+            privilege: GrantObjectPrivilege::ExecuteOnFunction,
+            columns: Vec::new(),
+            object_names: vec!["priv_testfunc1(int)".into()],
+            grantee_names: vec!["public".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
 fn parse_grant_role_membership_with_options_statement() {
     let stmt =
         parse_statement("grant regress_tenant2 to regress_createrole with inherit true, set false")
@@ -5139,6 +5496,7 @@ fn parse_grant_role_membership_with_options_statement() {
             role_names: vec!["regress_tenant2".into()],
             grantee_names: vec!["regress_createrole".into()],
             admin_option: false,
+            admin_option_specified: false,
             inherit_option: Some(true),
             set_option: Some(false),
             granted_by: None,
@@ -5159,6 +5517,7 @@ fn parse_grant_role_membership_granted_by_statement() {
             role_names: vec!["regress_tenant2".into()],
             grantee_names: vec!["regress_createrole".into()],
             admin_option: true,
+            admin_option_specified: true,
             inherit_option: None,
             set_option: None,
             granted_by: Some(RoleGrantorSpec::CurrentRole),
@@ -10458,6 +10817,115 @@ fn bind_update_from_uses_source_columns_in_set_where_and_returning() {
     assert_eq!(bound.returning.len(), 2);
 }
 
+fn assert_returning_var(expr: &Expr, varno: usize, attno: AttrNumber) {
+    match expr {
+        Expr::Var(Var {
+            varno: actual_varno,
+            varattno,
+            varlevelsup: 0,
+            ..
+        }) if *actual_varno == varno && *varattno == attno => {}
+        other => panic!("expected Var(varno={varno}, attno={attno}), got {other:?}"),
+    }
+}
+
+fn assert_returning_row(expr: &Expr, varno: usize, attnos: &[AttrNumber]) {
+    let Expr::Row { fields, .. } = expr else {
+        panic!("expected row expression, got {expr:?}");
+    };
+    assert_eq!(fields.len(), attnos.len());
+    for ((_, field), attno) in fields.iter().zip(attnos.iter().copied()) {
+        assert_returning_var(field, varno, attno);
+    }
+}
+
+struct ReturningTestCatalog {
+    relation: BoundRelation,
+}
+
+impl CatalogLookup for ReturningTestCatalog {
+    fn lookup_any_relation(&self, _name: &str) -> Option<BoundRelation> {
+        Some(self.relation.clone())
+    }
+
+    fn lookup_relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        (relation_oid == self.relation.relation_oid).then(|| self.relation.clone())
+    }
+
+    fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.lookup_relation_by_oid(relation_oid)
+    }
+}
+
+fn returning_test_catalog() -> ReturningTestCatalog {
+    ReturningTestCatalog {
+        relation: BoundRelation {
+            rel: crate::RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 15000,
+            },
+            relation_oid: 50000,
+            toast: None,
+            namespace_oid: 11,
+            owner_oid: BOOTSTRAP_SUPERUSER_OID,
+            of_type_oid: 0,
+            relpersistence: 'p',
+            relkind: 'r',
+            relispopulated: true,
+            relispartition: false,
+            relpartbound: None,
+            desc: desc(),
+            partitioned_table: None,
+        },
+    }
+}
+
+#[test]
+fn bind_insert_returning_exposes_old_and_new_pseudo_rows() {
+    let catalog = returning_test_catalog();
+    let stmt = match parse_statement(
+        "insert into people (id, name) values (1, 'alice') returning old, new, old.*, new.*",
+    )
+    .unwrap()
+    {
+        Statement::Insert(stmt) => stmt,
+        other => panic!("expected insert statement, got {other:?}"),
+    };
+    let bound = bind_insert(&stmt, &catalog).unwrap();
+    assert_eq!(bound.returning.len(), 8);
+    assert_returning_row(&bound.returning[0].expr, OUTER_VAR, &[1, 2, 3]);
+    assert_returning_row(&bound.returning[1].expr, INNER_VAR, &[1, 2, 3]);
+    for (target, attno) in bound.returning[2..5].iter().zip(1..) {
+        assert_returning_var(&target.expr, OUTER_VAR, attno);
+    }
+    for (target, attno) in bound.returning[5..8].iter().zip(1..) {
+        assert_returning_var(&target.expr, INNER_VAR, attno);
+    }
+}
+
+#[test]
+fn bind_update_and_delete_returning_expose_old_and_new_pseudo_rows() {
+    let catalog = returning_test_catalog();
+    let update = match parse_statement("update people set name = 'bob' returning old.id, new.name")
+        .unwrap()
+    {
+        Statement::Update(stmt) => stmt,
+        other => panic!("expected update statement, got {other:?}"),
+    };
+    let bound_update = bind_update(&update, &catalog).unwrap();
+    assert_returning_var(&bound_update.returning[0].expr, OUTER_VAR, 1);
+    assert_returning_var(&bound_update.returning[1].expr, INNER_VAR, 2);
+
+    let delete = match parse_statement("delete from people returning old.id, new.id").unwrap() {
+        Statement::Delete(stmt) => stmt,
+        other => panic!("expected delete statement, got {other:?}"),
+    };
+    let bound_delete = bind_delete(&delete, &catalog).unwrap();
+    assert_returning_var(&bound_delete.returning[0].expr, OUTER_VAR, 1);
+    assert_returning_var(&bound_delete.returning[1].expr, INNER_VAR, 1);
+}
+
 #[test]
 fn bind_update_alias_hides_base_table_name() {
     let mut catalog = catalog();
@@ -12803,6 +13271,83 @@ fn lower_create_table_preserves_key_constraint_deferrability() {
             && action.deferrable
             && !action.initially_deferred
     }));
+}
+
+#[test]
+fn lower_create_table_uses_foreign_key_column_errors() {
+    let catalog = catalog_with_people_primary_key();
+
+    let stmt = parse_statement(
+        "create table fktable (
+            ftest1 int4,
+            constraint fkfail1 foreign key (ftest2) references people
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let err = lower_create_table(&ct, &catalog).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ParseError::DetailedError {
+                message,
+                sqlstate,
+                ..
+            } if message == "column \"ftest2\" referenced in foreign key constraint does not exist"
+                && *sqlstate == "42703"
+        ),
+        "unexpected error: {err:?}"
+    );
+
+    let stmt = parse_statement(
+        "create table fktable (
+            ftest1 int4,
+            constraint fkfail1 foreign key (tableoid) references people(id)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let err = lower_create_table(&ct, &catalog).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ParseError::DetailedError {
+                message,
+                sqlstate,
+                ..
+            } if message == "system columns cannot be used in foreign keys"
+                && *sqlstate == "0A000"
+        ),
+        "unexpected error: {err:?}"
+    );
+
+    let stmt = parse_statement(
+        "create table fktable (
+            ftest1 int4,
+            constraint fkfail1 foreign key (ftest1) references people(tableoid)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let err = lower_create_table(&ct, &catalog).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ParseError::DetailedError {
+                message,
+                sqlstate,
+                ..
+            } if message == "system columns cannot be used in foreign keys"
+                && *sqlstate == "0A000"
+        ),
+        "unexpected error: {err:?}"
+    );
 }
 
 #[test]

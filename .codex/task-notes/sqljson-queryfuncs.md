@@ -42,10 +42,18 @@ database command modules.
 Tests run:
 cargo fmt
 scripts/cargo_isolated.sh check
+scripts/cargo_isolated.sh test --lib --quiet jsonpath_exists_propagates_non_silent_errors
+scripts/cargo_isolated.sh test --lib --quiet jsonpath
 CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm scripts/run_regression.sh --test sqljson_queryfuncs --timeout 120 --port 5580 --results-dir /tmp/pgrust_regress_sqljson_queryfuncs_final
 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm scripts/run_regression.sh --test sqljson_queryfuncs --timeout 120 --port 5591 --results-dir /tmp/pgrust_regress_sqljson_queryfuncs_query_default_fix
 
 Remaining:
+2026-04-28 PR 291 update: merged current origin/perf-optimization into the
+PR branch, resolved JSONPath/SQL-JSON conflicts, preserved base fatal jsonpath
+variable errors, covered new SQL/JSON nodes in generated/publication walkers,
+and kept JSONPath datetime mutability exhaustive for newer filter/string method
+variants. Focused JSONPath tests and cargo check pass on the merged tree.
+
 sqljson_queryfuncs now completes without server panic but still fails:
 259/314 queries matched, 400 diff lines. Remaining mismatches are mostly
 deeper or broader compatibility gaps: SQL-visible LINE/caret formatting,

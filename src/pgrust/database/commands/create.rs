@@ -32,13 +32,14 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::include::nodes::primnodes::{
     Expr, QueryColumn, RelationDesc, ScalarFunctionImpl, SetReturningCall, SqlJsonTableBehavior,
-    SqlJsonTableColumnKind, Var, attrno_index,
+    SqlJsonTableColumnKind, SqlXmlTableColumnKind, Var, attrno_index,
 };
 use crate::pgrust::database::ddl::{append_view_check_option, format_sql_type_name};
 use crate::pgrust::database::{
     SequenceData, SequenceRuntime, default_sequence_name_base, format_nextval_default_oid,
     initial_sequence_state, resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
 };
+use crate::pl::plpgsql::validate_create_function_body;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CreatedOwnedSequence {
@@ -307,11 +308,7 @@ fn validate_partitioned_table_ddl(
     table_name: &str,
     lowered: &crate::backend::parser::LoweredCreateTable,
 ) -> Result<(), ExecError> {
-    if lowered.partition_spec.is_some() && !lowered.foreign_key_actions.is_empty() {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
-            "foreign keys on partitioned table \"{table_name}\""
-        ))));
-    }
+    let _ = (table_name, lowered);
     Ok(())
 }
 
@@ -840,6 +837,24 @@ fn collect_set_returning_call_rule_dependencies(
             }
             collect_sql_json_behavior_rule_dependencies(&table.on_error, query, catalog, deps);
         }
+        SetReturningCall::SqlXmlTable(table) => {
+            collect_expr_rule_dependencies(&table.row_path, query, catalog, deps);
+            collect_expr_rule_dependencies(&table.document, query, catalog, deps);
+            for namespace in &table.namespaces {
+                collect_expr_rule_dependencies(&namespace.uri, query, catalog, deps);
+            }
+            for column in &table.columns {
+                collect_sql_type_rule_dependency(column.sql_type, deps);
+                if let SqlXmlTableColumnKind::Regular { path, default, .. } = &column.kind {
+                    if let Some(path) = path {
+                        collect_expr_rule_dependencies(path, query, catalog, deps);
+                    }
+                    if let Some(default) = default {
+                        collect_expr_rule_dependencies(default, query, catalog, deps);
+                    }
+                }
+            }
+        }
         SetReturningCall::PgLockStatus { .. } => {}
     }
 }
@@ -869,7 +884,9 @@ fn set_returning_proc_oid(call: &SetReturningCall) -> Option<u32> {
         | SetReturningCall::PgLockStatus { func_oid, .. }
         | SetReturningCall::TxidSnapshotXip { func_oid, .. } => *func_oid,
         SetReturningCall::UserDefined { proc_oid, .. } => *proc_oid,
-        SetReturningCall::TextSearchTableFunction { .. } | SetReturningCall::SqlJsonTable(_) => 0,
+        SetReturningCall::TextSearchTableFunction { .. }
+        | SetReturningCall::SqlJsonTable(_)
+        | SetReturningCall::SqlXmlTable(_) => 0,
     };
     (proc_oid != 0).then_some(proc_oid)
 }
@@ -2117,11 +2134,13 @@ impl Database {
                             && index.index_meta.indkey == referenced_attnums
                     })
                     .ok_or_else(|| {
-                        ExecError::Parse(ParseError::UnexpectedToken {
-                            expected: "referenced UNIQUE or PRIMARY KEY index",
-                            actual: format!(
-                                "table \"{table_name}\" lacks an exact matching unique key"
+                        ExecError::Parse(ParseError::DetailedError {
+                            message: format!(
+                                "there is no unique constraint matching given keys for referenced table \"{table_name}\""
                             ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42830",
                         })
                     })?;
                 (referenced_relation, referenced_index)
@@ -2187,18 +2206,25 @@ impl Database {
                     foreign_key_match_code(action.match_type),
                     delete_set_attnums.as_deref(),
                     action.period.is_some(),
+                    0,
+                    true,
+                    0,
                     &constraint_ctx,
                 )
                 .map_err(map_catalog_error)?;
             self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
             catalog_effects.push(constraint_effect);
-            next_foreign_key_cid = self.create_foreign_key_triggers_in_transaction(
-                client_id,
-                xid,
-                constraint_cid.saturating_add(1),
-                &constraint_row,
-                catalog_effects,
-            )?;
+            next_foreign_key_cid = if action.enforced {
+                self.create_foreign_key_triggers_in_transaction(
+                    client_id,
+                    xid,
+                    constraint_cid.saturating_add(1),
+                    &constraint_row,
+                    catalog_effects,
+                )?
+            } else {
+                constraint_cid.saturating_add(1)
+            };
         }
 
         Ok(next_foreign_key_cid)
@@ -3034,6 +3060,10 @@ impl Database {
             proargmodes.as_deref(),
             &callable_arg_oids,
         )?;
+        if language_row.oid == PG_LANGUAGE_PLPGSQL_OID {
+            validate_create_function_body(&create_stmt.body, !output_args.is_empty())
+                .map_err(ExecError::Parse)?;
+        }
         let existing_proc = catalog
             .proc_rows_by_name(&function_name)
             .into_iter()

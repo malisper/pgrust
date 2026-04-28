@@ -6,8 +6,9 @@ use crate::backend::parser::{BoundRelation, bind_generated_expr, expr_references
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
-    is_system_column_name, lookup_heap_relation_for_alter_table,
-    reject_column_with_rule_dependencies, reject_column_with_trigger_dependencies,
+    is_system_column_name, lookup_table_or_partitioned_table_for_alter_table,
+    reject_column_with_publication_dependencies, reject_column_with_rule_dependencies,
+    reject_column_with_trigger_dependencies,
 };
 
 fn display_relation_name(catalog: &dyn CatalogLookup, relation: &BoundRelation) -> String {
@@ -94,7 +95,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &drop_stmt.table_name,
             drop_stmt.if_exists,
@@ -132,7 +133,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &drop_stmt.table_name,
             drop_stmt.if_exists,
@@ -227,6 +228,12 @@ impl Database {
             "ALTER TABLE DROP COLUMN on column without foreign key dependencies",
         )?;
         reject_column_with_trigger_dependencies(
+            &catalog,
+            relation.relation_oid,
+            &relation.desc.columns[column_index].name,
+            (column_index + 1) as i16,
+        )?;
+        reject_column_with_publication_dependencies(
             &catalog,
             relation.relation_oid,
             &relation.desc.columns[column_index].name,

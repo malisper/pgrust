@@ -219,7 +219,8 @@ fn extract_jsonb_entries(attnum: u16, value: &JsonbValue, out: &mut Vec<GinEntry
         | JsonbValue::Time(_)
         | JsonbValue::TimeTz(_)
         | JsonbValue::Timestamp(_)
-        | JsonbValue::TimestampTz(_) => out.push(scalar_key(
+        | JsonbValue::TimestampTz(_)
+        | JsonbValue::TimestampTzWithOffset(_, _) => out.push(scalar_key(
             attnum,
             JGINFLAG_STR,
             &render_temporal_jsonb_value(value),
