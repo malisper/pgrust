@@ -2719,6 +2719,28 @@ impl CatalogStore {
         Ok((row.oid, effect))
     }
 
+    pub fn drop_operator_class_mvcc(
+        &mut self,
+        row: &PgOpclassRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let kinds = [
+            BootstrapCatalogKind::PgOpclass,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        let rows = PhysicalCatalogRows {
+            opclasses: vec![row.clone()],
+            depends: opclass_depend_rows(row),
+            ..PhysicalCatalogRows::default()
+        };
+        delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.oid);
+        Ok(effect)
+    }
+
     pub fn create_trigger_mvcc(
         &mut self,
         mut row: crate::include::catalog::PgTriggerRow,

@@ -3066,6 +3066,15 @@ fn parse_operator_family_and_class_alter_statements() {
             access_method: "hash".into(),
         })
     );
+    assert_eq!(
+        parse_statement("drop operator class if exists alt_opc1 using hash").unwrap(),
+        Statement::DropOperatorClass(DropOperatorClassStatement {
+            if_exists: true,
+            schema_name: None,
+            opclass_name: "alt_opc1".into(),
+            access_method: "hash".into(),
+        })
+    );
 
     let stmt =
         parse_statement("create operator class alt_opc1 for type uuid using hash as storage uuid")
@@ -6317,6 +6326,9 @@ fn parse_expression_entrypoint_reuses_sql_expression_grammar() {
 
     let expr = parse_expr("a <% b").unwrap();
     assert!(matches!(expr, SqlExpr::BinaryOperator { ref op, .. } if op == "<%"));
+
+    let expr = parse_expr("a === b").unwrap();
+    assert!(matches!(expr, SqlExpr::BinaryOperator { ref op, .. } if op == "==="));
 }
 
 #[test]

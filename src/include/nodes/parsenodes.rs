@@ -367,6 +367,7 @@ pub enum Statement {
     AlterOperatorFamily(AlterOperatorFamilyStatement),
     AlterOperatorClass(AlterOperatorClassStatement),
     DropOperatorFamily(DropOperatorFamilyStatement),
+    DropOperatorClass(DropOperatorClassStatement),
     CreateTextSearch(CreateTextSearchStatement),
     AlterTextSearch(AlterTextSearchStatement),
     AlterSequence(AlterSequenceStatement),
@@ -2527,6 +2528,14 @@ pub struct DropOperatorFamilyStatement {
     pub if_exists: bool,
     pub schema_name: Option<String>,
     pub family_name: String,
+    pub access_method: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropOperatorClassStatement {
+    pub if_exists: bool,
+    pub schema_name: Option<String>,
+    pub opclass_name: String,
     pub access_method: String,
 }
 

@@ -6832,6 +6832,10 @@ fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Stateme
         return build_drop_operator_family_statement(trimmed)
             .map(|stmt| Some(Statement::DropOperatorFamily(stmt)));
     }
+    if lowered.starts_with("drop operator class ") {
+        return build_drop_operator_class_statement(trimmed)
+            .map(|stmt| Some(Statement::DropOperatorClass(stmt)));
+    }
     if lowered.starts_with("create operator class ") {
         return build_create_operator_class_statement(trimmed)
             .map(|stmt| Some(Statement::CreateOperatorClass(stmt)));
@@ -12125,6 +12129,38 @@ fn build_drop_operator_family_statement(
         if_exists,
         schema_name,
         family_name,
+        access_method,
+    })
+}
+
+fn build_drop_operator_class_statement(
+    sql: &str,
+) -> Result<DropOperatorClassStatement, ParseError> {
+    let mut rest = sql["drop operator class".len()..].trim_start();
+    let if_exists = keyword_at_start(rest, "if exists");
+    if if_exists {
+        rest = consume_keyword(rest, "if exists").trim_start();
+    }
+    let ((schema_name, opclass_name), rest) = parse_qualified_sql_name(rest)?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "using") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "USING access method",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "using").trim_start();
+    let (access_method, rest) = parse_sql_identifier(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of DROP OPERATOR CLASS",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(DropOperatorClassStatement {
+        if_exists,
+        schema_name,
+        opclass_name,
         access_method,
     })
 }
@@ -24665,6 +24701,11 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             left: Box::new(left),
                             right: Box::new(right),
                         },
+                        "===" => SqlExpr::BinaryOperator {
+                            op: "===".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
                         "=" => SqlExpr::Eq(Box::new(left), Box::new(right)),
                         "<>" | "!=" => SqlExpr::NotEq(Box::new(left), Box::new(right)),
                         "<" => SqlExpr::Lt(Box::new(left), Box::new(right)),
@@ -27330,6 +27371,16 @@ mod tests {
                 operator_name: "===".to_string(),
                 left_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
                 right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
+            })
+        );
+        assert_eq!(
+            parse_statement("drop operator class if exists public.part_test_ops using hash")
+                .unwrap(),
+            Statement::DropOperatorClass(DropOperatorClassStatement {
+                if_exists: true,
+                schema_name: Some("public".to_string()),
+                opclass_name: "part_test_ops".to_string(),
+                access_method: "hash".to_string(),
             })
         );
     }

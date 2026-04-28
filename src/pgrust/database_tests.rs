@@ -7734,6 +7734,59 @@ fn satisfies_hash_partition_matches_postgres_validation_and_hashing() {
 }
 
 #[test]
+fn custom_hash_equality_operator_contradictions_prune_to_result() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function part_hashint4_noop(value int4, seed int8) returns int8 as $$ select value + seed; $$ language sql strict immutable parallel safe",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create operator === (leftarg = int4, rightarg = int4, procedure = int4eq, commutator = ===, hashes)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create operator class part_test_int4_ops2 for type int4 using hash as operator 1 ===, function 2 part_hashint4_noop(int4, int8)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp_contradict_test (a int, b int) partition by hash (a part_test_int4_ops2, b part_test_int4_ops2)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp_contradict_test_p1 partition of hp_contradict_test for values with (modulus 2, remainder 0)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp_contradict_test_p2 partition of hp_contradict_test for values with (modulus 2, remainder 1)",
+        )
+        .unwrap();
+
+    let plan = explain_lines(
+        &db,
+        1,
+        "(costs off) select * from hp_contradict_test where a is null and a === 1 and b === 1",
+    )
+    .join("\n");
+    assert!(plan.contains("Result"), "{plan}");
+    assert!(plan.contains("One-Time Filter: false"), "{plan}");
+    assert!(!plan.contains("Seq Scan"), "{plan}");
+}
+
+#[test]
 fn runtime_hash_pruning_uses_custom_opclass_support_proc() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -33227,6 +33280,21 @@ fn create_operator_class_persists_catalog_rows() {
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int16(1), Value::Int16(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    db.execute(1, "drop operator class part_test_int4_ops using hash")
+        .unwrap();
+    match db
+        .execute(
+            1,
+            "select count(*) from pg_opclass where opcname = 'part_test_int4_ops'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
