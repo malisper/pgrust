@@ -279,3 +279,24 @@ COPY TO inherited-parent bucket:
 - Latest rowsecurity regression result with a 300s file timeout:
   `689/774` matched, `85` mismatches, `1718` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+Policy role dependency bucket:
+- `CREATE POLICY` and `ALTER POLICY ... TO` now resolve roles against the
+  current transaction snapshot, so policies can target roles created earlier in
+  the same transaction.
+- `DROP ROLE` dependency checks now include relation ACL dependencies and
+  policy role targets, producing PostgreSQL-style `privileges for table ...`
+  and `target of policy ... on table ...` detail lines.
+- Added focused tests for same-transaction policy role resolution and DROP ROLE
+  policy/ACL dependency details.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  create_policy_resolves_roles_created_in_same_transaction` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  drop_role_reports_table_acl_and_policy_dependencies` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `689/774` matched, `85` mismatches, `1711` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.
+- Remaining dependency-related gaps are generated `pg_depend`/`pg_shdepend`
+  rows for policies and `DROP OWNED BY` cleanup of policy role references.

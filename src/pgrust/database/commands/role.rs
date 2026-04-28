@@ -1243,6 +1243,32 @@ fn shared_role_dependency_details_for_roles(
     let catcache = db
         .txn_backend_catcache(client_id, xid, cid)
         .map_err(map_role_catalog_error)?;
+    let class_rows = catcache.class_rows();
+    let relation_names = class_rows
+        .iter()
+        .map(|row| (row.oid, relation_display_name_for_role_deps(row)))
+        .collect::<BTreeMap<_, _>>();
+    for class in &class_rows {
+        if acl_depends_on_role(class.relacl.as_deref(), &target_role_names) {
+            details.push(format!(
+                "privileges for {} {}",
+                relation_kind_name_for_role_deps(class.relkind),
+                relation_display_name_for_role_deps(class)
+            ));
+        }
+    }
+    for policy in catcache.policy_rows() {
+        if policy.polroles.iter().any(|oid| role_oids.contains(oid)) {
+            let relation_name = relation_names
+                .get(&policy.polrelid)
+                .cloned()
+                .unwrap_or_else(|| policy.polrelid.to_string());
+            details.push(format!(
+                "target of policy {} on table {}",
+                policy.polname, relation_name
+            ));
+        }
+    }
     for wrapper in catcache.foreign_data_wrapper_rows() {
         if role_oids.contains(&wrapper.fdwowner) {
             details.push(format!("owner of foreign-data wrapper {}", wrapper.fdwname));
@@ -1304,6 +1330,18 @@ fn shared_role_dependency_details_for_roles(
     default_privilege_details.dedup();
     details.extend(default_privilege_details);
     Ok(details)
+}
+
+fn relation_kind_name_for_role_deps(relkind: char) -> &'static str {
+    match relkind {
+        'S' => "sequence",
+        'v' => "view",
+        _ => "table",
+    }
+}
+
+fn relation_display_name_for_role_deps(row: &crate::include::catalog::PgClassRow) -> String {
+    row.relname.clone()
 }
 
 #[cfg(test)]
@@ -2208,6 +2246,86 @@ mod tests {
         superuser.execute(&db, "drop owned by user2").unwrap();
         assert_eq!(
             superuser.execute(&db, "drop role user2").unwrap(),
+            StatementResult::AffectedRows(0)
+        );
+    }
+
+    #[test]
+    fn drop_role_reports_table_acl_and_policy_dependencies() {
+        let base = temp_dir("drop_role_policy_dependencies");
+        let db = Database::open(&base, 16).unwrap();
+        let mut superuser = Session::new(1);
+
+        superuser.execute(&db, "create role policy_user").unwrap();
+        superuser.execute(&db, "create role policy_user2").unwrap();
+        superuser
+            .execute(&db, "create table policy_dep_tbl (a int4)")
+            .unwrap();
+        superuser
+            .execute(&db, "grant select on policy_dep_tbl to policy_user")
+            .unwrap();
+        superuser
+            .execute(
+                &db,
+                "create policy p1 on policy_dep_tbl to policy_user, policy_user2 using (true)",
+            )
+            .unwrap();
+
+        let err = superuser.execute(&db, "drop role policy_user").unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message,
+                detail,
+                sqlstate,
+                ..
+            } => {
+                assert_eq!(
+                    message,
+                    "role \"policy_user\" cannot be dropped because some objects depend on it"
+                );
+                assert_eq!(
+                    detail.as_deref(),
+                    Some(
+                        "privileges for table policy_dep_tbl\ntarget of policy p1 on table policy_dep_tbl"
+                    )
+                );
+                assert_eq!(sqlstate, "2BP01");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        superuser
+            .execute(&db, "alter policy p1 on policy_dep_tbl to policy_user2")
+            .unwrap();
+        superuser
+            .execute(&db, "revoke all on policy_dep_tbl from policy_user")
+            .unwrap();
+        assert_eq!(
+            superuser.execute(&db, "drop role policy_user").unwrap(),
+            StatementResult::AffectedRows(0)
+        );
+
+        let err = superuser
+            .execute(&db, "drop role policy_user2")
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                detail, sqlstate, ..
+            } => {
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("target of policy p1 on table policy_dep_tbl")
+                );
+                assert_eq!(sqlstate, "2BP01");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        superuser
+            .execute(&db, "drop policy p1 on policy_dep_tbl")
+            .unwrap();
+        assert_eq!(
+            superuser.execute(&db, "drop role policy_user2").unwrap(),
             StatementResult::AffectedRows(0)
         );
     }

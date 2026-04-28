@@ -43335,6 +43335,27 @@ fn create_policy_rejects_aggregate_with_policy_error() {
 }
 
 #[test]
+fn create_policy_resolves_roles_created_in_same_transaction() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "create role txn_policy_role nologin")
+        .unwrap();
+    session
+        .execute(&db, "create table txn_policy_items (a int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p1 on txn_policy_items to txn_policy_role using (true)",
+        )
+        .unwrap();
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn create_policy_with_exists_subquery_on_rls_table_returns() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

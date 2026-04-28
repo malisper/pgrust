@@ -79,7 +79,7 @@ impl Database {
             polrelid: relation.relation_oid,
             polcmd: stmt.command,
             polpermissive: stmt.permissive,
-            polroles: resolve_policy_roles(self, client_id, &stmt.role_names)?,
+            polroles: resolve_policy_roles(self, client_id, Some((xid, cid)), &stmt.role_names)?,
             polqual: stmt.using_sql.clone(),
             polwithcheck: stmt.with_check_sql.clone(),
         };
@@ -194,7 +194,7 @@ impl Database {
                 PgPolicyRow {
                     polroles: role_names
                         .as_ref()
-                        .map(|names| resolve_policy_roles(self, client_id, names))
+                        .map(|names| resolve_policy_roles(self, client_id, Some((xid, cid)), names))
                         .transpose()?
                         .unwrap_or_else(|| existing.polroles.clone()),
                     polqual: using_sql.clone().or_else(|| existing.polqual.clone()),
@@ -306,9 +306,10 @@ impl Database {
 fn resolve_policy_roles(
     db: &Database,
     client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
     role_names: &[String],
 ) -> Result<Vec<u32>, ExecError> {
-    let auth_catalog = db.auth_catalog(client_id, None).map_err(|err| {
+    let auth_catalog = db.auth_catalog(client_id, txn_ctx).map_err(|err| {
         ExecError::Parse(ParseError::UnexpectedToken {
             expected: "authorization catalog",
             actual: format!("{err:?}"),
