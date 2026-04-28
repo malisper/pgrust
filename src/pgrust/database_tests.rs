@@ -40226,7 +40226,10 @@ fn bootstrap_toast_relations_resolve_before_privilege_checks() {
         Err(ExecError::DetailedError {
             message, sqlstate, ..
         }) => {
-            assert_eq!(message, "permission denied for table pg_toast_1213");
+            assert_eq!(
+                message,
+                "permission denied for table pg_toast.pg_toast_1213"
+            );
             assert_eq!(sqlstate, "42501");
         }
         other => panic!("expected toast table permission error, got {other:?}"),
