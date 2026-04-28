@@ -3397,6 +3397,11 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
             format!("value too long for type {ty}")
         }
         ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath" && is_jsonpath_parse_error_details(details) =>
+        {
+            details.clone()
+        }
+        ExecError::InvalidStorageValue { column, details }
             if matches!(
                 column.as_str(),
                 "date" | "time" | "timetz" | "timestamp" | "timestamptz"
@@ -3452,6 +3457,11 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         {
             "22P02"
         }
+        ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath" && is_jsonpath_parse_error_details(details) =>
+        {
+            "42601"
+        }
         ExecError::BitStringLengthMismatch { .. } => "22026",
         ExecError::BitStringTooLong { .. } => "22001",
         ExecError::IntegerOutOfRange { .. }
@@ -3471,6 +3481,18 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         ExecError::DetailedError { sqlstate, .. } => sqlstate,
         _ => "XX000",
     }
+}
+
+fn is_jsonpath_parse_error_details(details: &str) -> bool {
+    details == "syntax error at end of jsonpath input"
+        || details == "LAST is allowed only in array subscripts"
+        || details == "@ is not allowed in root expressions"
+        || details.starts_with("syntax error at or near ")
+            && details.ends_with(" of jsonpath input")
+        || details.starts_with("trailing junk after numeric literal at or near ")
+            && details.ends_with(" of jsonpath input")
+        || details.starts_with("invalid numeric literal at or near ")
+            && details.ends_with(" of jsonpath input")
 }
 
 pub(crate) fn datetime_parse_error_details(

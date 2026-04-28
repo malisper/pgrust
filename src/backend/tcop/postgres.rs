@@ -64,6 +64,11 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::JsonInput { sqlstate, .. } => sqlstate,
         ExecError::XmlInput { sqlstate, .. } => sqlstate,
         ExecError::DetailedError { sqlstate, .. } => sqlstate,
+        ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath" && is_jsonpath_parse_error(details) =>
+        {
+            "42601"
+        }
         ExecError::Parse(crate::backend::parser::ParseError::InvalidInteger(_))
         | ExecError::Parse(crate::backend::parser::ParseError::InvalidNumeric(_))
         | ExecError::InvalidIntegerInput { .. }
@@ -269,6 +274,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     }
     if let ExecError::Parse(parse_error) = e
         && let Some(position) = parse_error.position()
+    {
+        return Some(position);
+    }
+    if matches!(e, ExecError::Regex(_))
+        && is_jsonpath_sql_surface(sql)
+        && let Some(position) = find_jsonpath_literal_position(sql)
+            .or_else(|| find_first_string_literal_start_position(sql))
     {
         return Some(position);
     }
@@ -561,8 +573,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::InvalidFloatInput { value, .. } => value.as_str(),
         ExecError::FloatOutOfRange { value, .. } => value.as_str(),
         ExecError::InvalidStorageValue { details, .. } => {
-            if is_jsonpath_syntax_error(details)
+            if is_jsonpath_parse_error(details)
                 && let Some(position) = find_jsonpath_literal_position(sql)
+                    .or_else(|| find_first_string_literal_position(sql))
             {
                 return Some(position);
             }
@@ -590,6 +603,14 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::DetailedError {
             message, detail, ..
         } => {
+            if is_jsonpath_sql_surface(sql)
+                && (message == "invalid input syntax for type jsonpath"
+                    || is_jsonpath_parse_error(message))
+                && let Some(position) = find_jsonpath_literal_position(sql)
+                    .or_else(|| find_first_string_literal_start_position(sql))
+            {
+                return Some(position);
+            }
             if is_jsonpath_sql_surface(sql) && is_jsonpath_datetime_error(message, sql) {
                 return None;
             }
@@ -1209,10 +1230,22 @@ fn is_jsonpath_syntax_error(message: &str) -> bool {
     message.starts_with("syntax error at or near ") && message.ends_with(" of jsonpath input")
 }
 
+fn is_jsonpath_parse_error(message: &str) -> bool {
+    is_jsonpath_syntax_error(message)
+        || message == "syntax error at end of jsonpath input"
+        || message == "LAST is allowed only in array subscripts"
+        || message == "@ is not allowed in root expressions"
+        || message.starts_with("trailing junk after numeric literal at or near ")
+            && message.ends_with(" of jsonpath input")
+        || message.starts_with("invalid numeric literal at or near ")
+            && message.ends_with(" of jsonpath input")
+}
+
 fn is_jsonpath_sql_surface(sql: &str) -> bool {
     let lower = sql.to_ascii_lowercase();
     lower.contains("jsonb_path_")
         || lower.contains(" jsonpath")
+        || lower.contains("::jsonpath")
         || lower.contains("@?")
         || lower.contains("@@")
 }
