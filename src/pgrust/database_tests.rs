@@ -39140,6 +39140,60 @@ fn create_tablespace_absolute_location_creates_symlinked_version_dir() {
 }
 
 #[test]
+fn pg_table_size_and_tablespace_location_helpers_work() {
+    let dir = temp_dir("pg_table_size_and_tablespace_location_helpers");
+    let tablespace_dir = dir.join("external_tablespace");
+    fs::create_dir_all(&tablespace_dir).unwrap();
+
+    let db = Database::open(&dir, 32).expect("open database");
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create table size_test (id int)")
+        .unwrap();
+    session
+        .execute(&db, "create view size_view as select * from size_test")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            &format!(
+                "create tablespace regress_tblspace location '{}'",
+                tablespace_dir.display()
+            ),
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_table_size('size_test'::regclass), pg_table_size('size_view'::regclass), pg_table_size(null::regclass)",
+        ),
+        vec![vec![Value::Int64(0), Value::Int64(0), Value::Null]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select pg_tablespace_location(1663::oid)"),
+        vec![vec![Value::Text("".into())]]
+    );
+    let location_rows = match session
+        .execute(
+            &db,
+            "select pg_tablespace_location(oid) from pg_tablespace where spcname = 'regress_tblspace'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => rows,
+        other => panic!("expected query result, got {other:?}"),
+    };
+    assert_eq!(
+        location_rows,
+        vec![vec![Value::Text(
+            tablespace_dir.display().to_string().into()
+        )]]
+    );
+}
+
+#[test]
 fn create_function_scalar_elsif_branches_work() {
     let dir = temp_dir("create_function_scalar_elsif");
     let db = Database::open(&dir, 64).unwrap();

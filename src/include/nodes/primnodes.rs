@@ -503,6 +503,8 @@ pub enum BuiltinScalarFunction {
     PgRelationFilenode,
     PgFilenodeRelation,
     PgRelationSize,
+    PgTableSize,
+    PgTablespaceLocation,
     NumNulls,
     NumNonNulls,
     PgLogBackendMemoryContexts,

@@ -145,16 +145,16 @@ use crate::include::catalog::{
     ANYOID, ARRAY_BTREE_OPCLASS_OID, BOX_SPGIST_OPCLASS_OID, BPCHAR_HASH_OPCLASS_OID, BRIN_AM_OID,
     BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION, CONSTRAINT_FOREIGN,
     CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID,
-    DEFAULT_COLLATION_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID,
-    INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID,
-    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
-    PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, POLY_SPGIST_OPCLASS_OID,
-    PgConversionRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgTsConfigRow, PgTsDictRow,
-    PgTsParserRow, PgTsTemplateRow, PgTypeRow, QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID,
-    TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID, bootstrap_pg_am_rows,
-    builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid, default_btree_opclass_oid,
-    default_hash_opclass_oid,
+    DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID,
+    GLOBAL_TABLESPACE_OID, HASH_AM_OID, INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID,
+    PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID,
+    PG_NDISTINCT_TYPE_OID, PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID,
+    POLY_SPGIST_OPCLASS_OID, PgConversionRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID,
+    bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
+    default_btree_opclass_oid, default_hash_opclass_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
@@ -5226,13 +5226,91 @@ fn eval_pg_relation_size(values: &[Value], ctx: &ExecutorContext) -> Result<Valu
             },
         ));
     }
+    relation_main_fork_size(&relation, ctx).map(Value::Int64)
+}
+
+fn relation_main_fork_size(
+    relation: &crate::backend::parser::BoundRelation,
+    ctx: &ExecutorContext,
+) -> Result<i64, ExecError> {
     let nblocks = ctx
         .pool
         .with_storage_mut(|s| s.smgr.nblocks(relation.rel, ForkNumber::Main))
         .map_err(crate::backend::access::heap::heapam::HeapError::Storage)?;
-    Ok(Value::Int64(
-        i64::from(nblocks) * i64::from(crate::backend::storage::smgr::smgr::BLCKSZ as i32),
-    ))
+    Ok(i64::from(nblocks) * i64::from(crate::backend::storage::smgr::smgr::BLCKSZ as i32))
+}
+
+fn eval_pg_table_size(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_table_size(regclass)",
+            actual: format!("PgTableSize({} args)", values.len()),
+        }));
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    let catalog = executor_catalog(ctx)?;
+    let relation_oid = match oid_arg_to_u32(value, "pg_table_size") {
+        Ok(oid) => oid,
+        Err(err) if value.as_text().is_some() => {
+            let relation_name = value.as_text().expect("guarded above");
+            catalog
+                .lookup_any_relation(relation_name)
+                .map(|relation| relation.relation_oid)
+                .ok_or(err)?
+        }
+        Err(err) => return Err(err),
+    };
+    let Some(relation) = catalog.relation_by_oid(relation_oid) else {
+        return Ok(Value::Null);
+    };
+    if relation.rel.rel_number == 0 {
+        return Ok(Value::Int64(0));
+    }
+    relation_main_fork_size(&relation, ctx).map(Value::Int64)
+}
+
+fn eval_pg_tablespace_location(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_tablespace_location(oid)",
+            actual: format!("PgTablespaceLocation({} args)", values.len()),
+        }));
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    let mut tablespace_oid = oid_arg_to_u32(value, "pg_tablespace_location")?;
+    if tablespace_oid == 0 {
+        tablespace_oid = DEFAULT_TABLESPACE_OID;
+    }
+    if matches!(
+        tablespace_oid,
+        DEFAULT_TABLESPACE_OID | GLOBAL_TABLESPACE_OID
+    ) {
+        return Ok(Value::Text("".into()));
+    }
+
+    let Some(data_dir) = &ctx.data_dir else {
+        return Ok(Value::Text("".into()));
+    };
+    let source_path = data_dir.join("pg_tblspc").join(tablespace_oid.to_string());
+    let metadata = match std::fs::symlink_metadata(&source_path) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(Value::Null),
+    };
+    if metadata.file_type().is_symlink()
+        && let Ok(target) = std::fs::read_link(&source_path)
+    {
+        return Ok(Value::Text(target.display().to_string().into()));
+    }
+    Ok(Value::Text(source_path.display().to_string().into()))
 }
 
 fn eval_pg_relation_filenode(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -7254,14 +7332,15 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::HasServerPrivilege => {
             eval_has_foreign_privilege_function(ForeignPrivilegeKind::Server, &values, None)
         }
-        BuiltinScalarFunction::PgGetPartKeyDef | BuiltinScalarFunction::PgTableIsVisible => {
-            Err(ExecError::DetailedError {
-                message: "catalog helper requires executor context".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "XX000",
-            })
-        }
+        BuiltinScalarFunction::PgGetPartKeyDef
+        | BuiltinScalarFunction::PgTableIsVisible
+        | BuiltinScalarFunction::PgTableSize
+        | BuiltinScalarFunction::PgTablespaceLocation => Err(ExecError::DetailedError {
+            message: "catalog helper requires executor context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }),
         BuiltinScalarFunction::RegProcToText => {
             eval_reg_object_to_text(&values[0], SqlTypeKind::RegProc, None)
         }
@@ -9370,6 +9449,8 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgRelationFilenode => eval_pg_relation_filenode(&values, ctx),
         BuiltinScalarFunction::PgFilenodeRelation => eval_pg_filenode_relation(&values, ctx),
         BuiltinScalarFunction::PgRelationSize => eval_pg_relation_size(&values, ctx),
+        BuiltinScalarFunction::PgTableSize => eval_pg_table_size(&values, ctx),
+        BuiltinScalarFunction::PgTablespaceLocation => eval_pg_tablespace_location(&values, ctx),
         BuiltinScalarFunction::NumNulls => Ok(eval_num_nulls(&values, func_variadic, true)),
         BuiltinScalarFunction::NumNonNulls => Ok(eval_num_nulls(&values, func_variadic, false)),
         BuiltinScalarFunction::PgLogBackendMemoryContexts => {
