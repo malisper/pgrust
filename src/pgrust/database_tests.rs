@@ -38630,6 +38630,61 @@ fn regrole_cast_to_text_renders_role_name() {
 }
 
 #[test]
+fn pg_auth_members_is_selectable_by_role_membership_grantee() {
+    let dir = temp_dir("pg_auth_members_public_select");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create role app_role").unwrap();
+    session.execute(&db, "create role app_admin").unwrap();
+    session.execute(&db, "create role app_member").unwrap();
+    session
+        .execute(&db, "grant app_role to app_admin with admin option")
+        .unwrap();
+    session
+        .execute(&db, "grant app_admin to app_member")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization app_member")
+        .unwrap();
+    session
+        .execute(&db, "grant app_role to app_member")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select grantor::regrole::text from pg_auth_members \
+             where roleid = 'app_role'::regrole and member = 'app_member'::regrole",
+        ),
+        vec![vec![Value::Text("app_admin".into())]]
+    );
+}
+
+#[test]
+fn bootstrap_toast_relations_resolve_before_privilege_checks() {
+    let dir = temp_dir("bootstrap_toast_acl");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create role toast_user").unwrap();
+    session
+        .execute(&db, "set session authorization toast_user")
+        .unwrap();
+
+    match session.execute(&db, "update pg_toast.pg_toast_1213 set chunk_id = 1") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for table pg_toast_1213");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected toast table permission error, got {other:?}"),
+    }
+}
+
+#[test]
 fn pg_get_userbyid_returns_role_name() {
     let dir = temp_dir("pg_get_userbyid");
     let db = Database::open(&dir, 64).unwrap();

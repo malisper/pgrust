@@ -1436,7 +1436,7 @@ fn lookup_modify_relation(
     name: &str,
 ) -> Result<BoundRelation, ParseError> {
     match catalog.lookup_any_relation(name) {
-        Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'v') => Ok(entry),
+        Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'v' | 't') => Ok(entry),
         Some(entry) if entry.relkind == 'm' => Err(ParseError::FeatureNotSupportedMessage(
             format!("cannot change materialized view \"{name}\""),
         )),

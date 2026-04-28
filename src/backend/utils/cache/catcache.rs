@@ -43,31 +43,33 @@ use crate::backend::catalog::pg_ts_parser::sort_pg_ts_parser_rows;
 use crate::backend::catalog::pg_ts_template::sort_pg_ts_template_rows;
 use crate::backend::catalog::pg_user_mapping::sort_pg_user_mapping_rows;
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
+use crate::include::catalog::toasting::toast_relation_name;
 use crate::include::catalog::{
     ANYARRAYOID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
     BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID,
     CIRCLE_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID,
-    FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
-    INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID,
-    INTERVAL_ARRAY_TYPE_OID, INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
-    JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID,
-    LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID, MONEY_TYPE_OID, NUMERIC_ARRAY_TYPE_OID,
-    NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, POINT_TYPE_OID,
-    POLYGON_TYPE_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
-    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow, PgForeignDataWrapperRow,
-    PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow,
-    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    PgUserMappingRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
-    REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID,
-    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
-    TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, UUID_ARRAY_TYPE_OID, UUID_TYPE_OID,
-    VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
-    XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID, XML_TYPE_OID,
-    bootstrap_composite_type_rows, bootstrap_pg_aggregate_rows, bootstrap_pg_am_rows,
+    FLOAT8_TYPE_OID, HEAP_TABLE_AM_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT4_ARRAY_TYPE_OID,
+    INT4_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID,
+    INTERNAL_CHAR_TYPE_OID, INTERVAL_ARRAY_TYPE_OID, INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID,
+    JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID,
+    JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID, MONEY_TYPE_OID,
+    NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID,
+    PG_TOAST_NAMESPACE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, PgAggregateRow, PgAmRow, PgAmopRow,
+    PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
+    PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow,
+    PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow,
+    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
+    PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow, PgUserMappingRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
+    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
+    TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
+    TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
+    UUID_ARRAY_TYPE_OID, UUID_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
+    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID,
+    XML_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_aggregate_rows, bootstrap_pg_am_rows,
     bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
     bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows,
     bootstrap_pg_foreign_data_wrapper_rows, bootstrap_pg_foreign_server_rows,
@@ -504,6 +506,7 @@ impl CatCache {
         sort_pg_statistic_ext_data_rows(&mut cache.statistic_ext_data_rows);
         sort_pg_index_rows(&mut cache.index_rows);
 
+        cache.add_missing_bootstrap_toast_relations();
         cache.normalize_composite_array_types();
         cache
     }
@@ -715,8 +718,64 @@ impl CatCache {
         cache.tablespace_rows = tablespace_rows;
         sort_pg_tablespace_rows(&mut cache.tablespace_rows);
         cache.statistic_rows = statistic_rows;
+        cache.add_missing_bootstrap_toast_relations();
         cache.normalize_composite_array_types();
         cache
+    }
+
+    fn add_missing_bootstrap_toast_relations(&mut self) {
+        let parents = self
+            .classes_by_oid
+            .values()
+            .filter(|row| row.reltoastrelid != 0)
+            .cloned()
+            .collect::<Vec<_>>();
+        for parent in parents {
+            if self.classes_by_oid.contains_key(&parent.reltoastrelid) {
+                continue;
+            }
+            let relname = toast_relation_name(parent.oid);
+            let row = PgClassRow {
+                oid: parent.reltoastrelid,
+                relname: relname.clone(),
+                relnamespace: PG_TOAST_NAMESPACE_OID,
+                reltype: 0,
+                relowner: parent.relowner,
+                relam: HEAP_TABLE_AM_OID,
+                relfilenode: parent.reltoastrelid,
+                reltablespace: 0,
+                relpages: 0,
+                reltuples: 0.0,
+                relallvisible: 0,
+                relallfrozen: 0,
+                reltoastrelid: 0,
+                relhasindex: false,
+                relpersistence: parent.relpersistence,
+                relkind: 't',
+                relnatts: 3,
+                relhassubclass: false,
+                relhastriggers: false,
+                relrowsecurity: false,
+                relforcerowsecurity: false,
+                relispopulated: true,
+                relispartition: false,
+                relfrozenxid: parent.relfrozenxid,
+                relpartbound: None,
+                reloptions: None,
+                relacl: None,
+                relreplident: 'd',
+                reloftype: 0,
+            };
+            self.classes_by_name
+                .insert(relname.to_ascii_lowercase(), row.clone());
+            self.classes_by_name.insert(
+                format!("pg_toast.{}", relname.to_ascii_lowercase()),
+                row.clone(),
+            );
+            self.classes_by_oid.insert(row.oid, row.clone());
+            self.attributes_by_relid
+                .insert(row.oid, bootstrap_toast_attribute_rows(row.oid));
+        }
     }
 
     pub fn namespace_by_name(&self, name: &str) -> Option<&PgNamespaceRow> {
@@ -1152,6 +1211,62 @@ impl CatCache {
 }
 pub fn normalize_catalog_name(name: &str) -> &str {
     name.strip_prefix("pg_catalog.").unwrap_or(name)
+}
+
+fn bootstrap_toast_attribute_rows(attrelid: u32) -> Vec<PgAttributeRow> {
+    [
+        (
+            "chunk_id",
+            SqlType::new(SqlTypeKind::Oid),
+            OID_TYPE_OID,
+            4,
+            true,
+        ),
+        (
+            "chunk_seq",
+            SqlType::new(SqlTypeKind::Int4),
+            INT4_TYPE_OID,
+            4,
+            true,
+        ),
+        (
+            "chunk_data",
+            SqlType::new(SqlTypeKind::Bytea),
+            BYTEA_TYPE_OID,
+            -1,
+            false,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(
+        |(idx, (attname, sql_type, atttypid, attlen, attbyval))| PgAttributeRow {
+            attrelid,
+            attname: attname.into(),
+            atttypid,
+            attlen,
+            attnum: idx.saturating_add(1) as i16,
+            attnotnull: true,
+            attisdropped: false,
+            atttypmod: -1,
+            attalign: AttributeAlign::Int,
+            attstorage: AttributeStorage::Plain,
+            attcompression: AttributeCompression::Default,
+            attstattarget: -1,
+            attinhcount: 0,
+            attislocal: true,
+            attidentity: '\0',
+            attgenerated: '\0',
+            attcollation: 0,
+            attacl: None,
+            attoptions: None,
+            attfdwoptions: None,
+            attmissingval: None,
+            attbyval,
+            sql_type,
+        },
+    )
+    .collect()
 }
 
 fn catalog_entry_sql_type_oid(catalog: &Catalog, sql_type: SqlType) -> u32 {

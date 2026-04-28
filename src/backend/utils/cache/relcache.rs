@@ -7,7 +7,7 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, column_desc};
 use crate::backend::executor::RelationDesc;
-use crate::backend::parser::{LoweredPartitionSpec, SqlType};
+use crate::backend::parser::{LoweredPartitionSpec, SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
 use crate::include::access::brin::BrinOptions;
@@ -15,11 +15,12 @@ use crate::include::access::gin::GinOptions;
 use crate::include::access::hash::HashOptions;
 use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::PgTypeRow;
+use crate::include::catalog::toasting::toast_relation_name;
 use crate::include::catalog::{
     ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
-    PG_CATALOG_NAMESPACE_OID, PG_CONSTRAINT_RELATION_OID, PgPartitionedTableRow,
-    bootstrap_catalog_kinds, builtin_range_spec_by_multirange_oid, builtin_range_spec_by_oid,
-    builtin_scalar_function_for_proc_oid, system_catalog_index_by_oid,
+    PG_CATALOG_NAMESPACE_OID, PG_CONSTRAINT_RELATION_OID, PG_TOAST_NAMESPACE_OID,
+    PgPartitionedTableRow, bootstrap_catalog_kinds, builtin_range_spec_by_multirange_oid,
+    builtin_range_spec_by_oid, builtin_scalar_function_for_proc_oid, system_catalog_index_by_oid,
 };
 use crate::include::nodes::primnodes::Expr;
 
@@ -428,7 +429,17 @@ impl RelCache {
                     relcache_entry.clone(),
                 );
             }
-            cache.by_oid.insert(entry.relation_oid, relcache_entry);
+            cache
+                .by_oid
+                .insert(entry.relation_oid, relcache_entry.clone());
+            if entry.reltoastrelid != 0 {
+                let toast_entry = bootstrap_toast_relcache_entry(&relcache_entry);
+                cache.by_name.insert(
+                    format!("pg_toast.{}", toast_relation_name(entry.relation_oid)),
+                    toast_entry.clone(),
+                );
+                cache.by_oid.insert(toast_entry.relation_oid, toast_entry);
+            }
         }
         cache
     }
@@ -680,6 +691,15 @@ impl RelCache {
                 cache.by_name.insert(qualified, entry.clone());
             }
             cache.by_oid.insert(class.oid, entry);
+            if class.reltoastrelid != 0 {
+                let toast_entry =
+                    bootstrap_toast_relcache_entry(cache.by_oid.get(&class.oid).unwrap());
+                cache.by_name.insert(
+                    format!("pg_toast.{}", toast_relation_name(class.oid)),
+                    toast_entry.clone(),
+                );
+                cache.by_oid.insert(toast_entry.relation_oid, toast_entry);
+            }
         }
         Ok(cache)
     }
@@ -769,6 +789,46 @@ impl RelCache {
         self.by_name
             .iter()
             .map(|(name, entry)| (name.as_str(), entry))
+    }
+}
+
+fn bootstrap_toast_relation_desc() -> RelationDesc {
+    RelationDesc {
+        columns: vec![
+            column_desc("chunk_id", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("chunk_seq", SqlType::new(SqlTypeKind::Int4), false),
+            column_desc("chunk_data", SqlType::new(SqlTypeKind::Bytea), false),
+        ],
+    }
+}
+
+fn bootstrap_toast_relcache_entry(parent: &RelCacheEntry) -> RelCacheEntry {
+    RelCacheEntry {
+        rel: RelFileLocator {
+            spc_oid: parent.rel.spc_oid,
+            db_oid: parent.rel.db_oid,
+            rel_number: parent.reltoastrelid,
+        },
+        relation_oid: parent.reltoastrelid,
+        namespace_oid: PG_TOAST_NAMESPACE_OID,
+        owner_oid: parent.owner_oid,
+        of_type_oid: 0,
+        row_type_oid: 0,
+        array_type_oid: 0,
+        reltoastrelid: 0,
+        relhasindex: false,
+        relpersistence: parent.relpersistence,
+        relkind: 't',
+        relispartition: false,
+        relispopulated: true,
+        relpartbound: None,
+        relhastriggers: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
+        desc: bootstrap_toast_relation_desc(),
+        partitioned_table: None,
+        partition_spec: None,
+        index: None,
     }
 }
 
