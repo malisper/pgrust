@@ -135,8 +135,6 @@ expr_range_chunk = _{
 expr_loop_chunk = _{
     sql_string
     | quoted_ident
-    | "(" ~ expr_until_loop? ~ ")"
-    | "[" ~ expr_until_loop? ~ "]"
     | !kw_loop ~ ANY
 }
 
