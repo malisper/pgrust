@@ -5,7 +5,7 @@ use crate::backend::catalog::role_memberships::has_effective_membership;
 use crate::backend::catalog::roles::{has_bypassrls_privilege, policy_applies_to_role};
 use crate::backend::parser::{
     BoundScope, CatalogLookup, ParseError, bind_expr_with_outer_and_ctes, parse_select,
-    scope_for_relation, shift_scope_rtindexes,
+    scope_for_relation_with_generated, shift_scope_rtindexes,
 };
 use crate::include::catalog::{PgClassRow, PgPolicyRow, PolicyCommand};
 use crate::include::nodes::datum::Value;
@@ -510,18 +510,23 @@ fn bound_policy_expr(
         return Ok(Expr::Const(Value::Bool(true)));
     };
     let parsed = parse_policy_expr(expr_sql)?;
-    let scope = policy_scope(relation_name, desc, scope_rtindex);
+    let scope = policy_scope(relation_name, desc, scope_rtindex, catalog)?;
     stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
         let expr = bind_expr_with_outer_and_ctes(&parsed, &scope, catalog, &[], None, &[])?;
         rewrite_policy_expr(expr, catalog, active_policy_relations)
     })
 }
 
-fn policy_scope(relation_name: &str, desc: &RelationDesc, scope_rtindex: usize) -> BoundScope {
-    shift_scope_rtindexes(
-        scope_for_relation(Some(relation_name), desc),
+fn policy_scope(
+    relation_name: &str,
+    desc: &RelationDesc,
+    scope_rtindex: usize,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundScope, ParseError> {
+    Ok(shift_scope_rtindexes(
+        scope_for_relation_with_generated(Some(relation_name), desc, catalog)?,
         scope_rtindex - 1,
-    )
+    ))
 }
 
 fn and_exprs(mut exprs: Vec<Expr>) -> Option<Expr> {

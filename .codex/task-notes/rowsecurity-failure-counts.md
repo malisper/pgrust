@@ -117,3 +117,13 @@ MERGE RLS bucket:
 - `scripts/cargo_isolated.sh check` passed.
 - Latest rowsecurity regression result: `655/774` matched, `119` mismatches,
   `2158` diff lines. New diff copied to `/tmp/diffs/rowsecurity.diff`.
+
+RETURNING/generated-column WCO bucket:
+- INSERT/UPDATE now add SELECT policy checks as write checks when RETURNING is
+  present, so invisible returned rows raise RLS errors.
+- Policy expression binding now uses generated-column output expressions, so
+  virtual generated columns work inside RLS write checks.
+- Focused `row_security` and ON CONFLICT tests passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result: `655/774` matched, `119` mismatches,
+  `2098` diff lines. New diff copied to `/tmp/diffs/rowsecurity.diff`.

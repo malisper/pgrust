@@ -3678,7 +3678,7 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         &entry.desc,
         PolicyCommand::Insert,
         false,
-        false,
+        !stmt.returning.is_empty(),
         catalog,
     )?;
     let visible_target_name = stmt.table_alias.as_deref().unwrap_or(&stmt.table_name);
@@ -4007,7 +4007,7 @@ fn bind_simple_update(
         // :HACK: pgrust always materializes old target rows through one path today,
         // so first-pass UPDATE RLS also requires SELECT visibility on the target.
         true,
-        false,
+        !stmt.returning.is_empty(),
         catalog,
     )?;
     let predicate = prepend_visibility_quals(target_rls.visibility_quals.clone(), predicate);
@@ -4171,7 +4171,7 @@ fn bind_update_from(
         &entry.desc,
         PolicyCommand::Update,
         true,
-        false,
+        !stmt.returning.is_empty(),
         catalog,
     )?;
     let user_predicate = stmt
