@@ -1062,6 +1062,7 @@ fn make_ordered_rel(
                 .partial_cmp(&right.plan_info().total_cost.as_f64())
                 .unwrap_or(Ordering::Equal)
         });
+    let suppress_sort_fallback = cheapest_presorted.is_some_and(ordered_append_path);
     if let Some(path) = cheapest_presorted {
         let display_items = sort_key_display_items(root, &root.query_pathkeys, catalog);
         rel.add_path(path_with_sort_display_items(path.clone(), &display_items));
@@ -1087,7 +1088,9 @@ fn make_ordered_rel(
     }
     if let Some(path) = input_rel.cheapest_total_path() {
         let required_pathkeys = required_query_pathkeys_for_path(root, path);
-        if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
+        if !suppress_sort_fallback
+            && !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys)
+        {
             let display_items = sort_key_display_items(root, &root.query_pathkeys, catalog);
             rel.add_path(optimize_path_with_config(
                 Path::OrderBy {
@@ -1107,6 +1110,17 @@ fn make_ordered_rel(
     bestpath::set_cheapest(&mut rel);
     root.upper_rels[upper_rel_index].rel = rel.clone();
     rel
+}
+
+fn ordered_append_path(path: &Path) -> bool {
+    match path {
+        Path::Append { .. } | Path::MergeAppend { .. } => true,
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => ordered_append_path(input),
+        _ => false,
+    }
 }
 
 fn distinct_pathkeys(root: &PlannerInfo, targets: &[TargetEntry]) -> Vec<PathKey> {

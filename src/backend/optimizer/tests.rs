@@ -1311,6 +1311,254 @@ fn create_range_partition(
     relation_oid
 }
 
+fn create_list_partitioned_table(catalog: &mut Catalog, name: &str) -> u32 {
+    let desc = RelationDesc {
+        columns: vec![
+            column_desc("k", int4(), false),
+            column_desc("v", int4(), true),
+        ],
+    };
+    let entry = catalog
+        .create_table_with_relkind(
+            name,
+            desc,
+            PUBLIC_NAMESPACE_OID,
+            CURRENT_DATABASE_OID,
+            'p',
+            'p',
+            BOOTSTRAP_SUPERUSER_OID,
+        )
+        .expect("create list partitioned table");
+    let spec = LoweredPartitionSpec {
+        strategy: PartitionStrategy::List,
+        key_columns: vec!["k".into()],
+        key_exprs: vec![var(1, 1)],
+        key_types: vec![int4()],
+        key_sqls: vec!["k".into()],
+        partattrs: vec![1],
+        partclass: vec![0],
+        partcollation: vec![0],
+    };
+    let relation_oid = entry.relation_oid;
+    let table = catalog.tables.get_mut(&name.to_ascii_lowercase()).unwrap();
+    table.relhassubclass = true;
+    table.partitioned_table = Some(pg_partitioned_table_row(relation_oid, &spec, 0));
+    relation_oid
+}
+
+fn create_list_partition(
+    catalog: &mut Catalog,
+    parent_oid: u32,
+    name: &str,
+    values: &[i32],
+    is_default: bool,
+    inhseqno: i32,
+) -> u32 {
+    let desc = RelationDesc {
+        columns: vec![
+            column_desc("k", int4(), false),
+            column_desc("v", int4(), true),
+        ],
+    };
+    let entry = catalog
+        .create_table(name, desc)
+        .expect("create list partition child");
+    let bound = PartitionBoundSpec::List {
+        values: values
+            .iter()
+            .copied()
+            .map(SerializedPartitionValue::Int32)
+            .collect(),
+        is_default,
+    };
+    let relation_oid = entry.relation_oid;
+    let table = catalog.tables.get_mut(&name.to_ascii_lowercase()).unwrap();
+    table.relispartition = true;
+    table.relpartbound = Some(serialize_partition_bound(&bound).expect("serialize bound"));
+    catalog.inherits.push(PgInheritsRow {
+        inhrelid: relation_oid,
+        inhparent: parent_oid,
+        inhseqno,
+        inhdetachpending: false,
+    });
+    relation_oid
+}
+
+fn add_ready_k_index(catalog: &mut Catalog, table_name: &str) {
+    let table_oid = catalog
+        .lookup_any_relation(table_name)
+        .expect("table should exist")
+        .relation_oid;
+    let index = catalog
+        .create_index(
+            format!("{table_name}_k_idx"),
+            table_name,
+            false,
+            &[IndexColumnDef::from("k")],
+        )
+        .expect("create partition child index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark index ready");
+    catalog
+        .set_relation_stats(table_oid, 128, 10_000.0)
+        .expect("seed table stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 8, 10_000.0)
+        .expect("seed index stats");
+}
+
+fn create_abc_range_partitioned_table(catalog: &mut Catalog, name: &str) -> u32 {
+    let desc = RelationDesc {
+        columns: vec![
+            column_desc("a", int4(), false),
+            column_desc("b", int4(), false),
+            column_desc("c", int4(), false),
+        ],
+    };
+    let entry = catalog
+        .create_table_with_relkind(
+            name,
+            desc,
+            PUBLIC_NAMESPACE_OID,
+            CURRENT_DATABASE_OID,
+            'p',
+            'p',
+            BOOTSTRAP_SUPERUSER_OID,
+        )
+        .expect("create abc partitioned table");
+    let spec = LoweredPartitionSpec {
+        strategy: PartitionStrategy::Range,
+        key_columns: vec!["a".into()],
+        key_exprs: vec![var(1, 1)],
+        key_types: vec![int4()],
+        key_sqls: vec!["a".into()],
+        partattrs: vec![1],
+        partclass: vec![0],
+        partcollation: vec![0],
+    };
+    let relation_oid = entry.relation_oid;
+    let table = catalog.tables.get_mut(&name.to_ascii_lowercase()).unwrap();
+    table.relhassubclass = true;
+    table.partitioned_table = Some(pg_partitioned_table_row(relation_oid, &spec, 0));
+    relation_oid
+}
+
+fn create_abc_range_partition(
+    catalog: &mut Catalog,
+    parent_oid: u32,
+    name: &str,
+    from: i32,
+    to: i32,
+    inhseqno: i32,
+) -> u32 {
+    let desc = RelationDesc {
+        columns: vec![
+            column_desc("a", int4(), false),
+            column_desc("b", int4(), false),
+            column_desc("c", int4(), false),
+        ],
+    };
+    let entry = catalog
+        .create_table(name, desc)
+        .expect("create abc partition child");
+    let bound = PartitionBoundSpec::Range {
+        from: vec![PartitionRangeDatumValue::Value(
+            SerializedPartitionValue::Int32(from),
+        )],
+        to: vec![PartitionRangeDatumValue::Value(
+            SerializedPartitionValue::Int32(to),
+        )],
+        is_default: false,
+    };
+    let relation_oid = entry.relation_oid;
+    let table = catalog.tables.get_mut(&name.to_ascii_lowercase()).unwrap();
+    table.relispartition = true;
+    table.relpartbound = Some(serialize_partition_bound(&bound).expect("serialize bound"));
+    catalog.inherits.push(PgInheritsRow {
+        inhrelid: relation_oid,
+        inhparent: parent_oid,
+        inhseqno,
+        inhdetachpending: false,
+    });
+    relation_oid
+}
+
+fn add_ready_abc_order_index(catalog: &mut Catalog, table_name: &str) {
+    let table_oid = catalog
+        .lookup_any_relation(table_name)
+        .expect("table should exist")
+        .relation_oid;
+    let index_name = format!("{table_name}_a_abs_b_c_idx");
+    add_ready_index(
+        catalog,
+        table_name,
+        &index_name,
+        false,
+        false,
+        &[
+            IndexColumnDef::from("a"),
+            IndexColumnDef {
+                name: "expr".into(),
+                expr_sql: Some("abs(b)".into()),
+                expr_type: Some(int4()),
+                collation: None,
+                opclass: None,
+                opclass_options: Vec::new(),
+                descending: false,
+                nulls_first: None,
+            },
+            IndexColumnDef::from("c"),
+        ],
+        Some(int4_btree_options(3, false)),
+        None,
+    );
+    let index_oid = catalog
+        .lookup_any_relation(&index_name)
+        .expect("index should exist")
+        .relation_oid;
+    catalog
+        .set_relation_stats(table_oid, 128, 10_000.0)
+        .expect("seed table stats");
+    catalog
+        .set_relation_stats(index_oid, 8, 10_000.0)
+        .expect("seed index stats");
+}
+
+fn catalog_with_indexed_range_partitions() -> Catalog {
+    let mut catalog = Catalog::default();
+    let parent_oid = create_partitioned_table(&mut catalog, "rp");
+    create_range_partition(&mut catalog, parent_oid, "rp_p1", 0, 10, 1);
+    create_range_partition(&mut catalog, parent_oid, "rp_p3", 20, 30, 2);
+    create_range_partition(&mut catalog, parent_oid, "rp_p2", 10, 20, 3);
+    for child in ["rp_p1", "rp_p2", "rp_p3"] {
+        add_ready_k_index(&mut catalog, child);
+    }
+    catalog
+}
+
+fn catalog_with_expression_indexed_range_partitions() -> Catalog {
+    let mut catalog = Catalog::default();
+    let parent_oid = create_abc_range_partitioned_table(&mut catalog, "erp");
+    create_abc_range_partition(&mut catalog, parent_oid, "erp_p1", 0, 10, 1);
+    create_abc_range_partition(&mut catalog, parent_oid, "erp_p2", 10, 20, 2);
+    for child in ["erp_p1", "erp_p2"] {
+        add_ready_abc_order_index(&mut catalog, child);
+    }
+    catalog
+}
+
+fn catalog_with_interleaved_list_partitions() -> Catalog {
+    let mut catalog = Catalog::default();
+    let parent_oid = create_list_partitioned_table(&mut catalog, "lp");
+    create_list_partition(&mut catalog, parent_oid, "lp_p35", &[3, 5], false, 1);
+    create_list_partition(&mut catalog, parent_oid, "lp_p4", &[4], false, 2);
+    for child in ["lp_p35", "lp_p4"] {
+        add_ready_k_index(&mut catalog, child);
+    }
+    catalog
+}
+
 fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
     match plan {
         Plan::Append { children, .. }
@@ -1424,6 +1672,117 @@ fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. } => {}
     }
+}
+
+#[test]
+fn ordered_range_partition_query_uses_append_without_sort() {
+    let catalog = catalog_with_indexed_range_partitions();
+    let planned = planned_stmt_for_sql_with_catalog("select k from rp order by k", &catalog);
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Append { .. }
+        )),
+        "expected ordered append path, got {:?}",
+        planned.plan_tree
+    );
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::OrderBy { .. } | Plan::MergeAppend { .. }
+        )),
+        "ordered range partitions should not require Sort or MergeAppend: {:?}",
+        planned.plan_tree
+    );
+    assert_eq!(
+        child_relation_names(&planned.plan_tree),
+        vec!["rp_p1", "rp_p2", "rp_p3"]
+    );
+}
+
+#[test]
+fn descending_ordered_range_partition_query_reverses_append_children() {
+    let catalog = catalog_with_indexed_range_partitions();
+    let planned = planned_stmt_for_sql_with_catalog("select k from rp order by k desc", &catalog);
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Append { .. }
+        )),
+        "expected ordered append path, got {:?}",
+        planned.plan_tree
+    );
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::OrderBy { .. } | Plan::MergeAppend { .. }
+        )),
+        "descending ordered range partitions should not require Sort or MergeAppend: {:?}",
+        planned.plan_tree
+    );
+    assert_eq!(
+        child_relation_names(&planned.plan_tree),
+        vec!["rp_p3", "rp_p2", "rp_p1"]
+    );
+}
+
+#[test]
+fn interleaved_list_partition_order_uses_merge_append() {
+    let catalog = catalog_with_interleaved_list_partitions();
+    let planned = planned_stmt_for_sql_with_catalog("select k from lp order by k", &catalog);
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::MergeAppend { .. }
+        )),
+        "interleaved list bounds should use merge append, got {:?}",
+        planned.plan_tree
+    );
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::OrderBy { .. }
+        )),
+        "interleaved list partitions have ordered children and should not require Sort: {:?}",
+        planned.plan_tree
+    );
+}
+
+#[test]
+fn expression_index_ordered_range_partition_query_uses_append() {
+    let catalog = catalog_with_expression_indexed_range_partitions();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select a, b, c from erp order by a, abs(b), c",
+        &catalog,
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Append { .. }
+        )),
+        "expected expression-index ordered append path, got {:?}",
+        planned.plan_tree
+    );
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::OrderBy { .. } | Plan::MergeAppend { .. }
+        )),
+        "translated expression pathkeys should not require Sort or MergeAppend: {:?}",
+        planned.plan_tree
+    );
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::IndexOnlyScan { .. } | Plan::IndexScan { .. }
+        )),
+        "expected child index paths, got {:?}",
+        planned.plan_tree
+    );
 }
 
 #[test]
