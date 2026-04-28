@@ -2282,6 +2282,7 @@ mod tests {
             partitioned_table: partition_spec
                 .as_ref()
                 .map(|spec| pg_partitioned_table_row(relation_oid, spec, 0)),
+            partition_spec,
         }
     }
 
