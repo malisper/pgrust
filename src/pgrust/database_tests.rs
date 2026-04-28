@@ -11147,7 +11147,7 @@ fn relation_privileges_gate_select_dml_copy_and_locking() {
         .unwrap();
 
     assert_table_permission_denied(session.execute(&db, "select * from rel_acl"), "rel_acl");
-    assert_table_permission_denied(session.execute(&db, "select * from pg_class"), "pg_class");
+    session.execute(&db, "select * from pg_class").unwrap();
 
     session.execute(&db, "reset session authorization").unwrap();
     session

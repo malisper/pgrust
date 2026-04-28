@@ -79,12 +79,18 @@ use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
     ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID, BOX_TYPE_OID, BPCHAR_TYPE_OID,
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID, HASH_AM_OID,
-    PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_POLICY_RELATION_OID,
+    PG_AM_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_ATTRIBUTE_RELATION_OID,
+    PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
+    PG_COLLATION_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_DESCRIPTION_RELATION_OID,
+    PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID, PG_LANGUAGE_RELATION_OID,
+    PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
+    PG_PARTITIONED_TABLE_RELATION_OID, PG_POLICY_RELATION_OID, PG_PROC_RELATION_OID,
     PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
-    PG_PUBLICATION_RELATION_OID, PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow,
-    PgPublicationRelRow, PgPublicationRow, RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_TYPE_OID,
-    VARCHAR_TYPE_OID, bootstrap_pg_am_rows, builtin_range_name_for_sql_type,
-    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID,
+    PG_TYPE_RELATION_OID, PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow, PgPublicationRelRow,
+    PgPublicationRow, RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+    bootstrap_pg_am_rows, builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type,
+    range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
@@ -6545,11 +6551,29 @@ fn catalog_relation_readable_by_public(relation_oid: u32, privilege: char) -> bo
     privilege == 'r'
         && matches!(
             relation_oid,
-            PG_AUTH_MEMBERS_RELATION_OID
+            PG_AM_RELATION_OID
+                | PG_ATTRIBUTE_RELATION_OID
+                | PG_ATTRDEF_RELATION_OID
+                | PG_AUTH_MEMBERS_RELATION_OID
+                | PG_CLASS_RELATION_OID
+                | PG_COLLATION_RELATION_OID
+                | PG_CONSTRAINT_RELATION_OID
+                | PG_DESCRIPTION_RELATION_OID
+                | PG_INDEX_RELATION_OID
+                | PG_INHERITS_RELATION_OID
+                | PG_LANGUAGE_RELATION_OID
+                | PG_NAMESPACE_RELATION_OID
+                | PG_OPCLASS_RELATION_OID
+                | PG_OPERATOR_RELATION_OID
+                | PG_PARTITIONED_TABLE_RELATION_OID
                 | PG_POLICY_RELATION_OID
+                | PG_PROC_RELATION_OID
                 | PG_PUBLICATION_RELATION_OID
                 | PG_PUBLICATION_REL_RELATION_OID
                 | PG_PUBLICATION_NAMESPACE_RELATION_OID
+                | PG_REWRITE_RELATION_OID
+                | PG_TRIGGER_RELATION_OID
+                | PG_TYPE_RELATION_OID
         )
 }
 

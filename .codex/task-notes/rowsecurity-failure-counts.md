@@ -127,3 +127,13 @@ RETURNING/generated-column WCO bucket:
 - `scripts/cargo_isolated.sh check` passed.
 - Latest rowsecurity regression result: `655/774` matched, `119` mismatches,
   `2098` diff lines. New diff copied to `/tmp/diffs/rowsecurity.diff`.
+
+Catalog readability bucket:
+- Whitelisted public reads for core `pg_catalog` metadata relations used by
+  `\d`, `\dp`, and policy/catalog inspection queries.
+- Updated the relation privilege test to expect PostgreSQL-compatible `pg_class`
+  visibility for ordinary users.
+- Focused privilege and pg_policies tests passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result: `655/774` matched, `119` mismatches,
+  `2083` diff lines. New diff copied to `/tmp/diffs/rowsecurity.diff`.
