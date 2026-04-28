@@ -1,30 +1,12 @@
 use super::super::*;
 use super::foreign_data_wrapper::alter_option_map;
+use super::reloptions::{reset_reloptions, split_table_reloption_resets};
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_heap_relation_for_alter_table,
     lookup_table_or_partitioned_table_for_alter_table, validate_alter_table_alter_column_options,
 };
-
-fn reset_reloptions(current: Option<Vec<String>>, reset_options: &[String]) -> Option<Vec<String>> {
-    let reset = reset_options
-        .iter()
-        .map(|option| option.to_ascii_lowercase())
-        .collect::<std::collections::BTreeSet<_>>();
-    let reloptions = current?
-        .into_iter()
-        .filter(|option| {
-            let name = option
-                .split_once('=')
-                .map(|(name, _)| name)
-                .unwrap_or(option)
-                .to_ascii_lowercase();
-            !reset.contains(&name)
-        })
-        .collect::<Vec<_>>();
-    (!reloptions.is_empty()).then_some(reloptions)
-}
 
 fn normalize_view_reloption(
     option: &crate::backend::parser::RelOption,
@@ -246,10 +228,7 @@ impl Database {
             }));
         }
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
-        let current = catalog
-            .class_row_by_oid(relation.relation_oid)
-            .and_then(|row| row.reloptions);
-        let reloptions = reset_reloptions(current, &alter_stmt.options);
+        let resets = split_table_reloption_resets(&alter_stmt.options)?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -259,13 +238,34 @@ impl Database {
             waiter: None,
             interrupts: self.interrupt_state(client_id),
         };
-        let effect = self
-            .catalog
-            .write()
-            .alter_relation_reloptions_mvcc(relation.relation_oid, reloptions, &ctx)
-            .map_err(map_catalog_error)?;
-        self.apply_catalog_mutation_effect_immediate(&effect)?;
-        catalog_effects.push(effect);
+        if !resets.heap.is_empty() {
+            let current = catalog
+                .class_row_by_oid(relation.relation_oid)
+                .and_then(|row| row.reloptions);
+            let reloptions = reset_reloptions(current, &resets.heap);
+            let effect = self
+                .catalog
+                .write()
+                .alter_relation_reloptions_mvcc(relation.relation_oid, reloptions, &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
+        if !resets.toast.is_empty()
+            && let Some(toast) = relation.toast.as_ref()
+        {
+            let current = catalog
+                .class_row_by_oid(toast.relation_oid)
+                .and_then(|row| row.reloptions);
+            let reloptions = reset_reloptions(current, &resets.toast);
+            let effect = self
+                .catalog
+                .write()
+                .alter_relation_reloptions_mvcc(toast.relation_oid, reloptions, &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 

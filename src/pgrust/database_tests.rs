@@ -10569,6 +10569,278 @@ fn create_view_persists_security_reloptions() {
 }
 
 #[test]
+fn table_reloptions_create_set_reset_and_errors() {
+    let dir = temp_dir("table_reloptions_create_set_reset");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(
+        1,
+        "create table reloptions_test(i int) with \
+         (FiLLFaCToR=30, autovacuum_enabled = false, autovacuum_analyze_scale_factor = 0.2)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_test'",
+        ),
+        vec![vec![typed_text_array_value(
+            &[
+                "fillfactor=30",
+                "autovacuum_enabled=false",
+                "autovacuum_analyze_scale_factor=0.2",
+            ],
+            TEXT_TYPE_OID
+        )]]
+    );
+
+    db.execute(
+        1,
+        "alter table reloptions_test set \
+         (fillfactor=31, autovacuum_analyze_scale_factor = 0.3)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_test'",
+        ),
+        vec![vec![typed_text_array_value(
+            &[
+                "autovacuum_enabled=false",
+                "fillfactor=31",
+                "autovacuum_analyze_scale_factor=0.3",
+            ],
+            TEXT_TYPE_OID
+        )]]
+    );
+
+    db.execute(
+        1,
+        "alter table reloptions_test set (autovacuum_enabled, fillfactor=32)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_test'",
+        ),
+        vec![vec![typed_text_array_value(
+            &[
+                "autovacuum_analyze_scale_factor=0.3",
+                "autovacuum_enabled=true",
+                "fillfactor=32",
+            ],
+            TEXT_TYPE_OID
+        )]]
+    );
+
+    db.execute(1, "alter table reloptions_test reset (fillfactor)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_test'",
+        ),
+        vec![vec![typed_text_array_value(
+            &[
+                "autovacuum_analyze_scale_factor=0.3",
+                "autovacuum_enabled=true",
+            ],
+            TEXT_TYPE_OID
+        )]]
+    );
+
+    db.execute(
+        1,
+        "alter table reloptions_test reset \
+         (autovacuum_enabled, autovacuum_analyze_scale_factor)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_test'",
+        ),
+        vec![vec![Value::Null]]
+    );
+
+    match db.execute(1, "create table reloptions_bad(i int) with (fillfactor=2)") {
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        }) if message == "value 2 out of bounds for option \"fillfactor\""
+            && detail == "Valid values are between \"10\" and \"100\"."
+            && sqlstate == "22023" => {}
+        other => panic!("expected fillfactor range error, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname = 'reloptions_bad'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    match db.execute(
+        1,
+        "create table reloptions_bad(i int) with (fillfactor='string')",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "invalid value for integer option \"fillfactor\": string"
+            && sqlstate == "22023" => {}
+        other => panic!("expected fillfactor type error, got {other:?}"),
+    }
+    match db.execute(
+        1,
+        "create table reloptions_bad(i int) with (not_existing_namespace.fillfactor=2)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "unrecognized parameter namespace \"not_existing_namespace\""
+            && sqlstate == "22023" => {}
+        other => panic!("expected reloption namespace error, got {other:?}"),
+    }
+    match db.execute(
+        1,
+        "create table reloptions_bad(i int) with (fillfactor=30, fillfactor=40)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "parameter \"fillfactor\" specified more than once"
+            && sqlstate == "22023" => {}
+        other => panic!("expected duplicate reloption error, got {other:?}"),
+    }
+}
+
+#[test]
+fn toast_and_index_reloptions_are_stored_on_target_relations() {
+    let dir = temp_dir("toast_index_reloptions");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(
+        1,
+        "create table reloptions_toast(s varchar) with \
+         (toast.autovacuum_vacuum_cost_delay = 23, \
+          autovacuum_vacuum_cost_delay = 24, fillfactor = 40)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_toast'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["autovacuum_vacuum_cost_delay=24", "fillfactor=40"],
+            TEXT_TYPE_OID
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tc.reloptions from pg_class c join pg_class tc on tc.oid = c.reltoastrelid \
+             where c.relname = 'reloptions_toast'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["autovacuum_vacuum_cost_delay=23"],
+            TEXT_TYPE_OID
+        )]]
+    );
+
+    db.execute(
+        1,
+        "alter table reloptions_toast set (toast.autovacuum_vacuum_cost_delay = 24)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tc.reloptions from pg_class c join pg_class tc on tc.oid = c.reltoastrelid \
+             where c.relname = 'reloptions_toast'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["autovacuum_vacuum_cost_delay=24"],
+            TEXT_TYPE_OID
+        )]]
+    );
+    db.execute(
+        1,
+        "alter table reloptions_toast reset (toast.autovacuum_vacuum_cost_delay)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tc.reloptions from pg_class c join pg_class tc on tc.oid = c.reltoastrelid \
+             where c.relname = 'reloptions_toast'",
+        ),
+        vec![vec![Value::Null]]
+    );
+
+    db.execute(
+        1,
+        "create index reloptions_toast_idx on reloptions_toast (s) with (fillfactor=30)",
+    )
+    .unwrap();
+    db.execute(1, "alter index reloptions_toast_idx set (fillfactor=40)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_toast_idx'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["fillfactor=40"],
+            TEXT_TYPE_OID
+        )]]
+    );
+
+    db.execute(
+        1,
+        "create index reloptions_toast_idx2 on reloptions_toast (s)",
+    )
+    .unwrap();
+    db.execute(1, "alter index reloptions_toast_idx2 set (fillfactor=40)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select reloptions from pg_class where relname = 'reloptions_toast_idx2'",
+        ),
+        vec![vec![typed_text_array_value(
+            &["fillfactor=40"],
+            TEXT_TYPE_OID
+        )]]
+    );
+
+    match db.execute(
+        1,
+        "create index reloptions_toast_idx3 on reloptions_toast (s) with (not_existing_ns.fillfactor=2)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "unrecognized parameter namespace \"not_existing_ns\""
+            && sqlstate == "22023" => {}
+        other => panic!("expected index reloption namespace error, got {other:?}"),
+    }
+}
+
+#[test]
 fn security_barrier_inheritance_view_filters_through_subquery_scan() {
     let dir = temp_dir("security_barrier_inheritance_view");
     let db = Database::open(&dir, 128).unwrap();
@@ -12280,8 +12552,8 @@ fn dropping_last_temp_table_keeps_temp_namespace() {
 }
 
 #[test]
-fn create_index_and_alter_table_set_are_noops() {
-    let base = temp_dir("numeric_sql_noops");
+fn create_index_catalog_paths_and_alter_table_set_parallel_workers() {
+    let base = temp_dir("numeric_sql_catalog_paths");
     let db = Database::open(&base, 16).unwrap();
 
     match db

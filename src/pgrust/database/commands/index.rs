@@ -1,4 +1,5 @@
 use super::super::*;
+use super::reloptions::normalize_btree_reloptions;
 use crate::backend::access::nbtree::nbtree::UNIQUE_BUILD_DETAIL_SEPARATOR;
 use crate::backend::commands::tablecmds::{
     collect_matching_rows_heap, index_key_values_for_row, insert_index_entry_for_row,
@@ -840,51 +841,7 @@ impl Database {
         &self,
         options: &[RelOption],
     ) -> Result<Option<BtreeOptions>, ExecError> {
-        if options.is_empty() {
-            return Ok(None);
-        }
-
-        let mut resolved = BtreeOptions::default();
-        for option in options {
-            if option.name.eq_ignore_ascii_case("fillfactor") {
-                let fillfactor = option.value.parse::<u16>().map_err(|_| {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "integer fillfactor between 10 and 100",
-                        actual: option.value.clone(),
-                    })
-                })?;
-                if !(10..=100).contains(&fillfactor) {
-                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "integer fillfactor between 10 and 100",
-                        actual: option.value.clone(),
-                    }));
-                }
-                resolved.fillfactor = fillfactor;
-                continue;
-            }
-
-            if option.name.eq_ignore_ascii_case("deduplicate_items") {
-                // :HACK: btree deduplication reloption is preserved for catalog
-                // compatibility, but posting-list deduplication is not built yet.
-                resolved.deduplicate_items = match option.value.to_ascii_lowercase().as_str() {
-                    "on" | "true" | "yes" | "1" => true,
-                    "off" | "false" | "no" | "0" => false,
-                    _ => {
-                        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                            expected: "boolean deduplicate_items",
-                            actual: option.value.clone(),
-                        }));
-                    }
-                };
-                continue;
-            }
-
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
-                "btree index option \"{}\"",
-                option.name
-            ))));
-        }
-        Ok(Some(resolved))
+        normalize_btree_reloptions(options).map(|(options, _)| options)
     }
 
     fn access_method_can_include(access_method_oid: u32) -> bool {

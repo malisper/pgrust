@@ -1460,53 +1460,67 @@ impl Session {
         db: &Database,
         stmt: &crate::backend::parser::AlterTableSetStatement,
     ) -> Result<StatementResult, ExecError> {
-        let catalog = self.catalog_lookup(db);
-        if let Some(relation) = catalog.lookup_any_relation(&stmt.table_name)
-            && relation.relkind == 'v'
-        {
-            drop(catalog);
-            if let Some((xid, cid)) = self.catalog_txn_ctx() {
-                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
-                let search_path = self.configured_search_path();
-                let txn = self.active_txn.as_mut().unwrap();
-                return db.execute_alter_view_set_options_stmt_in_transaction_with_search_path(
-                    self.client_id,
-                    stmt,
-                    xid,
-                    cid,
-                    search_path.as_deref(),
-                    &mut txn.catalog_effects,
-                );
+        if let Some((xid, cid)) = self.catalog_txn_ctx() {
+            let relation_to_lock = {
+                let catalog = self.catalog_lookup(db);
+                catalog
+                    .lookup_any_relation(&stmt.table_name)
+                    .map(|relation| relation.rel)
+            };
+            if let Some(rel) = relation_to_lock {
+                self.lock_table_if_needed(db, rel, TableLockMode::AccessExclusive)?;
             }
             let search_path = self.configured_search_path();
-            return db.execute_alter_view_set_options_stmt_with_search_path(
+            let txn = self.active_txn.as_mut().unwrap();
+            return db.execute_alter_table_set_stmt_in_transaction_with_search_path(
                 self.client_id,
                 stmt,
+                xid,
+                cid,
                 search_path.as_deref(),
+                &mut txn.catalog_effects,
             );
         }
-        for option in &stmt.options {
-            if option.name.eq_ignore_ascii_case("toast_tuple_target") {
-                let target = option.value.parse::<usize>().map_err(|_| {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "integer toast_tuple_target",
-                        actual: option.value.clone(),
-                    })
-                })?;
-                let relation = catalog
-                    .lookup_any_relation(&stmt.table_name)
-                    .ok_or_else(|| {
-                        ExecError::Parse(ParseError::TableDoesNotExist(stmt.table_name.clone()))
-                    })?;
-                if let Some(toast) = relation.toast {
-                    crate::backend::access::table::toast_helper::set_toast_tuple_target_for_toast_relation(
-                        toast.relation_oid,
-                        target,
-                    );
-                }
+        let search_path = self.configured_search_path();
+        db.execute_alter_table_set_stmt_with_search_path(
+            self.client_id,
+            stmt,
+            search_path.as_deref(),
+        )
+    }
+
+    fn apply_alter_index_set(
+        &mut self,
+        db: &Database,
+        stmt: &crate::backend::parser::AlterIndexSetStatement,
+    ) -> Result<StatementResult, ExecError> {
+        if let Some((xid, cid)) = self.catalog_txn_ctx() {
+            let relation_to_lock = {
+                let catalog = self.catalog_lookup(db);
+                catalog
+                    .lookup_any_relation(&stmt.index_name)
+                    .map(|relation| relation.rel)
+            };
+            if let Some(rel) = relation_to_lock {
+                self.lock_table_if_needed(db, rel, TableLockMode::AccessExclusive)?;
             }
+            let search_path = self.configured_search_path();
+            let txn = self.active_txn.as_mut().unwrap();
+            return db.execute_alter_index_set_stmt_in_transaction_with_search_path(
+                self.client_id,
+                stmt,
+                xid,
+                cid,
+                search_path.as_deref(),
+                &mut txn.catalog_effects,
+            );
         }
-        Ok(StatementResult::AffectedRows(0))
+        let search_path = self.configured_search_path();
+        db.execute_alter_index_set_stmt_with_search_path(
+            self.client_id,
+            stmt,
+            search_path.as_deref(),
+        )
     }
 
     pub(crate) fn catalog_txn_ctx(&self) -> Option<(TransactionId, u32)> {
@@ -4435,7 +4449,7 @@ impl Session {
                 }
             }
             Statement::AlterTableSet(ref alter_stmt) => self.apply_alter_table_set(db, alter_stmt),
-            Statement::AlterIndexSet(_) => Ok(StatementResult::AffectedRows(0)),
+            Statement::AlterIndexSet(ref alter_stmt) => self.apply_alter_index_set(db, alter_stmt),
             Statement::CreateTableAs(ref create_stmt) => {
                 let create_stmt = self.resolve_create_table_as_statement(create_stmt)?;
                 if self.active_txn.is_some() {
@@ -7241,7 +7255,7 @@ impl Session {
                 )
             }
             Statement::AlterTableSet(ref alter_stmt) => self.apply_alter_table_set(db, alter_stmt),
-            Statement::AlterIndexSet(_) => Ok(StatementResult::AffectedRows(0)),
+            Statement::AlterIndexSet(ref alter_stmt) => self.apply_alter_index_set(db, alter_stmt),
             Statement::CreateRole(ref create_stmt) => {
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_role_stmt_in_transaction(

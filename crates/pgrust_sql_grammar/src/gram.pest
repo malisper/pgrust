@@ -205,7 +205,7 @@ alter_table_drop_expression_action = { kw_drop ~ kw_expression ~ if_exists_claus
 alter_table_set_default_action = { kw_set ~ kw_default ~ expr }
 alter_table_drop_default_action = { kw_drop ~ kw_default }
 alter_table_set_options_action = { kw_set ~ "(" ~ reloption ~ ("," ~ reloption)* ~ ")" }
-alter_table_reset_options_action = { kw_reset ~ "(" ~ ident_list ~ ")" }
+alter_table_reset_options_action = { kw_reset ~ "(" ~ reset_reloption ~ ("," ~ reset_reloption)* ~ ")" }
 alter_table_using_clause = { kw_using ~ expr }
 alter_table_rename_column_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_rename ~ kw_column? ~ identifier ~ kw_to ~ identifier }
 alter_table_rename_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_rename ~ kw_to ~ identifier }
@@ -218,7 +218,7 @@ alter_materialized_view_set_schema_stmt = { kw_alter ~ kw_materialized ~ kw_view
 alter_schema_owner_stmt = { kw_alter ~ kw_schema ~ identifier ~ kw_owner ~ kw_to ~ identifier }
 alter_table_set_persistence_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_set ~ (kw_logged | kw_unlogged) }
 alter_table_set_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_set ~ "(" ~ reloption ~ ("," ~ reloption)* ~ ")" }
-alter_table_reset_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_reset ~ "(" ~ ident_list ~ ")" }
+alter_table_reset_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ kw_reset ~ "(" ~ reset_reloption ~ ("," ~ reset_reloption)* ~ ")" }
 alter_table_set_row_security_stmt = { kw_alter ~ kw_table ~ alter_table_target ~ alter_table_row_security_action }
 alter_view_target = { if_exists_clause? ~ identifier }
 alter_table_row_security_action = { (kw_enable ~ kw_row ~ kw_level ~ kw_security) | (kw_disable ~ kw_row ~ kw_level ~ kw_security) | (kw_force ~ kw_row ~ kw_level ~ kw_security) | (kw_no ~ kw_force ~ kw_row ~ kw_level ~ kw_security) }
@@ -248,7 +248,8 @@ role_password_option = { kw_password ~ (quoted_string_literal | kw_null) }
 role_encrypted_password_option = { kw_encrypted ~ kw_password ~ quoted_string_literal }
 role_membership_option = { ((kw_in ~ kw_role) | kw_role | kw_admin | kw_user) ~ ident_list }
 role_sysid_option = { kw_sysid ~ integer }
-reloption = { identifier ~ "=" ~ set_value_atom }
+reloption = { identifier ~ ("=" ~ set_value_atom)? }
+reset_reloption = { identifier ~ ("=" ~ set_value_atom)? }
 table_persistence_clause = { temp_clause | kw_unlogged }
 temp_clause = { kw_temp | kw_temporary }
 create_table_tail = { create_table_of_form | create_table_column_form | create_table_as_form }
@@ -287,8 +288,7 @@ ctas_query = { select_stmt | parenthesized_values_stmt | values_stmt | execute_p
 ctas_column_list = { "(" ~ ident_list ~ ")" }
 on_commit_clause = { kw_on ~ kw_commit ~ on_commit_action }
 on_commit_action = { kw_preserve ~ kw_rows | kw_delete ~ kw_rows | kw_drop }
-table_with_clause = { kw_with ~ "(" ~ table_with_item ~ ("," ~ table_with_item)* ~ ")" }
-table_with_item = { identifier ~ ("=" ~ (identifier | integer))? }
+table_with_clause = { kw_with ~ "(" ~ reloption ~ ("," ~ reloption)* ~ ")" }
 without_oids_clause = { kw_without ~ kw_oids }
 table_storage_clause = { table_with_clause | without_oids_clause }
 drop_table_stmt = { kw_drop ~ kw_table ~ if_exists_clause? ~ ident_list ~ drop_behavior? }
