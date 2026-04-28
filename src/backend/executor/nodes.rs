@@ -59,8 +59,8 @@ use crate::include::nodes::plannodes::{
 };
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR,
-    OrderByEntry, ParamKind, RelationDesc, ScalarFunctionImpl, SetReturningCall, Var,
-    attrno_index, is_special_varno,
+    OrderByEntry, ParamKind, RelationDesc, ScalarFunctionImpl, SetReturningCall, Var, attrno_index,
+    is_special_varno,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

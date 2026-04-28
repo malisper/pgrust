@@ -347,19 +347,29 @@ fn partition_info_for_parent(
     members: Vec<PartitionMember>,
 ) -> Option<PartitionInfo> {
     let spec = partition_cache::partition_spec(root, catalog, relation_oid)?;
+    let parent_translation = AppendRelInfo {
+        parent_relid: 1,
+        child_relid: parent_rtindex,
+        translated_vars: parent_rte
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                Expr::Var(Var {
+                    varno: parent_rtindex,
+                    varattno: user_attrno(index),
+                    varlevelsup: 0,
+                    vartype: column.sql_type,
+                })
+            })
+            .collect(),
+    };
     let key_exprs = spec
-        .partattrs
+        .key_exprs
         .iter()
-        .filter_map(|attno| {
-            let index = usize::try_from(*attno).ok()?.checked_sub(1)?;
-            let column = parent_rte.desc.columns.get(index)?;
-            Some(Expr::Var(Var {
-                varno: parent_rtindex,
-                varattno: i32::from(*attno),
-                varlevelsup: 0,
-                vartype: column.sql_type,
-            }))
-        })
+        .cloned()
+        .map(|expr| translate_append_rel_expr(expr, &parent_translation))
         .collect::<Vec<_>>();
     if key_exprs.len() != spec.partattrs.len() || members.is_empty() {
         return None;

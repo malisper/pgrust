@@ -8,15 +8,15 @@ use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{
-    PartitionInfo, Path, PathKey, PathTarget, PlannerConfig, PlannerGlobal, PlannerInfo,
-    RelOptInfo, RelOptKind, UpperRelKind,
+    AppendRelInfo, PartitionInfo, Path, PathKey, PathTarget, PlannerConfig, PlannerGlobal,
+    PlannerInfo, RelOptInfo, RelOptKind, UpperRelKind,
 };
 use crate::include::nodes::plannodes::{
     AggregatePhase, AggregateStrategy, PlanEstimate, PlannedStmt,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, AggFunc, BoolExprType, BuiltinScalarFunction, Expr, OpExprKind, ProjectSetTarget,
-    QueryColumn, RelationDesc, ScalarFunctionImpl, TargetEntry, WindowClause,
+    AggAccum, AggFunc, BoolExprType, BuiltinScalarFunction, Expr, JoinType, OpExprKind,
+    ProjectSetTarget, QueryColumn, RelationDesc, ScalarFunctionImpl, TargetEntry, WindowClause,
     expr_contains_set_returning, set_returning_call_exprs, user_attrno,
 };
 
@@ -24,6 +24,7 @@ use super::super::bestpath;
 use super::super::create_plan_with_param_base;
 use super::super::groupby_rewrite;
 use super::super::has_grouping;
+use super::super::inherit::translate_append_rel_expr;
 use super::super::path::{
     query_planner, relation_index_only_full_scan_paths, relation_ordered_index_paths,
     residual_where_qual,
@@ -38,7 +39,7 @@ use super::super::util::{
 };
 use super::super::{
     expand_join_rte_vars, expr_relids, flatten_join_alias_vars, optimize_path_with_config,
-    pull_up_sublinks,
+    pull_up_sublinks, relids_union,
 };
 
 pub(super) fn make_pathtarget_projection_rel(
@@ -336,6 +337,66 @@ fn grouping_contains_inner_join_key(
     })
 }
 
+fn grouping_contains_preserved_right_join_key(
+    root: &PlannerInfo,
+    group_by: &[Expr],
+    relids: &[usize],
+) -> bool {
+    root.join_info_list.iter().any(|join| {
+        if join.jointype != JoinType::Right
+            || !join
+                .syn_lefthand
+                .iter()
+                .chain(join.syn_righthand.iter())
+                .all(|relid| relids.contains(relid))
+        {
+            return false;
+        }
+        let Expr::Op(op) = flatten_join_alias_vars(root, join.join_quals.clone()) else {
+            return false;
+        };
+        if !matches!(op.op, OpExprKind::Eq) {
+            return false;
+        }
+        let [left, right] = op.args.as_slice() else {
+            return false;
+        };
+        let preserved_key = if expr_relids(left)
+            .iter()
+            .all(|relid| join.syn_righthand.contains(relid))
+        {
+            left
+        } else if expr_relids(right)
+            .iter()
+            .all(|relid| join.syn_righthand.contains(relid))
+        {
+            right
+        } else {
+            return false;
+        };
+        let preserved_key = normalized_partition_expr(root, preserved_key.clone());
+        group_by.iter().cloned().any(|expr| {
+            let expr = normalized_partition_expr(root, expr);
+            expr == preserved_key
+        })
+    })
+}
+
+fn rel_contains_outer_join(root: &PlannerInfo, relids: &[usize]) -> bool {
+    root.join_info_list.iter().any(|join| {
+        matches!(
+            join.jointype,
+            crate::include::nodes::primnodes::JoinType::Left
+                | crate::include::nodes::primnodes::JoinType::Right
+                | crate::include::nodes::primnodes::JoinType::Full
+        ) && join
+            .syn_lefthand
+            .iter()
+            .chain(join.syn_righthand.iter())
+            .all(|relid| relids.contains(relid))
+    })
+}
+
 fn aggregate_expr_contains_whole_row_rel(
     root: &PlannerInfo,
     expr: &Expr,
@@ -518,19 +579,322 @@ fn const_false_aggregate_input(
 }
 
 fn path_is_const_false_filter(path: &Path) -> bool {
-    matches!(
-        path,
+    match path {
         Path::Filter {
             predicate: Expr::Const(Value::Bool(false)),
             ..
-        }
-    )
+        } => true,
+        Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::SubqueryScan { input, .. } => path_is_const_false_filter(input),
+        _ => false,
+    }
 }
 
 fn projection_is_var_passthrough(targets: &[TargetEntry]) -> bool {
     targets
         .iter()
         .all(|target| !target.resjunk && matches!(target.expr, Expr::Var(_)))
+}
+
+fn path_single_relid(path: &Path) -> Option<usize> {
+    match path {
+        Path::Append { relids, .. } if relids.len() == 1 => relids.first().copied(),
+        Path::Projection { input, .. }
+        | Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => path_single_relid(input),
+        _ => None,
+    }
+}
+
+fn path_contains_nested_append(path: &Path) -> bool {
+    match path {
+        Path::Append { children, .. } | Path::MergeAppend { children, .. } => !children.is_empty(),
+        Path::Projection { input, .. }
+        | Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => path_contains_nested_append(input),
+        _ => false,
+    }
+}
+
+fn path_relids(path: &Path) -> Vec<usize> {
+    match path {
+        Path::Append { relids, .. } => relids.clone(),
+        Path::Projection { input, .. }
+        | Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Aggregate { input, .. } => path_relids(input),
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. } => {
+            relids_union(&path_relids(left), &path_relids(right))
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn empty_preserved_outer_join_aggregate_input(
+    path: &Path,
+    group_by: &[Expr],
+    _passthrough_exprs: &[Expr],
+    _accumulators: &[AggAccum],
+    _having: Option<&Expr>,
+) -> Option<Path> {
+    match path {
+        Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::SubqueryScan { input, .. } => empty_preserved_outer_join_aggregate_input(
+            input,
+            group_by,
+            _passthrough_exprs,
+            _accumulators,
+            _having,
+        ),
+        Path::HashJoin { left, kind, .. }
+        | Path::NestedLoopJoin { left, kind, .. }
+        | Path::MergeJoin { left, kind, .. }
+            if !group_by.is_empty()
+                && *kind == JoinType::Left
+                && path_is_const_false_filter(left) =>
+        {
+            Some(left.as_ref().clone())
+        }
+        _ => None,
+    }
+}
+
+fn append_translation_chain(
+    root: &PlannerInfo,
+    ancestor_relid: usize,
+    descendant_relid: usize,
+) -> Option<Vec<AppendRelInfo>> {
+    if ancestor_relid == descendant_relid {
+        return Some(Vec::new());
+    }
+    let mut current = descendant_relid;
+    let mut chain = Vec::new();
+    loop {
+        let info = root.append_rel_infos.get(current)?.as_ref()?.clone();
+        if info.child_relid != current {
+            return None;
+        }
+        let parent_relid = info.parent_relid;
+        chain.push(info);
+        if parent_relid == ancestor_relid {
+            chain.reverse();
+            return Some(chain);
+        }
+        if parent_relid == current {
+            return None;
+        }
+        current = parent_relid;
+    }
+}
+
+fn translate_expr_to_descendant(
+    root: &PlannerInfo,
+    mut expr: Expr,
+    descendant_relid: usize,
+) -> Expr {
+    let relids = expr_relids(&expr);
+    for relid in relids {
+        let Some(chain) = append_translation_chain(root, relid, descendant_relid) else {
+            continue;
+        };
+        for info in chain {
+            expr = translate_append_rel_expr(expr, &info);
+        }
+    }
+    expr
+}
+
+fn translate_accums_to_descendant(
+    root: &PlannerInfo,
+    accumulators: &[AggAccum],
+    descendant_relid: usize,
+) -> Vec<AggAccum> {
+    accumulators
+        .iter()
+        .cloned()
+        .map(|mut accum| {
+            accum.args = accum
+                .args
+                .into_iter()
+                .map(|expr| translate_expr_to_descendant(root, expr, descendant_relid))
+                .collect();
+            accum.direct_args = accum
+                .direct_args
+                .into_iter()
+                .map(|expr| translate_expr_to_descendant(root, expr, descendant_relid))
+                .collect();
+            accum.order_by = accum
+                .order_by
+                .into_iter()
+                .map(|mut item| {
+                    item.expr = translate_expr_to_descendant(root, item.expr, descendant_relid);
+                    item
+                })
+                .collect();
+            accum.filter = accum
+                .filter
+                .map(|expr| translate_expr_to_descendant(root, expr, descendant_relid));
+            accum
+        })
+        .collect()
+}
+
+fn translate_path_target_to_descendant(
+    root: &PlannerInfo,
+    reltarget: &PathTarget,
+    descendant_relid: usize,
+) -> PathTarget {
+    PathTarget::with_sortgrouprefs(
+        reltarget
+            .exprs
+            .iter()
+            .cloned()
+            .map(|expr| translate_expr_to_descendant(root, expr, descendant_relid))
+            .collect(),
+        reltarget.sortgrouprefs.clone(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn partial_partitionwise_leaf_aggregate_paths(
+    root: &PlannerInfo,
+    children: Vec<Path>,
+    partial_strategy: AggregateStrategy,
+    group_by: &[Expr],
+    passthrough_exprs: &[Expr],
+    accumulators: &[AggAccum],
+    partial_output_columns: &[QueryColumn],
+    partial_target: &PathTarget,
+    child_slot_id: usize,
+    catalog: &dyn CatalogLookup,
+) -> Vec<Path> {
+    let mut paths = Vec::new();
+    for child in children {
+        let mut aggregate_child = child;
+        aggregate_child = match aggregate_child {
+            Path::Append {
+                children: nested_children,
+                ..
+            } if !nested_children.is_empty() => {
+                paths.extend(partial_partitionwise_leaf_aggregate_paths(
+                    root,
+                    nested_children,
+                    partial_strategy,
+                    group_by,
+                    passthrough_exprs,
+                    accumulators,
+                    partial_output_columns,
+                    partial_target,
+                    child_slot_id,
+                    catalog,
+                ));
+                continue;
+            }
+            other => other,
+        };
+        if let Some(child_relid) = path_single_relid(&aggregate_child) {
+            let child_rel = root
+                .simple_rel_array
+                .get(child_relid)
+                .and_then(Option::as_ref);
+            if child_rel
+                .and_then(|rel| rel.partition_info.as_ref())
+                .is_some()
+            {
+                let input = match aggregate_child {
+                    Path::Projection { input, targets, .. }
+                        if projection_is_identity(&input, &targets)
+                            || projection_is_var_passthrough(&targets) =>
+                    {
+                        *input
+                    }
+                    other => other,
+                };
+                match input {
+                    Path::Append {
+                        children: nested_children,
+                        ..
+                    } if !nested_children.is_empty() => {
+                        let child_group_by = group_by
+                            .iter()
+                            .cloned()
+                            .map(|expr| translate_expr_to_descendant(root, expr, child_relid))
+                            .collect::<Vec<_>>();
+                        let child_passthrough_exprs = passthrough_exprs
+                            .iter()
+                            .cloned()
+                            .map(|expr| translate_expr_to_descendant(root, expr, child_relid))
+                            .collect::<Vec<_>>();
+                        let child_accumulators =
+                            translate_accums_to_descendant(root, accumulators, child_relid);
+                        let child_target =
+                            translate_path_target_to_descendant(root, partial_target, child_relid);
+                        paths.extend(partial_partitionwise_leaf_aggregate_paths(
+                            root,
+                            nested_children,
+                            partial_strategy,
+                            &child_group_by,
+                            &child_passthrough_exprs,
+                            &child_accumulators,
+                            partial_output_columns,
+                            &child_target,
+                            child_slot_id,
+                            catalog,
+                        ));
+                        continue;
+                    }
+                    other => {
+                        aggregate_child = other;
+                    }
+                }
+            }
+        }
+
+        let partial_group_pathkeys = group_pathkeys(group_by);
+        let input = prepare_aggregate_input_for_strategy(
+            partial_strategy,
+            aggregate_child,
+            group_by,
+            accumulators,
+        );
+        paths.push(aggregate_path(
+            partial_strategy,
+            AggregatePhase::Partial,
+            if partial_strategy == AggregateStrategy::Sorted {
+                partial_group_pathkeys
+            } else {
+                Vec::new()
+            },
+            child_slot_id,
+            input,
+            group_by.to_vec(),
+            passthrough_exprs.to_vec(),
+            accumulators.to_vec(),
+            None,
+            partial_output_columns.to_vec(),
+            partial_target.clone(),
+            catalog,
+            root.config,
+        ));
+    }
+    paths
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -584,6 +948,7 @@ fn partitionwise_aggregate_path(
             .is_some_and(|partition_info| {
                 grouping_covers_partition_keys(root, group_by, partition_info)
             })
+            || grouping_contains_preserved_right_join_key(root, group_by, &input_rel.relids)
             || (input_rel.partition_info.is_none()
                 && grouping_contains_inner_join_key(root, group_by, &input_rel.relids));
 
@@ -605,10 +970,13 @@ fn partitionwise_aggregate_path(
     if !all_aggregates_are_partial_safe(accumulators) {
         return None;
     }
+    let force_sorted_final = rel_contains_outer_join(root, &input_rel.relids)
+        || children.iter().any(path_contains_nested_append);
     Some(partial_partitionwise_aggregate_path(
         root,
         relids,
         children,
+        force_sorted_final,
         group_by,
         passthrough_exprs,
         accumulators,
@@ -657,7 +1025,9 @@ fn append_partitionwise_aggregate_fallback_path(
     if children.is_empty() {
         return None;
     }
-    if grouping_contains_inner_join_key(root, group_by, &input_rel.relids) {
+    if grouping_contains_inner_join_key(root, group_by, &input_rel.relids)
+        || grouping_contains_preserved_right_join_key(root, group_by, &input_rel.relids)
+    {
         return Some(full_partitionwise_aggregate_path(
             root,
             relids,
@@ -672,10 +1042,13 @@ fn append_partitionwise_aggregate_fallback_path(
         ));
     }
     if all_aggregates_are_partial_safe(accumulators) {
+        let force_sorted_final = rel_contains_outer_join(root, &input_rel.relids)
+            || children.iter().any(path_contains_nested_append);
         return Some(partial_partitionwise_aggregate_path(
             root,
             relids,
             children,
+            force_sorted_final,
             group_by,
             passthrough_exprs,
             accumulators,
@@ -686,6 +1059,140 @@ fn append_partitionwise_aggregate_fallback_path(
         ));
     }
     None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn nested_partitionwise_aggregate_path(
+    root: &PlannerInfo,
+    child: Path,
+    group_by: &[Expr],
+    passthrough_exprs: &[Expr],
+    accumulators: &[AggAccum],
+    having: Option<&Expr>,
+    output_columns: &[QueryColumn],
+    reltarget: &PathTarget,
+    catalog: &dyn CatalogLookup,
+) -> Option<Path> {
+    let child_relid = path_single_relid(&child)?;
+    let child_rel = root
+        .simple_rel_array
+        .get(child_relid)
+        .and_then(Option::as_ref)?;
+    let partition_info = child_rel.partition_info.as_ref()?;
+    let input = match child {
+        Path::Projection { input, targets, .. }
+            if projection_is_identity(&input, &targets)
+                || projection_is_var_passthrough(&targets) =>
+        {
+            *input
+        }
+        other => other,
+    };
+    let Path::Append {
+        plan_info,
+        pathtarget,
+        relids,
+        source_id,
+        desc,
+        child_roots,
+        children,
+    } = input
+    else {
+        return None;
+    };
+    if children.is_empty() {
+        return None;
+    }
+
+    let child_group_by = group_by
+        .iter()
+        .cloned()
+        .map(|expr| translate_expr_to_descendant(root, expr, child_relid))
+        .collect::<Vec<_>>();
+    let child_passthrough_exprs = passthrough_exprs
+        .iter()
+        .cloned()
+        .map(|expr| translate_expr_to_descendant(root, expr, child_relid))
+        .collect::<Vec<_>>();
+    let child_accumulators = translate_accums_to_descendant(root, accumulators, child_relid);
+    let child_having = having
+        .cloned()
+        .map(|expr| translate_expr_to_descendant(root, expr, child_relid));
+    let child_reltarget = PathTarget::with_sortgrouprefs(
+        reltarget
+            .exprs
+            .iter()
+            .cloned()
+            .map(|expr| translate_expr_to_descendant(root, expr, child_relid))
+            .collect(),
+        reltarget.sortgrouprefs.clone(),
+    );
+
+    if grouping_covers_partition_keys(root, &child_group_by, partition_info) {
+        return Some(full_partitionwise_aggregate_path(
+            root,
+            relids,
+            children,
+            &child_group_by,
+            &child_passthrough_exprs,
+            &child_accumulators,
+            child_having.as_ref(),
+            output_columns,
+            &child_reltarget,
+            catalog,
+        ));
+    }
+    if all_aggregates_are_partial_safe(&child_accumulators) {
+        return Some(partial_partitionwise_aggregate_path(
+            root,
+            relids,
+            children,
+            true,
+            &child_group_by,
+            &child_passthrough_exprs,
+            &child_accumulators,
+            child_having.as_ref(),
+            output_columns,
+            &child_reltarget,
+            catalog,
+        ));
+    }
+    let strategy = aggregate_strategy_for_input(root, &child_group_by, &child_accumulators);
+    let group_pathkeys = group_pathkeys(&child_group_by);
+    let append_input = Path::Append {
+        plan_info,
+        pathtarget,
+        relids,
+        source_id,
+        desc,
+        child_roots,
+        children,
+    };
+    let input = prepare_aggregate_input_for_strategy(
+        strategy,
+        append_input,
+        &child_group_by,
+        &child_accumulators,
+    );
+    Some(aggregate_path(
+        strategy,
+        AggregatePhase::Complete,
+        if strategy == AggregateStrategy::Sorted {
+            group_pathkeys
+        } else {
+            Vec::new()
+        },
+        next_synthetic_slot_id(),
+        input,
+        child_group_by,
+        child_passthrough_exprs,
+        child_accumulators,
+        child_having,
+        output_columns.to_vec(),
+        child_reltarget,
+        catalog,
+        root.config,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -707,6 +1214,19 @@ fn full_partitionwise_aggregate_path(
     let children = children
         .into_iter()
         .map(|child| {
+            if let Some(path) = nested_partitionwise_aggregate_path(
+                root,
+                child.clone(),
+                group_by,
+                passthrough_exprs,
+                accumulators,
+                having,
+                output_columns,
+                reltarget,
+                catalog,
+            ) {
+                return path;
+            }
             let input =
                 prepare_aggregate_input_for_strategy(strategy, child, group_by, accumulators);
             aggregate_path(
@@ -763,6 +1283,7 @@ fn partial_partitionwise_aggregate_path(
     root: &PlannerInfo,
     relids: Vec<usize>,
     children: Vec<Path>,
+    force_sorted_final: bool,
     group_by: &[Expr],
     passthrough_exprs: &[Expr],
     accumulators: &[AggAccum],
@@ -788,42 +1309,24 @@ fn partial_partitionwise_aggregate_path(
     let partial_group_pathkeys = group_pathkeys(group_by);
     let final_strategy = if group_by.is_empty() {
         AggregateStrategy::Plain
-    } else if root.config.enable_hashagg {
-        AggregateStrategy::Hashed
-    } else {
+    } else if force_sorted_final || !root.config.enable_hashagg {
         AggregateStrategy::Sorted
+    } else {
+        AggregateStrategy::Hashed
     };
     let child_slot_id = next_synthetic_slot_id();
-    let children = children
-        .into_iter()
-        .map(|child| {
-            let input = prepare_aggregate_input_for_strategy(
-                partial_strategy,
-                child,
-                group_by,
-                accumulators,
-            );
-            aggregate_path(
-                partial_strategy,
-                AggregatePhase::Partial,
-                if partial_strategy == AggregateStrategy::Sorted {
-                    partial_group_pathkeys.clone()
-                } else {
-                    Vec::new()
-                },
-                child_slot_id,
-                input,
-                group_by.to_vec(),
-                passthrough_exprs.to_vec(),
-                accumulators.to_vec(),
-                None,
-                partial_output_columns.clone(),
-                partial_target.clone(),
-                catalog,
-                root.config,
-            )
-        })
-        .collect::<Vec<_>>();
+    let children = partial_partitionwise_leaf_aggregate_paths(
+        root,
+        children,
+        partial_strategy,
+        group_by,
+        passthrough_exprs,
+        accumulators,
+        &partial_output_columns,
+        &partial_target,
+        child_slot_id,
+        catalog,
+    );
     let partial_source_id = next_synthetic_slot_id();
     let partial_desc = relation_desc_for_output_columns(&partial_output_columns);
     let partial_append_path = if final_strategy == AggregateStrategy::Sorted
@@ -851,6 +1354,14 @@ fn partial_partitionwise_aggregate_path(
     let partial_append = optimize_path_with_config(partial_append_path, catalog, root.config);
     let final_accumulators = final_accumulators_for_partial(accumulators);
     let final_group_pathkeys = group_pathkeys(group_by);
+    let final_output_pathkeys = if final_strategy == AggregateStrategy::Sorted
+        && !root.query_pathkeys.is_empty()
+        && root.query_pathkeys.len() == group_by.len()
+    {
+        root.query_pathkeys.clone()
+    } else {
+        final_group_pathkeys.clone()
+    };
     let final_input = prepare_aggregate_input_for_strategy(
         final_strategy,
         partial_append,
@@ -861,7 +1372,7 @@ fn partial_partitionwise_aggregate_path(
         final_strategy,
         AggregatePhase::Finalize,
         if final_strategy == AggregateStrategy::Sorted {
-            final_group_pathkeys
+            final_output_pathkeys
         } else {
             Vec::new()
         },
@@ -941,6 +1452,15 @@ fn make_aggregate_rel(
             .map(|expr| expand_join_rte_vars(root, expr));
         let output_columns =
             build_aggregate_output_columns(&group_by, &passthrough_exprs, &accumulators);
+        if let Some(empty_input) = empty_preserved_outer_join_aggregate_input(
+            &path,
+            &group_by,
+            &passthrough_exprs,
+            &accumulators,
+            having.as_ref(),
+        ) {
+            path = empty_input;
+        }
         let partitionwise_input = path.clone();
         if !root.parse.grouping_sets.is_empty() {
             rel.add_path(aggregate_path(
@@ -2840,8 +3360,8 @@ fn sort_key_display_items(
         {
             continue;
         }
-        let mut rendered = render_sort_key_expr(root, &display_expr, catalog);
-        if sort_key_needs_extra_expression_parens(&display_expr)
+        let mut rendered = render_sort_key_expr(root, &dedupe_expr, catalog);
+        if sort_key_needs_extra_expression_parens(&dedupe_expr)
             || sort_key_rendering_needs_expression_parens(&rendered)
         {
             rendered = format!("({rendered})");
@@ -2849,7 +3369,9 @@ fn sort_key_display_items(
         if key.descending {
             rendered.push_str(" DESC");
         }
-        if let Some(nulls_first) = key.nulls_first {
+        if let Some(nulls_first) = key.nulls_first
+            && nulls_first != key.descending
+        {
             rendered.push_str(if nulls_first {
                 " NULLS FIRST"
             } else {
@@ -2937,9 +3459,30 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
                     {
                         return Some(render_sort_key_expr(root, alias_expr, catalog));
                     }
+                    if let RangeTblEntryKind::Subquery { query } = &rte.kind
+                        && let Some(target) = query
+                            .target_list
+                            .iter()
+                            .filter(|target| !target.resjunk)
+                            .nth(index)
+                        && let Some(rendered) =
+                            render_subquery_sort_key_expr(query, &target.expr, catalog)
+                    {
+                        return Some(rendered);
+                    }
                     rte.desc.columns.get(index).map(|column| {
                         let qualifier = rte.alias.as_deref();
                         match (qualifier, &rte.kind) {
+                            (Some(_), RangeTblEntryKind::Relation { relation_oid, .. })
+                                if rte.alias_preserves_source_names =>
+                            {
+                                catalog
+                                    .class_row_by_oid(*relation_oid)
+                                    .map(|class_row| {
+                                        format!("{}.{}", class_row.relname, column.name)
+                                    })
+                                    .unwrap_or_else(|| column.name.clone())
+                            }
                             (
                                 Some(qualifier),
                                 RangeTblEntryKind::Relation {
@@ -3089,6 +3632,36 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
                 .to_string()
         }
         _ => crate::backend::executor::render_explain_expr(expr, &[]),
+    }
+}
+
+fn render_subquery_sort_key_expr(
+    query: &crate::include::nodes::parsenodes::Query,
+    expr: &Expr,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => {
+            let rte = query.rtable.get(var.varno.saturating_sub(1))?;
+            let index = crate::include::nodes::primnodes::attrno_index(var.varattno)?;
+            if let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind {
+                return joinaliasvars
+                    .get(index)
+                    .and_then(|expr| render_subquery_sort_key_expr(query, expr, catalog));
+            }
+            let column = rte.desc.columns.get(index)?;
+            let qualifier = rte.alias.clone().or_else(|| match &rte.kind {
+                RangeTblEntryKind::Relation { relation_oid, .. } => catalog
+                    .class_row_by_oid(*relation_oid)
+                    .map(|class_row| class_row.relname),
+                _ => None,
+            })?;
+            Some(format!("{qualifier}.{}", column.name))
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            render_subquery_sort_key_expr(query, inner, catalog)
+        }
+        _ => None,
     }
 }
 
