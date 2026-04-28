@@ -2703,7 +2703,15 @@ impl CatalogStore {
             triggers: rows.clone(),
             depends: rows
                 .iter()
-                .flat_map(|row| trigger_depend_rows(row.oid, row.tgrelid, row.tgfoid, &row.tgattr))
+                .flat_map(|row| {
+                    trigger_depend_rows(
+                        row.oid,
+                        row.tgrelid,
+                        row.tgfoid,
+                        &row.tgattr,
+                        row.tgconstraint,
+                    )
+                })
                 .collect(),
             ..PhysicalCatalogRows::default()
         };

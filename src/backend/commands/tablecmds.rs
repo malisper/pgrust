@@ -2846,7 +2846,7 @@ fn collect_referencing_rows(
             .then(|| catalog.clone())
     });
     let result = if let Some(catalog) = partitioned_catalog {
-        partitioned_referencing_rows(constraint, key_values, &catalog, ctx)
+        partitioned_referencing_rows(constraint, key_values, catalog.as_ref(), ctx)
     } else if let Some(index) = &constraint.child_index {
         collect_matching_rows_index(
             constraint.child_rel,
@@ -3129,7 +3129,8 @@ fn referenced_row_exists_for_no_action(
     });
     let result = if let Some(catalog) = partitioned_catalog {
         let mut exists = false;
-        for leaf in partition_leaf_relations(&catalog, constraint.referenced_relation_oid)? {
+        for leaf in partition_leaf_relations(catalog.as_ref(), constraint.referenced_relation_oid)?
+        {
             let leaf_key_indexes = map_column_indexes_by_name(
                 &constraint.referenced_desc,
                 &leaf.desc,

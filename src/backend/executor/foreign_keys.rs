@@ -513,7 +513,13 @@ fn referenced_key_exists(
             .then(|| catalog.clone())
     });
     if let Some(catalog) = partitioned_catalog {
-        return partitioned_referenced_key_exists(constraint, key_values, &snapshot, &catalog, ctx);
+        return partitioned_referenced_key_exists(
+            constraint,
+            key_values,
+            &snapshot,
+            catalog.as_ref(),
+            ctx,
+        );
     }
     let key_values = referenced_key_values_in_index_order(constraint, key_values)?;
     index_has_visible_row(
@@ -814,7 +820,7 @@ fn child_row_exists(
             .then(|| catalog.clone())
     });
     if let Some(catalog) = partitioned_catalog {
-        let leaves = partition_leaf_relations(&catalog, constraint.child_relation_oid)?;
+        let leaves = partition_leaf_relations(catalog.as_ref(), constraint.child_relation_oid)?;
         for leaf in leaves {
             let leaf_key_indexes = map_column_indexes_by_name(
                 &constraint.child_desc,
