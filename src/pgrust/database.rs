@@ -27,7 +27,9 @@ use crate::backend::access::transam::{
     ControlFileError,
 };
 use crate::backend::catalog::catalog::{CatalogIndexBuildOptions, column_desc};
-use crate::backend::catalog::indexing::rebuild_system_catalog_indexes_in_pool;
+use crate::backend::catalog::indexing::{
+    rebuild_system_catalog_indexes_in_pool, vacuum_system_catalog_heaps_and_indexes_for_kinds_in_db,
+};
 use crate::backend::catalog::namespace::effective_search_path as namespace_effective_search_path;
 use crate::backend::catalog::rows::physical_catalog_rows_from_catcache;
 use crate::backend::catalog::store::{CatalogMutationEffect, CatalogWriteContext};

@@ -974,6 +974,8 @@ pub struct BackendCacheState {
     pub catalog_snapshot: Option<Snapshot>,
     pub catalog_snapshot_ctx: Option<BackendCacheContext>,
     pub transaction_snapshot_override: Option<(TransactionId, Snapshot)>,
+    pub shared_catcache: Option<CatCache>,
+    pub shared_catcache_ctx: Option<BackendCacheContext>,
     pub catcache: Option<CatCache>,
     pub catcache_ctx: Option<BackendCacheContext>,
     pub relation_cache: HashMap<u32, RelCacheEntry>,
@@ -2067,12 +2069,31 @@ fn load_backend_catcache(
 ) -> Result<CatCache, CatalogError> {
     let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
         .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
-    let mut cache = {
+    let cache_ctx = BackendCacheContext::from(txn_ctx);
+    let shared = if let Some(cache) = db
+        .backend_cache_states
+        .read()
+        .get(&client_id)
+        .filter(|state| state.shared_catcache_ctx == Some(cache_ctx))
+        .and_then(|state| state.shared_catcache.clone())
+    {
+        cache
+    } else {
         let txns = db.txns.read();
         let shared = db
             .shared_catalog
             .read()
             .catcache_with_snapshot(&db.pool, &txns, &snapshot, client_id)?;
+        drop(txns);
+
+        let mut states = db.backend_cache_states.write();
+        let state = states.entry(client_id).or_default();
+        state.shared_catcache_ctx = Some(cache_ctx);
+        state.shared_catcache = Some(shared.clone());
+        shared
+    };
+    let mut cache = {
+        let txns = db.txns.read();
         let local = db
             .catalog
             .read()

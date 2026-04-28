@@ -59,6 +59,15 @@ pub fn apply_backend_cache_invalidation(
     state.syscache.invalidate(invalidation);
     state.catcache = None;
     state.catcache_ctx = None;
+    let touches_shared_catalog = invalidation.touched_catalogs.is_empty()
+        || invalidation
+            .touched_catalogs
+            .iter()
+            .any(|kind| matches!(kind.scope(), crate::include::catalog::CatalogScope::Shared));
+    if touches_shared_catalog {
+        state.shared_catcache = None;
+        state.shared_catcache_ctx = None;
+    }
     if invalidation.relation_oids.is_empty() {
         state.relation_cache.clear();
         state.relation_cache_ctx = None;

@@ -780,8 +780,10 @@ impl Database {
         if unique {
             let partition_spec = crate::backend::parser::relation_partition_spec(relation)
                 .map_err(ExecError::Parse)?;
+            let key_count = build_options.indclass.len().min(columns.len());
             let key_columns = columns
                 .iter()
+                .take(key_count)
                 .filter(|column| column.expr_sql.is_none())
                 .map(|column| column.name.clone())
                 .collect::<Vec<_>>();

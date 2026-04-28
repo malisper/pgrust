@@ -8268,6 +8268,29 @@ fn partitioned_key_coverage_checks_fire_for_root_partition_of_and_attach_partiti
         other => panic!("expected EXCLUDE partition-key coverage error, got {other:?}"),
     }
 
+    session
+        .execute(
+            &db,
+            "create table include_not_key (a int, b int) partition by list (a)",
+        )
+        .unwrap();
+    match session.execute(
+        &db,
+        "create unique index on include_not_key (b) include (a)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        })) if message
+            == "unique constraint on partitioned table must include all partitioning columns"
+            && detail
+                == "UNIQUE constraint on table \"include_not_key\" lacks column \"a\" which is part of the partition key."
+            && sqlstate == "0A000" => {}
+        other => panic!("expected INCLUDE column to not satisfy coverage, got {other:?}"),
+    }
+
     match session.execute(
         &db,
         "create table expr_pk (a int primary key, b int) partition by range ((b + a))",
