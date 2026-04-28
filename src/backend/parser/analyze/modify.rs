@@ -3291,11 +3291,11 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
             &resolved.visible_output_exprs,
             &resolved.base_relation.desc,
         ),
-        input_plan: None,
-        target_visible_count: resolved.base_relation.desc.columns.len(),
-        visible_column_count: resolved.base_relation.desc.columns.len(),
-        target_ctid_index: resolved.base_relation.desc.columns.len(),
-        target_tableoid_index: resolved.base_relation.desc.columns.len() + 1,
+        input_plan: stmt.input_plan,
+        target_visible_count: stmt.target_visible_count,
+        visible_column_count: stmt.visible_column_count,
+        target_ctid_index: stmt.target_ctid_index,
+        target_tableoid_index: stmt.target_tableoid_index,
         required_privileges,
         subplans: stmt.subplans,
     })
@@ -3362,6 +3362,38 @@ fn build_delete_target(
         row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
         parent_visible_exprs: translation_exprs,
         predicate,
+    })
+}
+
+fn build_delete_target_from_joined_input(
+    base_relation_name: &str,
+    parent_desc: &RelationDesc,
+    parent_predicate: Option<&Expr>,
+    child: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundDeleteTarget, ParseError> {
+    let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
+    let translation_exprs = inheritance_translation_exprs(
+        &child.desc,
+        &inheritance_translation_indexes(parent_desc, &child.desc),
+        catalog,
+    )?;
+
+    Ok(BoundDeleteTarget {
+        relation_name,
+        rel: child.rel,
+        relation_oid: child.relation_oid,
+        relkind: child.relkind,
+        toast: child.toast,
+        desc: child.desc.clone(),
+        referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
+            child.relation_oid,
+            &child.desc,
+            catalog,
+        )?,
+        row_source: BoundModifyRowSource::Heap,
+        parent_visible_exprs: translation_exprs,
+        predicate: parent_predicate.cloned(),
     })
 }
 
@@ -4569,8 +4601,9 @@ fn bind_delete_using(
     local_ctes: &[BoundCte],
     entry: &BoundRelation,
 ) -> Result<BoundDeleteStatement, ParseError> {
+    let target_relation_name = stmt.table_name.clone();
     let target_scope = scope_for_base_relation_with_generated(
-        &stmt.table_name,
+        &target_relation_name,
         &entry.desc,
         Some(entry.relation_oid),
         catalog,
@@ -4578,9 +4611,17 @@ fn bind_delete_using(
     let source_stmt = stmt.using.as_ref().expect("checked above");
     let (source_from, source_scope_raw) =
         bind_from_item_with_ctes(source_stmt, catalog, outer_scopes, None, local_ctes, &[])?;
+    if source_scope_raw.relations.iter().any(|relation| {
+        relation
+            .relation_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&target_relation_name))
+    }) {
+        return Err(ParseError::DuplicateTableName(target_relation_name));
+    }
 
     let mut target_base = AnalyzedFrom::relation(
-        stmt.table_name.clone(),
+        target_relation_name.clone(),
         entry.rel,
         entry.relation_oid,
         entry.relkind,
@@ -4618,7 +4659,7 @@ fn bind_delete_using(
         false,
         catalog,
     )?;
-    let predicate = stmt
+    let user_predicate = stmt
         .where_clause
         .as_ref()
         .map(|expr| {
@@ -4632,12 +4673,8 @@ fn bind_delete_using(
             )
         })
         .transpose()?;
-    let predicate = match (predicate, target_rls.visibility_qual) {
-        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(predicate, visibility_qual)),
-        (Some(predicate), None) => Some(predicate),
-        (None, Some(visibility_qual)) => Some(visibility_qual),
-        (None, None) => None,
-    };
+    let predicate =
+        prepend_visibility_quals(target_rls.visibility_quals.clone(), user_predicate.clone());
     let returning = bind_returning_targets(
         &stmt.returning,
         &returning_scope,
@@ -4645,7 +4682,11 @@ fn bind_delete_using(
         outer_scopes,
         local_ctes,
     )?;
-    let query = query_from_projection_with_qual(projected, predicate.clone());
+    let query = query_from_projection_with_target_security_quals(
+        projected,
+        target_rls.visibility_quals,
+        user_predicate,
+    );
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
         .map(|query| crate::backend::optimizer::planner(query, catalog))??;
 

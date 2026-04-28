@@ -10801,6 +10801,11 @@ pub fn execute_delete_with_waiter(
         }
         let mut affected_rows = 0;
         let mut returned_rows = Vec::new();
+        let joined_delete_events = if stmt.input_plan.is_some() {
+            Some(materialize_delete_row_events(&stmt, ctx)?)
+        } else {
+            None
+        };
         for target in &stmt.targets {
             let triggers = ctx
                 .catalog
@@ -10847,13 +10852,29 @@ pub fn execute_delete_with_waiter(
                 .as_ref()
                 .map(|p| compile_predicate_with_decoder(p, &decoder));
             let targets = match &target.row_source {
+                _ if joined_delete_events.is_some() => joined_delete_events
+                    .as_ref()
+                    .expect("checked above")
+                    .iter()
+                    .filter(|event| event.target.relation_oid == target.relation_oid)
+                    .map(|event| {
+                        (
+                            event.tid,
+                            event.old_values.clone(),
+                            Some(event.returning_values.clone()),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
                 BoundModifyRowSource::Heap => collect_matching_rows_heap(
                     target.rel,
                     &target.desc,
                     target.toast,
                     target.predicate.as_ref(),
                     ctx,
-                )?,
+                )?
+                .into_iter()
+                .map(|(tid, values)| (tid, values, None))
+                .collect(),
                 BoundModifyRowSource::Index { index, keys } => collect_matching_rows_index(
                     target.rel,
                     &target.desc,
@@ -10862,12 +10883,15 @@ pub fn execute_delete_with_waiter(
                     keys,
                     target.predicate.as_ref(),
                     ctx,
-                )?,
+                )?
+                .into_iter()
+                .map(|(tid, values)| (tid, values, None))
+                .collect(),
             };
             let snapshot = ctx.snapshot.clone();
             let mut pending_no_action_checks = Vec::new();
 
-            for (tid, values) in &targets {
+            for (tid, values, joined_returning_values) in &targets {
                 let mut current_tid = *tid;
                 let mut current_values = values.clone();
                 loop {
@@ -10959,12 +10983,17 @@ pub fn execute_delete_with_waiter(
                                 .write()
                                 .note_relation_delete(target.relation_oid);
                             if !stmt.returning.is_empty() {
-                                let returned_values = project_delete_target_visible_values(
-                                    target,
-                                    &current_values,
-                                    current_tid,
-                                    ctx,
-                                )?;
+                                let returned_values =
+                                    if let Some(values) = joined_returning_values.clone() {
+                                        values
+                                    } else {
+                                        project_delete_target_visible_values(
+                                            target,
+                                            &current_values,
+                                            current_tid,
+                                            ctx,
+                                        )?
+                                    };
                                 let row = project_returning_row_with_old_new(
                                     &stmt.returning,
                                     &returned_values,
@@ -11058,6 +11087,7 @@ pub(crate) struct DeleteRowEvent {
     pub target: BoundDeleteTarget,
     pub tid: ItemPointerData,
     pub old_values: Vec<Value>,
+    pub returning_values: Vec<Value>,
 }
 
 pub(crate) fn materialize_update_row_events(
@@ -11430,10 +11460,13 @@ pub(crate) fn materialize_delete_row_events(
             )?,
         };
         for (tid, old_values) in rows {
+            let returning_values =
+                project_delete_target_visible_values(target, &old_values, tid, ctx)?;
             events.push(DeleteRowEvent {
                 target: target.clone(),
                 tid,
                 old_values,
+                returning_values,
             });
         }
     }
@@ -11502,9 +11535,46 @@ fn materialize_delete_from_joined_input_events(
             target: target.clone(),
             tid,
             old_values,
+            returning_values: row_values[..stmt.visible_column_count].to_vec(),
         });
     }
     Ok(events)
+}
+
+fn fetch_delete_target_values(
+    target: &BoundDeleteTarget,
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let desc = Rc::new(target.desc.clone());
+    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+    let tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, tid)?;
+    let mut slot = TupleSlot::from_heap_tuple(desc, attr_descs, tid, tuple);
+    slot.toast = slot_toast_context(target.toast, ctx);
+    slot.into_values()
+}
+
+fn project_delete_target_visible_values(
+    target: &BoundDeleteTarget,
+    row_values: &[Value],
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    if target.parent_visible_exprs.is_empty() {
+        return Ok(row_values.to_vec());
+    }
+    let mut slot = TupleSlot::virtual_row_with_metadata(
+        row_values.to_vec(),
+        Some(tid),
+        Some(target.relation_oid),
+    );
+    let mut values = target
+        .parent_visible_exprs
+        .iter()
+        .map(|expr| eval_expr(expr, &mut slot, ctx).map(|value| value.to_owned_value()))
+        .collect::<Result<Vec<_>, ExecError>>()?;
+    Value::materialize_all(&mut values);
+    Ok(values)
 }
 
 pub(crate) fn apply_base_delete_row(

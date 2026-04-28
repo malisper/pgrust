@@ -4173,6 +4173,48 @@ fn delete_returning_target_lists() {
 }
 
 #[test]
+fn delete_using_returning_projects_target_and_source_rows() {
+    let dir = temp_dir("delete_using_returning");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table du_t1 (a int4)").unwrap();
+    session.execute(&db, "create table du_t2 (a int4)").unwrap();
+    session
+        .execute(&db, "insert into du_t1 values (11), (12), (21), (22)")
+        .unwrap();
+    session
+        .execute(&db, "insert into du_t2 values (10), (20)")
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "delete from du_t1 using du_t2 where du_t1.a = du_t2.a + 2 returning *",
+        )
+        .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["a", "a"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(12), Value::Int32(10)],
+                    vec![Value::Int32(22), Value::Int32(20)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select * from du_t1 order by a"),
+        vec![vec![Value::Int32(11)], vec![Value::Int32(21)]]
+    );
+}
+
+#[test]
 fn delete_returning_tableoid_uses_deleted_relation() {
     let dir = temp_dir("delete_returning_tableoid");
     let db = Database::open(&dir, 128).unwrap();

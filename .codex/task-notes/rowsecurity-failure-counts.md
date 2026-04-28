@@ -337,3 +337,19 @@ DROP OWNED policy dependency bucket:
 - Latest rowsecurity regression status from the interrupted-but-completed run:
   `689/774` matched, `85` mismatches, `1617` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+DELETE USING bucket:
+- Added parser, binder, and executor support for `DELETE ... USING`, including
+  joined target/source planning with hidden target `ctid` and `tableoid`.
+- `DELETE ... USING ... RETURNING *` now projects PostgreSQL-style target and
+  source visible columns from the joined input while deleting the physical
+  target row.
+- Added focused coverage for target/source `RETURNING *` rows and target-table
+  deletion side effects.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  delete_using_returning_projects_target_and_source_rows` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `689/774` matched, `85` mismatches, `1594` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.
