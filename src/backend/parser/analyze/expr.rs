@@ -3728,7 +3728,11 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 )?
             {
-                return Ok(bound_row);
+                return Ok(if domain.is_some() {
+                    Expr::Cast(Box::new(bound_row), target_type)
+                } else {
+                    bound_row
+                });
             }
             if !matches!(inner.as_ref(), SqlExpr::Const(Value::Null)) {
                 validate_catalog_backed_explicit_cast(

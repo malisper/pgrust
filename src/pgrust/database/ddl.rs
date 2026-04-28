@@ -1377,6 +1377,12 @@ pub(super) fn validate_alter_table_add_column(
         desc.identity = Some(identity.kind);
     } else if serial_kind.is_none() {
         desc.default_expr = column.default_expr.clone();
+        if desc.default_expr.is_none()
+            && let Some(type_oid) = catalog.type_oid_for_sql_type(sql_type)
+            && let Some(type_default) = catalog.type_default_sql(type_oid)
+        {
+            desc.default_expr = Some(type_default);
+        }
         if let Some(sql) = desc.default_expr.as_deref() {
             desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
         }

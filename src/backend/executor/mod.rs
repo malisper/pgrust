@@ -2,6 +2,7 @@
 
 mod agg;
 mod constraints;
+mod domain;
 mod driver;
 pub mod exec_expr;
 pub(crate) mod exec_tuples;
@@ -67,6 +68,10 @@ pub use crate::include::nodes::datum::*;
 pub use crate::include::nodes::execnodes::*;
 pub use crate::include::nodes::plannodes::*;
 pub(crate) use agg::{AccumState, AggGroup, AggTransitionFn, AggregateRuntime, OrderedAggInput};
+pub(crate) use domain::{
+    cast_domain_text_input, enforce_domain_constraints_for_value,
+    enforce_domain_constraints_for_value_ref,
+};
 pub use driver::{
     exec_next, execute_plan, execute_planned_stmt, execute_readonly_statement,
     execute_readonly_statement_with_config, execute_sql, execute_statement,

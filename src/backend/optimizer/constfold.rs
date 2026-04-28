@@ -5,10 +5,11 @@ use crate::backend::executor::expr_ops::{
     concat_values, div_values, mod_values, mul_values, negate_value, not_equal_values,
     order_values, shift_left_values, shift_right_values, sub_values, values_are_distinct,
 };
-use crate::backend::executor::{ExecError, Value, cast_value};
+use crate::backend::executor::{ExecError, Value, cast_value, eval_to_char_function};
 use crate::backend::parser::{ParseError, is_binary_coercible_type};
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::include::catalog::builtin_type_row_by_oid;
 use crate::include::catalog::pg_proc::builtin_aggregate_function_for_proc_oid;
-use crate::include::catalog::{builtin_range_spec_by_oid, builtin_type_name_for_oid};
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RecursiveUnionQuery, SetOperationQuery,
     SqlType, SqlTypeKind,
@@ -954,6 +955,9 @@ fn evaluate_const_func(
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Power) => {
             eval_power_function(args).map(Some)
         }
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::ToChar) => {
+            eval_to_char_function(args, &DateTimeConfig::default()).map(Some)
+        }
         _ => Ok(None),
     }
 }
@@ -1094,17 +1098,9 @@ fn cast_is_const_fold_safe(value: &Value, target: SqlType) -> bool {
     {
         return false;
     }
-    if target.type_oid != 0 && builtin_type_name_for_oid(target.type_oid).is_none() {
-        return false;
-    }
-    // :HACK: Dynamic range OIDs include domains-over-range. Domain CHECK
-    // enforcement needs the executor's catalog-aware cast path, so don't fold
-    // those casts with this catalog-free helper.
-    if !target.is_array
-        && matches!(target.kind, SqlTypeKind::Range)
-        && target.type_oid != 0
-        && builtin_range_spec_by_oid(target.type_oid).is_none()
-    {
+    // :HACK: Dynamic type OIDs can be domains whose nullability and CHECK
+    // constraints require the executor's catalog-aware cast path.
+    if target.type_oid != 0 && builtin_type_row_by_oid(target.type_oid).is_none() {
         return false;
     }
     let Some(source) = value.sql_type_hint() else {

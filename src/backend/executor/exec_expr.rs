@@ -16,6 +16,7 @@ use crate::include::nodes::primnodes::expr_sql_type_hint;
 use rand::RngCore;
 use std::sync::Mutex;
 
+use super::domain::{cast_domain_text_input, enforce_domain_constraints_for_value};
 use super::expr_agg_support::{
     execute_builtin_scalar_function_value_call, execute_scalar_function_value_call,
 };
@@ -138,8 +139,8 @@ use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, LoweredPartitionSpec, ParseError, PartitionBoundSpec, PartitionRangeDatumValue,
     PartitionStrategy, SerializedPartitionValue, SqlType, SqlTypeKind, SubqueryComparisonOp,
-    bind_relation_expr, deserialize_partition_bound, partition_value_to_value,
-    relation_partition_spec,
+    bind_relation_expr, deserialize_partition_bound, parse_type_name, partition_value_to_value,
+    relation_partition_spec, resolve_raw_type_name,
 };
 use crate::backend::rewrite::{
     format_stored_rule_definition_with_catalog, format_view_definition, render_relation_expr_sql,
@@ -847,6 +848,44 @@ fn eval_pg_index_column_has_property(
 
 fn catalog_lookup(ctx: Option<&ExecutorContext>) -> Option<&dyn CatalogLookup> {
     ctx.and_then(|ctx| ctx.catalog.as_deref())
+}
+
+fn soft_input_error_info_with_context(
+    input: &str,
+    type_name: &str,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<super::expr_casts::InputErrorInfo>, ExecError> {
+    let info = soft_input_error_info_with_catalog_and_config(
+        input,
+        type_name,
+        catalog_lookup(Some(ctx)),
+        &ctx.datetime_config,
+    )?;
+    if info.is_some() {
+        return Ok(info);
+    }
+
+    let Some(sql_type) = (|| {
+        let catalog = ctx.catalog.as_deref()?;
+        let raw_type = parse_type_name(type_name.trim()).ok()?;
+        let sql_type = resolve_raw_type_name(&raw_type, catalog).ok()?;
+        catalog
+            .domain_by_type_oid(sql_type.type_oid)
+            .is_some()
+            .then_some(sql_type)
+    })() else {
+        return Ok(None);
+    };
+
+    match cast_domain_text_input(input, sql_type, ctx) {
+        Ok(_) => Ok(None),
+        Err(err @ ExecError::DetailedError { sqlstate, .. })
+            if matches!(sqlstate, "23502" | "23514") =>
+        {
+            Ok(Some(super::expr_casts::input_error_info(err, input)))
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn eval_reg_object_to_text(
@@ -8230,7 +8269,7 @@ pub fn eval_expr(
         }
         Expr::Cast(inner, ty) => {
             let value = eval_expr(inner, slot, ctx)?;
-            if let Value::Record(record) = value {
+            let casted = if let Value::Record(record) = value {
                 cast_record_value_for_target(record, *ty, ctx)
             } else {
                 cast_value_with_source_type_catalog_and_config(
@@ -8240,7 +8279,8 @@ pub fn eval_expr(
                     ctx.catalog.as_deref(),
                     &ctx.datetime_config,
                 )
-            }
+            }?;
+            enforce_domain_constraints_for_value(casted, *ty, ctx)
         }
         Expr::Collate { expr, .. } => eval_expr(expr, slot, ctx),
         Expr::Coalesce(left, right) => {
@@ -11617,13 +11657,7 @@ pub(crate) fn eval_builtin_function(
                 right: Value::Text("".into()),
             })?;
             Ok(Value::Bool(
-                soft_input_error_info_with_catalog_and_config(
-                    input,
-                    ty,
-                    catalog_lookup(Some(ctx)),
-                    &ctx.datetime_config,
-                )?
-                .is_none(),
+                soft_input_error_info_with_context(input, ty, ctx)?.is_none(),
             ))
         }
         BuiltinScalarFunction::PgInputErrorMessage
@@ -11640,12 +11674,7 @@ pub(crate) fn eval_builtin_function(
                 left: values[1].clone(),
                 right: Value::Text("".into()),
             })?;
-            let info = soft_input_error_info_with_catalog_and_config(
-                input,
-                ty,
-                catalog_lookup(Some(ctx)),
-                &ctx.datetime_config,
-            )?;
+            let info = soft_input_error_info_with_context(input, ty, ctx)?;
             Ok(match (func, info) {
                 (_, None) => Value::Null,
                 (BuiltinScalarFunction::PgInputErrorMessage, Some(info)) => {

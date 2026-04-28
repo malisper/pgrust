@@ -54473,6 +54473,264 @@ fn alter_domain_constraints_update_catalog_and_enforcement() {
 }
 
 #[test]
+fn domain_constraints_are_enforced_for_casts_and_input_info() {
+    let dir = temp_dir("domain_cast_constraint_enforcement");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create domain dnotnull as varchar(15) not null")
+        .unwrap();
+    match db.execute(1, "select cast(null as dnotnull)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23502");
+            assert_eq!(message, "domain dnotnull does not allow null values");
+        }
+        other => panic!("expected domain not-null violation, got {other:?}"),
+    }
+
+    db.execute(1, "create domain vchar4 as varchar(4)").unwrap();
+    db.execute(
+        1,
+        "create domain dinter as vchar4 check (substring(value, 1, 1) = 'x')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create domain dtop as dinter check (substring(value, 2, 1) = '1')",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select 'x1234'::dtop"),
+        vec![vec![Value::Text("x123".into())]],
+    );
+    match db.execute(1, "select 'y123'::dtop") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain dtop violates check constraint \"dinter_check\""
+            );
+        }
+        other => panic!("expected nested domain check violation, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create domain weirdfloat as float8 check((1 / value) < 10)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select message, sql_error_code from pg_input_error_info('0.01', 'weirdfloat')",
+        ),
+        vec![vec![
+            Value::Text(
+                "value for domain weirdfloat violates check constraint \"weirdfloat_check\"".into(),
+            ),
+            Value::Text("23514".into()),
+        ]],
+    );
+    assert!(matches!(
+        db.execute(1, "select * from pg_input_error_info('0', 'weirdfloat')"),
+        Err(ExecError::DivisionByZero(_))
+    ));
+
+    db.execute(
+        1,
+        "create type pairdom_composite as (left_value int, right_value int)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create domain pairdom as pairdom_composite check ((value).left_value < (value).right_value)",
+    )
+    .unwrap();
+    match db.execute(1, "select row(2, 1)::pairdom") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain pairdom violates check constraint \"pairdom_check\""
+            );
+        }
+        other => panic!("expected composite domain check violation, got {other:?}"),
+    }
+
+    db.execute(1, "create table add_domain_existing_rows (a int)")
+        .unwrap();
+    db.execute(1, "insert into add_domain_existing_rows values (1)")
+        .unwrap();
+    db.execute(1, "create domain add_col_not_null as text not null")
+        .unwrap();
+    match db.execute(
+        1,
+        "alter table add_domain_existing_rows add column c add_col_not_null",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23502");
+            assert_eq!(
+                message,
+                "domain add_col_not_null does not allow null values"
+            );
+        }
+        other => panic!("expected add-column domain not-null violation, got {other:?}"),
+    }
+    db.execute(
+        1,
+        "create domain add_col_check_default as text default 'bad' check (value <> 'bad')",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "alter table add_domain_existing_rows add column d add_col_check_default",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain add_col_check_default violates check constraint \"add_col_check_default_check\""
+            );
+        }
+        other => panic!("expected add-column domain check violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn domain_constraints_are_rechecked_after_update_assignment() {
+    let dir = temp_dir("domain_update_assignment_recheck");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create domain orderedpair as int[2] check (value[1] < value[2])",
+    )
+    .unwrap();
+    db.execute(1, "create table op (f1 orderedpair)").unwrap();
+    db.execute(1, "insert into op values (array[1,2])").unwrap();
+    db.execute(1, "update op set f1[2] = 3").unwrap();
+    match db.execute(1, "update op set f1[2] = 0") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain orderedpair violates check constraint \"orderedpair_check\""
+            );
+        }
+        other => panic!("expected orderedpair check violation, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(&db, 1, "select f1[1], f1[2] from op"),
+        vec![vec![Value::Int32(1), Value::Int32(3)]],
+    );
+}
+
+#[test]
+fn copy_uses_domain_input_semantics() {
+    let dir = temp_dir("copy_domain_input_semantics");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create domain domainvarchar as varchar(5)")
+        .unwrap();
+    session
+        .execute(&db, "create table copy_domain (v domainvarchar)")
+        .unwrap();
+    let copy = crate::pgrust::session::parse_copy_command("copy copy_domain(v) from stdin")
+        .unwrap()
+        .unwrap();
+    match session.copy_from_text(&db, &copy, "notsoshorttext\n\\.") {
+        Err(ExecError::StringDataRightTruncation { ty }) => {
+            assert_eq!(ty, "character varying(5)");
+        }
+        other => panic!("expected varchar truncation error, got {other:?}"),
+    }
+    assert_eq!(session.copy_from_text(&db, &copy, "short\n\\.").unwrap(), 1);
+    assert_eq!(
+        query_rows(&db, 1, "select v from copy_domain"),
+        vec![vec![Value::Text("short".into())]],
+    );
+}
+
+#[test]
+fn plpgsql_return_values_are_checked_against_domain_constraints() {
+    let dir = temp_dir("plpgsql_domain_return_constraints");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create domain pos_int as int4 check (value > 0) not null",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function dec_domain(p1 pos_int) returns pos_int as \
+         'begin return p1 - 2; end' language plpgsql",
+    )
+    .unwrap();
+    match db.execute(1, "select dec_domain(1)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain pos_int violates check constraint \"pos_int_check\""
+            );
+        }
+        Err(ExecError::WithContext { source, .. }) => match *source {
+            ExecError::DetailedError {
+                message, sqlstate, ..
+            } => {
+                assert_eq!(sqlstate, "23514");
+                assert_eq!(
+                    message,
+                    "value for domain pos_int violates check constraint \"pos_int_check\""
+                );
+            }
+            other => panic!("expected wrapped PL/pgSQL return domain violation, got {other:?}"),
+        },
+        other => panic!("expected PL/pgSQL return domain violation, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(&db, 1, "select dec_domain(3)"),
+        vec![vec![Value::Int32(1)]],
+    );
+
+    db.execute(
+        1,
+        "create function local_domain(p1 pos_int) returns pos_int as \
+         'declare v pos_int; begin return p1; end' language plpgsql",
+    )
+    .unwrap();
+    match db.execute(1, "select local_domain(3)") {
+        Err(ExecError::WithContext { source, .. }) => match *source {
+            ExecError::DetailedError {
+                message, sqlstate, ..
+            } => {
+                assert_eq!(sqlstate, "23502");
+                assert_eq!(message, "domain pos_int does not allow null values");
+            }
+            other => panic!("expected wrapped PL/pgSQL local domain violation, got {other:?}"),
+        },
+        other => panic!("expected PL/pgSQL local domain violation, got {other:?}"),
+    }
+}
+
+#[test]
 fn jsonb_populate_record_enforces_domain_constraints() {
     let dir = temp_dir("jsonb_populate_record_domain_constraints");
     let db = Database::open(&dir, 64).unwrap();

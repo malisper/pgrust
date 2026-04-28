@@ -14,9 +14,9 @@ use crate::backend::executor::function_guc::{
 use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
     TupleSlot, Value, cast_value, cast_value_with_config,
-    cast_value_with_source_type_catalog_and_config, compare_order_values, eval_expr,
-    eval_plpgsql_expr, execute_planned_stmt, execute_readonly_statement_with_config,
-    executor_start, render_interval_text,
+    cast_value_with_source_type_catalog_and_config, compare_order_values,
+    enforce_domain_constraints_for_value, eval_expr, eval_plpgsql_expr, execute_planned_stmt,
+    execute_readonly_statement_with_config, executor_start, render_interval_text,
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::libpq::pqformat::{format_exec_error, format_exec_error_hint};
@@ -1437,7 +1437,8 @@ fn execute_compiled_function(
     state.values[compiled.sqlstate_slot] = Value::Text(String::new().into());
     state.values[compiled.sqlerrm_slot] = Value::Text(String::new().into());
     for (slot_def, arg_value) in compiled.parameter_slots.iter().zip(arg_values.iter()) {
-        state.values[slot_def.slot] = cast_value(arg_value.clone(), slot_def.ty)?;
+        state.values[slot_def.slot] =
+            cast_function_value(arg_value.clone(), None, slot_def.ty, ctx)?;
     }
 
     let saved_gucs = ctx.gucs.clone();
@@ -1516,9 +1517,11 @@ fn execute_compiled_function(
                 if ty.kind == SqlTypeKind::Void {
                     state.scalar_return = Some(Value::Null);
                 } else if let Some(slot) = output_slot {
-                    state.scalar_return = Some(cast_function_scalar_return_value(
+                    state.scalar_return = Some(cast_function_value(
                         state.values[*slot].clone(),
+                        None,
                         *ty,
+                        ctx,
                     )?);
                 } else {
                     return Err(with_plpgsql_function_context(
@@ -1541,7 +1544,7 @@ fn execute_compiled_function(
             ..
         } => {
             if state.rows.is_empty() {
-                state.rows.push(current_output_row(compiled, &state)?);
+                state.rows.push(current_output_row(compiled, &state, ctx)?);
             }
             Ok(state.rows)
         }
@@ -1972,17 +1975,15 @@ fn exec_function_block(
     }
 
     for local in &block.local_slots {
-        let value = match &local.default_expr {
-            Some(expr) => cast_function_value(
+        let (value, source_type) = match &local.default_expr {
+            Some(expr) => (
                 eval_function_expr(expr, &state.values, ctx)?,
                 compiled_expr_sql_type_hint(expr),
-                local.ty,
-                ctx,
-            )?,
-            None => Value::Null,
+            ),
+            None => (Value::Null, None),
         };
+        let value = cast_function_value(value, source_type, local.ty, ctx)?;
         ensure_not_null_assignment(Some(&local.name), local.not_null, &value)?;
-        enforce_plpgsql_domain_constraints(&value, local.ty, ctx)?;
         state.values[local.slot] = value;
     }
     for stmt in &block.statements {
@@ -2119,7 +2120,6 @@ fn exec_function_stmt(
             let value = eval_function_expr(expr, &state.values, ctx)?;
             let value = cast_function_value(value, compiled_expr_sql_type_hint(expr), *ty, ctx)?;
             ensure_not_null_assignment(name.as_deref(), *not_null, &value)?;
-            enforce_plpgsql_domain_constraints(&value, *ty, ctx)?;
             state.values[*slot] = value;
             Ok(FunctionControl::Continue)
         }
@@ -2130,7 +2130,6 @@ fn exec_function_stmt(
             let updated =
                 assign_indirect_value(current, target.ty, &indirection, replacement, Some(&*ctx))?;
             let updated = cast_function_value(updated, None, target.ty, ctx)?;
-            enforce_plpgsql_domain_constraints(&updated, target.ty, ctx)?;
             state.values[target.slot] = updated;
             Ok(FunctionControl::Continue)
         }
@@ -2422,7 +2421,7 @@ fn exec_function_stmt(
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::GetDiagnostics { stacked, items } => {
-            exec_function_get_diagnostics(*stacked, items, compiled, state)?;
+            exec_function_get_diagnostics(*stacked, items, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::OpenCursor {
@@ -2598,24 +2597,23 @@ fn exec_function_return(
             output_slot,
         } => {
             state.scalar_return = Some(match expr {
-                Some(expr) => cast_function_scalar_return_value(
-                    eval_function_expr(expr, &state.values, ctx)?,
-                    *ty,
-                )
-                .map_err(|err| with_plpgsql_return_cast_context(err, compiled))?,
+                Some(expr) => {
+                    let value = eval_function_expr(expr, &state.values, ctx)?;
+                    cast_function_value(value, compiled_expr_sql_type_hint(expr), *ty, ctx)
+                        .map_err(|err| with_plpgsql_return_cast_context(err, compiled))?
+                }
                 None if ty.kind == SqlTypeKind::Void => Value::Null,
-                None => cast_function_scalar_return_value(
-                    state.values[output_slot.ok_or_else(|| {
+                None => {
+                    let slot = output_slot.ok_or_else(|| {
                         function_runtime_error(
                             "control reached end of function without RETURN",
                             None,
                             "2F005",
                         )
-                    })?]
-                    .clone(),
-                    *ty,
-                )
-                .map_err(|err| with_plpgsql_return_cast_context(err, compiled))?,
+                    })?;
+                    cast_function_value(state.values[slot].clone(), None, *ty, ctx)
+                        .map_err(|err| with_plpgsql_return_cast_context(err, compiled))?
+                }
             });
             Ok(FunctionControl::Return)
         }
@@ -2635,6 +2633,7 @@ fn exec_function_return(
                     row,
                     &compiled.return_contract,
                     expected_record_shape,
+                    ctx,
                 )?);
             }
             Ok(FunctionControl::Return)
@@ -2683,7 +2682,8 @@ fn exec_function_return_next(
                 })?]
                 .clone(),
             };
-            let value = cast_function_scalar_return_value(value, *ty)
+            let source_type = expr.and_then(compiled_expr_sql_type_hint);
+            let value = cast_function_value(value, source_type, *ty, ctx)
                 .map_err(|err| with_plpgsql_return_cast_context(err, compiled))?;
             state.rows.push(TupleSlot::virtual_row(vec![value]));
             Ok(())
@@ -2704,7 +2704,7 @@ fn exec_function_return_next(
                     ..
                 }
             ) {
-                state.rows.push(current_output_row(compiled, state)?);
+                state.rows.push(current_output_row(compiled, state, ctx)?);
                 return Ok(());
             } else {
                 return Err(function_runtime_error(
@@ -2717,6 +2717,7 @@ fn exec_function_return_next(
                 row,
                 &compiled.return_contract,
                 expected_record_shape,
+                ctx,
             )?);
             Ok(())
         }
@@ -2749,6 +2750,7 @@ fn exec_function_return_query(
             row.values,
             &compiled.return_contract,
             expected_record_shape,
+            ctx,
         )?);
     }
     state.last_row_count = row_count;
@@ -2810,7 +2812,7 @@ fn assign_query_rows_into_targets(
     multi_row_hint: bool,
     compiled: &CompiledFunction,
     state: &mut FunctionState,
-    ctx: &ExecutorContext,
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let Some(row) = rows.first() else {
         if strict {
@@ -2885,18 +2887,25 @@ fn assign_query_rows_into_targets(
                 handle_strict_multi_assignment(&ctx.gucs)?;
             }
             let value = row.first().cloned().unwrap_or(Value::Null);
-            let value = cast_value_with_config(value, *ty, &ctx.datetime_config)?;
+            let value = cast_function_value(
+                value,
+                columns.first().map(|column| column.sql_type),
+                *ty,
+                ctx,
+            )?;
             assign_select_target_casted_value(target, value, state)?;
         }
         _ => {
             if row.len() != targets.len() {
                 handle_strict_multi_assignment(&ctx.gucs)?;
             }
-            for (target, value) in targets
+            for (index, (target, value)) in targets
                 .iter()
                 .zip(row.iter().chain(std::iter::repeat(&Value::Null)))
+                .enumerate()
             {
-                let value = cast_value_with_config(value.clone(), target.ty, &ctx.datetime_config)?;
+                let source_type = columns.get(index).map(|column| column.sql_type);
+                let value = cast_function_value(value.clone(), source_type, target.ty, ctx)?;
                 assign_select_target_casted_value(target, value, state)?;
             }
         }
@@ -4732,6 +4741,7 @@ fn exec_function_get_diagnostics(
     items: &[(CompiledSelectIntoTarget, String)],
     compiled: &CompiledFunction,
     state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     if stacked && state.current_exception.is_none() {
         return Err(ExecError::DetailedError {
@@ -4767,7 +4777,7 @@ fn exec_function_get_diagnostics(
                 _ => diagnostic_text(None),
             }
         };
-        state.values[target.slot] = cast_value(value, target.ty)?;
+        state.values[target.slot] = cast_function_value(value, None, target.ty, ctx)?;
     }
     Ok(())
 }
@@ -4781,7 +4791,7 @@ fn assign_query_row_to_targets(
     columns: &[QueryColumn],
     targets: &[CompiledSelectIntoTarget],
     state: &mut FunctionState,
-    ctx: &ExecutorContext,
+    ctx: &mut ExecutorContext,
     require_exact_single_scalar_width: bool,
 ) -> Result<(), ExecError> {
     match targets {
@@ -4849,7 +4859,7 @@ fn assign_select_target_value(
     value: Value,
     source_type: Option<SqlType>,
     state: &mut FunctionState,
-    ctx: &ExecutorContext,
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let value = cast_function_value(value, source_type, target.ty, ctx)?;
     assign_select_target_casted_value(target, value, state)
@@ -4931,27 +4941,16 @@ fn cast_function_value(
     value: Value,
     source_type: Option<SqlType>,
     target_type: SqlType,
-    ctx: &ExecutorContext,
+    ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    cast_value_with_source_type_catalog_and_config(
+    let casted = cast_value_with_source_type_catalog_and_config(
         value,
         source_type,
         target_type,
         ctx.catalog.as_deref(),
         &ctx.datetime_config,
-    )
-}
-
-fn enforce_plpgsql_domain_constraints(
-    value: &Value,
-    target_type: SqlType,
-    ctx: &mut ExecutorContext,
-) -> Result<(), ExecError> {
-    crate::backend::commands::tablecmds::enforce_domain_constraint_for_value(
-        value,
-        target_type,
-        ctx,
-    )
+    )?;
+    enforce_domain_constraints_for_value(casted, target_type, ctx)
 }
 
 fn compiled_expr_sql_type_hint(expr: &CompiledExpr) -> Option<SqlType> {
@@ -6180,12 +6179,17 @@ fn is_identifier_start(ch: char) -> bool {
 fn current_output_row(
     compiled: &CompiledFunction,
     state: &FunctionState,
+    ctx: &mut ExecutorContext,
 ) -> Result<TupleSlot, ExecError> {
-    let values = compiled
-        .output_slots
-        .iter()
-        .map(|slot| cast_value(state.values[slot.slot].clone(), slot.column.sql_type))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut values = Vec::with_capacity(compiled.output_slots.len());
+    for slot in &compiled.output_slots {
+        values.push(cast_function_value(
+            state.values[slot.slot].clone(),
+            None,
+            slot.column.sql_type,
+            ctx,
+        )?);
+    }
     Ok(TupleSlot::virtual_row(values))
 }
 
@@ -6193,12 +6197,15 @@ fn coerce_function_result_row(
     row: Vec<Value>,
     contract: &FunctionReturnContract,
     expected_record_shape: Option<&[QueryColumn]>,
+    ctx: &mut ExecutorContext,
 ) -> Result<TupleSlot, ExecError> {
     match contract {
         FunctionReturnContract::Scalar { ty, .. } => match row.as_slice() {
-            [value] => Ok(TupleSlot::virtual_row(vec![cast_value(
+            [value] => Ok(TupleSlot::virtual_row(vec![cast_function_value(
                 value.clone(),
+                None,
                 *ty,
+                ctx,
             )?])),
             _ => Err(function_runtime_error(
                 "structure of query does not match function result type",
@@ -6207,7 +6214,7 @@ fn coerce_function_result_row(
             )),
         },
         FunctionReturnContract::FixedRow { columns, .. } => {
-            coerce_row_to_columns(row, expected_record_shape.unwrap_or(columns))
+            coerce_row_to_columns(row, expected_record_shape.unwrap_or(columns), ctx)
         }
         FunctionReturnContract::AnonymousRecord { .. } => coerce_row_to_columns(
             row,
@@ -6218,6 +6225,7 @@ fn coerce_function_result_row(
                     "0A000",
                 )
             })?,
+            ctx,
         ),
         FunctionReturnContract::Trigger { .. } | FunctionReturnContract::EventTrigger { .. } => {
             Err(function_runtime_error(
@@ -6229,7 +6237,11 @@ fn coerce_function_result_row(
     }
 }
 
-fn coerce_row_to_columns(row: Vec<Value>, columns: &[QueryColumn]) -> Result<TupleSlot, ExecError> {
+fn coerce_row_to_columns(
+    row: Vec<Value>,
+    columns: &[QueryColumn],
+    ctx: &mut ExecutorContext,
+) -> Result<TupleSlot, ExecError> {
     if row.len() != columns.len() {
         return Err(function_runtime_error(
             "structure of query does not match function result type",
@@ -6241,11 +6253,15 @@ fn coerce_row_to_columns(row: Vec<Value>, columns: &[QueryColumn]) -> Result<Tup
             "42804",
         ));
     }
-    let values = row
-        .into_iter()
-        .zip(columns.iter())
-        .map(|(value, column)| cast_value(value, column.sql_type))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut values = Vec::with_capacity(row.len());
+    for (value, column) in row.into_iter().zip(columns.iter()) {
+        values.push(cast_function_value(
+            value,
+            Some(column.sql_type),
+            column.sql_type,
+            ctx,
+        )?);
+    }
     Ok(TupleSlot::virtual_row(values))
 }
 

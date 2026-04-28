@@ -3664,7 +3664,7 @@ fn date_parse_error(text: &str, err: DateParseError) -> ExecError {
     }
 }
 
-fn input_error_info(err: ExecError, text: &str) -> InputErrorInfo {
+pub(crate) fn input_error_info(err: ExecError, text: &str) -> InputErrorInfo {
     match err {
         ExecError::JsonInput {
             message,

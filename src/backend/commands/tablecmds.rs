@@ -15,7 +15,6 @@ use crate::backend::access::index::indexam;
 use crate::backend::access::table::toast_helper::toast_tuple_values_for_write;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
-use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
 use crate::backend::executor::value_io::format_failing_row_detail;
 use crate::backend::optimizer::{finalize_expr_subqueries, planner};
@@ -70,8 +69,9 @@ use crate::backend::executor::value_io::{
 };
 use crate::backend::executor::{
     ConstraintTiming, ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef,
-    apply_jsonb_subscript_assignment, cast_value_with_source_type_catalog_and_config,
-    compare_order_values, create_query_desc, executor_start,
+    apply_jsonb_subscript_assignment, cast_domain_text_input,
+    cast_value_with_source_type_catalog_and_config, compare_order_values, create_query_desc,
+    enforce_domain_constraints_for_value_ref, executor_start,
 };
 use crate::include::access::amapi::IndexUniqueCheck;
 use crate::include::access::brin::BrinOptions;
@@ -3166,6 +3166,7 @@ pub(crate) fn write_updated_row(
         &current_values,
         ctx,
     )?;
+    enforce_insert_domain_constraints(desc, &current_values, ctx)?;
     if let Some(catalog) = ctx.catalog.clone()
         && allow_partition_routing
         && let Some(destination) = route_updated_partition_row(
@@ -4389,7 +4390,7 @@ fn map_column_indexes_by_name(
         .collect()
 }
 
-fn evaluate_default_value(
+pub(crate) fn evaluate_default_value(
     desc: &RelationDesc,
     column_index: usize,
     ctx: &mut ExecutorContext,
@@ -8025,100 +8026,6 @@ fn apply_overriding_user_identity_defaults(
     Ok(())
 }
 
-fn domain_constraint_violation(domain_name: &str, constraint_name: &str) -> ExecError {
-    ExecError::DetailedError {
-        message: format!(
-            "value for domain {domain_name} violates check constraint \"{constraint_name}\""
-        ),
-        detail: None,
-        hint: None,
-        sqlstate: "23514",
-    }
-}
-
-fn domain_not_null_violation(domain_name: &str) -> ExecError {
-    ExecError::DetailedError {
-        message: format!("domain {domain_name} does not allow null values"),
-        detail: None,
-        hint: None,
-        sqlstate: "23502",
-    }
-}
-
-pub(crate) fn enforce_domain_constraint_for_value(
-    value: &Value,
-    ty: SqlType,
-    ctx: &mut ExecutorContext,
-) -> Result<(), ExecError> {
-    let Some(domain) = ctx
-        .catalog
-        .as_deref()
-        .and_then(|catalog| catalog.domain_by_type_oid(ty.type_oid))
-    else {
-        return Ok(());
-    };
-    if domain.not_null && matches!(value, Value::Null) {
-        return Err(domain_not_null_violation(&domain.name));
-    }
-    if matches!(value, Value::Null) {
-        return Ok(());
-    }
-    if ty.is_array && !domain.sql_type.is_array {
-        match value {
-            Value::PgArray(array) => {
-                for element in &array.elements {
-                    enforce_domain_constraint_for_value(element, ty.element_type(), ctx)?;
-                }
-            }
-            Value::Array(elements) => {
-                for element in elements {
-                    enforce_domain_constraint_for_value(element, ty.element_type(), ctx)?;
-                }
-            }
-            _ => {}
-        }
-        return Ok(());
-    }
-    let mut checks = domain
-        .constraints
-        .iter()
-        .filter_map(|constraint| {
-            (constraint.enforced && matches!(constraint.kind, DomainConstraintLookupKind::Check))
-                .then(|| {
-                    constraint
-                        .expr
-                        .as_ref()
-                        .map(|expr| (&constraint.name, expr))
-                })
-                .flatten()
-        })
-        .collect::<Vec<_>>();
-    if checks.is_empty()
-        && let Some(check) = domain.check.as_ref()
-    {
-        checks.push((&domain.name, check));
-    }
-    for (constraint_name, check) in checks {
-        let raw = parse_expr(check).map_err(ExecError::Parse)?;
-        let desc = RelationDesc {
-            columns: vec![column_desc("value", domain.sql_type, true)],
-        };
-        let scope = scope_for_relation(None, &desc);
-        let bound = {
-            let Some(catalog) = ctx.catalog.as_deref() else {
-                return Ok(());
-            };
-            bind_expr_with_outer_and_ctes(&raw, &scope, catalog, &[], None, &[])
-                .map_err(ExecError::Parse)?
-        };
-        let mut slot = TupleSlot::virtual_row(vec![value.clone()]);
-        if matches!(eval_expr(&bound, &mut slot, ctx)?, Value::Bool(false)) {
-            return Err(domain_constraint_violation(&domain.name, constraint_name));
-        }
-    }
-    Ok(())
-}
-
 fn enforce_insert_domain_constraints(
     desc: &RelationDesc,
     values: &[Value],
@@ -8128,7 +8035,7 @@ fn enforce_insert_domain_constraints(
         if column.dropped {
             continue;
         }
-        enforce_domain_constraint_for_value(value, column.sql_type, ctx)?;
+        enforce_domain_constraints_for_value_ref(value, column.sql_type, ctx)?;
     }
     Ok(())
 }
@@ -8320,7 +8227,7 @@ pub(crate) fn apply_assignment_target(
     }
     .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
     let value = coerce_record_assignment_value(value, assignment_type, ctx)?;
-    enforce_domain_constraint_for_value(&value, assignment_type, ctx)
+    enforce_domain_constraints_for_value_ref(&value, assignment_type, ctx)
         .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
     let resolved_indirection = if target.indirection.is_empty() {
         target
@@ -8357,8 +8264,9 @@ pub(crate) fn apply_assignment_target(
     };
     let current = values[target.column_index].clone();
     let column_type = desc.columns[target.column_index].sql_type;
-    values[target.column_index] =
+    let assigned =
         assign_typed_value_ordered(current, column_type, &resolved_indirection, value, ctx)?;
+    values[target.column_index] = assigned;
     Ok(())
 }
 
@@ -9840,7 +9748,7 @@ pub(crate) fn execute_insert_rows(
 fn coerce_user_defined_base_assignments(
     desc: &RelationDesc,
     values: &mut [Value],
-    ctx: &ExecutorContext,
+    ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     if !values
         .iter()
@@ -9848,7 +9756,7 @@ fn coerce_user_defined_base_assignments(
     {
         return Ok(());
     }
-    let Some(catalog) = ctx.catalog.as_deref() else {
+    let Some(catalog) = ctx.catalog.clone() else {
         return Ok(());
     };
     for (column, value) in desc.columns.iter().zip(values.iter_mut()) {
@@ -9857,6 +9765,10 @@ fn coerce_user_defined_base_assignments(
         }
         let target = column.sql_type;
         if target.is_array || target.type_oid == 0 {
+            continue;
+        }
+        if let Some(casted) = cast_domain_text_input(value.as_text().unwrap(), target, ctx)? {
+            *value = casted;
             continue;
         }
         let Some(type_row) = catalog.type_by_oid(target.type_oid) else {
@@ -9873,7 +9785,7 @@ fn coerce_user_defined_base_assignments(
             value.clone(),
             Some(SqlType::new(SqlTypeKind::Text)),
             target,
-            Some(catalog),
+            Some(catalog.as_ref()),
             &ctx.datetime_config,
         )?;
     }
@@ -11692,6 +11604,7 @@ pub(crate) fn apply_base_update_row(
             &current_values,
             ctx,
         )?;
+        enforce_insert_domain_constraints(&target.desc, &current_values, ctx)?;
         crate::backend::executor::enforce_relation_constraints(
             &target.relation_name,
             &target.desc,
