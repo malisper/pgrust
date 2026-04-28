@@ -10921,6 +10921,7 @@ fn catalog_index_meta_from_relcache(index: &IndexRelCacheEntry) -> CatalogIndexM
         indpred: index.indpred.clone(),
         btree_options: index.btree_options.clone(),
         brin_options: index.brin_options.clone(),
+        gist_options: index.gist_options.clone(),
         gin_options: index.gin_options.clone(),
         hash_options: index.hash_options.clone(),
     }
