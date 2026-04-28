@@ -88,9 +88,10 @@ use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsS
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_NAME, PUBLIC_NAMESPACE_OID, PgConstraintRow,
-    PgEnumRow, PgRangeRow, PgTypeRow, RangeCanonicalization, annotate_catalog_type_io_procs,
-    builtin_type_row_by_oid, synthetic_type_output_proc_oid, system_catalog_indexes,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CURRENT_DATABASE_NAME,
+    PUBLIC_NAMESPACE_OID, PgConstraintRow, PgEnumRow, PgRangeRow, PgTypeRow, RangeCanonicalization,
+    annotate_catalog_type_io_procs, builtin_type_row_by_oid, builtin_type_rows,
+    synthetic_type_output_proc_oid, system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 pub use crate::pgrust::autovacuum::AutovacuumConfig;
@@ -267,10 +268,12 @@ pub(crate) struct DomainEntry {
     pub array_oid: u32,
     pub name: String,
     pub namespace_oid: u32,
+    pub owner_oid: u32,
     pub sql_type: SqlType,
     pub default: Option<String>,
     pub check: Option<String>,
     pub not_null: bool,
+    pub constraints: Vec<DomainConstraintEntry>,
     pub enum_check: Option<DomainCheckEntry>,
     pub typacl: Option<Vec<String>>,
     pub comment: Option<String>,
@@ -289,6 +292,22 @@ const ARRAY_SUBSCRIPT_HANDLER_PROC_OID: u32 = 6179;
 pub(crate) struct DomainCheckEntry {
     pub name: String,
     pub allowed_enum_label_oids: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DomainConstraintEntry {
+    pub oid: u32,
+    pub name: String,
+    pub kind: DomainConstraintKind,
+    pub expr: Option<String>,
+    pub validated: bool,
+    pub enforced: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DomainConstraintKind {
+    Check,
+    NotNull,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,6 +438,33 @@ fn domain_sql_type(domain: &DomainEntry) -> SqlType {
 
 fn domain_array_sql_type(domain: &DomainEntry) -> SqlType {
     SqlType::array_of(domain_sql_type(domain))
+}
+
+fn domain_constraint_lookup_rows(
+    domain: &DomainEntry,
+) -> Vec<crate::backend::parser::DomainConstraintLookup> {
+    let mut rows = domain
+        .constraints
+        .iter()
+        .map(
+            |constraint| crate::backend::parser::DomainConstraintLookup {
+                name: constraint.name.clone(),
+                kind: match constraint.kind {
+                    DomainConstraintKind::Check => {
+                        crate::backend::parser::DomainConstraintLookupKind::Check
+                    }
+                    DomainConstraintKind::NotNull => {
+                        crate::backend::parser::DomainConstraintLookupKind::NotNull
+                    }
+                },
+                expr: constraint.expr.clone(),
+                validated: constraint.validated,
+                enforced: constraint.enforced,
+            },
+        )
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.name.cmp(&right.name));
+    rows
 }
 
 fn dynamic_range_array_type_names(
@@ -847,7 +893,18 @@ impl Database {
         let mut rows = domains
             .values()
             .flat_map(|domain| {
-                let base_catalog = builtin_type_row_by_oid(domain.sql_type.type_oid);
+                let base_catalog =
+                    builtin_type_row_by_oid(domain.sql_type.type_oid).or_else(|| {
+                        builtin_type_rows().into_iter().find(|row| {
+                            row.sql_type.kind == domain.sql_type.kind
+                                && row.sql_type.is_array == domain.sql_type.is_array
+                        })
+                    });
+                let base_type_oid = if domain.sql_type.type_oid != 0 {
+                    domain.sql_type.type_oid
+                } else {
+                    base_catalog.as_ref().map(|row| row.oid).unwrap_or(0)
+                };
                 let base_entry = base_types.get(&domain.sql_type.type_oid);
                 let domain_type = domain_sql_type(domain);
                 [
@@ -855,7 +912,7 @@ impl Database {
                         oid: domain.oid,
                         typname: domain.name.clone(),
                         typnamespace: domain.namespace_oid,
-                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typowner: domain.owner_oid,
                         typacl: domain.typacl.clone(),
                         typlen: base_catalog
                             .as_ref()
@@ -908,7 +965,7 @@ impl Database {
                             .map(|row| row.typanalyze)
                             .or_else(|| base_entry.map(|entry| entry.analyze_proc_oid))
                             .unwrap_or(0),
-                        typbasetype: domain.sql_type.type_oid,
+                        typbasetype: base_type_oid,
                         typcollation: base_catalog
                             .as_ref()
                             .map(|row| row.typcollation)
@@ -919,7 +976,7 @@ impl Database {
                         oid: domain.array_oid,
                         typname: format!("_{}", domain.name),
                         typnamespace: domain.namespace_oid,
-                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typowner: domain.owner_oid,
                         typacl: None,
                         typlen: -1,
                         typbyval: false,
@@ -1100,12 +1157,15 @@ impl Database {
     }
 
     pub(crate) fn domain_check_by_type_oid(&self, domain_oid: u32) -> Option<String> {
-        self.domains
-            .read()
-            .values()
-            .find(|domain| domain.oid == domain_oid)?
-            .check
-            .clone()
+        let domains = self.domains.read();
+        let domain = domains.values().find(|domain| domain.oid == domain_oid)?;
+        domain
+            .constraints
+            .iter()
+            .filter(|constraint| matches!(constraint.kind, DomainConstraintKind::Check))
+            .min_by(|left, right| left.name.cmp(&right.name))
+            .and_then(|constraint| constraint.expr.clone())
+            .or_else(|| domain.check.clone())
     }
 
     pub(crate) fn domain_by_type_oid(
@@ -1123,6 +1183,7 @@ impl Database {
                 default: domain.default.clone(),
                 check: domain.check.clone(),
                 not_null: domain.not_null,
+                constraints: domain_constraint_lookup_rows(domain),
             })
     }
 
@@ -1157,10 +1218,61 @@ impl Database {
                         default: domain.default.clone(),
                         check: domain.check.clone(),
                         not_null: domain.not_null,
+                        constraints: domain_constraint_lookup_rows(domain),
                     },
                 )
             })
             .collect()
+    }
+
+    pub(crate) fn domain_constraint_rows_for_catalog(&self) -> Vec<PgConstraintRow> {
+        let mut rows = self
+            .domains
+            .read()
+            .values()
+            .flat_map(|domain| {
+                domain.constraints.iter().map(|constraint| PgConstraintRow {
+                    oid: constraint.oid,
+                    conname: constraint.name.clone(),
+                    connamespace: domain.namespace_oid,
+                    contype: match constraint.kind {
+                        DomainConstraintKind::Check => CONSTRAINT_CHECK,
+                        DomainConstraintKind::NotNull => CONSTRAINT_NOTNULL,
+                    },
+                    condeferrable: false,
+                    condeferred: false,
+                    conenforced: constraint.enforced,
+                    convalidated: constraint.validated,
+                    conrelid: 0,
+                    contypid: domain.oid,
+                    conindid: 0,
+                    conparentid: 0,
+                    confrelid: 0,
+                    confupdtype: ' ',
+                    confdeltype: ' ',
+                    confmatchtype: ' ',
+                    conkey: None,
+                    confkey: None,
+                    conpfeqop: None,
+                    conppeqop: None,
+                    conffeqop: None,
+                    confdelsetcols: None,
+                    conexclop: None,
+                    conbin: constraint.expr.clone(),
+                    conislocal: true,
+                    coninhcount: 0,
+                    connoinherit: false,
+                    conperiod: false,
+                })
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.contypid
+                .cmp(&right.contypid)
+                .then_with(|| left.conname.cmp(&right.conname))
+                .then_with(|| left.oid.cmp(&right.oid))
+        });
+        rows
     }
 
     pub(crate) fn dynamic_type_snapshot(&self) -> DynamicTypeSnapshot {
@@ -1185,6 +1297,13 @@ impl Database {
             .read()
             .get(&type_oid)
             .and_then(|entry| entry.default.clone())
+            .or_else(|| {
+                self.domains
+                    .read()
+                    .values()
+                    .find(|domain| domain.oid == type_oid)
+                    .and_then(|domain| domain.default.clone())
+            })
     }
 
     pub(crate) fn commit_enum_labels_created_by(&self, xid: TransactionId) {

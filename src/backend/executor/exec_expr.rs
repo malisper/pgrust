@@ -5031,6 +5031,28 @@ fn eval_pg_table_is_visible(values: &[Value], ctx: &ExecutorContext) -> Result<V
     }
 }
 
+fn eval_pg_type_is_visible(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [value] => {
+            let type_oid = oid_arg_to_u32(value, "pg_type_is_visible")?;
+            let catalog = executor_catalog(ctx)?;
+            let Some(type_row) = catalog.type_by_oid(type_oid) else {
+                return Ok(Value::Null);
+            };
+            Ok(Value::Bool(
+                catalog
+                    .type_by_name(&type_row.typname)
+                    .is_some_and(|visible| visible.oid == type_oid),
+            ))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_type_is_visible(oid)",
+            actual: format!("PgTypeIsVisible({} args)", values.len()),
+        })),
+    }
+}
+
 fn sequence_runtime(
     ctx: &ExecutorContext,
 ) -> Result<&crate::pgrust::database::SequenceRuntime, ExecError> {
@@ -6910,14 +6932,14 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::HasServerPrivilege => {
             eval_has_foreign_privilege_function(ForeignPrivilegeKind::Server, &values, None)
         }
-        BuiltinScalarFunction::PgGetPartKeyDef | BuiltinScalarFunction::PgTableIsVisible => {
-            Err(ExecError::DetailedError {
-                message: "catalog helper requires executor context".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "XX000",
-            })
-        }
+        BuiltinScalarFunction::PgGetPartKeyDef
+        | BuiltinScalarFunction::PgTableIsVisible
+        | BuiltinScalarFunction::PgTypeIsVisible => Err(ExecError::DetailedError {
+            message: "catalog helper requires executor context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }),
         BuiltinScalarFunction::RegProcToText => {
             eval_reg_object_to_text(&values[0], SqlTypeKind::RegProc, None)
         }
@@ -9043,6 +9065,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgPartitionRoot => eval_pg_partition_root(&values, ctx),
         BuiltinScalarFunction::PgGetPartKeyDef => eval_pg_get_partkeydef(&values, ctx),
         BuiltinScalarFunction::PgTableIsVisible => eval_pg_table_is_visible(&values, ctx),
+        BuiltinScalarFunction::PgTypeIsVisible => eval_pg_type_is_visible(&values, ctx),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
         BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(&values, ctx),
         BuiltinScalarFunction::PgGetFunctionArguments => {

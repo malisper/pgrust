@@ -6471,7 +6471,16 @@ fn bind_domain_constraint_expr(
     let Some(domain) = domain else {
         return expr;
     };
-    let Some(check) = domain.check.as_deref() else {
+    let check = domain
+        .constraints
+        .iter()
+        .filter(|constraint| {
+            constraint.enforced && matches!(constraint.kind, DomainConstraintLookupKind::Check)
+        })
+        .filter_map(|constraint| constraint.expr.as_deref())
+        .find(|check| parse_domain_upper_less_than_check(check).is_some())
+        .or(domain.check.as_deref());
+    let Some(check) = check else {
         return expr;
     };
     let Some(limit) = parse_domain_upper_less_than_check(check) else {

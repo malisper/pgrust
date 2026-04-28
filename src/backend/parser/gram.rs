@@ -4745,6 +4745,10 @@ fn try_parse_domain_statement(sql: &str) -> Result<Option<Statement>, ParseError
         return build_create_domain_statement(trimmed)
             .map(|stmt| Some(Statement::CreateDomain(stmt)));
     }
+    if lowered.starts_with("alter domain ") {
+        return build_alter_domain_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterDomain(stmt)));
+    }
     if lowered.starts_with("drop domain ") {
         return build_drop_domain_statement(trimmed).map(|stmt| Some(Statement::DropDomain(stmt)));
     }
@@ -13466,6 +13470,7 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
         default: clauses.default,
         check: clauses.check,
         not_null: clauses.not_null,
+        constraints: clauses.constraints,
         enum_check,
     })
 }
@@ -13476,6 +13481,7 @@ struct CreateDomainClauses {
     check: Option<String>,
     check_name: Option<String>,
     not_null: bool,
+    constraints: Vec<DomainConstraintSpec>,
 }
 
 fn split_create_domain_type_and_clauses(type_sql: &str) -> (&str, &str) {
@@ -13526,8 +13532,19 @@ fn parse_create_domain_clauses(mut input: &str) -> Result<CreateDomainClauses, P
         }
         if keyword_at_boundary(input, 0, "check") {
             let (check, rest) = parse_create_domain_check_clause(input)?;
-            clauses.check_name = pending_constraint_name.take();
-            clauses.check = Some(check);
+            let name = pending_constraint_name.take();
+            let kind = DomainConstraintSpecKind::Check {
+                expr: check.clone(),
+            };
+            let (attrs, rest) = split_domain_constraint_attribute_prefix(rest);
+            let not_valid = parse_domain_constraint_attributes(&attrs, &kind)?;
+            clauses.check_name = name.clone();
+            clauses.check = Some(check.clone());
+            clauses.constraints.push(DomainConstraintSpec {
+                name,
+                kind,
+                not_valid,
+            });
             input = rest.trim_start();
             continue;
         }
@@ -13550,8 +13567,25 @@ fn parse_create_domain_clauses(mut input: &str) -> Result<CreateDomainClauses, P
                     actual: after_not.into(),
                 });
             }
+            if clauses.not_null {
+                return Err(ParseError::DetailedError {
+                    message: "redundant NOT NULL constraint definition".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
+                });
+            }
             clauses.not_null = true;
-            input = after_not["null".len()..].trim_start();
+            let kind = DomainConstraintSpecKind::NotNull;
+            let (attrs, rest) =
+                split_domain_constraint_attribute_prefix(&after_not["null".len()..]);
+            let not_valid = parse_domain_constraint_attributes(&attrs, &kind)?;
+            clauses.constraints.push(DomainConstraintSpec {
+                name: pending_constraint_name.take(),
+                kind,
+                not_valid,
+            });
+            input = rest.trim_start();
             continue;
         }
         if keyword_at_boundary(input, 0, "null") {
@@ -13704,21 +13738,295 @@ fn keyword_end_boundary(sql: &str, end: usize) -> bool {
 }
 
 fn parse_domain_constraint_name(input: &str) -> Result<(String, &str), ParseError> {
-    let trimmed = input.trim_start();
-    let end = trimmed
-        .char_indices()
-        .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx))
-        .unwrap_or(trimmed.len());
-    if end == 0 {
-        return Err(ParseError::UnexpectedToken {
-            expected: "domain constraint name",
-            actual: input.into(),
+    parse_sql_identifier(input).map_err(|_| ParseError::UnexpectedToken {
+        expected: "domain constraint name",
+        actual: input.into(),
+    })
+}
+
+fn build_alter_domain_statement(sql: &str) -> Result<AlterDomainStatement, ParseError> {
+    let prefix = "alter domain ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "ALTER DOMAIN name action",
+            actual: sql.into(),
+        })?
+        .trim_start();
+    let ((schema_name, object_name), rest) = parse_qualified_sql_name(rest)?;
+    let domain_name = schema_name
+        .map(|schema| format!("{schema}.{object_name}"))
+        .unwrap_or(object_name);
+    let rest = rest.trim_start();
+
+    if let Some(after) = consume_keywords(rest, &["set", "default"]) {
+        let default = after.trim();
+        if default.is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "default expression",
+                actual: rest.into(),
+            });
+        }
+        return Ok(AlterDomainStatement {
+            domain_name,
+            action: AlterDomainAction::SetDefault {
+                default: Some(default.to_string()),
+            },
         });
     }
-    Ok((
-        trimmed[..end].trim_matches('"').to_string(),
-        &trimmed[end..],
-    ))
+    if let Some(after) = consume_keywords(rest, &["drop", "default"]) {
+        ensure_alter_domain_end(after)?;
+        return Ok(AlterDomainStatement {
+            domain_name,
+            action: AlterDomainAction::SetDefault { default: None },
+        });
+    }
+    if let Some(after) = consume_keywords(rest, &["set", "not", "null"]) {
+        ensure_alter_domain_end(after)?;
+        return Ok(AlterDomainStatement {
+            domain_name,
+            action: AlterDomainAction::SetNotNull,
+        });
+    }
+    if let Some(after) = consume_keywords(rest, &["drop", "not", "null"]) {
+        ensure_alter_domain_end(after)?;
+        return Ok(AlterDomainStatement {
+            domain_name,
+            action: AlterDomainAction::DropNotNull,
+        });
+    }
+    if let Some(after) = consume_keyword_if_present(rest, "add") {
+        let constraint = parse_alter_domain_constraint(after)?;
+        return Ok(AlterDomainStatement {
+            domain_name,
+            action: AlterDomainAction::AddConstraint(constraint),
+        });
+    }
+    if let Some(after) = consume_keywords(rest, &["drop", "constraint"]) {
+        let mut after = after.trim_start();
+        let mut if_exists = false;
+        if let Some(next) = consume_keywords(after, &["if", "exists"]) {
+            if_exists = true;
+            after = next.trim_start();
+        }
+        let (constraint_name, after_name) = parse_domain_constraint_name(after)?;
+        let after_name = after_name.trim_start();
+        let (cascade, trailing) = parse_optional_drop_behavior(after_name)?;
+        ensure_alter_domain_end(trailing)?;
+        return Ok(AlterDomainStatement {
+            domain_name,
+            action: AlterDomainAction::DropConstraint {
+                constraint_name,
+                if_exists,
+                cascade,
+            },
+        });
+    }
+    if let Some(after) = consume_keywords(rest, &["validate", "constraint"]) {
+        let (constraint_name, trailing) = parse_domain_constraint_name(after)?;
+        ensure_alter_domain_end(trailing)?;
+        return Ok(AlterDomainStatement {
+            domain_name,
+            action: AlterDomainAction::ValidateConstraint { constraint_name },
+        });
+    }
+    if let Some(after) = consume_keywords(rest, &["rename", "to"]) {
+        let (new_name, trailing) = parse_sql_identifier(after)?;
+        ensure_alter_domain_end(trailing)?;
+        return Ok(AlterDomainStatement {
+            domain_name,
+            action: AlterDomainAction::RenameDomain { new_name },
+        });
+    }
+    if let Some(after) = consume_keywords(rest, &["rename", "constraint"]) {
+        let (constraint_name, after_name) = parse_domain_constraint_name(after)?;
+        let Some(after_to) = consume_keyword_if_present(after_name, "to") else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "TO",
+                actual: after_name.into(),
+            });
+        };
+        let (new_name, trailing) = parse_domain_constraint_name(after_to)?;
+        ensure_alter_domain_end(trailing)?;
+        return Ok(AlterDomainStatement {
+            domain_name,
+            action: AlterDomainAction::RenameConstraint {
+                constraint_name,
+                new_name,
+            },
+        });
+    }
+    if let Some(after) = consume_keywords(rest, &["set", "schema"]) {
+        let (new_schema, trailing) = parse_sql_identifier(after)?;
+        ensure_alter_domain_end(trailing)?;
+        return Ok(AlterDomainStatement {
+            domain_name,
+            action: AlterDomainAction::SetSchema { new_schema },
+        });
+    }
+    if let Some(after) = consume_keywords(rest, &["owner", "to"]) {
+        let (new_owner, trailing) = parse_sql_identifier(after)?;
+        ensure_alter_domain_end(trailing)?;
+        return Ok(AlterDomainStatement {
+            domain_name,
+            action: AlterDomainAction::OwnerTo { new_owner },
+        });
+    }
+
+    Err(ParseError::UnexpectedToken {
+        expected: "ALTER DOMAIN action",
+        actual: rest.into(),
+    })
+}
+
+fn consume_keyword_if_present<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    let rest = input.trim_start();
+    keyword_at_start(rest, keyword).then(|| consume_keyword(rest, keyword).trim_start())
+}
+
+fn ensure_alter_domain_end(rest: &str) -> Result<(), ParseError> {
+    if rest.trim().is_empty() {
+        Ok(())
+    } else {
+        Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER DOMAIN statement",
+            actual: rest.trim().into(),
+        })
+    }
+}
+
+fn parse_optional_drop_behavior(input: &str) -> Result<(bool, &str), ParseError> {
+    let input = input.trim_start();
+    if keyword_at_start(input, "cascade") {
+        Ok((true, consume_keyword(input, "cascade")))
+    } else if keyword_at_start(input, "restrict") {
+        Ok((false, consume_keyword(input, "restrict")))
+    } else {
+        Ok((false, input))
+    }
+}
+
+fn parse_alter_domain_constraint(input: &str) -> Result<DomainConstraintSpec, ParseError> {
+    let mut rest = input.trim_start();
+    let mut name = None;
+    if keyword_at_start(rest, "constraint") {
+        rest = consume_keyword(rest, "constraint").trim_start();
+        let (constraint_name, after_name) = parse_domain_constraint_name(rest)?;
+        name = Some(constraint_name);
+        rest = after_name.trim_start();
+    }
+    let (kind, attrs) = if keyword_at_start(rest, "check") {
+        let (expr, trailing) = parse_create_domain_check_clause(rest)?;
+        (DomainConstraintSpecKind::Check { expr }, trailing)
+    } else if let Some(after) = consume_keywords(rest, &["not", "null"]) {
+        (DomainConstraintSpecKind::NotNull, after)
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "domain constraint",
+            actual: input.into(),
+        });
+    };
+    let not_valid = parse_domain_constraint_attributes(attrs, &kind)?;
+    Ok(DomainConstraintSpec {
+        name,
+        kind,
+        not_valid,
+    })
+}
+
+fn parse_domain_constraint_attributes(
+    attrs: &str,
+    kind: &DomainConstraintSpecKind,
+) -> Result<bool, ParseError> {
+    let attrs = attrs.trim();
+    if attrs.is_empty() {
+        return Ok(false);
+    }
+    let lowered = attrs.to_ascii_lowercase();
+    if lowered.contains("not enforced") {
+        return Err(domain_constraint_attribute_error(kind, "NOT ENFORCED"));
+    }
+    if lowered
+        .split_whitespace()
+        .any(|part| part.eq_ignore_ascii_case("enforced"))
+    {
+        return Err(domain_constraint_attribute_error(kind, "ENFORCED"));
+    }
+    if lowered.contains("deferrable") || lowered.contains("initially") {
+        return Err(ParseError::FeatureNotSupported(
+            "specifying constraint deferrability not supported for domains".into(),
+        ));
+    }
+    if lowered.contains("no inherit") {
+        return Err(ParseError::FeatureNotSupported(
+            "check constraints for domains cannot be marked NO INHERIT".into(),
+        ));
+    }
+    let not_valid = lowered.contains("not valid");
+    let stripped = lowered
+        .replace("not valid", "")
+        .replace("valid", "")
+        .trim()
+        .to_string();
+    if !stripped.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "domain constraint attributes",
+            actual: attrs.into(),
+        });
+    }
+    Ok(not_valid)
+}
+
+fn split_domain_constraint_attribute_prefix(input: &str) -> (String, &str) {
+    let mut rest = input.trim_start();
+    let mut attrs = Vec::new();
+    loop {
+        if let Some(next) = consume_keywords(rest, &["not", "valid"]) {
+            attrs.push("NOT VALID");
+            rest = next;
+        } else if let Some(next) = consume_keywords(rest, &["not", "enforced"]) {
+            attrs.push("NOT ENFORCED");
+            rest = next;
+        } else if let Some(next) = consume_keywords(rest, &["not", "deferrable"]) {
+            attrs.push("NOT DEFERRABLE");
+            rest = next;
+        } else if let Some(next) = consume_keyword_if_present(rest, "deferrable") {
+            attrs.push("DEFERRABLE");
+            rest = next;
+        } else if let Some(next) = consume_keywords(rest, &["initially", "immediate"]) {
+            attrs.push("INITIALLY IMMEDIATE");
+            rest = next;
+        } else if let Some(next) = consume_keywords(rest, &["initially", "deferred"]) {
+            attrs.push("INITIALLY DEFERRED");
+            rest = next;
+        } else if let Some(next) = consume_keywords(rest, &["no", "inherit"]) {
+            attrs.push("NO INHERIT");
+            rest = next;
+        } else if let Some(next) = consume_keyword_if_present(rest, "enforced") {
+            attrs.push("ENFORCED");
+            rest = next;
+        } else {
+            break;
+        }
+        rest = rest.trim_start();
+    }
+    (attrs.join(" "), rest)
+}
+
+fn domain_constraint_attribute_error(
+    kind: &DomainConstraintSpecKind,
+    attribute: &str,
+) -> ParseError {
+    let constraint_kind = match kind {
+        DomainConstraintSpecKind::Check { .. } => "CHECK",
+        DomainConstraintSpecKind::NotNull => "NOT NULL",
+    };
+    ParseError::DetailedError {
+        message: format!("{constraint_kind} constraints cannot be marked {attribute}"),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
 }
 
 fn parse_domain_value_in_check(input: &str) -> Result<Vec<String>, ParseError> {

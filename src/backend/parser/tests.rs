@@ -12,7 +12,7 @@ use crate::include::catalog::{
 use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
     AliasColumnDef, AliasColumnSpec, AlterAggregateRenameStatement, AlterColumnExpressionAction,
-    AlterColumnIdentityAction, AlterGenericOptionAction, AlterTableTriggerMode,
+    AlterColumnIdentityAction, AlterDomainAction, AlterGenericOptionAction, AlterTableTriggerMode,
     AlterTableTriggerStateStatement, AlterTableTriggerTarget, AlterTriggerRenameStatement,
     AlterTypeSetOptionsStatement, CastContext, ColumnConstraint, ColumnGeneratedKind,
     ColumnIdentityKind, CommentOnAggregateStatement, CommentOnColumnStatement,
@@ -20,10 +20,10 @@ use crate::include::nodes::parsenodes::{
     CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
     CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement,
     CreateCompositeTypeStatement, CreateShellTypeStatement, CreateTriggerStatement,
-    CreateTypeStatement, DropAggregateStatement, DropCastStatement, DropTriggerStatement,
-    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege,
-    GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
-    OverridingKind, PartitionStrategy, PublicationObjectSpec, PublicationOption,
+    CreateTypeStatement, DomainConstraintSpecKind, DropAggregateStatement, DropCastStatement,
+    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType,
+    GrantObjectPrivilege, GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement,
+    JoinTreeNode, OverridingKind, PartitionStrategy, PublicationObjectSpec, PublicationOption,
     PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
     RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
     SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
@@ -13722,6 +13722,116 @@ fn parse_create_drop_and_comment_on_domain_statements() {
     };
     assert_eq!(comment.domain_name, "dom_int");
     assert_eq!(comment.comment.as_deref(), Some("hello"));
+}
+
+#[test]
+fn parse_alter_domain_statements() {
+    let cases = [
+        (
+            "alter domain public.dom set default 3 + 4",
+            AlterDomainAction::SetDefault {
+                default: Some("3 + 4".into()),
+            },
+        ),
+        (
+            "alter domain public.dom drop default",
+            AlterDomainAction::SetDefault { default: None },
+        ),
+        (
+            "alter domain dom set not null",
+            AlterDomainAction::SetNotNull,
+        ),
+        (
+            "alter domain dom drop not null",
+            AlterDomainAction::DropNotNull,
+        ),
+        (
+            "alter domain dom drop constraint if exists ck cascade",
+            AlterDomainAction::DropConstraint {
+                constraint_name: "ck".into(),
+                if_exists: true,
+                cascade: true,
+            },
+        ),
+        (
+            "alter domain dom validate constraint ck",
+            AlterDomainAction::ValidateConstraint {
+                constraint_name: "ck".into(),
+            },
+        ),
+        (
+            "alter domain dom rename to dom2",
+            AlterDomainAction::RenameDomain {
+                new_name: "dom2".into(),
+            },
+        ),
+        (
+            "alter domain dom rename constraint ck to ck2",
+            AlterDomainAction::RenameConstraint {
+                constraint_name: "ck".into(),
+                new_name: "ck2".into(),
+            },
+        ),
+        (
+            "alter domain dom set schema archive",
+            AlterDomainAction::SetSchema {
+                new_schema: "archive".into(),
+            },
+        ),
+        (
+            "alter domain dom owner to current_user",
+            AlterDomainAction::OwnerTo {
+                new_owner: "current_user".into(),
+            },
+        ),
+    ];
+
+    for (sql, expected) in cases {
+        let Statement::AlterDomain(stmt) = parse_statement(sql).unwrap() else {
+            panic!("expected ALTER DOMAIN for {sql}");
+        };
+        assert_eq!(stmt.action, expected);
+    }
+
+    let Statement::AlterDomain(stmt) =
+        parse_statement("alter domain \"Mixed\" add constraint \"Ck\" check (VALUE > 0) not valid")
+            .unwrap()
+    else {
+        panic!("expected ALTER DOMAIN ADD CONSTRAINT");
+    };
+    assert_eq!(stmt.domain_name, "Mixed");
+    let AlterDomainAction::AddConstraint(spec) = stmt.action else {
+        panic!("expected ADD CONSTRAINT");
+    };
+    assert_eq!(spec.name.as_deref(), Some("Ck"));
+    assert!(spec.not_valid);
+    assert!(matches!(
+        spec.kind,
+        DomainConstraintSpecKind::Check { ref expr } if expr == "VALUE > 0"
+    ));
+
+    let Statement::AlterDomain(stmt) =
+        parse_statement("alter domain dom add constraint nn not null").unwrap()
+    else {
+        panic!("expected ALTER DOMAIN ADD NOT NULL");
+    };
+    assert!(matches!(
+        stmt.action,
+        AlterDomainAction::AddConstraint(ref spec)
+            if spec.name.as_deref() == Some("nn")
+                && matches!(spec.kind, DomainConstraintSpecKind::NotNull)
+    ));
+
+    assert!(matches!(
+        parse_statement("alter domain dom add constraint ck check (value > 0) enforced"),
+        Err(ParseError::DetailedError { message, .. })
+            if message == "CHECK constraints cannot be marked ENFORCED"
+    ));
+    assert!(matches!(
+        parse_statement("alter domain dom add constraint ck check (value > 0) not enforced"),
+        Err(ParseError::DetailedError { message, .. })
+            if message == "CHECK constraints cannot be marked NOT ENFORCED"
+    ));
 }
 
 #[test]

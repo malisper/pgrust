@@ -2119,6 +2119,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterDomain(ref alter_stmt) => self
+                .execute_alter_domain_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateConversion(ref create_stmt) => self
                 .execute_create_conversion_stmt_with_search_path(
                     client_id,

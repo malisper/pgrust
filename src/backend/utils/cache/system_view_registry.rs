@@ -5,6 +5,7 @@ use crate::include::nodes::primnodes::QueryColumn;
 pub enum SyntheticSystemViewKind {
     PgEnum,
     PgType,
+    PgConstraint,
     PgRange,
     PgViews,
     PgMatviews,
@@ -113,6 +114,7 @@ pub fn synthetic_system_views() -> &'static [SyntheticSystemView] {
 const PG_VIEW_ALIASES: &[&str] = &["pg_views", "pg_catalog.pg_views"];
 const PG_ENUM_ALIASES: &[&str] = &["pg_enum", "pg_catalog.pg_enum"];
 const PG_TYPE_ALIASES: &[&str] = &["pg_type", "pg_catalog.pg_type"];
+const PG_CONSTRAINT_ALIASES: &[&str] = &["pg_constraint", "pg_catalog.pg_constraint"];
 const PG_RANGE_ALIASES: &[&str] = &["pg_range", "pg_catalog.pg_range"];
 const PG_MATVIEWS_ALIASES: &[&str] = &["pg_matviews", "pg_catalog.pg_matviews"];
 const PG_INDEXES_ALIASES: &[&str] = &["pg_indexes", "pg_catalog.pg_indexes"];
@@ -197,8 +199,60 @@ const PG_TYPE_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::new("typdelim", SqlType::new(SqlTypeKind::InternalChar)),
     SyntheticSystemViewColumn::new("typanalyze", SqlType::new(SqlTypeKind::RegProc)),
     SyntheticSystemViewColumn::new("typbasetype", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("typtypmod", SqlType::new(SqlTypeKind::Int4)),
     SyntheticSystemViewColumn::new("typcollation", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("typnotnull", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("typdefault", SqlType::new(SqlTypeKind::Text)),
     SyntheticSystemViewColumn::new("typacl", SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
+];
+
+const PG_CONSTRAINT_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("oid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("conname", SqlType::new(SqlTypeKind::Name)),
+    SyntheticSystemViewColumn::new("connamespace", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("contype", SqlType::new(SqlTypeKind::InternalChar)),
+    SyntheticSystemViewColumn::new("condeferrable", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("condeferred", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("conenforced", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("convalidated", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("conrelid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("contypid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("conindid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("conparentid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("confrelid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("confupdtype", SqlType::new(SqlTypeKind::InternalChar)),
+    SyntheticSystemViewColumn::new("confdeltype", SqlType::new(SqlTypeKind::InternalChar)),
+    SyntheticSystemViewColumn::new("confmatchtype", SqlType::new(SqlTypeKind::InternalChar)),
+    SyntheticSystemViewColumn::new("conkey", SqlType::array_of(SqlType::new(SqlTypeKind::Int2))),
+    SyntheticSystemViewColumn::new(
+        "confkey",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Int2)),
+    ),
+    SyntheticSystemViewColumn::new(
+        "conpfeqop",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Oid)),
+    ),
+    SyntheticSystemViewColumn::new(
+        "conppeqop",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Oid)),
+    ),
+    SyntheticSystemViewColumn::new(
+        "conffeqop",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Oid)),
+    ),
+    SyntheticSystemViewColumn::new(
+        "confdelsetcols",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Int2)),
+    ),
+    SyntheticSystemViewColumn::new(
+        "conexclop",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Oid)),
+    ),
+    SyntheticSystemViewColumn::new("conbin", SqlType::new(SqlTypeKind::PgNodeTree)),
+    SyntheticSystemViewColumn::new("conislocal", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("coninhcount", SqlType::new(SqlTypeKind::Int2)),
+    SyntheticSystemViewColumn::new("connoinherit", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("conperiod", SqlType::new(SqlTypeKind::Bool)),
 ];
 
 const PG_RANGE_COLUMNS: &[SyntheticSystemViewColumn] = &[
@@ -726,7 +780,7 @@ const INFORMATION_SCHEMA_FOREIGN_TABLE_OPTIONS_COLUMNS: &[SyntheticSystemViewCol
     SyntheticSystemViewColumn::text("option_value"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 38] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 39] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgEnum,
         canonical_name: "pg_catalog.pg_enum",
@@ -739,6 +793,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 38] = [
         canonical_name: "pg_catalog.pg_type",
         aliases: PG_TYPE_ALIASES,
         columns: PG_TYPE_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgConstraint,
+        canonical_name: "pg_catalog.pg_constraint",
+        aliases: PG_CONSTRAINT_ALIASES,
+        columns: PG_CONSTRAINT_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

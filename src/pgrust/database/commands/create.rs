@@ -36,8 +36,9 @@ use crate::include::nodes::primnodes::{
 };
 use crate::pgrust::database::ddl::{append_view_check_option, format_sql_type_name};
 use crate::pgrust::database::{
-    SequenceData, SequenceRuntime, default_sequence_name_base, format_nextval_default_oid,
-    initial_sequence_state, resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
+    DomainConstraintEntry, DomainConstraintKind, SequenceData, SequenceRuntime,
+    default_sequence_name_base, format_nextval_default_oid, initial_sequence_state,
+    resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
 };
 use crate::pl::plpgsql::validate_create_function_body;
 
@@ -1890,6 +1891,22 @@ fn column_attnums_for_names(
         .collect()
 }
 
+fn unique_domain_constraint_name(
+    base_name: String,
+    used_names: &mut std::collections::BTreeSet<String>,
+) -> String {
+    if used_names.insert(base_name.to_ascii_lowercase()) {
+        return base_name;
+    }
+    for suffix in 1.. {
+        let candidate = format!("{base_name}{suffix}");
+        if used_names.insert(candidate.to_ascii_lowercase()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded domain constraint suffix search")
+}
+
 impl Database {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn install_create_table_constraints_in_transaction(
@@ -2651,8 +2668,52 @@ impl Database {
             )));
         }
         drop(domains);
-        let oid = self.allocate_dynamic_type_oids(2, None, None)?;
+        let oid = self.allocate_dynamic_type_oids(
+            2 + u32::try_from(create_stmt.constraints.len()).unwrap_or(0),
+            None,
+            None,
+        )?;
         let array_oid = oid.saturating_add(1);
+        let mut used_constraint_names = std::collections::BTreeSet::new();
+        let constraints = create_stmt
+            .constraints
+            .iter()
+            .enumerate()
+            .map(|(index, constraint)| {
+                let base_name = constraint
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| match constraint.kind {
+                        crate::backend::parser::DomainConstraintSpecKind::Check { .. } => {
+                            format!("{}_check", object_name)
+                        }
+                        crate::backend::parser::DomainConstraintSpecKind::NotNull => {
+                            format!("{}_not_null", object_name)
+                        }
+                    });
+                let name = unique_domain_constraint_name(base_name, &mut used_constraint_names);
+                DomainConstraintEntry {
+                    oid: oid.saturating_add(2 + u32::try_from(index).unwrap_or(0)),
+                    name,
+                    kind: match constraint.kind {
+                        crate::backend::parser::DomainConstraintSpecKind::Check { .. } => {
+                            DomainConstraintKind::Check
+                        }
+                        crate::backend::parser::DomainConstraintSpecKind::NotNull => {
+                            DomainConstraintKind::NotNull
+                        }
+                    },
+                    expr: match &constraint.kind {
+                        crate::backend::parser::DomainConstraintSpecKind::Check { expr } => {
+                            Some(expr.clone())
+                        }
+                        crate::backend::parser::DomainConstraintSpecKind::NotNull => None,
+                    },
+                    validated: !constraint.not_valid,
+                    enforced: true,
+                }
+            })
+            .collect::<Vec<_>>();
         let mut domains = self.domains.write();
         domains.insert(
             normalized,
@@ -2661,10 +2722,12 @@ impl Database {
                 array_oid,
                 name: object_name,
                 namespace_oid,
+                owner_oid: self.auth_state(client_id).current_user_oid(),
                 sql_type,
                 default: create_stmt.default.clone(),
                 check: create_stmt.check.clone(),
                 not_null: create_stmt.not_null,
+                constraints,
                 enum_check,
                 typacl: None,
                 comment: None,

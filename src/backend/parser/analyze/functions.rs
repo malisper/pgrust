@@ -1477,7 +1477,8 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgTriggerDepth => args.is_empty(),
             BuiltinScalarFunction::PgPartitionRoot
             | BuiltinScalarFunction::PgGetPartKeyDef
-            | BuiltinScalarFunction::PgTableIsVisible => args.len() == 1,
+            | BuiltinScalarFunction::PgTableIsVisible
+            | BuiltinScalarFunction::PgTypeIsVisible => args.len() == 1,
             BuiltinScalarFunction::DatePart | BuiltinScalarFunction::Extract => args.len() == 2,
             BuiltinScalarFunction::DateTrunc => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::DateBin => args.len() == 3,
@@ -2805,6 +2806,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_table_is_visible",
             BuiltinScalarFunction::PgTableIsVisible,
         ),
+        ("pg_type_is_visible", BuiltinScalarFunction::PgTypeIsVisible),
         ("pg_my_temp_schema", BuiltinScalarFunction::PgMyTempSchema),
         (
             "pg_rust_internal_binary_coercible",
@@ -4241,6 +4243,7 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             BuiltinScalarFunction::PgIndexAmHasProperty,
             BuiltinScalarFunction::PgIndexHasProperty,
             BuiltinScalarFunction::PgIndexColumnHasProperty,
+            BuiltinScalarFunction::PgTypeIsVisible,
             BuiltinScalarFunction::BoolAndStateFunc,
             BuiltinScalarFunction::BoolOrStateFunc,
         ] {
@@ -4359,6 +4362,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgPartitionRoot
             | BuiltinScalarFunction::PgGetPartKeyDef
             | BuiltinScalarFunction::PgTableIsVisible
+            | BuiltinScalarFunction::PgTypeIsVisible
             | BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::CurrVal
             | BuiltinScalarFunction::SetVal
