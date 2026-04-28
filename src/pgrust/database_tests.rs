@@ -21529,6 +21529,210 @@ fn pg_stats_ext_views_exist_and_bind_columns() {
 }
 
 #[test]
+fn stats_ext_dependencies_use_postgres_selectivity_formula() {
+    let base = temp_dir("stats_ext_dependencies_selectivity");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table stats_fd (filler1 text, filler2 numeric, a int4, b text, filler3 date, c int4, d text) \
+         with (autovacuum_enabled = off)",
+    )
+    .unwrap();
+    db.execute(1, "create index stats_fd_ab_idx on stats_fd (a, b)")
+        .unwrap();
+    db.execute(1, "create index stats_fd_abc_idx on stats_fd (a, b, c)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into stats_fd (a, b, c, filler1) \
+         select mod(i,100), mod(i,50)::text, mod(i,25), i \
+         from generate_series(1,5000) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_fd_dep (dependencies) on a, b, c from stats_fd",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_fd").unwrap();
+
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_fd where a = any (array[1, 51]) and b = any (array['1', '2'])",
+        ),
+        100
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_fd where (a = 1 or a = 51) and b = '1'",
+        ),
+        99
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_fd where a < any (array[1, 51]) and b > '1'",
+        ),
+        2472
+    );
+}
+
+#[test]
+fn stats_ext_mcv_or_and_array_selectivity_match_postgres_shapes() {
+    let base = temp_dir("stats_ext_mcv_selectivity");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table stats_mcv (a int4, b text, c int4, d text, ia int4[]) \
+         with (autovacuum_enabled = off)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into stats_mcv (a, b, c, d, ia) \
+         select mod(i,100), mod(i,50)::text, mod(i,25), null, \
+                array[mod(i,25)] \
+         from generate_series(1,5000) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_mcv_abcia (mcv) on a, b, c, ia from stats_mcv",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_mcv").unwrap();
+
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv where a = 1 or b = '1' or c = 1",
+        ),
+        200
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv where a in (1, 2, 51, 52) and b in ('1', '2')",
+        ),
+        200
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv where a <= any (array[1, 2, 3]) and b in ('1', '2', '3')",
+        ),
+        150
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv where a = any (array[4, 5]) and 4 = any (ia)",
+        ),
+        4
+    );
+
+    db.execute(1, "create table stats_mcv_partial (a int4, b int4, c int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into stats_mcv_partial (a, b, c) \
+         select mod(i,10), mod(i,10), mod(i,10) \
+         from generate_series(0,999) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into stats_mcv_partial (a, b, c) \
+         select i, i, i \
+         from generate_series(0,99) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into stats_mcv_partial (a, b, c) \
+         select i, i, i \
+         from generate_series(0,3999) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_mcv_partial_mcv (mcv) on a, b, c from stats_mcv_partial",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_mcv_partial").unwrap();
+
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv_partial where a = 0 and b = 0 and c = 0",
+        ),
+        102
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv_partial where a = 0 or b = 0 or c = 0",
+        ),
+        96
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv_partial where a = 10 or b = 10 or c = 10",
+        ),
+        2
+    );
+
+    db.execute(
+        1,
+        "create table stats_mcv_multi (a int4, b int4, c int4, d int4)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into stats_mcv_multi (a, b, c, d) \
+         select mod(i,5), mod(i,5), mod(i,7), mod(i,7) \
+         from generate_series(1,5000) s(i)",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_mcv_multi").unwrap();
+    db.execute(
+        1,
+        "create statistics stats_mcv_multi_ab (mcv) on a, b from stats_mcv_multi",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_mcv_multi_cd (mcv) on c, d from stats_mcv_multi",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_mcv_multi").unwrap();
+
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv_multi where a = 0 or b = 0 or c = 0 or d = 0",
+        ),
+        1571
+    );
+}
+
+#[test]
 fn alter_table_add_without_overlaps_on_inherited_columns() {
     let base = temp_dir("without_overlaps_inherited_alter");
     let db = Database::open(&base, 16).unwrap();

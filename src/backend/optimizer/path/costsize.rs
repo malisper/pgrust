@@ -491,7 +491,15 @@ pub(super) fn optimize_path_with_config(
                 let input = optimize_path_with_config(*input, catalog, config);
                 let input_info = input.plan_info();
                 let input_rows = input_info.plan_rows.as_f64();
-                let selectivity = clause_selectivity(&predicate, None, input_rows);
+                let stats = relation_stats_for_group_estimate(&input, catalog);
+                let selectivity = clause_selectivity(
+                    &predicate,
+                    stats.as_ref(),
+                    stats
+                        .as_ref()
+                        .map(|stats| stats.reltuples)
+                        .unwrap_or(input_rows),
+                );
                 let rows = clamp_rows(input_rows * selectivity);
                 let qual_cost = predicate_cost(&predicate) * input_rows * CPU_OPERATOR_COST;
                 Path::Filter {
@@ -2075,6 +2083,10 @@ pub(super) fn estimate_index_candidate(
     let scan_info = PlanEstimate::new(startup_cost, base_cost, index_rows, stats.width);
     let mut total_cost = scan_info.total_cost.as_f64();
     let mut current_rows = scan_info.plan_rows.as_f64();
+    let residual_output_rows = spec
+        .residual
+        .as_ref()
+        .map(|_| index_output_rows_for_quals(&spec.used_quals, &spec.filter_quals, stats, catalog));
     let native_pathkeys = if spec.removes_order {
         order_items
             .as_ref()
@@ -2140,8 +2152,10 @@ pub(super) fn estimate_index_candidate(
     };
 
     if let Some(predicate) = spec.residual {
-        let selectivity = clause_selectivity(&predicate, Some(stats), stats.reltuples);
-        current_rows = clamp_rows(current_rows * selectivity);
+        current_rows = residual_output_rows.unwrap_or_else(|| {
+            let selectivity = clause_selectivity(&predicate, Some(stats), stats.reltuples);
+            clamp_rows(current_rows * selectivity)
+        });
         total_cost += current_rows * predicate_cost(&predicate) * CPU_OPERATOR_COST;
         plan = Path::Filter {
             plan_info: PlanEstimate::new(
@@ -3916,6 +3930,27 @@ fn clauses_selectivity(clauses: &[Expr], stats: Option<&RelationStats>, reltuple
     }
 }
 
+fn index_output_rows_for_quals(
+    index_quals: &[Expr],
+    filter_quals: &[Expr],
+    stats: &RelationStats,
+    catalog: &dyn CatalogLookup,
+) -> f64 {
+    let mut quals = Vec::with_capacity(index_quals.len() + filter_quals.len());
+    for qual in index_quals.iter().chain(filter_quals.iter()) {
+        if !quals.iter().any(|existing| existing == qual) {
+            quals.push(qual.clone());
+        }
+    }
+    let selectivity = and_exprs(quals)
+        .as_ref()
+        .map(|expr| {
+            clause_selectivity_with_catalog(expr, Some(stats), stats.reltuples, Some(catalog))
+        })
+        .unwrap_or(1.0);
+    clamp_rows(stats.reltuples * selectivity)
+}
+
 fn clause_selectivity_with_catalog(
     expr: &Expr,
     stats: Option<&RelationStats>,
@@ -3962,15 +3997,20 @@ fn clause_selectivity_internal(
                 .clamp(0.0, 1.0)
         }
         Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => {
+            let clauses = bool_expr
+                .args
+                .iter()
+                .flat_map(flatten_or_disjuncts)
+                .collect::<Vec<_>>();
             if use_extended
                 && let Some(stats) = stats
                 && let Some(selectivity) =
-                    extended_mcv_selectivity_for_expr(expr, stats, reltuples, catalog)
+                    extended_mcv_or_selectivity(&clauses, stats, reltuples, catalog)
             {
                 return selectivity;
             }
             let mut result = 0.0;
-            for arg in &bool_expr.args {
+            for arg in &clauses {
                 let selectivity =
                     clause_selectivity_internal(arg, stats, reltuples, catalog, use_extended);
                 result = result + selectivity - result * selectivity;
@@ -4022,33 +4062,17 @@ fn clause_selectivity_internal(
             .max(eq_selectivity(&op.args[0], &op.args[1], stats, reltuples))
         }
         Expr::ScalarArrayOp(saop)
-            if saop.use_or
-                && matches!(
-                    saop.op,
-                    crate::include::nodes::parsenodes::SubqueryComparisonOp::Eq
-                ) =>
-        {
-            scalar_array_eq_selectivity(&saop.left, &saop.right, stats, reltuples)
-        }
-        Expr::ScalarArrayOp(saop)
-            if !saop.use_or
-                && matches!(
-                    saop.op,
-                    crate::include::nodes::parsenodes::SubqueryComparisonOp::Eq
-                ) =>
-        {
-            scalar_array_all_eq_selectivity(&saop.left, &saop.right, stats, reltuples)
-        }
-        Expr::ScalarArrayOp(saop)
             if matches!(
                 saop.op,
-                crate::include::nodes::parsenodes::SubqueryComparisonOp::Lt
+                crate::include::nodes::parsenodes::SubqueryComparisonOp::Eq
+                    | crate::include::nodes::parsenodes::SubqueryComparisonOp::NotEq
+                    | crate::include::nodes::parsenodes::SubqueryComparisonOp::Lt
                     | crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq
                     | crate::include::nodes::parsenodes::SubqueryComparisonOp::Gt
                     | crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq
             ) =>
         {
-            scalar_array_ineq_selectivity(saop, stats, reltuples).unwrap_or(DEFAULT_BOOL_SEL)
+            scalar_array_selectivity(saop, stats, reltuples).unwrap_or(DEFAULT_BOOL_SEL)
         }
         Expr::Op(op)
             if matches!(
@@ -4112,12 +4136,47 @@ fn extended_mcv_selectivity_for_clauses(
     reltuples: f64,
     catalog: Option<&dyn CatalogLookup>,
 ) -> Option<(f64, HashSet<usize>)> {
-    let mut best: Option<(
-        &ExtendedStatistic,
-        &PgMcvListPayload,
-        Vec<usize>,
-        BTreeSet<i16>,
-    )> = None;
+    let mut selectivity = 1.0;
+    let mut covered = HashSet::new();
+    let mut applied = false;
+
+    while let Some(selection) = best_mcv_selection(clauses, stats, &covered) {
+        let selected = selection
+            .covered_indices
+            .iter()
+            .map(|idx| clauses[*idx].clone())
+            .collect::<Vec<_>>();
+        let Some(stat_selectivity) = mcv_selectivity_for_exprs(
+            &selected,
+            selection.ext,
+            selection.mcv,
+            stats,
+            reltuples,
+            catalog,
+        ) else {
+            break;
+        };
+        selectivity *= stat_selectivity;
+        covered.extend(selection.covered_indices);
+        applied = true;
+    }
+
+    applied.then_some((selectivity.clamp(0.0, 1.0), covered))
+}
+
+struct McvSelection<'a> {
+    ext: &'a ExtendedStatistic,
+    mcv: &'a PgMcvListPayload,
+    covered_indices: Vec<usize>,
+}
+
+fn best_mcv_selection<'a>(
+    clauses: &[Expr],
+    stats: &'a RelationStats,
+    already_covered: &HashSet<usize>,
+) -> Option<McvSelection<'a>> {
+    let mut best: Option<McvSelection<'a>> = None;
+    let mut best_targets = BTreeSet::new();
     for ext in &stats.extended_stats {
         let Some(mcv) = ext.mcv.as_ref() else {
             continue;
@@ -4126,6 +4185,9 @@ fn extended_mcv_selectivity_for_clauses(
         let mut covered_indices = Vec::new();
         let mut covered_targets = BTreeSet::new();
         for (idx, clause) in clauses.iter().enumerate() {
+            if already_covered.contains(&idx) {
+                continue;
+            }
             let mut refs = BTreeSet::new();
             if !mcv_supported_target_ids(clause, ext, &mut refs) || refs.is_empty() {
                 continue;
@@ -4138,26 +4200,23 @@ fn extended_mcv_selectivity_for_clauses(
         if covered_targets.len() < 2 {
             continue;
         }
-        let replace = best
-            .as_ref()
-            .is_none_or(|(_, _, best_indices, best_targets)| {
-                covered_targets
-                    .len()
-                    .cmp(&best_targets.len())
-                    .then_with(|| covered_indices.len().cmp(&best_indices.len()))
-                    .is_gt()
-            });
+        let replace = best.as_ref().is_none_or(|best| {
+            covered_targets
+                .len()
+                .cmp(&best_targets.len())
+                .then_with(|| covered_indices.len().cmp(&best.covered_indices.len()))
+                .is_gt()
+        });
         if replace {
-            best = Some((ext, mcv, covered_indices, covered_targets));
+            best_targets = covered_targets;
+            best = Some(McvSelection {
+                ext,
+                mcv,
+                covered_indices,
+            });
         }
     }
-    let (ext, mcv, covered_indices, _) = best?;
-    let selected = covered_indices
-        .iter()
-        .map(|idx| clauses[*idx].clone())
-        .collect::<Vec<_>>();
-    let selectivity = mcv_selectivity_for_exprs(&selected, ext, mcv, stats, reltuples, catalog)?;
-    Some((selectivity, covered_indices.into_iter().collect()))
+    best
 }
 
 fn extended_mcv_selectivity_for_expr(
@@ -4166,6 +4225,16 @@ fn extended_mcv_selectivity_for_expr(
     reltuples: f64,
     catalog: Option<&dyn CatalogLookup>,
 ) -> Option<f64> {
+    if let Expr::Bool(bool_expr) = expr
+        && bool_expr.boolop == BoolExprType::Or
+    {
+        let clauses = bool_expr
+            .args
+            .iter()
+            .flat_map(flatten_or_disjuncts)
+            .collect::<Vec<_>>();
+        return extended_mcv_or_selectivity(&clauses, stats, reltuples, catalog);
+    }
     stats
         .extended_stats
         .iter()
@@ -4187,6 +4256,86 @@ fn extended_mcv_selectivity_for_expr(
         .map(|(_, selectivity)| selectivity)
 }
 
+fn extended_mcv_or_selectivity(
+    clauses: &[Expr],
+    stats: &RelationStats,
+    reltuples: f64,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Option<f64> {
+    let mut selectivity = 0.0;
+    let mut covered = HashSet::new();
+    let mut applied = false;
+
+    while let Some(selection) = best_mcv_selection(clauses, stats, &covered) {
+        let stat_selectivity =
+            mcv_or_selectivity_for_selection(clauses, &selection, stats, reltuples, catalog)?;
+        selectivity = selectivity + stat_selectivity - selectivity * stat_selectivity;
+        covered.extend(selection.covered_indices);
+        applied = true;
+    }
+
+    if !applied {
+        return None;
+    }
+
+    for (idx, clause) in clauses.iter().enumerate() {
+        if covered.contains(&idx) {
+            continue;
+        }
+        let clause_selectivity =
+            clause_selectivity_internal(clause, Some(stats), reltuples, catalog, true);
+        selectivity = selectivity + clause_selectivity - selectivity * clause_selectivity;
+    }
+
+    Some(selectivity.clamp(0.0, 1.0))
+}
+
+fn mcv_or_selectivity_for_selection(
+    clauses: &[Expr],
+    selection: &McvSelection<'_>,
+    stats: &RelationStats,
+    reltuples: f64,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Option<f64> {
+    let mut simple_or_selectivity = 0.0;
+    let mut stat_selectivity = 0.0;
+    let mut previous_matches = vec![false; selection.mcv.items.len()];
+
+    for idx in &selection.covered_indices {
+        let clause = &clauses[*idx];
+        let simple_selectivity = clause_selectivity_simple(clause, Some(stats), reltuples, catalog);
+        let overlap_simple_selectivity = simple_or_selectivity * simple_selectivity;
+        simple_or_selectivity += simple_selectivity - overlap_simple_selectivity;
+        simple_or_selectivity = simple_or_selectivity.clamp(0.0, 1.0);
+
+        let matches = mcv_match_bitmap(clause, selection.ext, selection.mcv)?;
+        let components = mcv_components_from_bitmap(selection.mcv, &matches);
+        let overlap_matches = previous_matches
+            .iter()
+            .zip(matches.iter())
+            .map(|(left, right)| *left && *right)
+            .collect::<Vec<_>>();
+        let overlap_components = mcv_components_from_bitmap(selection.mcv, &overlap_matches);
+
+        let clause_selectivity = if mcv_clause_is_simple_target(clause, selection.ext) {
+            simple_selectivity
+        } else {
+            mcv_combine_selectivities(simple_selectivity, &components)
+        };
+        let overlap_selectivity =
+            mcv_combine_selectivities(overlap_simple_selectivity, &overlap_components);
+
+        stat_selectivity += clause_selectivity - overlap_selectivity;
+        stat_selectivity = stat_selectivity.clamp(0.0, 1.0);
+
+        for (previous, matches) in previous_matches.iter_mut().zip(matches.iter()) {
+            *previous = *previous || *matches;
+        }
+    }
+
+    Some(stat_selectivity.clamp(0.0, 1.0))
+}
+
 fn mcv_selectivity_for_exprs(
     exprs: &[Expr],
     ext: &ExtendedStatistic,
@@ -4203,19 +4352,61 @@ fn mcv_selectivity_for_exprs(
     let simple_selectivity = exprs.iter().fold(1.0, |acc, clause| {
         acc * clause_selectivity_simple(clause, Some(stats), reltuples, catalog)
     });
-    let mut mcv_selectivity = 0.0;
-    let mut mcv_base_selectivity = 0.0;
-    let mut mcv_total_selectivity = 0.0;
-    for item in &mcv.items {
-        mcv_total_selectivity += item.frequency;
-        if mcv_expr_matches(&expr, ext, item)? {
-            mcv_selectivity += item.frequency;
-            mcv_base_selectivity += item.base_frequency;
+    let matches = mcv_match_bitmap(&expr, ext, mcv)?;
+    let components = mcv_components_from_bitmap(mcv, &matches);
+    Some(mcv_combine_selectivities(simple_selectivity, &components))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct McvSelectivityComponents {
+    mcv_selectivity: f64,
+    mcv_base_selectivity: f64,
+    mcv_total_selectivity: f64,
+}
+
+fn mcv_match_bitmap(
+    expr: &Expr,
+    ext: &ExtendedStatistic,
+    mcv: &PgMcvListPayload,
+) -> Option<Vec<bool>> {
+    mcv.items
+        .iter()
+        .map(|item| mcv_expr_matches(expr, ext, item))
+        .collect()
+}
+
+fn mcv_components_from_bitmap(
+    mcv: &PgMcvListPayload,
+    matches: &[bool],
+) -> McvSelectivityComponents {
+    let mut components = McvSelectivityComponents {
+        mcv_selectivity: 0.0,
+        mcv_base_selectivity: 0.0,
+        mcv_total_selectivity: 0.0,
+    };
+    for (item, matches) in mcv.items.iter().zip(matches.iter()) {
+        components.mcv_total_selectivity += item.frequency;
+        if *matches {
+            components.mcv_selectivity += item.frequency;
+            components.mcv_base_selectivity += item.base_frequency;
         }
     }
-    let non_mcv_selectivity =
-        (simple_selectivity - mcv_base_selectivity).min(1.0 - mcv_total_selectivity);
-    Some((mcv_selectivity + non_mcv_selectivity.max(0.0)).clamp(0.0, 1.0))
+    components
+}
+
+fn mcv_combine_selectivities(
+    simple_selectivity: f64,
+    components: &McvSelectivityComponents,
+) -> f64 {
+    let mut other_selectivity =
+        (simple_selectivity - components.mcv_base_selectivity).clamp(0.0, 1.0);
+    other_selectivity = other_selectivity.min((1.0 - components.mcv_total_selectivity).max(0.0));
+    (components.mcv_selectivity + other_selectivity).clamp(0.0, 1.0)
+}
+
+fn mcv_clause_is_simple_target(expr: &Expr, ext: &ExtendedStatistic) -> bool {
+    let mut refs = BTreeSet::new();
+    mcv_supported_target_ids(expr, ext, &mut refs) && refs.len() == 1
 }
 
 fn dependency_adjusted_selectivity(
@@ -4227,24 +4418,36 @@ fn dependency_adjusted_selectivity(
     if clauses.is_empty() {
         return Some(1.0);
     }
-    let mut selectivity = clauses.iter().fold(1.0, |acc, clause| {
-        acc * clause_selectivity_simple(clause, Some(stats), reltuples, catalog)
-    });
+
+    let mut target_selectivities = HashMap::<i16, f64>::new();
+    let mut clause_targets = Vec::with_capacity(clauses.len());
+    for clause in clauses {
+        let mut target = None;
+        for ext in &stats.extended_stats {
+            if ext.dependencies.is_none() {
+                continue;
+            }
+            if let Some(target_id) = dependency_clause_target_id(clause, ext) {
+                target = Some(target_id);
+                break;
+            }
+        }
+        if let Some(target_id) = target {
+            let clause_selectivity =
+                clause_selectivity_simple(clause, Some(stats), reltuples, catalog);
+            target_selectivities
+                .entry(target_id)
+                .and_modify(|existing| *existing *= clause_selectivity)
+                .or_insert(clause_selectivity);
+        }
+        clause_targets.push(target);
+    }
+
     let mut candidates = Vec::new();
     for ext in &stats.extended_stats {
         let Some(dependencies) = ext.dependencies.as_ref() else {
             continue;
         };
-        let mut clause_selectivities = HashMap::<i16, f64>::new();
-        for clause in clauses {
-            if let Some(target_id) = dependency_clause_target_id(clause, ext) {
-                let clause_sel = clause_selectivity_simple(clause, Some(stats), reltuples, catalog);
-                clause_selectivities
-                    .entry(target_id)
-                    .and_modify(|existing| *existing = existing.min(clause_sel))
-                    .or_insert(clause_sel);
-            }
-        }
         for item in &dependencies.items {
             let Some(implied_target) = dependency_implied_target(item) else {
                 continue;
@@ -4252,46 +4455,104 @@ fn dependency_adjusted_selectivity(
             if !item
                 .from
                 .iter()
-                .all(|target| clause_selectivities.contains_key(target))
+                .all(|target| target_selectivities.contains_key(target))
+                || !target_selectivities.contains_key(&implied_target)
             {
                 continue;
             }
-            let Some(implied_selectivity) = clause_selectivities.get(&implied_target).copied()
-            else {
-                continue;
-            };
-            candidates.push((
-                item.degree,
-                item.from.len(),
-                item.from.clone(),
+            candidates.push(DependencyCandidate {
+                degree: item.degree,
+                from: item.from.clone(),
                 implied_target,
-                implied_selectivity,
-            ));
+            });
         }
     }
-    candidates.sort_by(|left, right| {
-        right
-            .0
-            .partial_cmp(&left.0)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| right.1.cmp(&left.1))
-    });
-    let mut applied = HashSet::new();
-    let mut changed = false;
-    for (degree, _, determinant_targets, implied_target, implied_selectivity) in candidates {
-        if determinant_targets
+
+    let mut available_targets = target_selectivities
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut selected = Vec::new();
+    while let Some((idx, _)) = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| candidate.is_matched_by(&available_targets))
+        .max_by(|(_, left), (_, right)| left.strength_cmp(right))
+    {
+        let candidate = candidates.remove(idx);
+        available_targets.remove(&candidate.implied_target);
+        selected.push(candidate);
+    }
+
+    if selected.is_empty() {
+        return None;
+    }
+
+    let mut covered_targets = BTreeSet::new();
+    for candidate in &selected {
+        covered_targets.extend(candidate.from.iter().copied());
+        covered_targets.insert(candidate.implied_target);
+    }
+
+    let mut adjusted_selectivities = target_selectivities.clone();
+    for candidate in selected.iter().rev() {
+        let determinant_selectivity = candidate
+            .from
             .iter()
-            .any(|target| applied.contains(target))
-            || !applied.insert(implied_target)
-            || implied_selectivity <= 0.0
-        {
+            .filter_map(|target| adjusted_selectivities.get(target))
+            .product::<f64>();
+        let Some(implied_selectivity) = adjusted_selectivities
+            .get(&candidate.implied_target)
+            .copied()
+        else {
+            continue;
+        };
+        let adjusted = if determinant_selectivity <= implied_selectivity {
+            candidate.degree + (1.0 - candidate.degree) * implied_selectivity
+        } else if determinant_selectivity > 0.0 {
+            candidate.degree * implied_selectivity / determinant_selectivity
+                + (1.0 - candidate.degree) * implied_selectivity
+        } else {
+            implied_selectivity
+        };
+        adjusted_selectivities.insert(candidate.implied_target, adjusted.clamp(0.0, 1.0));
+    }
+
+    let mut selectivity = covered_targets
+        .iter()
+        .filter_map(|target| adjusted_selectivities.get(target))
+        .product::<f64>();
+    for (clause, target) in clauses.iter().zip(clause_targets.iter()) {
+        if target.is_some_and(|target| covered_targets.contains(&target)) {
             continue;
         }
-        let conditional = degree + (1.0 - degree) * implied_selectivity;
-        selectivity = selectivity / implied_selectivity * conditional.clamp(0.0, 1.0);
-        changed = true;
+        selectivity *= clause_selectivity_simple(clause, Some(stats), reltuples, catalog);
     }
-    changed.then_some(selectivity.clamp(0.0, 1.0))
+    Some(selectivity.clamp(0.0, 1.0))
+}
+
+#[derive(Debug, Clone)]
+struct DependencyCandidate {
+    degree: f64,
+    from: Vec<i16>,
+    implied_target: i16,
+}
+
+impl DependencyCandidate {
+    fn is_matched_by(&self, targets: &BTreeSet<i16>) -> bool {
+        targets.contains(&self.implied_target)
+            && self.from.iter().all(|target| targets.contains(target))
+    }
+
+    fn strength_cmp(&self, other: &Self) -> Ordering {
+        let self_width = self.from.len() + 1;
+        let other_width = other.from.len() + 1;
+        self_width.cmp(&other_width).then_with(|| {
+            self.degree
+                .partial_cmp(&other.degree)
+                .unwrap_or(Ordering::Equal)
+        })
+    }
 }
 
 fn dependency_implied_target(item: &PgDependencyItem) -> Option<i16> {
@@ -4976,111 +5237,167 @@ fn support_function_selectivity(
     ))
 }
 
-fn scalar_array_eq_selectivity(
-    left: &Expr,
-    right: &Expr,
-    stats: Option<&RelationStats>,
-    reltuples: f64,
-) -> f64 {
-    let Some(array) = const_argument(right).and_then(|value| value.as_array_value()) else {
-        return DEFAULT_BOOL_SEL;
-    };
-    array
-        .elements
-        .iter()
-        .filter(|element| !matches!(element, Value::Null))
-        .map(|element| eq_selectivity(left, &Expr::Const(element.clone()), stats, reltuples))
-        .sum::<f64>()
-        .clamp(0.0, 1.0)
-}
-
-fn scalar_array_ineq_selectivity(
+fn scalar_array_selectivity(
     saop: &crate::include::nodes::primnodes::ScalarArrayOpExpr,
     stats: Option<&RelationStats>,
     reltuples: f64,
 ) -> Option<f64> {
-    let bound = scalar_array_ineq_bound(saop)?;
-    let wanted = match saop.op {
-        crate::include::nodes::parsenodes::SubqueryComparisonOp::Lt
-        | crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq => Ordering::Less,
-        crate::include::nodes::parsenodes::SubqueryComparisonOp::Gt
-        | crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq => Ordering::Greater,
-        _ => return None,
-    };
-    let strict = ineq_selectivity(
-        &saop.left,
-        &Expr::Const(bound.clone()),
-        stats,
-        reltuples,
-        wanted,
-    );
-    if matches!(
-        saop.op,
-        crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq
-            | crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq
-    ) {
-        Some(
-            strict
-                .max(eq_selectivity(
-                    &saop.left,
-                    &Expr::Const(bound),
-                    stats,
-                    reltuples,
-                ))
-                .clamp(0.0, 1.0),
-        )
+    if let Some(selectivity) = scalar_array_column_containment_selectivity(saop, stats, reltuples) {
+        return Some(selectivity);
+    }
+    let value = const_argument(&saop.right)?;
+    if matches!(value, Value::Null) {
+        return Some(0.0);
+    }
+    let array = value.as_array_value()?;
+    let mut selectivity = if saop.use_or { 0.0 } else { 1.0 };
+    let mut disjoint_selectivity = selectivity;
+
+    for element in &array.elements {
+        let element_selectivity =
+            scalar_array_element_selectivity(saop.op, &saop.left, element, stats, reltuples);
+        if saop.use_or {
+            selectivity += element_selectivity - selectivity * element_selectivity;
+            if matches!(
+                saop.op,
+                crate::include::nodes::parsenodes::SubqueryComparisonOp::Eq
+            ) {
+                disjoint_selectivity += element_selectivity;
+            }
+        } else {
+            selectivity *= element_selectivity;
+            if matches!(
+                saop.op,
+                crate::include::nodes::parsenodes::SubqueryComparisonOp::NotEq
+            ) {
+                disjoint_selectivity += element_selectivity - 1.0;
+            }
+        }
+    }
+
+    if ((saop.use_or
+        && matches!(
+            saop.op,
+            crate::include::nodes::parsenodes::SubqueryComparisonOp::Eq
+        ))
+        || (!saop.use_or
+            && matches!(
+                saop.op,
+                crate::include::nodes::parsenodes::SubqueryComparisonOp::NotEq
+            )))
+        && (0.0..=1.0).contains(&disjoint_selectivity)
+    {
+        selectivity = disjoint_selectivity;
+    }
+
+    Some(selectivity.clamp(0.0, 1.0))
+}
+
+fn scalar_array_column_containment_selectivity(
+    saop: &crate::include::nodes::primnodes::ScalarArrayOpExpr,
+    stats: Option<&RelationStats>,
+    reltuples: f64,
+) -> Option<f64> {
+    let stats = stats?;
+    let is_contains = saop.use_or
+        && matches!(
+            saop.op,
+            crate::include::nodes::parsenodes::SubqueryComparisonOp::Eq
+        );
+    let is_not_contains = !saop.use_or
+        && matches!(
+            saop.op,
+            crate::include::nodes::parsenodes::SubqueryComparisonOp::NotEq
+        );
+    if !is_contains && !is_not_contains {
+        return None;
+    }
+
+    let constant = const_argument(&saop.left)?;
+    let constant_key = statistics_value_key(&constant)?;
+    let row = stats_row_for_selectivity_expr(&saop.right, stats)?;
+    let contains = array_contains_selectivity_for_stats_row(row, &constant_key, reltuples)?;
+    Some(if is_not_contains {
+        1.0 - contains
     } else {
-        Some(strict)
+        contains
+    })
+}
+
+fn array_contains_selectivity_for_stats_row(
+    row: &PgStatisticRow,
+    constant_key: &str,
+    reltuples: f64,
+) -> Option<f64> {
+    let ndistinct = effective_ndistinct(row, reltuples)
+        .unwrap_or(200.0)
+        .max(1.0);
+    let Some((values, freqs)) = slot_values_and_numbers(row, STATISTIC_KIND_MCV) else {
+        return Some(((1.0 - row.stanullfrac) / ndistinct).clamp(0.0, 1.0));
+    };
+    let mut selectivity = 0.0;
+    let mut mcv_total = 0.0;
+    for (value, freq) in values.elements.iter().zip(freqs.elements.iter()) {
+        let Some(freq) = float_value(freq) else {
+            continue;
+        };
+        mcv_total += freq;
+        if array_value_contains_key(value, constant_key) {
+            selectivity += freq;
+        }
+    }
+    let non_mcv = (1.0 - row.stanullfrac - mcv_total).max(0.0);
+    let distinct_remaining = (ndistinct - values.elements.len() as f64).max(1.0);
+    Some((selectivity + non_mcv / distinct_remaining).clamp(0.0, 1.0))
+}
+
+fn array_value_contains_key(value: &Value, constant_key: &str) -> bool {
+    match value {
+        Value::Array(elements) => elements
+            .iter()
+            .filter_map(statistics_value_key)
+            .any(|key| key == constant_key),
+        Value::PgArray(array) => array
+            .elements
+            .iter()
+            .filter_map(statistics_value_key)
+            .any(|key| key == constant_key),
+        _ => false,
     }
 }
 
-fn scalar_array_ineq_bound(
-    saop: &crate::include::nodes::primnodes::ScalarArrayOpExpr,
-) -> Option<Value> {
-    let array = const_argument(&saop.right)?.as_array_value()?;
-    let mut values = array
-        .elements
-        .iter()
-        .filter(|value| !matches!(value, Value::Null));
-    let first = values.next()?.clone();
-    let want_max = match (saop.use_or, saop.op) {
-        (
-            true,
-            crate::include::nodes::parsenodes::SubqueryComparisonOp::Lt
-            | crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq,
-        )
-        | (
-            false,
-            crate::include::nodes::parsenodes::SubqueryComparisonOp::Gt
-            | crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq,
-        ) => true,
-        (
-            true,
-            crate::include::nodes::parsenodes::SubqueryComparisonOp::Gt
-            | crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq,
-        )
-        | (
-            false,
-            crate::include::nodes::parsenodes::SubqueryComparisonOp::Lt
-            | crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq,
-        ) => false,
-        _ => return None,
-    };
-    Some(values.fold(first, |best, value| {
-        let Some(best_key) = statistics_value_key(&best) else {
-            return value.clone();
-        };
-        let Some(value_key) = statistics_value_key(value) else {
-            return best;
-        };
-        let ordering = compare_stat_keys(&best_key, &value_key);
-        if (want_max && ordering == Ordering::Less) || (!want_max && ordering == Ordering::Greater)
-        {
-            value.clone()
-        } else {
-            best
+fn scalar_array_element_selectivity(
+    op: crate::include::nodes::parsenodes::SubqueryComparisonOp,
+    left: &Expr,
+    element: &Value,
+    stats: Option<&RelationStats>,
+    reltuples: f64,
+) -> f64 {
+    let element_expr = Expr::Const(element.clone());
+    match op {
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::Eq => {
+            eq_selectivity(left, &element_expr, stats, reltuples)
         }
-    }))
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::NotEq => {
+            1.0 - eq_selectivity(left, &element_expr, stats, reltuples)
+        }
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::Lt => {
+            ineq_selectivity(left, &element_expr, stats, reltuples, Ordering::Less)
+        }
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq => {
+            ineq_selectivity(left, &element_expr, stats, reltuples, Ordering::Less)
+                .max(eq_selectivity(left, &element_expr, stats, reltuples))
+        }
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::Gt => {
+            ineq_selectivity(left, &element_expr, stats, reltuples, Ordering::Greater)
+        }
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq => {
+            ineq_selectivity(left, &element_expr, stats, reltuples, Ordering::Greater)
+                .max(eq_selectivity(left, &element_expr, stats, reltuples))
+        }
+        _ => DEFAULT_BOOL_SEL,
+    }
+    .clamp(0.0, 1.0)
 }
 
 fn scalar_array_key_matches(
@@ -5091,6 +5408,9 @@ fn scalar_array_key_matches(
     let ordering = compare_stat_keys(actual, key);
     match op {
         crate::include::nodes::parsenodes::SubqueryComparisonOp::Eq => ordering == Ordering::Equal,
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::NotEq => {
+            ordering != Ordering::Equal
+        }
         crate::include::nodes::parsenodes::SubqueryComparisonOp::Lt => ordering == Ordering::Less,
         crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq => {
             matches!(ordering, Ordering::Less | Ordering::Equal)
@@ -5103,30 +5423,6 @@ fn scalar_array_key_matches(
         }
         _ => false,
     }
-}
-
-fn scalar_array_all_eq_selectivity(
-    left: &Expr,
-    right: &Expr,
-    stats: Option<&RelationStats>,
-    reltuples: f64,
-) -> f64 {
-    let Some(array) = const_argument(right).and_then(|value| value.as_array_value()) else {
-        return DEFAULT_BOOL_SEL;
-    };
-    let non_null = array
-        .elements
-        .iter()
-        .filter(|value| !matches!(value, Value::Null))
-        .collect::<Vec<_>>();
-    if non_null.is_empty() {
-        return DEFAULT_BOOL_SEL;
-    }
-    let first = non_null[0];
-    if non_null.iter().any(|value| !values_equal(value, first)) {
-        return 0.0;
-    }
-    eq_selectivity(left, &Expr::Const(first.clone()), stats, reltuples)
 }
 
 fn bool_target_selectivity(expr: &Expr, stats: Option<&RelationStats>) -> Option<f64> {
@@ -5246,12 +5542,15 @@ fn ineq_selectivity_for_stats_row(
     if matches!(constant, Value::Null) {
         return 0.0;
     };
+    let (mcv_selectivity, mcv_total_selectivity) =
+        mcv_ineq_selectivity_for_stats_row(row, constant, wanted, flipped);
+    let non_mcv_rows = (1.0 - row.stanullfrac - mcv_total_selectivity).max(0.0);
     let Some(hist) = slot_values(row, STATISTIC_KIND_HISTOGRAM) else {
-        return DEFAULT_INEQ_SEL;
+        return (mcv_selectivity + DEFAULT_INEQ_SEL * non_mcv_rows).clamp(0.0, 1.0);
     };
     let fraction = histogram_fraction(&hist, constant);
-    let lt_fraction = fraction * (1.0 - row.stanullfrac);
-    let gt_fraction = (1.0 - fraction) * (1.0 - row.stanullfrac);
+    let lt_fraction = mcv_selectivity + fraction * non_mcv_rows;
+    let gt_fraction = mcv_selectivity + (1.0 - fraction) * non_mcv_rows;
     match (wanted, flipped) {
         (Ordering::Less, false) => lt_fraction,
         (Ordering::Greater, false) => gt_fraction,
@@ -5261,18 +5560,64 @@ fn ineq_selectivity_for_stats_row(
     }
 }
 
+fn mcv_ineq_selectivity_for_stats_row(
+    row: &PgStatisticRow,
+    constant: &Value,
+    wanted: Ordering,
+    flipped: bool,
+) -> (f64, f64) {
+    let Some((values, freqs)) = slot_values_and_numbers(row, STATISTIC_KIND_MCV) else {
+        return (0.0, 0.0);
+    };
+    let mut selectivity = 0.0;
+    let mut total = 0.0;
+    for (value, freq) in values.elements.iter().zip(freqs.elements.iter()) {
+        let Some(freq) = float_value(freq) else {
+            continue;
+        };
+        total += freq;
+        if ordered_value_matches(value, constant, wanted, flipped) {
+            selectivity += freq;
+        }
+    }
+    (selectivity.clamp(0.0, 1.0), total.clamp(0.0, 1.0))
+}
+
+fn ordered_value_matches(value: &Value, constant: &Value, wanted: Ordering, flipped: bool) -> bool {
+    if matches!(value, Value::Null) {
+        return false;
+    }
+    let Ok(ordering) = compare_order_values(value, constant, None, None, false) else {
+        return false;
+    };
+    match (wanted, flipped) {
+        (Ordering::Less, false) => ordering == Ordering::Less,
+        (Ordering::Greater, false) => ordering == Ordering::Greater,
+        (Ordering::Less, true) => ordering == Ordering::Greater,
+        (Ordering::Greater, true) => ordering == Ordering::Less,
+        _ => false,
+    }
+}
+
 fn column_selectivity(
     expr: &Expr,
     stats: Option<&RelationStats>,
     f: impl FnOnce(&PgStatisticRow, f64) -> f64,
 ) -> Option<f64> {
     let stats = stats?;
-    let row = if let Some(column) = expr_column_index(expr) {
-        stats.stats_by_attnum.get(&((column + 1) as i16))?
-    } else {
-        expression_stats_row(expr, stats)?
-    };
+    let row = stats_row_for_selectivity_expr(expr, stats)?;
     Some(f(row, stats.reltuples))
+}
+
+fn stats_row_for_selectivity_expr<'a>(
+    expr: &Expr,
+    stats: &'a RelationStats,
+) -> Option<&'a PgStatisticRow> {
+    if let Some(column) = expr_column_index(expr) {
+        stats.stats_by_attnum.get(&((column + 1) as i16))
+    } else {
+        expression_stats_row(expr, stats)
+    }
 }
 
 fn expression_const_pair<'a>(
@@ -5546,6 +5891,17 @@ pub(super) fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
             .args
             .iter()
             .flat_map(flatten_and_conjuncts)
+            .collect(),
+        other => vec![other.clone()],
+    }
+}
+
+fn flatten_or_disjuncts(expr: &Expr) -> Vec<Expr> {
+    match expr {
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => bool_expr
+            .args
+            .iter()
+            .flat_map(flatten_or_disjuncts)
             .collect(),
         other => vec![other.clone()],
     }

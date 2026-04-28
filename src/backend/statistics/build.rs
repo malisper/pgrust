@@ -123,27 +123,37 @@ fn build_mcv_payload(
     if sample_total == 0 {
         return encode_pg_mcv_list_payload(&PgMcvListPayload { items });
     }
-    let mut tuple_counts = BTreeMap::<Vec<Option<String>>, usize>::new();
+    let mut tuple_counts = BTreeMap::<Vec<Option<String>>, (usize, usize)>::new();
     let mut marginal_counts = (0..rows[0].len())
         .map(|_| BTreeMap::<Option<String>, usize>::new())
         .collect::<Vec<_>>();
-    for row in rows {
-        *tuple_counts.entry(row.clone()).or_insert(0) += 1;
+    for (row_index, row) in rows.iter().enumerate() {
+        tuple_counts
+            .entry(row.clone())
+            .and_modify(|(count, _)| *count += 1)
+            .or_insert((1, row_index));
         for (index, value) in row.iter().enumerate() {
             *marginal_counts[index].entry(value.clone()).or_insert(0) += 1;
         }
     }
 
     let mut ranked = tuple_counts.into_iter().collect::<Vec<_>>();
-    ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .0
+            .cmp(&left.1.0)
+            .then_with(|| left.1.1.cmp(&right.1.1))
+            .then_with(|| left.0.cmp(&right.0))
+    });
     let target = if statistics_target <= 0 {
         100
     } else {
         statistics_target as usize
     };
-    for (values, count) in ranked
+    for (values, (count, _)) in ranked
         .into_iter()
-        .filter(|(_, count)| *count > 1)
+        .filter(|(_, (count, _))| *count > 1)
         .take(target)
     {
         let base_frequency = values.iter().enumerate().fold(1.0, |acc, (index, value)| {
@@ -152,8 +162,8 @@ fn build_mcv_payload(
         });
         items.push(PgMcvItem {
             values,
-            frequency: count as f64 / sample_total as f64,
-            base_frequency,
+            frequency: rounded_stat_frequency(count as f64 / sample_total as f64),
+            base_frequency: rounded_stat_frequency(base_frequency),
         });
     }
     loop {
@@ -161,10 +171,19 @@ fn build_mcv_payload(
             items: items.clone(),
         };
         let encoded = encode_pg_mcv_list_payload(&payload)?;
-        if encoded.len() <= 6_000 || items.is_empty() {
+        if encoded.len() <= 8_000 || items.is_empty() {
             return Ok(encoded);
         }
         items.pop();
+    }
+}
+
+fn rounded_stat_frequency(value: f64) -> f64 {
+    const SCALE: f64 = 1_000_000_000_000_000.0;
+    if value.is_finite() {
+        (value * SCALE).round() / SCALE
+    } else {
+        value
     }
 }
 
@@ -311,5 +330,25 @@ mod tests {
         );
         assert_eq!(decoded.items[0].frequency, 0.5);
         assert_eq!(decoded.items[0].base_frequency, 0.5625);
+    }
+
+    #[test]
+    fn mcv_tie_break_keeps_earliest_observed_group() {
+        let rows = vec![
+            vec![Value::Text("z".into()), Value::Text("x".into())],
+            vec![Value::Text("a".into()), Value::Text("x".into())],
+            vec![Value::Text("z".into()), Value::Text("x".into())],
+            vec![Value::Text("a".into()), Value::Text("x".into())],
+        ];
+        let payload = build_extended_statistics_payloads(&[1, 2], &rows, 4.0, b"m", 1).unwrap();
+        let decoded = crate::backend::statistics::types::decode_pg_mcv_list_payload(
+            &payload.stxdmcv.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decoded.items.len(), 1);
+        assert_eq!(
+            decoded.items[0].values,
+            vec![Some("z".into()), Some("x".into())]
+        );
     }
 }

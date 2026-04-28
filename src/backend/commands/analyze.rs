@@ -973,7 +973,12 @@ fn build_statistics_rows(
             .map(|row| row.oid)
             .unwrap_or(0);
 
-        let target = column.attstattarget.max(1) as usize;
+        let target = if column.attstattarget > 0 {
+            column.attstattarget as usize
+        } else {
+            DEFAULT_STATISTICS_TARGET as usize
+        };
+        let value_slot_target = target.min((4_000 / (stawidth.max(1) as usize + 32)).max(1));
         let mut stakind = [0; 5];
         let mut staop = [0; 5];
         let mut stacoll = [0; 5];
@@ -988,7 +993,7 @@ fn build_statistics_rows(
         let mcv = ranked
             .iter()
             .filter(|(_, (count, _))| *count > 1)
-            .take(target)
+            .take(value_slot_target)
             .cloned()
             .collect::<Vec<_>>();
         if supports_value_slots && !mcv.is_empty() {
@@ -1033,7 +1038,7 @@ fn build_statistics_rows(
                     ArrayValue::from_1d(
                         histogram_values
                             .into_iter()
-                            .step_by((distinct_seen.max(2) / target.max(2)).max(1))
+                            .step_by((distinct_seen.max(2) / value_slot_target.max(2)).max(1))
                             .map(|(_, value)| value)
                             .collect(),
                     )
