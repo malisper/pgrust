@@ -3678,6 +3678,8 @@ fn render_explain_scalar_array_op(
         SubqueryComparisonOp::LtEq => "<=",
         SubqueryComparisonOp::Gt => ">",
         SubqueryComparisonOp::GtEq => ">=",
+        SubqueryComparisonOp::RegexMatch => "~",
+        SubqueryComparisonOp::NotRegexMatch => "!~",
         _ => return format!("{saop:?}"),
     };
     let quantifier = if saop.use_or { "ANY" } else { "ALL" };

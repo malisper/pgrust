@@ -10523,7 +10523,7 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("prepare q as select * from cmdata").unwrap(), Statement::Prepare(PrepareStatement { name, .. }) if name == "q")
     );
     assert!(
-        matches!(parse_statement("create table from_prep as execute q").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { query: CreateTableAsQuery::Execute(name), .. }) if name == "q")
+        matches!(parse_statement("create table from_prep as execute q").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { query: CreateTableAsQuery::Execute { name, args }, .. }) if name == "q" && args.is_empty())
     );
     assert!(
         matches!(parse_statement("deallocate prepare q").unwrap(), Statement::Deallocate(DeallocateStatement { name: Some(name) }) if name == "q")
@@ -15562,21 +15562,40 @@ fn build_plan_allows_using_merged_primary_key_for_grouped_functional_dependency(
 
 #[test]
 fn parse_prepare_and_execute_statements() {
-    let stmt = parse_statement("prepare foo as select id from people group by id").unwrap();
+    let stmt = parse_statement(
+        "prepare foo (int, text) as select id from people where id = $1 group by id",
+    )
+    .unwrap();
     match stmt {
-        Statement::Prepare(PrepareStatement { name, query, .. }) => {
+        Statement::Prepare(PrepareStatement {
+            name,
+            parameter_types,
+            query,
+            ..
+        }) => {
             assert_eq!(name, "foo");
+            assert_eq!(parameter_types.len(), 2);
+            let PreparedStatementQuery::Select(query) = query else {
+                panic!("expected SELECT prepared query, got {query:?}");
+            };
             assert_eq!(query.group_by.len(), 1);
+            assert!(matches!(
+                query.where_clause,
+                Some(SqlExpr::Eq(_, ref right)) if matches!(right.as_ref(), SqlExpr::Parameter(1))
+            ));
         }
         other => panic!("expected PREPARE statement, got {other:?}"),
     }
 
-    let stmt = parse_statement("execute foo").unwrap();
+    let stmt = parse_statement("execute foo(1, 'x')").unwrap();
     assert_eq!(
         stmt,
         Statement::Execute(ExecuteStatement {
             name: "foo".into(),
-            args: Vec::new(),
+            args: vec![
+                SqlExpr::IntegerLiteral("1".into()),
+                SqlExpr::Const(Value::Text("x".into()))
+            ],
         })
     );
 
@@ -15588,6 +15607,9 @@ fn parse_prepare_and_execute_statements() {
             ..
         }) => {
             assert_eq!(parameter_types.len(), 2);
+            let PreparedStatementQuery::Select(query) = query else {
+                panic!("expected SELECT prepared query, got {query:?}");
+            };
             assert!(matches!(query.targets[0].expr, SqlExpr::Parameter(1)));
         }
         other => panic!("expected PREPARE statement, got {other:?}"),
@@ -15600,6 +15622,13 @@ fn parse_prepare_and_execute_statements() {
         }
         other => panic!("expected EXECUTE statement, got {other:?}"),
     }
+
+    let stmt = parse_statement("explain execute foo(1)").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::Explain(ExplainStatement { statement, .. })
+            if matches!(statement.as_ref(), Statement::Execute(ExecuteStatement { name, args }) if name == "foo" && args.len() == 1)
+    ));
 }
 
 #[test]

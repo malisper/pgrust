@@ -12040,6 +12040,91 @@ fn sql_prepare_execute_replans_after_primary_key_drop() {
 }
 
 #[test]
+fn sql_prepare_execute_parameters_and_explain_execute_work() {
+    let dir = temp_dir("sql_prepare_execute_params");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table prep_params(id int4, label text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into prep_params values (1, 'a'), (2, 'b')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "prepare find_label(int4, text) as \
+             select label from prep_params where id = $1 and label = $2",
+        )
+        .unwrap();
+    match session.execute(&db, "execute find_label(1, 'a')").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("a".into())]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match session
+        .execute(&db, "explain execute find_label(1, 'a')")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert!(rows.iter().any(|row| {
+                matches!(row.first(), Some(Value::Text(line)) if line.contains("Seq Scan on prep_params"))
+            }));
+        }
+        other => panic!("expected EXPLAIN query result, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "prepare upd_label(int4, text) as \
+             update prep_params set label = $2 where id = $1 returning label",
+        )
+        .unwrap();
+    match session.execute(&db, "execute upd_label(2, 'z')").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("z".into())]]);
+        }
+        other => panic!("expected update returning result, got {other:?}"),
+    }
+}
+
+#[test]
+fn regex_scalar_array_quantifiers_work() {
+    let dir = temp_dir("regex_scalar_array_quantifiers");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table rx(a text)").unwrap();
+    session
+        .execute(&db, "insert into rx values ('ab'), ('cd')")
+        .unwrap();
+
+    match session
+        .execute(&db, "select a from rx where a ~ any ('{^a}') order by a")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("ab".into())]]);
+        }
+        other => panic!("expected regex ANY query result, got {other:?}"),
+    }
+
+    match session
+        .execute(&db, "select a from rx where a !~ all ('{^a}') order by a")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("cd".into())]]);
+        }
+        other => panic!("expected regex ALL query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn drop_view_rejects_depended_on_view() {
     let dir = temp_dir("drop_view_rejects_depended_on_view");
     let db = Database::open(&dir, 128).unwrap();

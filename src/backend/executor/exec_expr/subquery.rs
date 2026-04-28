@@ -448,6 +448,17 @@ pub(super) fn compare_subquery_values(
                 right,
             }),
         },
+        SubqueryComparisonOp::RegexMatch | SubqueryComparisonOp::NotRegexMatch => {
+            let matched = eval_regex_match_operator(&left, &right)?;
+            match (op, matched) {
+                (_, Value::Null) => Ok(Value::Null),
+                (SubqueryComparisonOp::RegexMatch, value) => Ok(value),
+                (SubqueryComparisonOp::NotRegexMatch, Value::Bool(value)) => {
+                    Ok(Value::Bool(!value))
+                }
+                (_, other) => Err(ExecError::NonBoolQual(other)),
+            }
+        }
         SubqueryComparisonOp::Like => eval_like(&left, &right, None, collation_oid, false, false),
         SubqueryComparisonOp::NotLike => eval_like(&left, &right, None, collation_oid, false, true),
         SubqueryComparisonOp::ILike => eval_like(&left, &right, None, collation_oid, true, false),

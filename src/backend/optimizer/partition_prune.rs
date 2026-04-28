@@ -11,7 +11,7 @@ use crate::include::catalog::{ANYOID, PG_LANGUAGE_SQL_OID, builtin_scalar_functi
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, Expr, OpExprKind, RelationDesc, ScalarFunctionImpl,
-    attrno_index, user_attrno,
+    attrno_index, expr_sql_type_hint, user_attrno,
 };
 
 pub(super) fn partition_may_satisfy_filter(
@@ -531,7 +531,39 @@ fn partition_key_type_is_bool(
 fn partition_key_expr_matches<'a>(expr: &'a Expr, key_expr: &Expr) -> Option<&'a Expr> {
     let normalized = normalize_key_expr(expr);
     let normalized_key = normalize_key_expr(key_expr);
-    (normalized == normalized_key || simple_var_matches(normalized, normalized_key)).then_some(expr)
+    (normalized == normalized_key
+        || simple_var_matches(normalized, normalized_key)
+        || casted_partition_key_expr_matches(expr, key_expr))
+    .then_some(expr)
+}
+
+fn casted_partition_key_expr_matches(expr: &Expr, key_expr: &Expr) -> bool {
+    let Expr::Cast(inner, cast_ty) = expr else {
+        return false;
+    };
+    partition_key_expr_matches(inner, key_expr).is_some()
+        && partition_key_cast_is_prune_compatible(key_expr, cast_ty)
+}
+
+fn partition_key_cast_is_prune_compatible(
+    key_expr: &Expr,
+    cast_ty: &crate::backend::parser::SqlType,
+) -> bool {
+    let Some(key_ty) = expr_sql_type_hint(normalize_key_expr(key_expr)) else {
+        return false;
+    };
+    key_ty == *cast_ty
+        || (integer_partition_cast_type(&key_ty) && integer_partition_cast_type(cast_ty))
+}
+
+fn integer_partition_cast_type(ty: &crate::backend::parser::SqlType) -> bool {
+    !ty.is_array
+        && matches!(
+            ty.kind,
+            crate::backend::parser::SqlTypeKind::Int2
+                | crate::backend::parser::SqlTypeKind::Int4
+                | crate::backend::parser::SqlTypeKind::Int8
+        )
 }
 
 fn simple_var_matches(left: &Expr, right: &Expr) -> bool {
@@ -555,7 +587,7 @@ fn normalize_key_expr(expr: &Expr) -> &Expr {
         {
             normalize_key_expr(&func.args[0])
         }
-        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => normalize_key_expr(inner),
+        Expr::Collate { expr: inner, .. } => normalize_key_expr(inner),
         other => other,
     }
 }
@@ -723,7 +755,7 @@ fn bound_may_contain_non_null(
                     .iter()
                     .any(|value| !matches!(value, SerializedPartitionValue::Null))
         }
-        (PartitionStrategy::Range, PartitionBoundSpec::Range { is_default, .. }) => *is_default,
+        (PartitionStrategy::Range, PartitionBoundSpec::Range { .. }) => true,
         _ => true,
     }
 }
@@ -2397,6 +2429,48 @@ mod tests {
                 &siblings
             ));
         }
+    }
+
+    #[test]
+    fn range_is_not_null_keeps_non_default_partitions() {
+        let spec = range_spec();
+        let first = int_range_bound(PartitionRangeDatumValue::MinValue, int_value(1));
+        let second = int_range_bound(int_value(1), int_value(10));
+        let expr = Expr::IsNotNull(Box::new(int_key_expr(42)));
+
+        assert!(expr_may_match_bound(&expr, &spec, &first, &[]));
+        assert!(expr_may_match_bound(&expr, &spec, &second, &[]));
+    }
+
+    #[test]
+    fn casted_partition_key_is_not_treated_as_same_opfamily_match() {
+        let spec = range_spec();
+        let first = int_range_bound(PartitionRangeDatumValue::MinValue, int_value(1));
+        let casted_key = Expr::Cast(
+            Box::new(int_key_expr(42)),
+            SqlType::new(SqlTypeKind::Numeric),
+        );
+        let expr = Expr::op_auto(
+            OpExprKind::Eq,
+            vec![casted_key, Expr::Const(Value::Numeric("1".into()))],
+        );
+
+        assert!(expr_may_match_bound(&expr, &spec, &first, &[]));
+    }
+
+    #[test]
+    fn integer_family_partition_key_cast_still_prunes_range_partitions() {
+        let spec = range_spec();
+        let first = int_range_bound(PartitionRangeDatumValue::MinValue, int_value(1));
+        let second = int_range_bound(int_value(1), int_value(10));
+        let casted_key = Expr::Cast(Box::new(int_key_expr(42)), SqlType::new(SqlTypeKind::Int8));
+        let expr = Expr::op_auto(
+            OpExprKind::Eq,
+            vec![casted_key, Expr::Const(Value::Int64(1))],
+        );
+
+        assert!(!expr_may_match_bound(&expr, &spec, &first, &[]));
+        assert!(expr_may_match_bound(&expr, &spec, &second, &[]));
     }
 
     #[test]

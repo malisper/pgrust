@@ -25,13 +25,13 @@ use crate::backend::parser::{
     BoundInsertStatement, BoundMergeAction, BoundMergeStatement, BoundMergeWhenClause,
     BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey, BoundRelation,
     BoundRelationConstraints, BoundTemporalConstraint, BoundUpdateStatement, BoundUpdateTarget,
-    Catalog, CatalogLookup, CreateTableAsStatement, DomainConstraintLookupKind, DropTableStatement,
-    ExplainFormat, ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement,
-    OverridingKind, ParseError, SelectStatement, SqlType, SqlTypeKind, Statement,
+    Catalog, CatalogLookup, CreateTableAsStatement, DeleteStatement, DomainConstraintLookupKind,
+    DropTableStatement, ExplainFormat, ExplainStatement, ForeignKeyAction, MaintenanceTarget,
+    MergeStatement, OverridingKind, ParseError, SelectStatement, SqlType, SqlTypeKind, Statement,
     TableAsObjectType, TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table,
-    bind_expr_with_outer_and_ctes, bind_generated_expr, bind_referenced_by_foreign_keys,
-    bind_relation_constraints, bind_scalar_expr_in_scope, bind_update, parse_expr,
-    scope_for_relation,
+    bind_delete, bind_expr_with_outer_and_ctes, bind_generated_expr,
+    bind_referenced_by_foreign_keys, bind_relation_constraints, bind_scalar_expr_in_scope,
+    bind_update, parse_expr, scope_for_relation,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -447,6 +447,9 @@ pub(crate) fn execute_explain(
     if let Statement::Update(update) = statement {
         return execute_explain_update(update, analyze, costs, verbose, catalog);
     }
+    if let Statement::Delete(delete) = statement {
+        return execute_explain_delete(delete, analyze, costs, verbose, catalog);
+    }
 
     let explain_target = match statement {
         Statement::Select(select) => EitherExplainTarget::Select(select),
@@ -510,7 +513,10 @@ pub(crate) fn execute_explain(
                         crate::include::nodes::parsenodes::CreateTableAsQuery::Select(query) => {
                             query
                         }
-                        crate::include::nodes::parsenodes::CreateTableAsQuery::Execute(name) => {
+                        crate::include::nodes::parsenodes::CreateTableAsQuery::Execute {
+                            name,
+                            ..
+                        } => {
                             return Err(ExecError::Parse(ParseError::DetailedError {
                                 message: format!("prepared statement \"{name}\" does not exist"),
                                 detail: None,
@@ -729,6 +735,111 @@ fn execute_explain_update(
     })
 }
 
+fn execute_explain_delete(
+    stmt: DeleteStatement,
+    analyze: bool,
+    costs: bool,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+) -> Result<StatementResult, ExecError> {
+    if analyze {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "EXPLAIN ANALYZE DELETE".into(),
+        )));
+    }
+
+    let bound = finalize_bound_delete_stmt(bind_delete(&stmt, catalog)?, catalog);
+    let lines = explain_delete_lines(&stmt, &bound, costs, verbose);
+    Ok(StatementResult::Query {
+        columns: vec![QueryColumn::text("QUERY PLAN")],
+        column_names: vec!["QUERY PLAN".into()],
+        rows: lines
+            .into_iter()
+            .map(|line| vec![Value::Text(line.into())])
+            .collect(),
+    })
+}
+
+fn explain_delete_lines(
+    stmt: &DeleteStatement,
+    bound: &BoundDeleteStatement,
+    show_costs: bool,
+    verbose: bool,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    push_explain_line(
+        &format!(
+            "Delete on {}",
+            explain_update_target_name(&stmt.table_name, verbose)
+        ),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        &mut lines,
+    );
+    if verbose && !bound.returning.is_empty() {
+        lines.push(format!(
+            "  Output: {}",
+            render_update_returning_targets(&stmt.table_name, &bound.returning)
+        ));
+    }
+    let child_targets = bound
+        .targets
+        .iter()
+        .filter(|target| target.relation_name != stmt.table_name)
+        .collect::<Vec<_>>();
+    if let Some(target) = explain_delete_scan_target(&stmt.table_name, &bound.targets) {
+        let alias = child_targets
+            .iter()
+            .position(|candidate| candidate.relation_oid == target.relation_oid)
+            .map(|index| format!("{}_{}", stmt.table_name, index + 1));
+        if let Some(alias) = &alias {
+            lines.push(format!("  Delete on {} {}", target.relation_name, alias));
+        }
+        push_explain_line(
+            "  ->  Result",
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            &mut lines,
+        );
+        if is_const_false(target.predicate.as_ref()) {
+            lines.push("        One-Time Filter: false".into());
+            return lines;
+        }
+        push_explain_line(
+            &format!(
+                "        ->  {}",
+                explain_delete_scan_label(target, alias.as_deref())
+            ),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            &mut lines,
+        );
+        if let Some(predicate) = &target.predicate {
+            lines.push(format!(
+                "              Filter: {}",
+                crate::backend::executor::render_explain_expr(
+                    predicate,
+                    &target
+                        .desc
+                        .columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect::<Vec<_>>(),
+                )
+            ));
+        }
+    } else {
+        push_explain_line(
+            "  ->  Result",
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            &mut lines,
+        );
+        lines.push("        One-Time Filter: false".into());
+    }
+    lines
+}
+
 fn explain_update_lines(
     stmt: &UpdateStatement,
     bound: &BoundUpdateStatement,
@@ -845,6 +956,23 @@ fn explain_update_scan_target<'a>(
         .or_else(|| targets.first())
 }
 
+fn explain_delete_scan_target<'a>(
+    base_name: &str,
+    targets: &'a [BoundDeleteTarget],
+) -> Option<&'a BoundDeleteTarget> {
+    targets
+        .iter()
+        .find(|target| {
+            target.relation_name != base_name && !is_const_false(target.predicate.as_ref())
+        })
+        .or_else(|| {
+            targets
+                .iter()
+                .find(|target| !is_const_false(target.predicate.as_ref()))
+        })
+        .or_else(|| targets.first())
+}
+
 fn explain_update_target_name(table_name: &str, verbose: bool) -> String {
     if !verbose || table_name.contains('.') {
         return table_name.to_string();
@@ -885,6 +1013,25 @@ fn render_update_projection_output(target_name: &str, target: &BoundUpdateTarget
 }
 
 fn explain_update_scan_label(target: &BoundUpdateTarget, alias: Option<&str>) -> String {
+    match &target.row_source {
+        BoundModifyRowSource::Heap => match alias {
+            Some(alias) => format!("Seq Scan on {} {alias}", target.relation_name),
+            None => format!("Seq Scan on {}", target.relation_name),
+        },
+        BoundModifyRowSource::Index { index, .. } => match alias {
+            Some(alias) => format!(
+                "Index Scan using {} on {} {alias}",
+                index.name, target.relation_name
+            ),
+            None => format!(
+                "Index Scan using {} on {}",
+                index.name, target.relation_name
+            ),
+        },
+    }
+}
+
+fn explain_delete_scan_label(target: &BoundDeleteTarget, alias: Option<&str>) -> String {
     match &target.row_source {
         BoundModifyRowSource::Heap => match alias {
             Some(alias) => format!("Seq Scan on {} {alias}", target.relation_name),

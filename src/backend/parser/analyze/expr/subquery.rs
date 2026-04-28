@@ -38,6 +38,8 @@ fn comparison_operator_for_quantified_array(op: SubqueryComparisonOp) -> Option<
         SubqueryComparisonOp::LtEq => Some("<="),
         SubqueryComparisonOp::Gt => Some(">"),
         SubqueryComparisonOp::GtEq => Some(">="),
+        SubqueryComparisonOp::RegexMatch => Some("~"),
+        SubqueryComparisonOp::NotRegexMatch => Some("!~"),
         _ => None,
     }
 }
@@ -54,6 +56,12 @@ fn infer_quantified_array_literal_type(
     catalog: &dyn CatalogLookup,
 ) -> Result<SqlType, ParseError> {
     let left_element_type = left_type.element_type();
+    if matches!(
+        op,
+        SubqueryComparisonOp::RegexMatch | SubqueryComparisonOp::NotRegexMatch
+    ) {
+        return Ok(SqlType::array_of(SqlType::new(SqlTypeKind::Text)));
+    }
     let comparison_op = comparison_operator_for_quantified_array(op);
     let mut common = Some(left_element_type);
     for (element, bound) in elements.iter().zip(bound_elements) {
@@ -434,6 +442,10 @@ pub(super) fn bind_quantified_array_expr(
         ctes,
     )?;
     let raw_left_type = bound_left.sql_type;
+    let regex_array_op = matches!(
+        op,
+        SubqueryComparisonOp::RegexMatch | SubqueryComparisonOp::NotRegexMatch
+    );
     let (target_array_type, bound_array, _left_type, comparison_left_type) =
         if let SqlExpr::ArrayLiteral(elements) = array {
             let bound_elements = elements
@@ -457,8 +469,11 @@ pub(super) fn bind_quantified_array_expr(
                         .then_some(bound.sql_type.element_type())
                 })
                 .unwrap_or(SqlType::new(SqlTypeKind::Text));
-            let left_type =
-                coerce_unknown_string_literal_type(left, raw_left_type, raw_array_element_type);
+            let left_type = if regex_array_op {
+                SqlType::new(SqlTypeKind::Text)
+            } else {
+                coerce_unknown_string_literal_type(left, raw_left_type, raw_array_element_type)
+            };
             let target_array_type = infer_quantified_array_literal_type(
                 elements,
                 &bound_elements,
@@ -485,11 +500,15 @@ pub(super) fn bind_quantified_array_expr(
                 ctes,
             )?;
             let raw_array_type = bound_array.sql_type;
-            let left_type = coerce_unknown_string_literal_type(
-                left,
-                raw_left_type,
-                raw_array_type.element_type(),
-            );
+            let left_type = if regex_array_op {
+                SqlType::new(SqlTypeKind::Text)
+            } else {
+                coerce_unknown_string_literal_type(
+                    left,
+                    raw_left_type,
+                    raw_array_type.element_type(),
+                )
+            };
             if matches!(array, SqlExpr::ScalarSubquery(_))
                 && raw_array_type.is_array
                 && let Some(comparison_op) = comparison_operator_for_quantified_array(op)
@@ -500,12 +519,15 @@ pub(super) fn bind_quantified_array_expr(
                     right_type: sql_type_name(raw_array_type),
                 });
             }
-            let target_array_type = if matches!(op, SubqueryComparisonOp::Match)
+            let target_array_type = if regex_array_op {
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+            } else if matches!(op, SubqueryComparisonOp::Match)
                 && matches!(left_type.kind, SqlTypeKind::TsVector)
                 && matches!(
                     array,
                     SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
-                ) {
+                )
+            {
                 SqlType::array_of(SqlType::new(SqlTypeKind::TsQuery))
             } else if raw_array_type.is_array {
                 coerce_unknown_string_literal_type(array, raw_array_type, raw_left_type)

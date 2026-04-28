@@ -155,7 +155,7 @@ impl Database {
         })?;
         let select_query = match &create_stmt.query {
             CreateTableAsQuery::Select(query) => query,
-            CreateTableAsQuery::Execute(name) => {
+            CreateTableAsQuery::Execute { name, .. } => {
                 return Err(ExecError::Parse(ParseError::DetailedError {
                     message: format!("prepared statement \"{name}\" does not exist"),
                     detail: None,

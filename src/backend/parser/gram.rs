@@ -16123,6 +16123,7 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
     let mut parameter_types = Vec::new();
     let mut query = None;
     let mut query_sql = None;
+    let mut parameter_types = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier => name = Some(build_identifier(part)),
@@ -16135,7 +16136,14 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
             }
             Rule::select_stmt => {
                 query_sql = Some(part.as_str().trim().to_string());
-                query = Some(build_select(part)?);
+                query = Some(PreparedStatementQuery::Select(build_select(part)?));
+            }
+            Rule::update_stmt => {
+                query_sql = Some(part.as_str().trim().to_string());
+                query = Some(PreparedStatementQuery::Update(build_update(part)?));
+            }
+            Rule::type_name => {
+                parameter_types.push(build_type_name(part));
             }
             _ => {}
         }
@@ -17010,6 +17018,9 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
             Rule::merge_stmt => statement = Some(Statement::Merge(build_merge(part)?)),
             Rule::update_stmt => statement = Some(Statement::Update(build_update(part)?)),
             Rule::delete_stmt => statement = Some(Statement::Delete(build_delete(part)?)),
+            Rule::execute_prepared_stmt => {
+                statement = Some(Statement::Execute(build_execute_statement(part)?))
+            }
             Rule::create_materialized_view_stmt => {
                 statement = Some(Statement::CreateTableAs(build_create_materialized_view(
                     part,
@@ -19073,7 +19084,13 @@ fn build_ctas_query(
         }
         Rule::execute_prepared_stmt => {
             let execute = build_execute_statement(pair)?;
-            Ok((CreateTableAsQuery::Execute(execute.name), None))
+            Ok((
+                CreateTableAsQuery::Execute {
+                    name: execute.name,
+                    args: execute.args,
+                },
+                None,
+            ))
         }
         _ => Err(ParseError::UnexpectedToken {
             expected: "CREATE TABLE AS query",
@@ -24461,6 +24478,8 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         "<=" => SubqueryComparisonOp::LtEq,
                         ">" => SubqueryComparisonOp::Gt,
                         ">=" => SubqueryComparisonOp::GtEq,
+                        "~" => SubqueryComparisonOp::RegexMatch,
+                        "!~" => SubqueryComparisonOp::NotRegexMatch,
                         other => {
                             return Err(ParseError::UnexpectedToken {
                                 expected: "subquery comparison operator",

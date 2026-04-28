@@ -2264,7 +2264,7 @@ pub struct CreateTableAsStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateTableAsQuery {
     Select(SelectStatement),
-    Execute(String),
+    Execute { name: String, args: Vec<SqlExpr> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2277,8 +2277,14 @@ pub enum TableAsObjectType {
 pub struct PrepareStatement {
     pub name: String,
     pub parameter_types: Vec<RawTypeName>,
-    pub query: SelectStatement,
+    pub query: PreparedStatementQuery,
     pub query_sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreparedStatementQuery {
+    Select(SelectStatement),
+    Update(UpdateStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4807,6 +4813,8 @@ pub enum SubqueryComparisonOp {
     Gt,
     GtEq,
     Match,
+    RegexMatch,
+    NotRegexMatch,
     Like,
     NotLike,
     ILike,
