@@ -1167,10 +1167,6 @@ fn match_proc_signature(
     if actual_types.len() < fixed_prefix_len {
         return None;
     }
-    if fixed_prefix_len == 0 && actual_types.is_empty() && !func_variadic {
-        return None;
-    }
-
     let mut declared_arg_types = Vec::with_capacity(actual_types.len());
     let mut cost = 0usize;
     for (actual_type, declared_oid) in actual_types
@@ -1246,7 +1242,7 @@ fn polymorphic_signature_matches_declared(declared_oids: &[u32], actual_types: &
         .zip(actual_types.iter().copied())
     {
         match declared_oid {
-            ANYOID | ANYELEMENTOID => {
+            ANYELEMENTOID => {
                 if is_unknown_sql_type(actual_type) {
                     continue;
                 }
@@ -1254,6 +1250,7 @@ fn polymorphic_signature_matches_declared(declared_oids: &[u32], actual_types: &
                     return false;
                 }
             }
+            ANYOID => {}
             ANYARRAYOID if actual_type.is_array => {
                 if is_unknown_sql_type(actual_type) {
                     continue;
@@ -2036,8 +2033,8 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
     {
         return Some(1);
     }
-    if is_numeric_family(actual_type) && is_numeric_family(target_type) {
-        return Some(1);
+    if let Some(cost) = numeric_type_match_cost(actual_type.kind, target_type.kind) {
+        return Some(cost);
     }
     if is_builtin_text_like_type(actual_type) && is_builtin_text_like_type(target_type) {
         return Some(1);
@@ -2052,6 +2049,18 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
         return Some(2);
     }
     None
+}
+
+fn numeric_type_match_cost(actual: SqlTypeKind, target: SqlTypeKind) -> Option<usize> {
+    use SqlTypeKind::*;
+    Some(match (actual, target) {
+        (Int2, Int4) | (Int4, Int8) | (Int8, Numeric) | (Float4, Float8) => 1,
+        (Int2, Int8) | (Int4, Numeric) | (Int8, Float4) | (Numeric, Float4) => 2,
+        (Int2, Numeric) | (Int4, Float4) | (Int8, Float8) | (Numeric, Float8) => 3,
+        (Int2, Float4) | (Int4, Float8) => 4,
+        (Int2, Float8) => 5,
+        _ => return None,
+    })
 }
 
 pub(super) fn validate_scalar_function_arity(

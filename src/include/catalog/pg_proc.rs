@@ -11172,6 +11172,8 @@ fn is_dynamic_range_scalar_function(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::RangeIntersect
             | BuiltinScalarFunction::RangeDifference
             | BuiltinScalarFunction::RangeMerge
+            | BuiltinScalarFunction::PgRustInternalBinaryCoercible
+            | BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid
     )
 }
 
