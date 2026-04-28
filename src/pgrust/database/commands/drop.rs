@@ -974,6 +974,30 @@ fn record_drop_table_blocker(
     }
 }
 
+fn relation_in_explicit_drop_subtree(
+    ctx: &DropTableDependencyContext<'_>,
+    relation_oid: u32,
+    explicit_relation_oids: &BTreeSet<u32>,
+) -> bool {
+    if explicit_relation_oids.contains(&relation_oid) {
+        return true;
+    }
+    let mut stack = explicit_relation_oids.iter().copied().collect::<Vec<_>>();
+    let mut visited = BTreeSet::new();
+    while let Some(parent_oid) = stack.pop() {
+        if !visited.insert(parent_oid) {
+            continue;
+        }
+        for inherit in ctx.graph.inheritance_children(parent_oid) {
+            if inherit.inhrelid == relation_oid {
+                return true;
+            }
+            stack.push(inherit.inhrelid);
+        }
+    }
+    false
+}
+
 fn collect_drop_table_restrict_blockers(
     ctx: &DropTableDependencyContext<'_>,
     relation_oid: u32,
@@ -1031,7 +1055,11 @@ fn collect_drop_table_restrict_blockers(
                 relation_oid: dependent_relation_oid,
                 ..
             } => {
-                if explicit_relation_oids.contains(&dependent_relation_oid) {
+                if relation_in_explicit_drop_subtree(
+                    ctx,
+                    dependent_relation_oid,
+                    explicit_relation_oids,
+                ) {
                     continue;
                 }
                 record_drop_table_blocker(
@@ -1115,8 +1143,11 @@ fn plan_drop_table_relation(
                 ref constraint,
                 ..
             } => {
-                if explicit_relation_oids.contains(&dependent_relation_oid)
-                    || plan.relation_drop_oids.contains(&dependent_relation_oid)
+                if relation_in_explicit_drop_subtree(
+                    ctx,
+                    dependent_relation_oid,
+                    explicit_relation_oids,
+                ) || plan.relation_drop_oids.contains(&dependent_relation_oid)
                     || !plan.constraint_drop_oids.insert(constraint.oid)
                 {
                     continue;
@@ -1138,8 +1169,11 @@ fn plan_drop_table_relation(
                 ref rule,
                 ..
             } => {
-                if explicit_relation_oids.contains(&dependent_relation_oid)
-                    || plan.relation_drop_oids.contains(&dependent_relation_oid)
+                if relation_in_explicit_drop_subtree(
+                    ctx,
+                    dependent_relation_oid,
+                    explicit_relation_oids,
+                ) || plan.relation_drop_oids.contains(&dependent_relation_oid)
                     || !plan.rule_drop_oids.insert(rule.rewrite_oid)
                 {
                     continue;
@@ -3717,6 +3751,39 @@ mod tests {
         let catcache = db.backend_catcache(1, None).unwrap();
         assert!(catcache.class_by_name("parents").is_none());
         assert!(catcache.class_by_name("children").is_none());
+    }
+
+    #[test]
+    fn drop_table_allows_explicit_partitioned_fk_table_with_referenced_parent() {
+        let base = temp_dir("table_fk_explicit_partitioned_multi_drop");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table parents (id int4 primary key)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create table children (id int4 references parents) partition by range (id)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create table children_1 partition of children for values from (0) to (10)",
+            )
+            .unwrap();
+
+        clear_backend_notices();
+        session
+            .execute(&db, "drop table parents, children")
+            .unwrap();
+
+        assert!(take_backend_notice_messages().is_empty());
+        let catcache = db.backend_catcache(1, None).unwrap();
+        assert!(catcache.class_by_name("parents").is_none());
+        assert!(catcache.class_by_name("children").is_none());
+        assert!(catcache.class_by_name("children_1").is_none());
     }
 
     #[test]

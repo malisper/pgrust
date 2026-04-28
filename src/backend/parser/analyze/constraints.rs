@@ -928,6 +928,9 @@ pub fn bind_relation_constraints(
                 });
             }
             crate::include::catalog::CONSTRAINT_FOREIGN => {
+                if is_referenced_side_foreign_key_clone(&row, catalog) {
+                    continue;
+                }
                 foreign_keys.push(bind_outbound_foreign_key_constraint(
                     relation_oid,
                     desc,
@@ -1093,6 +1096,18 @@ pub(crate) fn bind_exclusion_constraint(
     })
 }
 
+fn is_referenced_side_foreign_key_clone(
+    row: &PgConstraintRow,
+    catalog: &dyn super::CatalogLookup,
+) -> bool {
+    if row.contype != crate::include::catalog::CONSTRAINT_FOREIGN || row.conparentid == 0 {
+        return false;
+    }
+    catalog
+        .constraint_row_by_oid(row.conparentid)
+        .is_some_and(|parent| parent.conrelid == row.conrelid)
+}
+
 pub fn bind_referenced_by_foreign_keys(
     relation_oid: u32,
     desc: &RelationDesc,
@@ -1103,9 +1118,10 @@ pub fn bind_referenced_by_foreign_keys(
         .into_iter()
         .map(|row| (row.oid, row))
         .collect::<BTreeMap<_, _>>();
-    if catalog
-        .relation_by_oid(relation_oid)
-        .is_some_and(|relation| relation.relispartition)
+    if rows.is_empty()
+        && catalog
+            .relation_by_oid(relation_oid)
+            .is_some_and(|relation| relation.relispartition)
     {
         let mut pending = catalog.inheritance_parents(relation_oid);
         while let Some(parent) = pending.pop() {

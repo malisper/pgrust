@@ -556,6 +556,19 @@ impl Database {
                 )
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
+            for index in &target.indexes {
+                let effect = self
+                    .catalog
+                    .write()
+                    .replace_index_relation_desc_meta_mvcc(
+                        index.relation_oid,
+                        index.desc.clone(),
+                        index.index_meta.clone(),
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+            }
             if target.relation.relpersistence == 't' {
                 self.replace_temp_entry_desc(
                     client_id,

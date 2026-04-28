@@ -502,7 +502,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return Some(position);
             }
             if message == "conflicting constraint properties" {
-                return find_constraint_enforcement_attribute_position(sql);
+                return find_conflicting_constraint_enforcement_attribute_position(sql);
             }
             if message == "range lower bound must be less than or equal to range upper bound" {
                 return find_range_literal_position(sql);
@@ -547,7 +547,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return find_case_insensitive_token_position(sql, "INITIALLY");
             }
             if message == "multiple ENFORCED/NOT ENFORCED clauses not allowed" {
-                return find_constraint_enforcement_attribute_position(sql);
+                return find_conflicting_constraint_enforcement_attribute_position(sql);
             }
             return None;
         }
@@ -2270,14 +2270,44 @@ fn find_last_case_insensitive_token_position(sql: &str, token: &str) -> Option<u
         .map(|index| index + 1)
 }
 
-fn find_constraint_enforcement_attribute_position(sql: &str) -> Option<usize> {
-    [
-        find_case_insensitive_token_position(sql, "NOT ENFORCED"),
-        find_case_insensitive_token_position(sql, "ENFORCED"),
-    ]
-    .into_iter()
-    .flatten()
-    .min()
+fn find_conflicting_constraint_enforcement_attribute_position(sql: &str) -> Option<usize> {
+    let positions = constraint_enforcement_attribute_positions(sql);
+    positions
+        .get(1)
+        .copied()
+        .or_else(|| positions.first().copied())
+}
+
+fn constraint_enforcement_attribute_positions(sql: &str) -> Vec<usize> {
+    let sql_lower = sql.to_ascii_lowercase();
+    let mut positions = Vec::new();
+    let mut index = 0usize;
+    while index < sql_lower.len() {
+        let rest = &sql_lower[index..];
+        if rest.starts_with("not enforced")
+            && is_token_boundary(sql.as_bytes(), index, "not enforced".len())
+        {
+            positions.push(index + 1);
+            index += "not enforced".len();
+            continue;
+        }
+        if rest.starts_with("enforced")
+            && is_token_boundary(sql.as_bytes(), index, "enforced".len())
+        {
+            positions.push(index + 1);
+            index += "enforced".len();
+            continue;
+        }
+        index += 1;
+    }
+    positions
+}
+
+fn is_token_boundary(bytes: &[u8], start: usize, len: usize) -> bool {
+    let before = start.checked_sub(1).and_then(|idx| bytes.get(idx));
+    let after = bytes.get(start + len);
+    !before.is_some_and(|byte| is_sql_identifier_byte(*byte))
+        && !after.is_some_and(|byte| is_sql_identifier_byte(*byte))
 }
 
 fn find_type_name_before_typmod_position(sql: &str) -> Option<usize> {
@@ -13258,7 +13288,7 @@ ORDER BY 1, 2;";
         });
         assert_eq!(
             exec_error_position(enforced_sql, &enforced_err),
-            find_case_insensitive_token_position(enforced_sql, "ENFORCED")
+            find_case_insensitive_token_position(enforced_sql, "NOT ENFORCED")
         );
     }
 

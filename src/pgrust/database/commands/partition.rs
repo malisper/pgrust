@@ -735,6 +735,23 @@ impl Database {
         ensure_relation_owner(self, client_id, &child, &stmt.partition_table)?;
 
         let mut next_cid = cid.saturating_add(1);
+        self.validate_referenced_partition_foreign_keys_for_detach_in_transaction(
+            client_id,
+            xid,
+            next_cid,
+            child.relation_oid,
+            configured_search_path,
+        )?;
+        let catalog =
+            self.lazy_catalog_lookup(client_id, Some((xid, next_cid)), configured_search_path);
+        next_cid = self.drop_referenced_partition_foreign_key_constraints_in_transaction(
+            client_id,
+            xid,
+            next_cid,
+            child.relation_oid,
+            &catalog,
+            catalog_effects,
+        )?;
         next_cid = self.drop_cloned_parent_row_triggers_from_partition_in_transaction(
             client_id,
             xid,

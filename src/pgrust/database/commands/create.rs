@@ -2299,6 +2299,19 @@ impl Database {
             } else {
                 constraint_cid.saturating_add(1)
             };
+            if referenced_relation.relkind == 'p' {
+                next_foreign_key_cid = self
+                    .create_referenced_partition_foreign_key_constraints_in_transaction(
+                        client_id,
+                        xid,
+                        next_foreign_key_cid,
+                        &referenced_relation,
+                        &constraint_row,
+                        &referenced_attnums,
+                        configured_search_path,
+                        catalog_effects,
+                    )?;
+            }
         }
 
         Ok(next_foreign_key_cid)
