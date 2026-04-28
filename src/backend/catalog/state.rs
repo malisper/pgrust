@@ -28,13 +28,13 @@ use crate::include::access::nbtree::BtreeOptions;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE,
     DEPENDENCY_INTERNAL, PG_CONSTRAINT_RELATION_OID, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
-    PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow,
-    PgPartitionedTableRow, PgPolicyRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgTablespaceRow,
-    PgTriggerRow, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
+    PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgEventTriggerRow,
+    PgInheritsRow, PgPartitionedTableRow, PgPolicyRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgTablespaceRow, PgTriggerRow, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
     bootstrap_pg_database_rows, bootstrap_pg_opclass_rows, bootstrap_pg_tablespace_rows,
     builtin_range_name_for_sql_type, builtin_type_name_for_oid, builtin_type_row_by_oid,
-    builtin_type_rows, relkind_has_storage, sort_pg_rewrite_rows,
+    builtin_type_rows, relkind_has_storage, sort_pg_event_trigger_rows, sort_pg_rewrite_rows,
 };
 
 const DEFAULT_SPC_OID: u32 = 0;
@@ -479,6 +479,7 @@ pub struct Catalog {
     pub(crate) partitioned_tables: Vec<PgPartitionedTableRow>,
     pub(crate) rewrites: Vec<PgRewriteRow>,
     pub(crate) triggers: Vec<crate::include::catalog::PgTriggerRow>,
+    pub(crate) event_triggers: Vec<PgEventTriggerRow>,
     pub(crate) policies: Vec<PgPolicyRow>,
     pub(crate) publications: Vec<PgPublicationRow>,
     pub(crate) publication_rels: Vec<PgPublicationRelRow>,
@@ -503,6 +504,7 @@ impl Default for Catalog {
             partitioned_tables: Vec::new(),
             rewrites: Vec::new(),
             triggers: Vec::new(),
+            event_triggers: Vec::new(),
             policies: Vec::new(),
             publications: Vec::new(),
             publication_rels: Vec::new(),
@@ -684,6 +686,20 @@ impl Catalog {
             .partition_point(|row| row.tgrelid < relation_oid);
         let end = start + self.triggers[start..].partition_point(|row| row.tgrelid == relation_oid);
         &self.triggers[start..end]
+    }
+
+    pub fn event_trigger_rows(&self) -> &[PgEventTriggerRow] {
+        &self.event_triggers
+    }
+
+    pub fn event_trigger_row_by_name(&self, name: &str) -> Option<&PgEventTriggerRow> {
+        self.event_triggers
+            .iter()
+            .find(|row| row.evtname.eq_ignore_ascii_case(name))
+    }
+
+    pub fn event_trigger_row_by_oid(&self, oid: u32) -> Option<&PgEventTriggerRow> {
+        self.event_triggers.iter().find(|row| row.oid == oid)
     }
 
     pub fn policy_rows(&self) -> &[PgPolicyRow] {
@@ -2560,6 +2576,50 @@ impl Catalog {
         Ok(removed)
     }
 
+    pub fn create_event_trigger(
+        &mut self,
+        mut row: PgEventTriggerRow,
+    ) -> Result<PgEventTriggerRow, CatalogError> {
+        if self
+            .event_triggers
+            .iter()
+            .any(|existing| existing.evtname.eq_ignore_ascii_case(&row.evtname))
+        {
+            return Err(CatalogError::UniqueViolation(
+                "pg_event_trigger_evtname_index".into(),
+            ));
+        }
+        if row.oid == 0 {
+            row.oid = self.next_oid;
+        }
+        self.next_oid = self.next_oid.max(row.oid.saturating_add(1));
+        self.event_triggers.push(row.clone());
+        sort_pg_event_trigger_rows(&mut self.event_triggers);
+        Ok(row)
+    }
+
+    pub fn replace_event_trigger(
+        &mut self,
+        old_name: &str,
+        mut row: PgEventTriggerRow,
+    ) -> Result<PgEventTriggerRow, CatalogError> {
+        let old = self.drop_event_trigger(old_name)?;
+        row.oid = old.oid;
+        self.create_event_trigger(row)
+    }
+
+    pub fn drop_event_trigger(
+        &mut self,
+        trigger_name: &str,
+    ) -> Result<PgEventTriggerRow, CatalogError> {
+        let index = self
+            .event_triggers
+            .iter()
+            .position(|row| row.evtname.eq_ignore_ascii_case(trigger_name))
+            .ok_or_else(|| CatalogError::UnknownTable(trigger_name.to_string()))?;
+        Ok(self.event_triggers.remove(index))
+    }
+
     pub fn remove_rewrite_row_by_oid(&mut self, rewrite_oid: u32) -> Option<PgRewriteRow> {
         let position = self
             .rewrites
@@ -2716,8 +2776,13 @@ fn not_null_constraint_column_index(
 pub(crate) fn validate_builtin_type_rows(desc: &RelationDesc) -> Result<(), CatalogError> {
     let builtin_rows = builtin_type_rows();
     for column in &desc.columns {
-        if matches!(column.sql_type.kind, SqlTypeKind::Trigger) {
-            return Err(CatalogError::UnknownType("trigger".into()));
+        if matches!(
+            column.sql_type.kind,
+            SqlTypeKind::Trigger | SqlTypeKind::EventTrigger
+        ) {
+            return Err(CatalogError::UnknownType(format_sql_type_name(
+                column.sql_type,
+            )));
         }
         if !column.sql_type.is_array && column.sql_type.type_oid != 0 {
             continue;
@@ -2769,6 +2834,7 @@ fn format_sql_type_name(sql_type: SqlType) -> String {
             SqlTypeKind::Cstring => "_cstring",
             SqlTypeKind::Void => "unsupported array",
             SqlTypeKind::Trigger => "unsupported array",
+            SqlTypeKind::EventTrigger => "unsupported array",
             SqlTypeKind::FdwHandler => "unsupported array",
             SqlTypeKind::Bool => "_bool",
             SqlTypeKind::Bit => "_bit",
@@ -2869,6 +2935,7 @@ fn format_sql_type_name(sql_type: SqlType) -> String {
         SqlTypeKind::Cstring => "cstring",
         SqlTypeKind::Void => "void",
         SqlTypeKind::Trigger => "trigger",
+        SqlTypeKind::EventTrigger => "event_trigger",
         SqlTypeKind::FdwHandler => "fdw_handler",
         SqlTypeKind::Bool => "bool",
         SqlTypeKind::Bit => "bit",

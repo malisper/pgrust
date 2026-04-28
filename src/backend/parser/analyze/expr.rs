@@ -358,6 +358,7 @@ fn sql_json_query_function_returning_type_is_pseudo(sql_type: SqlType) -> bool {
                 | SqlTypeKind::Record
                 | SqlTypeKind::Void
                 | SqlTypeKind::Trigger
+                | SqlTypeKind::EventTrigger
                 | SqlTypeKind::FdwHandler
                 | SqlTypeKind::Internal
                 | SqlTypeKind::Cstring

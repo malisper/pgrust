@@ -153,23 +153,24 @@ use crate::include::catalog::{
     DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID,
     GLOBAL_TABLESPACE_OID, HASH_AM_OID, INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID,
     PG_AUTHID_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_OWNER_OID,
-    PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
-    PG_LARGEOBJECT_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID, PG_READ_ALL_DATA_OID,
-    PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID,
-    POLY_SPGIST_OPCLASS_OID, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
-    PgConversionRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgTsConfigRow, PgTsDictRow,
-    PgTsParserRow, PgTsTemplateRow, PgTypeRow, QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID,
-    TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID, bootstrap_pg_am_rows,
-    builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid, default_btree_opclass_oid,
-    default_hash_opclass_oid,
+    PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID, PG_EVENT_TRIGGER_RELATION_OID,
+    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_LARGEOBJECT_RELATION_OID, PG_MCV_LIST_TYPE_OID,
+    PG_NDISTINCT_TYPE_OID, PG_READ_ALL_DATA_OID, PG_STATISTIC_EXT_RELATION_OID,
+    PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID, POLY_SPGIST_OPCLASS_OID, PgAttributeRow,
+    PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgConversionRow, PgOpclassRow, PgOperatorRow,
+    PgOpfamilyRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID,
+    bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
+    default_btree_opclass_oid, default_hash_opclass_oid,
 };
-use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
+use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue, RecordValue};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, HashFunctionKind, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr,
     OpExprKind, SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, SubLinkType, TABLE_OID_ATTR_NO,
     attrno_index, is_executor_special_varno,
 };
 use crate::pgrust::compact_string::CompactString;
+use crate::pl::plpgsql::current_event_trigger_table_rewrite;
 
 mod arrays;
 mod subquery;
@@ -2793,7 +2794,10 @@ fn eval_obj_description_for_classoid(
     Ok(Value::Text(row.description.into()))
 }
 
-fn eval_pg_describe_object(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+pub(crate) fn eval_pg_describe_object(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
     match values {
         [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
         [classid, objid, objsubid] => {
@@ -2837,6 +2841,9 @@ fn eval_pg_describe_object(values: &[Value], ctx: &ExecutorContext) -> Result<Va
                 "pg_operator" => catalog
                     .operator_by_oid(objid)
                     .map(|row| operator_identity_text(&row, catalog)),
+                "pg_event_trigger" => catalog
+                    .event_trigger_row_by_oid(objid)
+                    .map(|row| format!("event trigger {}", quote_identifier(&row.evtname))),
                 "pg_statistic_ext" => catalog.statistic_ext_row_by_oid(objid).and_then(|row| {
                     let namespace = catalog.namespace_row_by_oid(row.stxnamespace)?;
                     Some(format!(
@@ -2855,6 +2862,163 @@ fn eval_pg_describe_object(values: &[Value], ctx: &ExecutorContext) -> Result<Va
             actual: format!("PgDescribeObject({} args)", values.len()),
         })),
     }
+}
+
+pub(crate) fn eval_pg_identify_object(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
+        [classid, objid, objsubid] => {
+            let address = object_address_args(classid, objid, objsubid, "pg_identify_object")?;
+            let catalog = executor_catalog(ctx)?;
+            if let Some(evtname) = event_trigger_name_for_address(catalog, address) {
+                return Ok(Value::Record(RecordValue::anonymous(vec![
+                    ("type".into(), Value::Text("event trigger".into())),
+                    ("schema".into(), Value::Null),
+                    ("name".into(), Value::Text(evtname.clone().into())),
+                    ("identity".into(), Value::Text(evtname.into())),
+                ])));
+            }
+            Ok(Value::Null)
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_identify_object(classid, objid, objsubid)",
+            actual: format!("PgIdentifyObject({} args)", values.len()),
+        })),
+    }
+}
+
+pub(crate) fn eval_pg_identify_object_as_address(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
+        [classid, objid, objsubid] => {
+            let address =
+                object_address_args(classid, objid, objsubid, "pg_identify_object_as_address")?;
+            let catalog = executor_catalog(ctx)?;
+            if let Some(evtname) = event_trigger_name_for_address(catalog, address) {
+                return Ok(Value::Record(RecordValue::anonymous(vec![
+                    ("type".into(), Value::Text("event trigger".into())),
+                    (
+                        "object_names".into(),
+                        Value::Array(vec![Value::Text(evtname.into())]),
+                    ),
+                    ("object_args".into(), Value::Array(Vec::new())),
+                ])));
+            }
+            Ok(Value::Null)
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_identify_object_as_address(classid, objid, objsubid)",
+            actual: format!("PgIdentifyObjectAsAddress({} args)", values.len()),
+        })),
+    }
+}
+
+pub(crate) fn eval_pg_get_object_address(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
+        [object_type, object_names, object_args] => {
+            let object_type = object_type.as_text().unwrap_or_default();
+            let object_names = text_array_values(object_names);
+            let object_args = text_array_values(object_args);
+            let catalog = executor_catalog(ctx)?;
+            // :HACK: This covers the event_trigger regression's object-address
+            // round trip. The long-term shape should route through a shared
+            // PostgreSQL-like object-address resolver for all catalog classes.
+            if object_type.eq_ignore_ascii_case("event trigger")
+                && object_names.len() == 1
+                && object_args.is_empty()
+                && let Some(row) = catalog.event_trigger_row_by_name(&object_names[0])
+            {
+                return Ok(Value::Record(RecordValue::anonymous(vec![
+                    (
+                        "classid".into(),
+                        Value::Int64(i64::from(PG_EVENT_TRIGGER_RELATION_OID)),
+                    ),
+                    ("objid".into(), Value::Int64(i64::from(row.oid))),
+                    ("objsubid".into(), Value::Int32(0)),
+                ])));
+            }
+            Ok(Value::Null)
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_get_object_address(type, object_names, object_args)",
+            actual: format!("PgGetObjectAddress({} args)", values.len()),
+        })),
+    }
+}
+
+fn object_address_args(
+    classid: &Value,
+    objid: &Value,
+    objsubid: &Value,
+    func_name: &'static str,
+) -> Result<(u32, u32, u32), ExecError> {
+    Ok((
+        oid_arg_to_u32(classid, func_name)?,
+        oid_arg_to_u32(objid, func_name)?,
+        oid_arg_to_u32(objsubid, func_name)?,
+    ))
+}
+
+fn event_trigger_name_for_address(
+    catalog: &dyn CatalogLookup,
+    address: (u32, u32, u32),
+) -> Option<String> {
+    let (classid, objid, objsubid) = address;
+    if classid != PG_EVENT_TRIGGER_RELATION_OID || objsubid != 0 {
+        return None;
+    }
+    catalog
+        .event_trigger_row_by_oid(objid)
+        .map(|row| row.evtname)
+}
+
+fn text_array_values(value: &Value) -> Vec<String> {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .filter_map(Value::as_text)
+            .map(str::to_string)
+            .collect(),
+        Value::PgArray(array) => array
+            .elements
+            .iter()
+            .filter_map(Value::as_text)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn eval_pg_event_trigger_table_rewrite_oid() -> Result<Value, ExecError> {
+    current_event_trigger_table_rewrite()
+        .map(|(oid, _)| Value::Int64(i64::from(oid)))
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "pg_event_trigger_table_rewrite_oid() can only be called in a table_rewrite event trigger function".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })
+}
+
+fn eval_pg_event_trigger_table_rewrite_reason() -> Result<Value, ExecError> {
+    current_event_trigger_table_rewrite()
+        .map(|(_, reason)| Value::Int32(reason))
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "pg_event_trigger_table_rewrite_reason() can only be called in a table_rewrite event trigger function".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        })
 }
 
 fn eval_pg_get_statisticsobjdef(
@@ -9571,6 +9735,12 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
         BuiltinScalarFunction::PgReplicationOriginCreate => {
             eval_pg_replication_origin_create(values)
         }
+        BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(values, ctx),
+        BuiltinScalarFunction::PgIdentifyObject => eval_pg_identify_object(values, ctx),
+        BuiltinScalarFunction::PgIdentifyObjectAsAddress => {
+            eval_pg_identify_object_as_address(values, ctx)
+        }
+        BuiltinScalarFunction::PgGetObjectAddress => eval_pg_get_object_address(values, ctx),
         BuiltinScalarFunction::GistTranslateCmpTypeCommon => {
             eval_gist_translate_cmptype_common(values)
         }
@@ -10285,6 +10455,17 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgTableIsVisible => eval_pg_table_is_visible(&values, ctx),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
         BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(&values, ctx),
+        BuiltinScalarFunction::PgIdentifyObject => eval_pg_identify_object(&values, ctx),
+        BuiltinScalarFunction::PgIdentifyObjectAsAddress => {
+            eval_pg_identify_object_as_address(&values, ctx)
+        }
+        BuiltinScalarFunction::PgGetObjectAddress => eval_pg_get_object_address(&values, ctx),
+        BuiltinScalarFunction::PgEventTriggerTableRewriteOid => {
+            eval_pg_event_trigger_table_rewrite_oid()
+        }
+        BuiltinScalarFunction::PgEventTriggerTableRewriteReason => {
+            eval_pg_event_trigger_table_rewrite_reason()
+        }
         BuiltinScalarFunction::PgGetFunctionArguments => {
             eval_pg_get_function_arguments(&values, ctx)
         }

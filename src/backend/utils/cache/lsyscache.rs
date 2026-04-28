@@ -21,7 +21,8 @@ use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
     build_pg_rules_rows, build_pg_stat_all_tables_rows, build_pg_stat_io_rows,
     build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
-    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
+    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_tables_rows,
+    build_pg_views_rows,
 };
 use crate::include::access::brin_page::{
     BRIN_PAGE_CONTENT_OFFSET, BrinMetaPageData, brin_is_meta_page,
@@ -30,11 +31,11 @@ use crate::include::catalog::{
     CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
     PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
     PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow,
-    PgEnumRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow,
-    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
-    PgTypeRow,
+    PgEnumRow, PgEventTriggerRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgStatisticRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::SqlType;
@@ -2128,6 +2129,12 @@ impl CatalogLookup for LazyCatalogLookup {
             .unwrap_or_default()
     }
 
+    fn event_trigger_rows(&self) -> Vec<PgEventTriggerRow> {
+        backend_catcache(&self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.event_trigger_rows())
+            .unwrap_or_default()
+    }
+
     fn policy_rows_for_relation(
         &self,
         relation_oid: u32,
@@ -2259,6 +2266,19 @@ impl CatalogLookup for LazyCatalogLookup {
         backend_catcache(&self.db, self.client_id, self.txn_ctx)
             .map(|catcache| catcache.user_mapping_rows())
             .unwrap_or_default()
+    }
+
+    fn pg_tables_rows(&self) -> Vec<Vec<Value>> {
+        let authids = self
+            .db
+            .auth_catalog(self.client_id, self.txn_ctx)
+            .map(|catalog| catalog.roles().to_vec())
+            .unwrap_or_default();
+        build_pg_tables_rows(
+            ensure_namespace_rows(&self.db, self.client_id, self.txn_ctx),
+            authids,
+            ensure_class_rows(&self.db, self.client_id, self.txn_ctx),
+        )
     }
 
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {

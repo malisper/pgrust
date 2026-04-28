@@ -27,7 +27,10 @@ use crate::include::nodes::datetime::{
 use crate::include::nodes::datum::{IntervalValue, NumericValue, RecordValue};
 use crate::include::nodes::primnodes::{TextSearchTableFunction, expr_sql_type_hint};
 use crate::include::nodes::tsearch::TsWeight;
-use crate::pl::plpgsql::execute_user_defined_set_returning_function;
+use crate::pl::plpgsql::{
+    current_event_trigger_ddl_commands, current_event_trigger_dropped_objects,
+    execute_user_defined_set_returning_function,
+};
 
 const MAX_UNBOUNDED_TIMESTAMP_SERIES_ROWS: usize = 10_000;
 
@@ -248,6 +251,8 @@ fn execute_native_set_returning_function(
         ])]),
         "pg_tablespace_databases" => Some(eval_pg_tablespace_databases(&values)),
         "pg_get_publication_tables" => Some(eval_pg_get_publication_tables(&values, ctx)?),
+        "pg_event_trigger_ddl_commands" => Some(eval_pg_event_trigger_ddl_commands()),
+        "pg_event_trigger_dropped_objects" => Some(eval_pg_event_trigger_dropped_objects()),
         _ => {
             if let Some(func) = builtin_scalar_function_for_proc_oid(row.oid) {
                 let value = eval_native_builtin_scalar_value_call(func, &values, false, ctx)?;
@@ -261,6 +266,63 @@ fn execute_native_set_returning_function(
         }
     };
     Ok(rows)
+}
+
+fn eval_pg_event_trigger_dropped_objects() -> Vec<TupleSlot> {
+    current_event_trigger_dropped_objects()
+        .into_iter()
+        .map(|row| {
+            TupleSlot::virtual_row(vec![
+                Value::Int64(i64::from(row.classid)),
+                Value::Int64(i64::from(row.objid)),
+                Value::Int32(row.objsubid),
+                Value::Bool(row.original),
+                Value::Bool(row.normal),
+                Value::Bool(row.is_temporary),
+                Value::Text(row.object_type.into()),
+                row.schema_name
+                    .map(|schema| Value::Text(schema.into()))
+                    .unwrap_or(Value::Null),
+                row.object_name
+                    .map(|name| Value::Text(name.into()))
+                    .unwrap_or(Value::Null),
+                Value::Text(row.object_identity.into()),
+                Value::Array(
+                    row.address_names
+                        .into_iter()
+                        .map(|name| Value::Text(name.into()))
+                        .collect(),
+                ),
+                Value::Array(
+                    row.address_args
+                        .into_iter()
+                        .map(|arg| Value::Text(arg.into()))
+                        .collect(),
+                ),
+            ])
+        })
+        .collect()
+}
+
+fn eval_pg_event_trigger_ddl_commands() -> Vec<TupleSlot> {
+    current_event_trigger_ddl_commands()
+        .into_iter()
+        .map(|row| {
+            TupleSlot::virtual_row(vec![
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int32(0),
+                Value::Text(row.command_tag.into()),
+                Value::Text(row.object_type.into()),
+                row.schema_name
+                    .map(|schema| Value::Text(schema.into()))
+                    .unwrap_or(Value::Null),
+                Value::Text(row.object_identity.into()),
+                Value::Bool(false),
+                Value::Null,
+            ])
+        })
+        .collect()
 }
 
 fn eval_pg_get_publication_tables(

@@ -318,6 +318,7 @@ pub(crate) fn sql_type_name(ty: SqlType) -> String {
             SqlTypeKind::Shell => "shell",
             SqlTypeKind::Internal => "internal",
             SqlTypeKind::Trigger => "trigger",
+            SqlTypeKind::EventTrigger => "event_trigger",
             SqlTypeKind::Void => "void",
             SqlTypeKind::Cstring => "cstring",
             SqlTypeKind::FdwHandler => "fdw_handler",

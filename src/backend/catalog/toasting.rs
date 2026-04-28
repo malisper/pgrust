@@ -58,7 +58,8 @@ fn type_maximum_size(column: &crate::backend::executor::ColumnDesc) -> Option<us
         crate::backend::parser::SqlTypeKind::Shell => Some(column.storage.attlen as usize),
         crate::backend::parser::SqlTypeKind::Cstring => Some(column.storage.attlen as usize),
         crate::backend::parser::SqlTypeKind::Void => Some(column.storage.attlen as usize),
-        crate::backend::parser::SqlTypeKind::Trigger => Some(column.storage.attlen as usize),
+        crate::backend::parser::SqlTypeKind::Trigger
+        | crate::backend::parser::SqlTypeKind::EventTrigger => Some(column.storage.attlen as usize),
         crate::backend::parser::SqlTypeKind::FdwHandler => Some(column.storage.attlen as usize),
         crate::backend::parser::SqlTypeKind::Name => Some(64 + crate::include::varatt::VARHDRSZ),
         crate::backend::parser::SqlTypeKind::InternalChar => Some(2),

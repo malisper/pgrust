@@ -13,13 +13,15 @@ pub use ast::*;
 pub use cache::PlpgsqlFunctionCache;
 pub use compile::{CompiledFunction, TriggerTransitionTable};
 pub use exec::{
+    EventTriggerCallContext, EventTriggerDdlCommandRow, EventTriggerDroppedObjectRow,
     PlpgsqlNotice, TriggerCallContext, TriggerFunctionResult, TriggerOperation, clear_notices,
-    take_notices,
+    current_event_trigger_ddl_commands, current_event_trigger_dropped_objects,
+    current_event_trigger_table_rewrite, take_notices,
 };
 pub(crate) use exec::{
-    execute_user_defined_procedure_values, execute_user_defined_scalar_function,
-    execute_user_defined_scalar_function_values, execute_user_defined_set_returning_function,
-    execute_user_defined_trigger_function,
+    execute_user_defined_event_trigger_function, execute_user_defined_procedure_values,
+    execute_user_defined_scalar_function, execute_user_defined_scalar_function_values,
+    execute_user_defined_set_returning_function, execute_user_defined_trigger_function,
 };
 pub use gram::parse_block;
 
@@ -53,6 +55,7 @@ fn block_contains_return_expr(block: &Block) -> bool {
 fn stmt_contains_return_expr(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Return { expr: Some(_) } => true,
+        Stmt::Continue => false,
         Stmt::Block(block) => block_contains_return_expr(block),
         Stmt::If {
             branches,

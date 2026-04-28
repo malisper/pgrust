@@ -10,17 +10,17 @@ use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::parser::{
     ArraySubscript, Assignment, AssignmentTarget, AssignmentTargetIndirection, BoundCte,
     BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup,
-    CreateTableAsStatement, CteBody, FromItem, InsertSource, InsertStatement, OnConflictClause,
-    OnConflictTarget, OrderByItem, ParseError, RawWindowFrame, RawWindowFrameBound, RawWindowSpec,
-    RawXmlExpr, SelectItem, SelectStatement, SlotScopeColumn, SqlCallArgs, SqlCaseWhen, SqlExpr,
-    SqlType, SqlTypeKind, Statement, ValuesStatement, XmlTableColumn,
-    bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
+    CreateTableAsStatement, CreateTableStatement, CteBody, DeleteStatement, FromItem, InsertSource,
+    InsertStatement, OnConflictClause, OnConflictTarget, OrderByItem, ParseError, RawWindowFrame,
+    RawWindowFrameBound, RawWindowSpec, RawXmlExpr, SelectItem, SelectStatement, SlotScopeColumn,
+    SqlCallArgs, SqlCaseWhen, SqlExpr, SqlType, SqlTypeKind, Statement, UpdateStatement,
+    ValuesStatement, XmlTableColumn, bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
     bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
     parse_statement, parse_type_name, pg_plan_query_with_outer_scopes_and_ctes,
     pg_plan_values_query_with_outer_scopes_and_ctes, resolve_raw_type_name,
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
-use crate::include::catalog::{PgProcRow, RECORD_TYPE_OID};
+use crate::include::catalog::{EVENT_TRIGGER_TYPE_OID, PgProcRow, RECORD_TYPE_OID};
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, Var, user_attrno};
 
@@ -158,6 +158,9 @@ pub(crate) enum FunctionReturnContract {
     Trigger {
         bindings: CompiledTriggerBindings,
     },
+    EventTrigger {
+        bindings: CompiledEventTriggerBindings,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +182,12 @@ pub(crate) struct CompiledTriggerBindings {
 pub(crate) struct CompiledTriggerRelation {
     pub(crate) slots: Vec<usize>,
     pub(crate) field_names: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledEventTriggerBindings {
+    pub(crate) tg_event_slot: usize,
+    pub(crate) tg_tag_slot: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,11 +229,13 @@ pub(crate) enum CompiledStmt {
         sqlstate: Option<String>,
         message: String,
         params: Vec<CompiledExpr>,
+        line: usize,
     },
     Assert {
         condition: CompiledExpr,
         message: Option<CompiledExpr>,
     },
+    Continue,
     Return {
         expr: Option<CompiledExpr>,
     },
@@ -248,6 +259,7 @@ pub(crate) enum CompiledStmt {
         sql_expr: CompiledExpr,
         into_targets: Vec<CompiledSelectIntoTarget>,
         using_exprs: Vec<CompiledExpr>,
+        line: usize,
     },
     SetGuc {
         name: String,
@@ -301,6 +313,9 @@ pub(crate) enum CompiledStmt {
     },
     CreateTableAs {
         stmt: CreateTableAsStatement,
+    },
+    CreateTable {
+        stmt: CreateTableStatement,
     },
 }
 
@@ -646,6 +661,14 @@ pub(crate) fn compile_function_from_proc(
     row: &PgProcRow,
     catalog: &dyn CatalogLookup,
 ) -> Result<CompiledFunction, ParseError> {
+    if row.prorettype == EVENT_TRIGGER_TYPE_OID {
+        return Err(ParseError::DetailedError {
+            message: "trigger functions can only be called as triggers".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
     let block = parse_block(&row.prosrc)?;
     let mut env = CompileEnv::default();
     let mut parameter_slots = Vec::new();
@@ -801,6 +824,32 @@ pub(crate) fn compile_trigger_function_from_proc(
         sqlerrm_slot,
         local_ctes: env.local_ctes.clone(),
         trigger_transition_ctes,
+    })
+}
+
+pub(crate) fn compile_event_trigger_function_from_proc(
+    row: &PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> Result<CompiledFunction, ParseError> {
+    let block = parse_block(&row.prosrc)?;
+    let mut env = CompileEnv::default();
+    let bindings = seed_event_trigger_env(&mut env);
+    let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
+    let sqlerrm_slot = env.define_var("sqlerrm", SqlType::new(SqlTypeKind::Text));
+    let return_contract = FunctionReturnContract::EventTrigger { bindings };
+    let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
+    Ok(CompiledFunction {
+        name: row.proname.clone(),
+        proconfig: row.proconfig.clone(),
+        parameter_slots: Vec::new(),
+        context_arg_type_names: Vec::new(),
+        output_slots: Vec::new(),
+        body,
+        return_contract,
+        found_slot,
+        sqlerrm_slot,
+        local_ctes: Vec::new(),
+        trigger_transition_ctes: Vec::new(),
     })
 }
 
@@ -1147,6 +1196,7 @@ fn compile_stmt(
             sqlstate,
             message,
             params,
+            line,
         } => {
             let placeholder_count = message.matches('%').count();
             if placeholder_count != params.len() {
@@ -1166,6 +1216,7 @@ fn compile_stmt(
                     .iter()
                     .map(|expr| compile_expr_text(expr, catalog, env))
                     .collect::<Result<_, _>>()?,
+                line: *line,
             }
         }
         Stmt::Assert { condition, message } => CompiledStmt::Assert {
@@ -1175,6 +1226,7 @@ fn compile_stmt(
                 .map(|expr| compile_expr_text(expr, catalog, env))
                 .transpose()?,
         },
+        Stmt::Continue => CompiledStmt::Continue,
         Stmt::Return { expr } => {
             compile_return_stmt(expr.as_deref(), catalog, env, return_contract)?
         }
@@ -1189,7 +1241,10 @@ fn compile_stmt(
             sql_expr,
             into_targets,
             using_exprs,
-        } => compile_dynamic_execute_stmt(sql_expr, into_targets, using_exprs, catalog, env)?,
+            line,
+        } => {
+            compile_dynamic_execute_stmt(sql_expr, into_targets, using_exprs, *line, catalog, env)?
+        }
         Stmt::GetDiagnostics { stacked, items } => {
             let items = items
                 .iter()
@@ -1255,6 +1310,15 @@ fn compile_return_stmt(
         (FunctionReturnContract::Trigger { .. }, Some(_)) => Err(ParseError::FeatureNotSupported(
             "trigger RETURN expressions must be NEW, OLD, or NULL".into(),
         )),
+        (FunctionReturnContract::EventTrigger { .. }, None) => {
+            Ok(CompiledStmt::ReturnTriggerNoValue)
+        }
+        (FunctionReturnContract::EventTrigger { .. }, Some(_)) => Err(ParseError::DetailedError {
+            message: "RETURN cannot have a parameter in function returning event_trigger".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        }),
         (
             FunctionReturnContract::Scalar {
                 output_slot: Some(_),
@@ -1316,7 +1380,8 @@ fn compile_return_next_stmt(
         ));
     };
     match (contract, expr) {
-        (FunctionReturnContract::Trigger { .. }, _) => Err(ParseError::FeatureNotSupported(
+        (FunctionReturnContract::Trigger { .. }, _)
+        | (FunctionReturnContract::EventTrigger { .. }, _) => Err(ParseError::FeatureNotSupported(
             "RETURN NEXT is not valid in trigger functions".into(),
         )),
         (FunctionReturnContract::Scalar { setof: true, .. }, Some(expr)) => {
@@ -1371,8 +1436,9 @@ fn plan_values_for_env(
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
 ) -> Result<PlannedStmt, ParseError> {
+    let stmt = normalize_plpgsql_values(stmt.clone(), env);
     pg_plan_values_query_with_outer_scopes_and_ctes(
-        stmt,
+        &stmt,
         catalog,
         &[outer_scope_for_sql(env)],
         &env.local_ctes,
@@ -1395,7 +1461,9 @@ fn compile_return_query_stmt(
         FunctionReturnContract::Scalar { setof, .. }
         | FunctionReturnContract::FixedRow { setof, .. }
         | FunctionReturnContract::AnonymousRecord { setof } => *setof,
-        FunctionReturnContract::Trigger { .. } => false,
+        FunctionReturnContract::Trigger { .. } | FunctionReturnContract::EventTrigger { .. } => {
+            false
+        }
     };
     if !is_setof {
         return Err(ParseError::FeatureNotSupported(
@@ -1442,6 +1510,7 @@ fn compile_dynamic_execute_stmt(
     sql_expr: &str,
     into_targets: &[AssignTarget],
     using_exprs: &[String],
+    line: usize,
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
@@ -1459,6 +1528,7 @@ fn compile_dynamic_execute_stmt(
             .iter()
             .map(|expr| compile_expr_text(expr, catalog, env))
             .collect::<Result<_, _>>()?,
+        line,
     })
 }
 
@@ -1560,23 +1630,31 @@ fn compile_exec_sql_stmt(
             line: 1,
         }),
         Statement::Values(stmt) => Ok(CompiledStmt::Perform {
-            plan: pg_plan_values_query_with_outer_scopes_and_ctes(
-                &stmt,
-                catalog,
-                &[outer_scope],
-                &env.local_ctes,
-            )?,
+            plan: plan_values_for_env(&stmt, catalog, env)?,
             line: 1,
         }),
         Statement::Insert(stmt) => Ok(CompiledStmt::ExecInsert {
-            stmt: bind_insert_with_outer_scopes(&stmt, catalog, &[outer_scope])?,
+            stmt: bind_insert_with_outer_scopes(
+                &normalize_plpgsql_insert(stmt, env),
+                catalog,
+                &[outer_scope],
+            )?,
         }),
         Statement::Update(stmt) => Ok(CompiledStmt::ExecUpdate {
-            stmt: bind_update_with_outer_scopes(&stmt, catalog, &[outer_scope])?,
+            stmt: bind_update_with_outer_scopes(
+                &normalize_plpgsql_update(stmt, env),
+                catalog,
+                &[outer_scope],
+            )?,
         }),
         Statement::Delete(stmt) => Ok(CompiledStmt::ExecDelete {
-            stmt: bind_delete_with_outer_scopes(&stmt, catalog, &[outer_scope])?,
+            stmt: bind_delete_with_outer_scopes(
+                &normalize_plpgsql_delete(stmt, env),
+                catalog,
+                &[outer_scope],
+            )?,
         }),
+        Statement::CreateTable(stmt) => Ok(CompiledStmt::CreateTable { stmt }),
         Statement::CreateTableAs(stmt) => Ok(CompiledStmt::CreateTableAs { stmt }),
         Statement::Set(stmt) if stmt.name.eq_ignore_ascii_case("jit") => {
             // :HACK: pgrust has no JIT subsystem; PL/pgSQL regression helpers
@@ -2333,6 +2411,7 @@ fn compile_exec_returning_into_stmt(
     let outer_scope = outer_scope_for_sql(env);
     match stmt {
         Statement::Insert(stmt) => {
+            let stmt = normalize_plpgsql_insert(stmt, env);
             let bound = bind_insert_with_outer_scopes(&stmt, catalog, &[outer_scope])?;
             let targets = compile_dml_into_targets(
                 target_refs,
@@ -2349,6 +2428,7 @@ fn compile_exec_returning_into_stmt(
             })
         }
         Statement::Update(stmt) => {
+            let stmt = normalize_plpgsql_update(stmt, env);
             let bound = bind_update_with_outer_scopes(&stmt, catalog, &[outer_scope])?;
             let targets = compile_dml_into_targets(
                 target_refs,
@@ -2365,6 +2445,7 @@ fn compile_exec_returning_into_stmt(
             })
         }
         Statement::Delete(stmt) => {
+            let stmt = normalize_plpgsql_delete(stmt, env);
             let bound = bind_delete_with_outer_scopes(&stmt, catalog, &[outer_scope])?;
             let targets = compile_dml_into_targets(
                 target_refs,
@@ -3394,6 +3475,52 @@ fn normalize_plpgsql_insert(mut stmt: InsertStatement, env: &CompileEnv) -> Inse
     stmt
 }
 
+fn normalize_plpgsql_update(mut stmt: UpdateStatement, env: &CompileEnv) -> UpdateStatement {
+    stmt.with = stmt
+        .with
+        .into_iter()
+        .map(|mut cte| {
+            cte.body = normalize_plpgsql_cte_body(cte.body, env);
+            cte
+        })
+        .collect();
+    stmt.assignments = stmt
+        .assignments
+        .into_iter()
+        .map(|assignment| normalize_plpgsql_assignment(assignment, env))
+        .collect();
+    stmt.from = stmt.from.map(|from| normalize_plpgsql_from_item(from, env));
+    stmt.where_clause = stmt
+        .where_clause
+        .map(|expr| normalize_plpgsql_expr(expr, env));
+    stmt.returning = stmt
+        .returning
+        .into_iter()
+        .map(|item| normalize_plpgsql_select_item(item, env))
+        .collect();
+    stmt
+}
+
+fn normalize_plpgsql_delete(mut stmt: DeleteStatement, env: &CompileEnv) -> DeleteStatement {
+    stmt.with = stmt
+        .with
+        .into_iter()
+        .map(|mut cte| {
+            cte.body = normalize_plpgsql_cte_body(cte.body, env);
+            cte
+        })
+        .collect();
+    stmt.where_clause = stmt
+        .where_clause
+        .map(|expr| normalize_plpgsql_expr(expr, env));
+    stmt.returning = stmt
+        .returning
+        .into_iter()
+        .map(|item| normalize_plpgsql_select_item(item, env))
+        .collect();
+    stmt
+}
+
 fn normalize_plpgsql_values(mut values: ValuesStatement, env: &CompileEnv) -> ValuesStatement {
     values.with = values
         .with
@@ -3625,6 +3752,15 @@ fn seed_trigger_env(env: &mut CompileEnv, relation_desc: &RelationDesc) -> Compi
     }
 }
 
+fn seed_event_trigger_env(env: &mut CompileEnv) -> CompiledEventTriggerBindings {
+    let tg_event_slot = env.define_var("tg_event", SqlType::new(SqlTypeKind::Text));
+    let tg_tag_slot = env.define_var("tg_tag", SqlType::new(SqlTypeKind::Text));
+    CompiledEventTriggerBindings {
+        tg_event_slot,
+        tg_tag_slot,
+    }
+}
+
 fn resolve_assign_target(
     target: &AssignTarget,
     env: &CompileEnv,
@@ -3724,6 +3860,31 @@ mod tests {
             SqlExpr::FieldSelect {
                 expr: Box::new(SqlExpr::Column(plpgsql_label_alias(0, outer_slot, "rec"))),
                 field: "backlink".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn normalizes_record_field_references_in_insert_values() {
+        let mut env = CompileEnv::default();
+        env.define_var("obj", SqlType::record(RECORD_TYPE_OID));
+
+        let Statement::Insert(stmt) =
+            parse_statement("insert into dropped_objects (object_type) values (obj.object_type)")
+                .unwrap()
+        else {
+            panic!("expected INSERT statement");
+        };
+        let normalized = normalize_plpgsql_insert(stmt, &env);
+
+        let InsertSource::Values(rows) = normalized.source else {
+            panic!("expected INSERT VALUES source");
+        };
+        assert_eq!(
+            rows[0][0],
+            SqlExpr::FieldSelect {
+                expr: Box::new(SqlExpr::Column("obj".into())),
+                field: "object_type".into(),
             }
         );
     }

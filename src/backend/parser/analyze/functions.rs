@@ -1786,8 +1786,14 @@ pub(super) fn validate_scalar_function_arity(
                 args.len() == 1
             }
             BuiltinScalarFunction::TxidStatus => args.len() == 1,
+            BuiltinScalarFunction::PgIdentifyObject
+            | BuiltinScalarFunction::PgIdentifyObjectAsAddress
+            | BuiltinScalarFunction::PgGetObjectAddress
+            | BuiltinScalarFunction::PgDescribeObject => args.len() == 3,
+            BuiltinScalarFunction::PgEventTriggerTableRewriteOid
+            | BuiltinScalarFunction::PgEventTriggerTableRewriteReason
+            | BuiltinScalarFunction::PgTriggerDepth => args.is_empty(),
             BuiltinScalarFunction::PgGetTriggerDef => matches!(args.len(), 1 | 2),
-            BuiltinScalarFunction::PgTriggerDepth => args.is_empty(),
             BuiltinScalarFunction::PgPartitionRoot
             | BuiltinScalarFunction::PgGetPartKeyDef
             | BuiltinScalarFunction::PgTableIsVisible
@@ -1892,7 +1898,6 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::MakeAclItem => args.len() == 4,
             BuiltinScalarFunction::PgGetUserById => args.len() == 1,
             BuiltinScalarFunction::ObjDescription => matches!(args.len(), 1 | 2),
-            BuiltinScalarFunction::PgDescribeObject => args.len() == 3,
             BuiltinScalarFunction::PgGetFunctionArguments
             | BuiltinScalarFunction::PgGetFunctionDef
             | BuiltinScalarFunction::PgGetFunctionResult
@@ -3550,6 +3555,18 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgDescribeObject,
         ),
         (
+            "pg_identify_object",
+            BuiltinScalarFunction::PgIdentifyObject,
+        ),
+        (
+            "pg_identify_object_as_address",
+            BuiltinScalarFunction::PgIdentifyObjectAsAddress,
+        ),
+        (
+            "pg_get_object_address",
+            BuiltinScalarFunction::PgGetObjectAddress,
+        ),
+        (
             "pg_get_function_arguments",
             BuiltinScalarFunction::PgGetFunctionArguments,
         ),
@@ -4175,6 +4192,18 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_describe_object",
             BuiltinScalarFunction::PgDescribeObject,
+        ),
+        (
+            "pg_identify_object",
+            BuiltinScalarFunction::PgIdentifyObject,
+        ),
+        (
+            "pg_identify_object_as_address",
+            BuiltinScalarFunction::PgIdentifyObjectAsAddress,
+        ),
+        (
+            "pg_get_object_address",
+            BuiltinScalarFunction::PgGetObjectAddress,
         ),
         (
             "pg_get_function_arguments",
