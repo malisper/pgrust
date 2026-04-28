@@ -8,6 +8,7 @@ use crate::backend::parser::{
     AlterRoleAction, AlterRoleStatement, CommentOnRoleStatement, CreateRoleStatement,
     DropOwnedStatement, DropRoleStatement, ReassignOwnedStatement,
 };
+use crate::include::catalog::{DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_POLICY_RELATION_OID};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl Database {
@@ -731,6 +732,59 @@ impl Database {
             current_cid = current_cid.saturating_add(1);
         }
 
+        let catcache = self
+            .txn_backend_catcache(client_id, xid, current_cid)
+            .map_err(map_role_catalog_error)?;
+        let mut policy_rows = catcache
+            .policy_rows()
+            .into_iter()
+            .filter(|row| row.polroles.iter().any(|oid| role_oids.contains(oid)))
+            .collect::<Vec<_>>();
+        policy_rows.sort_by(|left, right| {
+            left.polrelid
+                .cmp(&right.polrelid)
+                .then(left.polname.cmp(&right.polname))
+                .then(left.oid.cmp(&right.oid))
+        });
+        for policy in policy_rows {
+            let retained_roles = policy
+                .polroles
+                .iter()
+                .copied()
+                .filter(|oid| !role_oids.contains(oid))
+                .collect::<Vec<_>>();
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: current_cid,
+                client_id,
+                waiter: Some(self.txn_waiter.clone()),
+                interrupts: interrupts.clone(),
+            };
+            let effect = if retained_roles.is_empty() {
+                self.catalog
+                    .write()
+                    .drop_policy_mvcc(policy.polrelid, &policy.polname, &ctx)
+                    .map(|(_, effect)| effect)
+            } else {
+                let referenced_relation_oids =
+                    policy_normal_relation_dependencies(&catcache, policy.oid, policy.polrelid);
+                let updated = crate::include::catalog::PgPolicyRow {
+                    polroles: retained_roles,
+                    ..policy.clone()
+                };
+                self.catalog
+                    .write()
+                    .replace_policy_mvcc(&policy, updated, &referenced_relation_oids, &ctx)
+                    .map(|(_, effect)| effect)
+            }
+            .map_err(map_role_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            current_cid = current_cid.saturating_add(1);
+        }
+
         // :HACK: DROP OWNED currently covers pgrust's tracked shared-role dependencies
         // (relation ownership, pg_auth_members rows, and database CREATE grants). Full
         // PostgreSQL-style shared dependency traversal should replace this with a single
@@ -1330,6 +1384,28 @@ fn shared_role_dependency_details_for_roles(
     default_privilege_details.dedup();
     details.extend(default_privilege_details);
     Ok(details)
+}
+
+fn policy_normal_relation_dependencies(
+    catcache: &crate::backend::utils::cache::catcache::CatCache,
+    policy_oid: u32,
+    policy_relation_oid: u32,
+) -> Vec<u32> {
+    let mut relation_oids = catcache
+        .depend_rows()
+        .into_iter()
+        .filter(|row| {
+            row.classid == PG_POLICY_RELATION_OID
+                && row.objid == policy_oid
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid != policy_relation_oid
+                && row.deptype == DEPENDENCY_NORMAL
+        })
+        .map(|row| row.refobjid)
+        .collect::<Vec<_>>();
+    relation_oids.sort_unstable();
+    relation_oids.dedup();
+    relation_oids
 }
 
 fn relation_kind_name_for_role_deps(relkind: char) -> &'static str {
@@ -2176,6 +2252,86 @@ mod tests {
 
         assert_eq!(
             superuser.execute(&db, "drop role tenant").unwrap(),
+            StatementResult::AffectedRows(0)
+        );
+    }
+
+    #[test]
+    fn drop_owned_drops_or_rewrites_policy_role_targets() {
+        let base = temp_dir("drop_owned_policy_dependencies");
+        let db = Database::open(&base, 16).unwrap();
+        let mut superuser = Session::new(1);
+        superuser.execute(&db, "create role policy_owner1").unwrap();
+        superuser.execute(&db, "create role policy_owner2").unwrap();
+        superuser
+            .execute(&db, "create table policy_owned_tbl (a int4)")
+            .unwrap();
+
+        superuser
+            .execute(
+                &db,
+                "create policy p1 on policy_owned_tbl to policy_owner1 using (true)",
+            )
+            .unwrap();
+        superuser
+            .execute(&db, "drop owned by policy_owner1")
+            .unwrap();
+        let err = superuser
+            .execute(&db, "drop policy p1 on policy_owned_tbl")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::DetailedError {
+                message,
+                sqlstate: "42704",
+                ..
+            } if message == "policy \"p1\" for table \"policy_owned_tbl\" does not exist"
+        ));
+
+        superuser
+            .execute(
+                &db,
+                "create policy p1 on policy_owned_tbl to policy_owner1, policy_owner1, \
+                 policy_owner2 using (a > (select max(a) from policy_owned_tbl))",
+            )
+            .unwrap();
+        superuser
+            .execute(&db, "drop owned by policy_owner1")
+            .unwrap();
+        assert_eq!(
+            query_rows(
+                &db,
+                1,
+                "select count(*)::int4 from pg_shdepend \
+                 where objid = (select oid from pg_policy where polname = 'p1') \
+                   and refobjid = 'policy_owner1'::regrole"
+            ),
+            vec![vec![Value::Int32(0)]]
+        );
+        assert_eq!(
+            query_rows(
+                &db,
+                1,
+                "select count(*)::int4 from pg_shdepend \
+                 where objid = (select oid from pg_policy where polname = 'p1') \
+                   and refobjid = 'policy_owner2'::regrole"
+            ),
+            vec![vec![Value::Int32(1)]]
+        );
+        assert_eq!(
+            query_rows(
+                &db,
+                1,
+                "select count(*)::int4 from pg_depend \
+                 where objid = (select oid from pg_policy where polname = 'p1') \
+                   and refobjid = 'policy_owned_tbl'::regclass"
+            ),
+            vec![vec![Value::Int32(1)]]
+        );
+        assert_eq!(
+            superuser
+                .execute(&db, "drop policy p1 on policy_owned_tbl")
+                .unwrap(),
             StatementResult::AffectedRows(0)
         );
     }

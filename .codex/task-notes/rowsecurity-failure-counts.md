@@ -320,3 +320,20 @@ Policy catalog dependency rows bucket:
   `689/774` matched, `85` mismatches, `1633` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
 - Remaining dependency-related gap is `DROP OWNED BY` policy cleanup behavior.
+
+DROP OWNED policy dependency bucket:
+- `DROP OWNED BY` now removes policy role targets. Policies whose `polroles`
+  are fully owned by the dropped roles are dropped; mixed-role policies are
+  rewritten to remove only the dropped roles while preserving expression
+  dependency rows.
+- Added focused coverage for both full policy removal and mixed-role rewrite
+  with duplicate target roles.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  drop_owned_drops_or_rewrites_policy_role_targets` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  drop_owned_removes_tracked_role_dependencies` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression status from the interrupted-but-completed run:
+  `689/774` matched, `85` mismatches, `1617` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.
