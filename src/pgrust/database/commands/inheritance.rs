@@ -218,13 +218,13 @@ fn validate_inherit_constraints(
 ) -> Result<(), ExecError> {
     let child_constraints = inherited_check_constraints(catalog, relation.relation_oid);
     for parent_constraint in inherited_check_constraints(catalog, parent.relation_oid) {
-        let matched = child_constraints.iter().any(|child_constraint| {
+        let matched = child_constraints.iter().find(|child_constraint| {
             child_constraint
                 .conname
                 .eq_ignore_ascii_case(&parent_constraint.conname)
                 && child_constraint.conbin == parent_constraint.conbin
         });
-        if !matched {
+        let Some(child_constraint) = matched else {
             return Err(ExecError::DetailedError {
                 message: format!(
                     "child table is missing constraint \"{}\"",
@@ -233,6 +233,30 @@ fn validate_inherit_constraints(
                 detail: None,
                 hint: None,
                 sqlstate: "42704",
+            });
+        };
+        if parent_constraint.conenforced && !child_constraint.conenforced {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "constraint \"{}\" conflicts with NOT ENFORCED constraint on child table \"{}\"",
+                    child_constraint.conname,
+                    relation_name_for_oid(catalog, relation.relation_oid),
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P17",
+            });
+        }
+        if parent_constraint.convalidated && !child_constraint.convalidated {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "constraint \"{}\" conflicts with NOT VALID constraint on child table \"{}\"",
+                    child_constraint.conname,
+                    relation_name_for_oid(catalog, relation.relation_oid),
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P17",
             });
         }
     }
@@ -452,8 +476,10 @@ impl Database {
             let effect = self
                 .catalog
                 .write()
-                .alter_not_null_constraint_state_mvcc(
+                .alter_not_null_constraint_state_by_attnum_mvcc(
                     relation.relation_oid,
+                    attnum,
+                    child_constraint.oid,
                     &child_constraint.conname,
                     None,
                     Some(false),

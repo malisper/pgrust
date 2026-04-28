@@ -1996,6 +1996,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Abs
             | BuiltinScalarFunction::Log10
             | BuiltinScalarFunction::Length
+            | BuiltinScalarFunction::BitLength
             | BuiltinScalarFunction::Lower
             | BuiltinScalarFunction::Upper
             | BuiltinScalarFunction::Unistr
@@ -4078,6 +4079,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("rpad", BuiltinScalarFunction::RPad),
         ("repeat", BuiltinScalarFunction::Repeat),
         ("length", BuiltinScalarFunction::Length),
+        ("bit_length", BuiltinScalarFunction::BitLength),
         ("array_ndims", BuiltinScalarFunction::ArrayNdims),
         ("array_dims", BuiltinScalarFunction::ArrayDims),
         ("array_lower", BuiltinScalarFunction::ArrayLower),
@@ -5052,6 +5054,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::RPad
             | BuiltinScalarFunction::Repeat
             | BuiltinScalarFunction::Length
+            | BuiltinScalarFunction::BitLength
             | BuiltinScalarFunction::ArrayNdims
             | BuiltinScalarFunction::ArrayDims
             | BuiltinScalarFunction::ArrayLower

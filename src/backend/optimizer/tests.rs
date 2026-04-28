@@ -1786,6 +1786,28 @@ fn expression_index_ordered_range_partition_query_uses_append() {
 }
 
 #[test]
+fn range_partition_is_not_null_keeps_non_default_partitions() {
+    let catalog = catalog_with_indexed_range_partitions();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select k from rp where k is not null and k < 15",
+        &catalog,
+    );
+
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Result { .. }
+        )),
+        "range IS NOT NULL should not prune all non-default partitions: {:?}",
+        planned.plan_tree
+    );
+    assert_eq!(
+        child_relation_names(&planned.plan_tree),
+        vec!["rp_p1", "rp_p2"]
+    );
+}
+
+#[test]
 fn partitionwise_join_guc_off_keeps_join_over_appends() {
     let catalog = catalog_with_matching_range_partitions();
     let planned = planned_stmt_for_sql_with_catalog(

@@ -18716,9 +18716,12 @@ fn build_merge_action(pair: Pair<'_, Rule>) -> Result<MergeAction, ParseError> {
         Rule::merge_update_action => Ok(MergeAction::Update {
             assignments: pair
                 .into_inner()
-                .filter(|part| part.as_rule() == Rule::assignment)
-                .map(build_assignment)
-                .collect::<Result<Vec<_>, _>>()?,
+                .filter(|part| part.as_rule() == Rule::assignment_item)
+                .map(build_assignment_item)
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .collect(),
         }),
         Rule::merge_delete_action => Ok(MergeAction::Delete),
         Rule::merge_do_nothing_action => Ok(MergeAction::DoNothing),
@@ -18783,7 +18786,7 @@ fn build_on_conflict_clause(pair: Pair<'_, Rule>) -> Result<OnConflictClause, Pa
                 }
             }
             Rule::on_conflict_target => *target = Some(build_on_conflict_target(part)?),
-            Rule::assignment => assignments.push(build_assignment(part)?),
+            Rule::assignment_item => assignments.extend(build_assignment_item(part)?),
             Rule::expr => *where_clause = Some(build_expr(part)?),
             _ => {}
         }
@@ -19812,16 +19815,39 @@ fn build_exclusion_constraint_body(
             }
             Rule::exclusion_element => {
                 let mut column = None;
+                let mut expr_sql = None;
                 let mut operator = None;
                 for inner in part.into_inner() {
                     match inner.as_rule() {
-                        Rule::identifier => column = Some(build_identifier(inner)),
+                        Rule::create_index_target => {
+                            let target =
+                                inner.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+                            match target.as_rule() {
+                                Rule::identifier => column = Some(build_identifier(target)),
+                                Rule::create_index_expression => {
+                                    let expr = target
+                                        .into_inner()
+                                        .find(|inner| inner.as_rule() == Rule::expr)
+                                        .ok_or(ParseError::UnexpectedEof)?;
+                                    expr_sql = Some(expr.as_str().to_string());
+                                }
+                                Rule::create_index_function_expression => {
+                                    expr_sql = Some(target.as_str().to_string());
+                                }
+                                _ => {}
+                            }
+                        }
                         Rule::operator_token => operator = Some(inner.as_str().to_string()),
                         _ => {}
                     }
                 }
+                let column = column.unwrap_or_default();
+                if column.is_empty() && expr_sql.is_none() {
+                    return Err(ParseError::UnexpectedEof);
+                }
                 elements.push(ExclusionElement {
-                    column: column.ok_or(ParseError::UnexpectedEof)?,
+                    column,
+                    expr_sql,
                     operator: operator.ok_or(ParseError::UnexpectedEof)?,
                 });
             }
@@ -19839,7 +19865,7 @@ fn build_exclusion_constraint_body(
         return Err(ParseError::UnexpectedEof);
     }
     Ok((
-        using_method.ok_or(ParseError::UnexpectedEof)?,
+        using_method.unwrap_or_else(|| "gist".into()),
         elements,
         include_columns,
     ))
@@ -21336,7 +21362,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
                 only = parsed_only;
             }
             Rule::from_item => from = Some(build_from_item(part)?),
-            Rule::assignment => assignments.push(build_assignment(part)?),
+            Rule::assignment_item => assignments.extend(build_assignment_item(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
             Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
@@ -22280,6 +22306,73 @@ fn build_assignment(pair: Pair<'_, Rule>) -> Result<Assignment, ParseError> {
         target: build_assignment_target(inner.next().ok_or(ParseError::UnexpectedEof)?)?,
         expr: build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?,
     })
+}
+
+fn build_assignment_item(pair: Pair<'_, Rule>) -> Result<Vec<Assignment>, ParseError> {
+    match pair.as_rule() {
+        Rule::assignment_item => {
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            build_assignment_item(inner)
+        }
+        Rule::assignment => Ok(vec![build_assignment(pair)?]),
+        Rule::row_assignment => build_row_assignment(pair),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "assignment",
+            actual: pair.as_str().to_string(),
+        }),
+    }
+}
+
+fn build_row_assignment(pair: Pair<'_, Rule>) -> Result<Vec<Assignment>, ParseError> {
+    let mut targets = None;
+    let mut expr = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::assignment_target_list => targets = Some(build_assignment_target_list(part)?),
+            Rule::expr => expr = Some(build_expr(part)?),
+            _ => {}
+        }
+    }
+    let targets = targets.ok_or(ParseError::UnexpectedEof)?;
+    let exprs = split_row_assignment_expr(expr.ok_or(ParseError::UnexpectedEof)?, targets.len())?;
+    Ok(targets
+        .into_iter()
+        .zip(exprs)
+        .map(|(target, expr)| Assignment { target, expr })
+        .collect())
+}
+
+fn split_row_assignment_expr(expr: SqlExpr, arity: usize) -> Result<Vec<SqlExpr>, ParseError> {
+    match expr {
+        SqlExpr::Row(items) if items.len() == arity => Ok(items),
+        SqlExpr::Row(items) => Err(ParseError::UnexpectedToken {
+            expected: "matching row assignment values",
+            actual: format!("{} values", items.len()),
+        }),
+        SqlExpr::ScalarSubquery(select) => {
+            if select.set_operation.is_some() || select.targets.len() != arity {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "matching row assignment columns",
+                    actual: format!("{} columns", select.targets.len()),
+                });
+            }
+            let select = *select;
+            Ok(select
+                .targets
+                .iter()
+                .map(|target| {
+                    let mut projected = select.clone();
+                    projected.targets = vec![target.clone()];
+                    SqlExpr::ScalarSubquery(Box::new(projected))
+                })
+                .collect())
+        }
+        other if arity == 1 => Ok(vec![other]),
+        other => Err(ParseError::UnexpectedToken {
+            expected: "row assignment source",
+            actual: format!("{other:?}"),
+        }),
+    }
 }
 
 fn build_assignment_target_list(pair: Pair<'_, Rule>) -> Result<Vec<AssignmentTarget>, ParseError> {

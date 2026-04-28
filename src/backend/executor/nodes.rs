@@ -5518,6 +5518,10 @@ fn exec_lateral_join<'a>(
                         values,
                         &state.current_left.as_ref().unwrap().system_bindings,
                     );
+                    set_active_system_bindings(
+                        ctx,
+                        &state.current_left.as_ref().unwrap().system_bindings,
+                    );
                     let saved_params = bind_exec_params(
                         &state.nest_params,
                         &mut state.current_left.as_mut().unwrap().slot,

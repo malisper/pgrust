@@ -4229,6 +4229,7 @@ pub enum TableConstraint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExclusionElement {
     pub column: String,
+    pub expr_sql: Option<String>,
     pub operator: String,
 }
 
