@@ -298,6 +298,15 @@ pub(crate) fn validate_partitioned_check_constraints(
 pub(crate) fn relation_partition_spec(
     relation: &BoundRelation,
 ) -> Result<LoweredPartitionSpec, ParseError> {
+    if let Some(spec) = relation.partition_spec.as_ref() {
+        return Ok(spec.clone());
+    }
+    lower_relation_partition_spec_uncached(relation)
+}
+
+pub(crate) fn lower_relation_partition_spec_uncached(
+    relation: &BoundRelation,
+) -> Result<LoweredPartitionSpec, ParseError> {
     let row = relation.partitioned_table.as_ref().ok_or_else(|| {
         ParseError::InvalidTableDefinition(format!(
             "relation \"{}\" is not declaratively partitioned",

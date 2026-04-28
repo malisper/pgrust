@@ -85,6 +85,7 @@ pub struct BoundRelation {
     pub relpartbound: Option<String>,
     pub desc: RelationDesc,
     pub partitioned_table: Option<PgPartitionedTableRow>,
+    pub partition_spec: Option<LoweredPartitionSpec>,
 }
 
 #[derive(Debug, Clone, Copy)]

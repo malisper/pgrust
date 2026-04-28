@@ -9,12 +9,13 @@ use crate::backend::catalog::rowcodec::{
     namespace_row_from_values, pg_aggregate_row_from_values, pg_am_row_from_values,
     pg_amop_row_from_values, pg_amproc_row_from_values, pg_attrdef_row_from_values,
     pg_attribute_row_from_values, pg_auth_members_row_from_values, pg_authid_row_from_values,
-    pg_class_row_from_values, pg_collation_row_from_values, pg_constraint_row_from_values,
-    pg_depend_row_from_values, pg_description_row_from_values, pg_index_row_from_values,
-    pg_inherits_row_from_values, pg_language_row_from_values, pg_opclass_row_from_values,
-    pg_operator_row_from_values, pg_opfamily_row_from_values, pg_partitioned_table_row_from_values,
-    pg_policy_row_from_values, pg_proc_row_from_values, pg_publication_namespace_row_from_values,
-    pg_publication_rel_row_from_values, pg_publication_row_from_values, pg_rewrite_row_from_values,
+    pg_cast_row_from_values, pg_class_row_from_values, pg_collation_row_from_values,
+    pg_constraint_row_from_values, pg_depend_row_from_values, pg_description_row_from_values,
+    pg_index_row_from_values, pg_inherits_row_from_values, pg_language_row_from_values,
+    pg_opclass_row_from_values, pg_operator_row_from_values, pg_opfamily_row_from_values,
+    pg_partitioned_table_row_from_values, pg_policy_row_from_values, pg_proc_row_from_values,
+    pg_publication_namespace_row_from_values, pg_publication_rel_row_from_values,
+    pg_publication_row_from_values, pg_rewrite_row_from_values,
     pg_statistic_ext_data_row_from_values, pg_statistic_ext_row_from_values,
     pg_statistic_row_from_values, pg_trigger_row_from_values, pg_type_row_from_values,
 };
@@ -30,10 +31,10 @@ use crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
     PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
-    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgCollationRow, PgConstraintRow,
-    PgDependRow, PgDescriptionRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
+    PgConstraintRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow,
+    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
     PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
     bootstrap_composite_type_rows, builtin_type_rows, system_catalog_index_by_oid,
 };
@@ -56,6 +57,8 @@ const PG_AUTH_MEMBERS_OID_INDEX_OID: u32 = 6303;
 const PG_AUTH_MEMBERS_ROLE_MEMBER_INDEX_OID: u32 = 2694;
 const PG_AUTH_MEMBERS_MEMBER_ROLE_INDEX_OID: u32 = 2695;
 const PG_AUTH_MEMBERS_GRANTOR_INDEX_OID: u32 = 6302;
+const PG_CAST_OID_INDEX_OID: u32 = 2660;
+const PG_CAST_SOURCE_TARGET_INDEX_OID: u32 = 2661;
 const PG_CLASS_OID_INDEX_OID: u32 = 2662;
 const PG_CLASS_RELNAME_NSP_INDEX_OID: u32 = 2663;
 const PG_COLLATION_OID_INDEX_OID: u32 = 3085;
@@ -133,6 +136,10 @@ pub enum SysCacheId {
     AttrDefault,
     // PostgreSQL systable scan index: AttrDefaultOidIndexId.
     AttrDefaultOid,
+    // PostgreSQL systable scan index: CastOidIndexId.
+    CastOid,
+    // PostgreSQL syscache name: CASTSOURCETARGET.
+    CastSourceTarget,
     // PostgreSQL syscache name: COLLOID.
     CollOid,
     // PostgreSQL syscache name: CONSTROID.
@@ -241,6 +248,8 @@ impl SysCacheId {
             Self::AttrNum => PG_ATTRIBUTE_RELID_ATTNUM_INDEX_OID,
             Self::AttrDefault => PG_ATTRDEF_ADRELID_ADNUM_INDEX_OID,
             Self::AttrDefaultOid => PG_ATTRDEF_OID_INDEX_OID,
+            Self::CastOid => PG_CAST_OID_INDEX_OID,
+            Self::CastSourceTarget => PG_CAST_SOURCE_TARGET_INDEX_OID,
             Self::CollOid => PG_COLLATION_OID_INDEX_OID,
             Self::ConstraintOid => PG_CONSTRAINT_OID_INDEX_OID,
             Self::ConstraintRelId => PG_CONSTRAINT_CONRELID_CONTYPID_CONNAME_INDEX_OID,
@@ -297,6 +306,7 @@ impl SysCacheId {
             | Self::AuthIdOid
             | Self::AuthMembersOid
             | Self::AuthMembersGrantor
+            | Self::CastOid
             | Self::CollOid
             | Self::LangName
             | Self::LangOid
@@ -328,6 +338,7 @@ impl SysCacheId {
             Self::AttrDefault
             | Self::AttrName
             | Self::AttrNum
+            | Self::CastSourceTarget
             | Self::InheritsRelIdSeqNo
             | Self::PolicyPolrelidPolname
             | Self::PublicationRelMap
@@ -365,6 +376,7 @@ pub enum SysCacheTuple {
     Attribute(PgAttributeRow),
     AuthId(PgAuthIdRow),
     AuthMembers(PgAuthMembersRow),
+    Cast(PgCastRow),
     Class(PgClassRow),
     Collation(PgCollationRow),
     Constraint(PgConstraintRow),
@@ -491,6 +503,9 @@ fn sys_cache_tuple_from_values(
         | SysCacheId::AuthMembersMemberRole
         | SysCacheId::AuthMembersGrantor => {
             pg_auth_members_row_from_values(values).map(SysCacheTuple::AuthMembers)
+        }
+        SysCacheId::CastOid | SysCacheId::CastSourceTarget => {
+            pg_cast_row_from_values(values).map(SysCacheTuple::Cast)
         }
         SysCacheId::CollOid => pg_collation_row_from_values(values).map(SysCacheTuple::Collation),
         SysCacheId::ConstraintOid | SysCacheId::ConstraintRelId => {
@@ -1318,7 +1333,7 @@ impl CatalogStore {
             })
             .transpose()?;
 
-        Ok(Some(RelCacheEntry {
+        let mut entry = RelCacheEntry {
             rel: relation_locator_for_class_row(
                 class_row.oid,
                 class_row.relfilenode,
@@ -1342,9 +1357,35 @@ impl CatalogStore {
             relforcerowsecurity: class_row.relforcerowsecurity,
             desc: crate::backend::executor::RelationDesc { columns },
             partitioned_table,
+            partition_spec: None,
             index,
-        }))
+        };
+        entry.partition_spec = lower_relcache_partition_spec(&entry);
+        Ok(Some(entry))
     }
+}
+
+fn lower_relcache_partition_spec(
+    entry: &RelCacheEntry,
+) -> Option<crate::backend::parser::LoweredPartitionSpec> {
+    entry.partitioned_table.as_ref()?;
+    let relation = crate::backend::parser::BoundRelation {
+        rel: entry.rel,
+        relation_oid: entry.relation_oid,
+        toast: None,
+        namespace_oid: entry.namespace_oid,
+        owner_oid: entry.owner_oid,
+        of_type_oid: entry.of_type_oid,
+        relpersistence: entry.relpersistence,
+        relkind: entry.relkind,
+        relispopulated: entry.relispopulated,
+        relispartition: entry.relispartition,
+        relpartbound: entry.relpartbound.clone(),
+        desc: entry.desc.clone(),
+        partitioned_table: entry.partitioned_table.clone(),
+        partition_spec: None,
+    };
+    crate::backend::parser::lower_relation_partition_spec_uncached(&relation).ok()
 }
 
 pub(crate) fn relation_id_get_relation_db(
@@ -1695,7 +1736,7 @@ pub(crate) fn relation_id_get_relation_db(
         })
         .transpose()?;
 
-    let entry = RelCacheEntry {
+    let mut entry = RelCacheEntry {
         rel: relation_locator_for_class_row(class_row.oid, class_row.relfilenode, db.database_oid),
         relation_oid: class_row.oid,
         namespace_oid: class_row.relnamespace,
@@ -1715,8 +1756,10 @@ pub(crate) fn relation_id_get_relation_db(
         relforcerowsecurity: class_row.relforcerowsecurity,
         desc: crate::backend::executor::RelationDesc { columns },
         partitioned_table,
+        partition_spec: None,
         index,
     };
+    entry.partition_spec = lower_relcache_partition_spec(&entry);
 
     let mut states = db.backend_cache_states.write();
     let state = states.entry(client_id).or_default();

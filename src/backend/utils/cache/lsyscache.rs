@@ -1,4 +1,5 @@
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
@@ -34,6 +35,7 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::SqlType;
+use crate::include::nodes::pathnodes::PlannerIndexExprCacheEntry;
 use crate::pgrust::database::{
     Database, DatabaseStatsStore, TempNamespace, default_pg_stat_io_keys,
 };
@@ -1095,6 +1097,33 @@ pub fn default_opclass_for_am_and_type(
             .into_iter()
             .find(|row| row.oid == crate::include::catalog::VARCHAR_BTREE_OPCLASS_OID);
     }
+    let range_rows = db.range_rows();
+    if range_rows.iter().any(|row| row.rngtypid == input_type_oid) {
+        let opclass_oid = match am_oid {
+            crate::include::catalog::BTREE_AM_OID => {
+                crate::include::catalog::RANGE_BTREE_OPCLASS_OID
+            }
+            crate::include::catalog::HASH_AM_OID => crate::include::catalog::RANGE_HASH_OPCLASS_OID,
+            crate::include::catalog::GIST_AM_OID => crate::include::catalog::RANGE_GIST_OPCLASS_OID,
+            crate::include::catalog::SPGIST_AM_OID => {
+                crate::include::catalog::RANGE_SPGIST_OPCLASS_OID
+            }
+            _ => 0,
+        };
+        if opclass_oid != 0 {
+            return opclasses.into_iter().find(|row| row.oid == opclass_oid);
+        }
+    }
+    if range_rows
+        .iter()
+        .any(|row| row.rngmultitypid == input_type_oid)
+    {
+        return opclasses.into_iter().find(|row| {
+            row.opcmethod == am_oid
+                && row.opcdefault
+                && row.opcintype == crate::include::catalog::ANYMULTIRANGEOID
+        });
+    }
     let input_type = type_row_by_oid(db, client_id, txn_ctx, input_type_oid)?;
     if input_type.sql_type.is_range() {
         let opclass_oid = match am_oid {
@@ -1407,6 +1436,7 @@ fn bound_relation_from_entry(
         relispartition: entry.relispartition,
         relpartbound: entry.relpartbound.clone(),
         partitioned_table: entry.partitioned_table.clone(),
+        partition_spec: entry.partition_spec.clone(),
     }
 }
 
@@ -1613,6 +1643,7 @@ impl CatalogLookup for LazyCatalogLookup {
             relispartition: entry.relispartition,
             relpartbound: entry.relpartbound.clone(),
             partitioned_table: entry.partitioned_table.clone(),
+            partition_spec: entry.partition_spec.clone(),
         })
     }
 
@@ -2308,6 +2339,14 @@ impl CatalogLookup for LazyCatalogLookup {
         &self,
         relation_oid: u32,
     ) -> Vec<crate::backend::parser::BoundIndexRelation> {
+        self.index_relations_for_heap_with_cache(relation_oid, &RefCell::new(BTreeMap::new()))
+    }
+
+    fn index_relations_for_heap_with_cache(
+        &self,
+        relation_oid: u32,
+        index_expr_cache: &RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>,
+    ) -> Vec<crate::backend::parser::BoundIndexRelation> {
         let heap_relation = self.relation_by_oid(relation_oid);
         relation_get_index_list(&self.db, self.client_id, self.txn_ctx, relation_oid)
             .into_iter()
@@ -2315,11 +2354,12 @@ impl CatalogLookup for LazyCatalogLookup {
                 let entry =
                     relation_entry_by_oid(&self.db, self.client_id, self.txn_ctx, index_oid)?;
                 let class = class_row_by_oid(&self.db, self.client_id, self.txn_ctx, index_oid)?;
-                crate::backend::parser::bound_index_relation_from_relcache_entry_with_heap(
+                crate::backend::parser::bound_index_relation_from_relcache_entry_with_heap_and_cache(
                     class.relname,
                     &entry,
                     self,
                     heap_relation.as_ref(),
+                    Some(index_expr_cache),
                 )
             })
             .collect()

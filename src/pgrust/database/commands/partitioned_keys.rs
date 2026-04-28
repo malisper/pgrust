@@ -550,6 +550,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
                     relforcerowsecurity: index_entry.relforcerowsecurity,
                     desc: index_entry.desc.clone(),
                     partitioned_table: index_entry.partitioned_table.clone(),
+                    partition_spec: None,
                     index: Some(self.db.relcache_index_meta_from_catalog(
                         self.client_id,
                         Some((self.xid, cid)),

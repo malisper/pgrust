@@ -4,8 +4,9 @@ use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
     ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
-    TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_hypothetical_aggregate_function_for_proc_oid,
-    builtin_type_name_for_oid, builtin_type_rows, builtin_window_function_for_proc_oid,
+    TEXT_TYPE_OID, bootstrap_pg_proc_rows_ref,
+    builtin_hypothetical_aggregate_function_for_proc_oid, builtin_type_name_for_oid,
+    builtin_type_rows, builtin_window_function_for_proc_oid,
 };
 use crate::include::catalog::{
     multirange_type_ref_for_sql_type, range_type_ref_for_multirange_sql_type,
@@ -2243,7 +2244,7 @@ fn scalar_functions_by_name() -> &'static BTreeMap<String, BuiltinScalarFunction
     static FUNCTIONS: OnceLock<BTreeMap<String, BuiltinScalarFunction>> = OnceLock::new();
     FUNCTIONS.get_or_init(|| {
         let mut by_name = BTreeMap::new();
-        for row in bootstrap_pg_proc_rows() {
+        for row in bootstrap_pg_proc_rows_ref() {
             if row.prokind != 'f' || row.proretset {
                 continue;
             }
@@ -3960,7 +3961,7 @@ fn json_table_functions_by_name() -> &'static BTreeMap<String, JsonTableFunction
     static FUNCTIONS: OnceLock<BTreeMap<String, JsonTableFunction>> = OnceLock::new();
     FUNCTIONS.get_or_init(|| {
         let mut by_name = BTreeMap::new();
-        for row in bootstrap_pg_proc_rows() {
+        for row in bootstrap_pg_proc_rows_ref() {
             if row.prokind != 'f' || !row.proretset {
                 continue;
             }
@@ -4022,7 +4023,7 @@ fn scalar_function_arity_overrides() -> &'static Vec<(BuiltinScalarFunction, Sca
     ARITIES.get_or_init(|| {
         let mut by_func = Vec::new();
         let mut overloaded = Vec::new();
-        for row in bootstrap_pg_proc_rows() {
+        for row in bootstrap_pg_proc_rows_ref() {
             if row.prokind != 'f' || row.proretset || row.provariadic != 0 {
                 continue;
             }
@@ -4053,7 +4054,7 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
     static TYPES: OnceLock<Vec<(BuiltinScalarFunction, SqlType)>> = OnceLock::new();
     TYPES.get_or_init(|| {
         let mut by_func = Vec::new();
-        for row in bootstrap_pg_proc_rows() {
+        for row in bootstrap_pg_proc_rows_ref() {
             if row.prokind != 'f' || row.proretset {
                 continue;
             }
@@ -4578,7 +4579,7 @@ fn aggregate_arity_overrides() -> &'static Vec<(AggFunc, usize)> {
     static ARITIES: OnceLock<Vec<(AggFunc, usize)>> = OnceLock::new();
     ARITIES.get_or_init(|| {
         let mut by_func = Vec::new();
-        for row in bootstrap_pg_proc_rows() {
+        for row in bootstrap_pg_proc_rows_ref() {
             if row.prokind != 'a' {
                 continue;
             }
@@ -4598,7 +4599,7 @@ fn aggregate_fixed_return_types() -> &'static Vec<(AggFunc, SqlType)> {
     static TYPES: OnceLock<Vec<(AggFunc, SqlType)>> = OnceLock::new();
     TYPES.get_or_init(|| {
         let mut by_func = Vec::new();
-        for row in bootstrap_pg_proc_rows() {
+        for row in bootstrap_pg_proc_rows_ref() {
             if row.prokind != 'a' {
                 continue;
             }

@@ -1,12 +1,15 @@
-use std::{cmp::Ordering, collections::BTreeSet};
+use std::{
+    cell::RefCell,
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::compare_order_values;
 use crate::backend::parser::{
     BoundIndexRelation, CatalogLookup, PartitionBoundSpec, PartitionRangeDatumValue,
-    PartitionStrategy, SerializedPartitionValue, deserialize_partition_bound,
-    partition_value_to_value, relation_partition_spec,
+    PartitionStrategy, SerializedPartitionValue, partition_value_to_value,
 };
 use crate::include::catalog::BTREE_AM_OID;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
@@ -15,8 +18,8 @@ use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntryKind, SetOperator, SqlType, SqlTypeKind,
 };
 use crate::include::nodes::pathnodes::{
-    Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, PlannerSubroot, RelOptInfo, RelOptKind,
-    RestrictInfo, SpecialJoinInfo,
+    Path, PathKey, PathTarget, PlannerConfig, PlannerIndexExprCacheEntry, PlannerInfo,
+    PlannerSubroot, RelOptInfo, RelOptKind, RestrictInfo, SpecialJoinInfo,
 };
 use crate::include::nodes::plannodes::{AggregateStrategy, PlanEstimate, SetOpStrategy};
 use crate::include::nodes::primnodes::{
@@ -30,6 +33,7 @@ use super::super::inherit::{
     translate_append_rel_expr,
 };
 use super::super::joininfo;
+use super::super::partition_cache;
 use super::super::partition_prune::{
     partition_may_satisfy_filter, relation_may_satisfy_own_partition_bound,
 };
@@ -52,6 +56,8 @@ use super::{
     estimate_index_candidate, estimate_seqscan_candidate, index_supports_index_only_attrs,
     optimize_path_with_config, relation_stats,
 };
+
+type PlannerIndexExprCache = RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>;
 
 fn collect_inner_join_clauses(root: &PlannerInfo) -> Vec<RestrictInfo> {
     fn walk(root: &PlannerInfo, node: &JoinTreeNode, clauses: &mut Vec<RestrictInfo>) {
@@ -173,10 +179,16 @@ fn partition_bound_for_rtindex(
     catalog: &dyn CatalogLookup,
     rtindex: usize,
 ) -> Option<PartitionBoundSpec> {
-    relation_oid_for_rtindex(root, rtindex)
-        .and_then(|oid| catalog.relation_by_oid(oid))
-        .and_then(|relation| relation.relpartbound)
-        .and_then(|bound| deserialize_partition_bound(&bound).ok())
+    let child_oid = relation_oid_for_rtindex(root, rtindex)?;
+    let parent_oid = root
+        .append_rel_infos
+        .get(rtindex)
+        .and_then(Option::as_ref)
+        .and_then(|info| relation_oid_for_rtindex(root, info.parent_relid))?;
+    partition_cache::partition_child_bounds(root, catalog, parent_oid)
+        .into_iter()
+        .find(|child| child.row.inhrelid == child_oid)
+        .and_then(|child| child.bound)
 }
 
 fn serialized_partition_value_cmp(
@@ -278,13 +290,26 @@ fn sorted_append_child_rtindexes(
     parent_rtindex: usize,
 ) -> Vec<usize> {
     let mut children = append_child_rtindexes(root, parent_rtindex);
+    let parent_oid = relation_oid_for_rtindex(root, parent_rtindex);
+    let partition_children = parent_oid
+        .map(|oid| partition_cache::partition_child_bounds(root, catalog, oid))
+        .unwrap_or_default();
     children.sort_by(|left, right| {
-        match (
-            partition_bound_for_rtindex(root, catalog, *left),
-            partition_bound_for_rtindex(root, catalog, *right),
-        ) {
+        let left_bound = relation_oid_for_rtindex(root, *left).and_then(|left_oid| {
+            partition_children
+                .iter()
+                .find(|child| child.row.inhrelid == left_oid)
+                .and_then(|child| child.bound.as_ref())
+        });
+        let right_bound = relation_oid_for_rtindex(root, *right).and_then(|right_oid| {
+            partition_children
+                .iter()
+                .find(|child| child.row.inhrelid == right_oid)
+                .and_then(|child| child.bound.as_ref())
+        });
+        match (left_bound, right_bound) {
             (Some(left_bound), Some(right_bound)) => {
-                partition_bound_cmp(&left_bound, &right_bound).then_with(|| left.cmp(right))
+                partition_bound_cmp(left_bound, right_bound).then_with(|| left.cmp(right))
             }
             _ => left.cmp(right),
         }
@@ -468,6 +493,7 @@ fn collect_bitmap_or_paths(
     stats: &super::super::RelationStats,
     filter: Option<&Expr>,
     config: PlannerConfig,
+    index_expr_cache: &PlannerIndexExprCache,
     catalog: &dyn CatalogLookup,
 ) -> Vec<Path> {
     if !config.enable_bitmapscan {
@@ -484,7 +510,7 @@ fn collect_bitmap_or_paths(
     }
 
     let indexes = catalog
-        .index_relations_for_heap(relation_oid)
+        .index_relations_for_heap_with_cache(relation_oid, index_expr_cache)
         .into_iter()
         .filter(|index| {
             index.index_meta.indisvalid
@@ -768,6 +794,7 @@ fn collect_relation_access_paths(
     query_order_items: Option<Vec<OrderByEntry>>,
     required_index_only_attrs: &[usize],
     config: PlannerConfig,
+    index_expr_cache: &PlannerIndexExprCache,
     catalog: &dyn CatalogLookup,
 ) -> Vec<Path> {
     if relkind == 'p' {
@@ -819,7 +846,7 @@ fn collect_relation_access_paths(
         return paths;
     }
     for index in catalog
-        .index_relations_for_heap(relation_oid)
+        .index_relations_for_heap_with_cache(relation_oid, index_expr_cache)
         .iter()
         .filter(|index| {
             index.index_meta.indisvalid
@@ -939,6 +966,7 @@ fn collect_relation_access_paths(
         &stats,
         filter.as_ref(),
         config,
+        index_expr_cache,
         catalog,
     ));
     if paths.is_empty() {
@@ -971,6 +999,7 @@ fn collect_relation_ordered_index_paths(
     order_items: &[OrderByEntry],
     _required_index_only_attrs: &[usize],
     config: PlannerConfig,
+    index_expr_cache: &PlannerIndexExprCache,
     catalog: &dyn CatalogLookup,
 ) -> Vec<Path> {
     if !config.enable_indexscan || relation_uses_virtual_scan(relation_oid) {
@@ -979,7 +1008,7 @@ fn collect_relation_ordered_index_paths(
     let stats = relation_stats(catalog, relation_oid, &desc);
     let mut paths = Vec::new();
     for index in catalog
-        .index_relations_for_heap(relation_oid)
+        .index_relations_for_heap_with_cache(relation_oid, index_expr_cache)
         .iter()
         .filter(|index| {
             index.index_meta.indisvalid
@@ -1066,6 +1095,7 @@ pub(super) fn relation_ordered_index_paths(
                 &order_items,
                 &required_index_only_attrs,
                 root.config,
+                &root.index_expr_cache,
                 catalog,
             )
         }
@@ -1103,7 +1133,7 @@ pub(super) fn relation_index_only_full_scan_paths(
     let relation_name = relation_display_name(catalog, rte, *relation_oid, *heap_rel);
     let mut paths = Vec::new();
     for index in catalog
-        .index_relations_for_heap(*relation_oid)
+        .index_relations_for_heap_with_cache(*relation_oid, &root.index_expr_cache)
         .iter()
         .filter(|index| {
             index.index_meta.indisvalid
@@ -1170,6 +1200,7 @@ fn cheapest_relation_access_path(
     desc: RelationDesc,
     filter: Option<Expr>,
     config: PlannerConfig,
+    index_expr_cache: &PlannerIndexExprCache,
     catalog: &dyn CatalogLookup,
 ) -> Path {
     collect_relation_access_paths(
@@ -1185,6 +1216,7 @@ fn cheapest_relation_access_path(
         None,
         &[],
         config,
+        index_expr_cache,
         catalog,
     )
     .into_iter()
@@ -2462,6 +2494,18 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         let mut children = Vec::new();
         let mut ordered_children = Vec::new();
         let mut ordered_ok = query_order_items.is_some();
+        let partition_spec = (relkind == 'p')
+            .then(|| partition_cache::partition_spec(root, catalog, relation_oid))
+            .flatten();
+        let partition_child_bounds = if relkind == 'p' {
+            partition_cache::partition_child_bounds(root, catalog, relation_oid)
+        } else {
+            Vec::new()
+        };
+        let sibling_bounds = partition_child_bounds
+            .iter()
+            .filter_map(|child| child.bound.clone())
+            .collect::<Vec<_>>();
         if relkind != 'p' {
             children.push(normalize_rte_path(
                 rtindex,
@@ -2477,6 +2521,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     rte.desc.clone(),
                     filter.clone(),
                     root.config,
+                    &root.index_expr_cache,
                     catalog,
                 ),
                 catalog,
@@ -2495,6 +2540,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     order_items,
                     &required_index_only_attrs,
                     root.config,
+                    &root.index_expr_cache,
                     catalog,
                 ))
                 .map(|path| normalize_rte_path(rtindex, &rte.desc, path, catalog));
@@ -2517,8 +2563,18 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                         None
                     }
                 });
-            if let Some(child_oid) = child_relation_oid
-                && !partition_may_satisfy_filter(catalog, relation_oid, child_oid, filter.as_ref())
+            if relkind == 'p'
+                && let Some(child_oid) = child_relation_oid
+                && !partition_may_satisfy_filter(
+                    partition_spec.as_ref(),
+                    partition_child_bounds
+                        .iter()
+                        .find(|child| child.row.inhrelid == child_oid)
+                        .and_then(|child| child.bound.as_ref()),
+                    &sibling_bounds,
+                    filter.as_ref(),
+                    Some(catalog),
+                )
             {
                 continue;
             }
@@ -2691,6 +2747,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             query_order_items,
             &required_index_only_attrs,
             root.config,
+            &root.index_expr_cache,
             catalog,
         )),
         RangeTblEntryKind::Values {
@@ -3193,7 +3250,7 @@ fn partition_key_spec_for_rtindex(
 ) -> Option<PartitionKeySpec> {
     let relation_oid = relation_oid_for_rtindex(root, rtindex)?;
     let relation = catalog.relation_by_oid(relation_oid)?;
-    let spec = relation_partition_spec(&relation).ok()?;
+    let spec = partition_cache::partition_spec(root, catalog, relation_oid)?;
     let keys = spec
         .partattrs
         .iter()

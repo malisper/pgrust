@@ -1239,6 +1239,7 @@ mod tests {
                 relpartbound: None,
                 desc: source_desc,
                 partitioned_table: None,
+                partition_spec: None,
             }),
             constraints: vec![
                 PgConstraintRow {
@@ -1364,6 +1365,7 @@ mod tests {
                 relpartbound: None,
                 desc: source_desc,
                 partitioned_table: None,
+                partition_spec: None,
             }),
             constraints: Vec::new(),
         };

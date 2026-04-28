@@ -46,15 +46,15 @@ use crate::include::catalog::{
     bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
     bootstrap_pg_database_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
     bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
-    bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_template_rows, builtin_range_rows,
-    builtin_type_row_by_name, builtin_type_row_by_oid, builtin_type_rows,
-    is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
-    proc_oid_for_builtin_aggregate_function, proc_oid_for_builtin_hypothetical_aggregate_function,
-    range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
-    synthetic_range_proc_rows_by_name,
+    bootstrap_pg_proc_row_by_oid, bootstrap_pg_proc_rows, bootstrap_pg_proc_rows_by_name,
+    bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
+    bootstrap_pg_ts_template_rows, builtin_range_rows, builtin_type_row_by_name,
+    builtin_type_row_by_oid, builtin_type_rows, is_synthetic_range_proc_name,
+    multirange_type_ref_for_sql_type, proc_oid_for_builtin_aggregate_function,
+    proc_oid_for_builtin_hypothetical_aggregate_function, range_type_ref_for_sql_type,
+    relkind_is_analyzable, synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
 };
-use crate::include::nodes::pathnodes::PlannerConfig;
+use crate::include::nodes::pathnodes::{PlannerConfig, PlannerIndexExprCacheEntry};
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, HypotheticalAggFunc, JsonTableFunction,
@@ -135,7 +135,7 @@ pub use scope::BoundRelation;
 use scope::*;
 pub(crate) use scope::{BoundCte, BoundScope, scope_for_relation, shift_scope_rtindexes};
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use system_views::*;
 use window::*;
@@ -922,6 +922,14 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn index_relations_for_heap_with_cache(
+        &self,
+        relation_oid: u32,
+        _index_expr_cache: &RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>,
+    ) -> Vec<BoundIndexRelation> {
+        self.index_relations_for_heap(relation_oid)
+    }
+
     fn index_row_by_oid(&self, _index_oid: u32) -> Option<PgIndexRow> {
         None
     }
@@ -941,20 +949,14 @@ pub trait CatalogLookup {
     }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
-        let normalized = normalize_catalog_lookup_name(name);
-        let mut rows = bootstrap_pg_proc_rows()
-            .into_iter()
-            .filter(|row| row.proname.eq_ignore_ascii_case(normalized))
-            .collect::<Vec<_>>();
+        let mut rows = bootstrap_pg_proc_rows_by_name(name);
         extend_synthetic_range_proc_rows(self, name, &mut rows);
         dedup_proc_rows(&mut rows);
         rows
     }
 
     fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
-        bootstrap_pg_proc_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
+        bootstrap_pg_proc_row_by_oid(oid)
             .or_else(|| synthetic_range_proc_row_by_oid(oid, &self.type_rows(), &self.range_rows()))
     }
 
@@ -1697,6 +1699,22 @@ pub(crate) fn bound_index_relation_from_relcache_entry_with_heap(
     catalog: &dyn CatalogLookup,
     heap_relation: Option<&BoundRelation>,
 ) -> Option<BoundIndexRelation> {
+    bound_index_relation_from_relcache_entry_with_heap_and_cache(
+        name,
+        entry,
+        catalog,
+        heap_relation,
+        None,
+    )
+}
+
+pub(crate) fn bound_index_relation_from_relcache_entry_with_heap_and_cache(
+    name: String,
+    entry: &crate::backend::utils::cache::relcache::RelCacheEntry,
+    catalog: &dyn CatalogLookup,
+    heap_relation: Option<&BoundRelation>,
+    index_expr_cache: Option<&RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>>,
+) -> Option<BoundIndexRelation> {
     let mut index_meta = entry.index.as_ref()?.clone();
     let owned_heap;
     let heap_relation = if let Some(heap) = heap_relation {
@@ -1706,12 +1724,13 @@ pub(crate) fn bound_index_relation_from_relcache_entry_with_heap(
         owned_heap.as_ref()
     };
     let (index_exprs, index_predicate) = if let Some(heap) = heap_relation {
-        let index_exprs = relation_get_index_expressions(&mut index_meta, &heap.desc, catalog)
-            .unwrap_or_default();
-        let index_predicate = relation_get_index_predicate(&mut index_meta, &heap.desc, catalog)
-            .ok()
-            .flatten();
-        (index_exprs, index_predicate)
+        planner_cached_index_expressions(
+            entry.relation_oid,
+            &mut index_meta,
+            &heap.desc,
+            catalog,
+            index_expr_cache,
+        )
     } else {
         (Vec::new(), None)
     };
@@ -1745,6 +1764,36 @@ pub(crate) fn bound_index_relation_from_relcache_entry_with_heap(
             .as_ref()
             .is_some_and(|row| row.condeferred),
     })
+}
+
+fn planner_cached_index_expressions(
+    index_oid: u32,
+    index_meta: &mut crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    heap_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+    index_expr_cache: Option<&RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>>,
+) -> (Vec<Expr>, Option<Expr>) {
+    if let Some(cache) = index_expr_cache
+        && let Some(cached) = cache.borrow().get(&index_oid).cloned()
+    {
+        return (cached.exprs, cached.predicate);
+    }
+
+    let index_exprs =
+        relation_get_index_expressions(index_meta, heap_desc, catalog).unwrap_or_default();
+    let index_predicate = relation_get_index_predicate(index_meta, heap_desc, catalog)
+        .ok()
+        .flatten();
+    if let Some(cache) = index_expr_cache {
+        cache.borrow_mut().insert(
+            index_oid,
+            PlannerIndexExprCacheEntry {
+                exprs: index_exprs.clone(),
+                predicate: index_predicate.clone(),
+            },
+        );
+    }
+    (index_exprs, index_predicate)
 }
 
 impl CatalogLookup for Catalog {
@@ -1782,6 +1831,14 @@ impl CatalogLookup for Catalog {
     }
 
     fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
+        self.index_relations_for_heap_with_cache(relation_oid, &RefCell::new(BTreeMap::new()))
+    }
+
+    fn index_relations_for_heap_with_cache(
+        &self,
+        relation_oid: u32,
+        index_expr_cache: &RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>,
+    ) -> Vec<BoundIndexRelation> {
         let relcache = RelCache::from_catalog(self);
         let heap_relation = relcache
             .get_by_oid(relation_oid)
@@ -1794,11 +1851,12 @@ impl CatalogLookup for Catalog {
                 let name = relcache
                     .relation_name_by_oid(index_oid)
                     .unwrap_or_else(|| index_oid.to_string());
-                bound_index_relation_from_relcache_entry_with_heap(
+                bound_index_relation_from_relcache_entry_with_heap_and_cache(
                     name,
                     entry,
                     self,
                     heap_relation.as_ref(),
+                    Some(index_expr_cache),
                 )
             })
             .collect()
@@ -2314,10 +2372,22 @@ impl CatalogLookup for RelCache {
             relpartbound: entry.relpartbound.clone(),
             desc: entry.desc.clone(),
             partitioned_table: entry.partitioned_table.clone(),
+            partition_spec: entry.partition_spec.clone(),
         })
     }
 
     fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
+        self.index_relations_for_heap_with_cache(relation_oid, &RefCell::new(BTreeMap::new()))
+    }
+
+    fn index_relations_for_heap_with_cache(
+        &self,
+        relation_oid: u32,
+        index_expr_cache: &RefCell<BTreeMap<u32, PlannerIndexExprCacheEntry>>,
+    ) -> Vec<BoundIndexRelation> {
+        let heap_relation = self
+            .get_by_oid(relation_oid)
+            .map(|entry| bound_relation_from_relcache_entry(self, entry));
         self.relation_get_index_list(relation_oid)
             .into_iter()
             .filter_map(|index_oid| {
@@ -2325,7 +2395,13 @@ impl CatalogLookup for RelCache {
                 let name = self
                     .relation_name_by_oid(index_oid)
                     .unwrap_or_else(|| index_oid.to_string());
-                bound_index_relation_from_relcache_entry(name, entry, self)
+                bound_index_relation_from_relcache_entry_with_heap_and_cache(
+                    name,
+                    entry,
+                    self,
+                    heap_relation.as_ref(),
+                    Some(index_expr_cache),
+                )
             })
             .collect()
     }
@@ -2432,6 +2508,7 @@ fn bound_relation_from_relcache_entry(
         relpartbound: entry.relpartbound.clone(),
         desc: entry.desc.clone(),
         partitioned_table: entry.partitioned_table.clone(),
+        partition_spec: entry.partition_spec.clone(),
     }
 }
 

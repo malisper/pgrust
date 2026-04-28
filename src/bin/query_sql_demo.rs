@@ -177,6 +177,7 @@ fn main() -> Result<(), ExecError> {
             relforcerowsecurity: false,
             desc: desc(),
             partitioned_table: None,
+            partition_spec: None,
             index: None,
         },
     );

@@ -10956,6 +10956,7 @@ fn returning_test_catalog() -> ReturningTestCatalog {
             relpartbound: None,
             desc: desc(),
             partitioned_table: None,
+            partition_spec: None,
         },
     }
 }
