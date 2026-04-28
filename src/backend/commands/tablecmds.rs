@@ -4008,6 +4008,24 @@ fn defer_foreign_key_if_needed(
     true
 }
 
+fn foreign_key_constraint_ancestor_oids(
+    catalog: &dyn CatalogLookup,
+    constraint_oid: u32,
+) -> BTreeSet<u32> {
+    let mut oids = BTreeSet::from([constraint_oid]);
+    let mut current_oid = constraint_oid;
+    while let Some(row) = catalog.constraint_row_by_oid(current_oid) {
+        if row.conparentid == 0 {
+            break;
+        }
+        if !oids.insert(row.conparentid) {
+            break;
+        }
+        current_oid = row.conparentid;
+    }
+    oids
+}
+
 fn collect_no_action_checks_on_update(
     relation_name: &str,
     constraints: &[BoundReferencedByForeignKey],
@@ -4157,11 +4175,13 @@ fn apply_referential_action_to_rows(
             .map_err(ExecError::Parse)
         })
         .transpose()?;
+    let outbound_constraint_oids =
+        foreign_key_constraint_ancestor_oids(catalog.as_ref(), constraint.constraint_oid);
     let outbound_constraint = full_relation_constraints.as_ref().and_then(|constraints| {
         constraints
             .foreign_keys
             .iter()
-            .find(|foreign_key| foreign_key.constraint_oid == constraint.constraint_oid)
+            .find(|foreign_key| outbound_constraint_oids.contains(&foreign_key.constraint_oid))
             .cloned()
     });
     let triggers = RuntimeTriggers::load(
@@ -4205,7 +4225,7 @@ fn apply_referential_action_to_rows(
                             .foreign_keys
                             .iter()
                             .filter(|foreign_key| {
-                                foreign_key.constraint_oid != constraint.constraint_oid
+                                !outbound_constraint_oids.contains(&foreign_key.constraint_oid)
                             })
                             .cloned()
                             .collect::<Vec<_>>()

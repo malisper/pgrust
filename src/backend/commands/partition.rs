@@ -303,6 +303,10 @@ fn child_partition_bound(child: &BoundRelation) -> Result<PartitionBoundSpec, Ex
     deserialize_partition_bound(bound).map_err(ExecError::Parse)
 }
 
+pub(crate) fn partition_relation_is_default(child: &BoundRelation) -> Result<bool, ExecError> {
+    Ok(child_partition_bound(child)?.is_default())
+}
+
 fn key_values(
     relation: &BoundRelation,
     spec: &LoweredPartitionSpec,

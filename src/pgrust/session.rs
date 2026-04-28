@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Write as _;
 use std::mem;
@@ -2142,6 +2142,31 @@ fn pending_trigger_events_error(relation_name: &str) -> ExecError {
     }
 }
 
+fn foreign_key_constraint_family_oids(
+    catalog: &dyn CatalogLookup,
+    constraint_oid: u32,
+) -> BTreeSet<u32> {
+    let mut family = BTreeSet::from([constraint_oid]);
+    loop {
+        let mut changed = false;
+        for row in catalog.constraint_rows() {
+            if row.contype != CONSTRAINT_FOREIGN {
+                continue;
+            }
+            if family.contains(&row.oid) && row.conparentid != 0 {
+                changed |= family.insert(row.conparentid);
+            }
+            if row.conparentid != 0 && family.contains(&row.conparentid) {
+                changed |= family.insert(row.oid);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    family
+}
+
 impl Session {
     const DEFAULT_MAINTENANCE_WORK_MEM_KB: usize = 65_536;
 
@@ -4174,22 +4199,22 @@ impl Session {
             return Ok(());
         }
 
-        if txn
+        let family_oids = foreign_key_constraint_family_oids(&catalog, row.oid);
+
+        if let Some(check) = txn
             .deferred_foreign_keys
             .pending_foreign_key_checks()
             .iter()
-            .any(|check| check.constraint_oid == row.oid)
+            .find(|check| family_oids.contains(&check.constraint_oid))
         {
-            return Err(pending_trigger_events_error(relation_name_for_error(
-                &drop_stmt.table_name,
-            )));
+            return Err(pending_trigger_events_error(&check.relation_name));
         }
 
         if let Some(check) = txn
             .deferred_foreign_keys
             .pending_parent_foreign_key_checks()
             .into_iter()
-            .find(|check| check.constraint_oid == row.oid)
+            .find(|check| family_oids.contains(&check.constraint_oid))
         {
             return Err(pending_trigger_events_error(&check.relation_name));
         }

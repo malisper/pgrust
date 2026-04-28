@@ -2736,11 +2736,39 @@ fn partition_child_ordinal_for_relation(
     })
 }
 
-fn partition_bound_sort_key(relation: &super::BoundRelation) -> String {
-    relation
+fn partition_bound_sort_key(relation: &super::BoundRelation) -> (bool, String) {
+    let bound = relation
         .relpartbound
         .clone()
-        .unwrap_or_else(|| relation.relation_oid.to_string())
+        .unwrap_or_else(|| relation.relation_oid.to_string());
+    let is_default = partition_bound_text_is_default(&bound);
+    (is_default, bound)
+}
+
+fn partition_bound_text_is_default(bound: &str) -> bool {
+    let lower_bound = bound.to_ascii_lowercase();
+    if lower_bound.contains("\"is_default\":true")
+        || lower_bound.contains("\"is_default\": true")
+        || lower_bound.contains("default")
+    {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(bound)
+        .ok()
+        .is_some_and(|value| json_value_has_true_is_default(&value))
+}
+
+fn json_value_has_true_is_default(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.get("is_default")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                || map.values().any(json_value_has_true_is_default)
+        }
+        serde_json::Value::Array(values) => values.iter().any(json_value_has_true_is_default),
+        _ => false,
+    }
 }
 
 fn partition_contains_relation(

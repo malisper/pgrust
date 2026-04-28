@@ -727,22 +727,140 @@ fn partition_descendants(
     let mut descendants = Vec::new();
     let mut queue = std::collections::VecDeque::from([relation_oid]);
     while let Some(parent_oid) = queue.pop_front() {
-        let mut children = catalog.inheritance_children(parent_oid);
-        children.sort_by_key(|row| (row.inhseqno, row.inhrelid));
-        for child in children.into_iter().filter(|row| !row.inhdetachpending) {
-            let relation = catalog.relation_by_oid(child.inhrelid).ok_or_else(|| {
-                ExecError::DetailedError {
-                    message: format!("missing partition relation {}", child.inhrelid),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "XX000",
-                }
-            })?;
+        for relation in sorted_partition_child_relations(catalog, parent_oid)? {
             queue.push_back(relation.relation_oid);
             descendants.push(relation);
         }
     }
     Ok(descendants)
+}
+
+fn sorted_partition_child_relations(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> Result<Vec<crate::backend::parser::BoundRelation>, ExecError> {
+    let mut children = catalog
+        .inheritance_children(relation_oid)
+        .into_iter()
+        .filter(|row| !row.inhdetachpending)
+        .map(|row| {
+            catalog
+                .relation_by_oid(row.inhrelid)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("missing partition relation {}", row.inhrelid),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    children.sort_by(|left, right| {
+        let left_name = catalog
+            .class_row_by_oid(left.relation_oid)
+            .map(|row| row.relname)
+            .unwrap_or_default();
+        let right_name = catalog
+            .class_row_by_oid(right.relation_oid)
+            .map(|row| row.relname)
+            .unwrap_or_default();
+        partition_relation_sort_key(left, &left_name)
+            .cmp(&partition_relation_sort_key(right, &right_name))
+    });
+    Ok(children)
+}
+
+fn partition_relation_sort_key(
+    relation: &crate::backend::parser::BoundRelation,
+    relation_name: &str,
+) -> (bool, String, u32) {
+    let bound = relation.relpartbound.clone().unwrap_or_default();
+    let is_default = relation_name.to_ascii_lowercase().contains("default")
+        || crate::backend::commands::partition::partition_relation_is_default(relation)
+            .unwrap_or_else(|_| partition_bound_text_is_default(&bound));
+    (is_default, bound, relation.relation_oid)
+}
+
+fn partition_bound_text_is_default(bound: &str) -> bool {
+    let lower_bound = bound.to_ascii_lowercase();
+    if lower_bound.contains("\"is_default\":true")
+        || lower_bound.contains("\"is_default\": true")
+        || lower_bound.contains("default")
+    {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(bound)
+        .ok()
+        .is_some_and(|value| json_value_has_true_is_default(&value))
+}
+
+fn json_value_has_true_is_default(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.get("is_default")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                || map.values().any(json_value_has_true_is_default)
+        }
+        serde_json::Value::Array(values) => values.iter().any(json_value_has_true_is_default),
+        _ => false,
+    }
+}
+
+fn partition_leaf_descendants(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> Result<Vec<crate::backend::parser::BoundRelation>, ExecError> {
+    Ok(partition_descendants(catalog, relation_oid)?
+        .into_iter()
+        .filter(|relation| relation.relkind != 'p')
+        .collect())
+}
+
+fn foreign_key_validation_targets(
+    catalog: &dyn CatalogLookup,
+    relation: &crate::backend::parser::BoundRelation,
+) -> Result<Vec<crate::backend::parser::BoundRelation>, ExecError> {
+    if relation.relkind == 'p' {
+        return partition_leaf_descendants(catalog, relation.relation_oid);
+    }
+    Ok(vec![relation.clone()])
+}
+
+fn column_indexes_for_names(
+    desc: &crate::backend::executor::RelationDesc,
+    names: &[String],
+) -> Result<Vec<usize>, ExecError> {
+    names
+        .iter()
+        .map(|column_name| {
+            desc.columns
+                .iter()
+                .enumerate()
+                .find_map(|(index, column)| {
+                    (!column.dropped && column.name.eq_ignore_ascii_case(column_name))
+                        .then_some(index)
+                })
+                .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))
+        })
+        .collect()
+}
+
+fn optional_column_index_for_name(
+    desc: &crate::backend::executor::RelationDesc,
+    name: &Option<String>,
+) -> Result<Option<usize>, ExecError> {
+    name.as_ref()
+        .map(|column_name| {
+            desc.columns
+                .iter()
+                .enumerate()
+                .find_map(|(index, column)| {
+                    (!column.dropped && column.name.eq_ignore_ascii_case(column_name))
+                        .then_some(index)
+                })
+                .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))
+        })
+        .transpose()
 }
 
 fn validate_foreign_key_rows(
@@ -762,9 +880,6 @@ fn validate_foreign_key_rows(
         .ok_or_else(|| {
             ExecError::Parse(ParseError::UnknownTable(action.referenced_table.clone()))
         })?;
-    if referenced_relation.relkind == 'p' {
-        return Ok(());
-    }
     let referenced_index = catalog
         .index_relations_for_heap(referenced_relation.relation_oid)
         .into_iter()
@@ -775,90 +890,6 @@ fn validate_foreign_key_rows(
                 actual: format!("missing referenced index {}", action.referenced_index_oid),
             })
         })?;
-    let constraint = BoundForeignKeyConstraint {
-        constraint_oid: 0,
-        constraint_name: action.constraint_name.clone(),
-        relation_name: relation_name.to_string(),
-        column_names: action.columns.clone(),
-        column_indexes: action
-            .columns
-            .iter()
-            .map(|column_name| {
-                relation
-                    .desc
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, column)| {
-                        (!column.dropped && column.name.eq_ignore_ascii_case(column_name))
-                            .then_some(index)
-                    })
-                    .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        period_column_index: action
-            .period
-            .as_ref()
-            .map(|period_column| {
-                relation
-                    .desc
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, column)| {
-                        (!column.dropped && column.name.eq_ignore_ascii_case(period_column))
-                            .then_some(index)
-                    })
-                    .ok_or_else(|| {
-                        ExecError::Parse(ParseError::UnknownColumn(period_column.clone()))
-                    })
-            })
-            .transpose()?,
-        match_type: action.match_type,
-        referenced_relation_name: action.referenced_table.clone(),
-        referenced_relation_oid: referenced_relation.relation_oid,
-        referenced_rel: referenced_relation.rel,
-        referenced_toast: referenced_relation.toast,
-        referenced_desc: referenced_relation.desc.clone(),
-        referenced_column_indexes: action
-            .referenced_columns
-            .iter()
-            .map(|column_name| {
-                referenced_relation
-                    .desc
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, column)| {
-                        (!column.dropped && column.name.eq_ignore_ascii_case(column_name))
-                            .then_some(index)
-                    })
-                    .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        referenced_period_column_index: action
-            .referenced_period
-            .as_ref()
-            .map(|period_column| {
-                referenced_relation
-                    .desc
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, column)| {
-                        (!column.dropped && column.name.eq_ignore_ascii_case(period_column))
-                            .then_some(index)
-                    })
-                    .ok_or_else(|| {
-                        ExecError::Parse(ParseError::UnknownColumn(period_column.clone()))
-                    })
-            })
-            .transpose()?,
-        referenced_index,
-        deferrable: false,
-        initially_deferred: false,
-        enforced: true,
-    };
     let mut ctx = ddl_executor_context(
         db,
         catalog,
@@ -868,16 +899,47 @@ fn validate_foreign_key_rows(
         datetime_config,
         interrupts,
     )?;
-    let rows =
-        collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
-    for (_, values) in rows {
-        crate::backend::executor::enforce_outbound_foreign_keys(
-            relation_name,
-            std::slice::from_ref(&constraint),
-            None,
-            &values,
-            &mut ctx,
-        )?;
+    let referenced_column_indexes =
+        column_indexes_for_names(&referenced_relation.desc, &action.referenced_columns)?;
+    let referenced_period_column_index =
+        optional_column_index_for_name(&referenced_relation.desc, &action.referenced_period)?;
+    let validation_targets = foreign_key_validation_targets(catalog, relation)?;
+    for target in validation_targets {
+        let target_name = catalog
+            .class_row_by_oid(target.relation_oid)
+            .map(|class| class.relname)
+            .unwrap_or_else(|| relation_name.to_string());
+        let constraint = BoundForeignKeyConstraint {
+            constraint_oid: 0,
+            constraint_name: action.constraint_name.clone(),
+            relation_name: target_name.clone(),
+            column_names: action.columns.clone(),
+            column_indexes: column_indexes_for_names(&target.desc, &action.columns)?,
+            period_column_index: optional_column_index_for_name(&target.desc, &action.period)?,
+            match_type: action.match_type,
+            referenced_relation_name: action.referenced_table.clone(),
+            referenced_relation_oid: referenced_relation.relation_oid,
+            referenced_rel: referenced_relation.rel,
+            referenced_toast: referenced_relation.toast,
+            referenced_desc: referenced_relation.desc.clone(),
+            referenced_column_indexes: referenced_column_indexes.clone(),
+            referenced_period_column_index,
+            referenced_index: referenced_index.clone(),
+            deferrable: false,
+            initially_deferred: false,
+            enforced: true,
+        };
+        let rows =
+            collect_matching_rows_heap(target.rel, &target.desc, target.toast, None, &mut ctx)?;
+        for (_, values) in rows {
+            crate::backend::executor::enforce_outbound_foreign_keys(
+                &target_name,
+                std::slice::from_ref(&constraint),
+                None,
+                &values,
+                &mut ctx,
+            )?;
+        }
     }
     Ok(())
 }
@@ -1014,7 +1076,7 @@ fn validate_attached_foreign_key_rows_if_needed(
     cid: CommandId,
     interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
 ) -> Result<(), ExecError> {
-    if relation.relkind == 'p' || !row.conenforced {
+    if !row.conenforced {
         return Ok(());
     }
     let action = foreign_key_validation_action_from_row(
@@ -1528,6 +1590,18 @@ impl Database {
                 detail: None,
                 hint: None,
                 sqlstate: "42809",
+            });
+        }
+        if row.conparentid != 0 || row.coninhcount > 0 {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot alter inherited constraint \"{}\" on relation \"{}\"",
+                    row.conname,
+                    relation_basename(&alter_stmt.table_name),
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "55000",
             });
         }
         let (deferrable, initially_deferred, enforced) =
@@ -2874,18 +2948,10 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<CommandId, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let mut children = catalog.inheritance_children(referenced_parent.relation_oid);
-        children.sort_by_key(|row| (row.inhseqno, row.inhrelid));
         let mut next_cid = cid;
-        for child in children.into_iter().filter(|row| !row.inhdetachpending) {
-            let child_relation = catalog.relation_by_oid(child.inhrelid).ok_or_else(|| {
-                ExecError::DetailedError {
-                    message: format!("missing partition relation {}", child.inhrelid),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "XX000",
-                }
-            })?;
+        for child_relation in
+            sorted_partition_child_relations(&catalog, referenced_parent.relation_oid)?
+        {
             next_cid = self
                 .create_referenced_partition_foreign_key_constraint_for_partition_in_transaction(
                     client_id,
@@ -3776,6 +3842,18 @@ impl Database {
         match row.contype {
             CONSTRAINT_CHECK | CONSTRAINT_FOREIGN => {
                 if row.contype == CONSTRAINT_FOREIGN {
+                    if row.conparentid != 0 || row.coninhcount > 0 {
+                        return Err(ExecError::DetailedError {
+                            message: format!(
+                                "cannot drop inherited constraint \"{}\" of relation \"{}\"",
+                                row.conname,
+                                relation_basename(&drop_stmt.table_name),
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "0A000",
+                        });
+                    }
                     self.drop_partition_child_foreign_key_constraints_in_transaction(
                         client_id,
                         xid,

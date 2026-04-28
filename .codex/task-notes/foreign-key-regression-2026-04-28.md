@@ -84,3 +84,30 @@ Remaining frequency snapshot:
   - pending trigger event timing: 1 hunk.
   - drop schema notice ordering/aggregation and unsupported CTE/constraint
     trigger fallout near the tail.
+
+Update 2026-04-28 partition FK follow-up:
+- Implemented partition-aware validation for referencing roots/leaves,
+  inherited FK drop/alter rejection, ancestor-aware psql constraint queries,
+  referenced partition default-last clone ordering, pg_describe_object support
+  for pg_constraint, SET DEFAULT outbound recheck ancestor matching, and
+  pending-trigger checks across FK constraint families.
+- Added focused tests:
+  match_full_validation_scans_partition_leaves,
+  attach_partition_validates_inherited_foreign_key_rows,
+  inherited_foreign_key_drop_and_alter_are_rejected,
+  referenced_partition_clone_names_default_last,
+  partitioned_foreign_key_actions_remap_leaf_rows,
+  pending_trigger_events_include_partition_children.
+- Validation run:
+  cargo fmt; scripts/cargo_isolated.sh check; focused tests above;
+  scripts/cargo_isolated.sh test --lib --quiet partitioned_foreign_key;
+  scripts/cargo_isolated.sh test --lib --quiet referenced_partition_foreign_key -- --nocapture;
+  scripts/cargo_isolated.sh test --lib --quiet foreign_keys_apply_referential_actions.
+- Full regression completed before a reverted experimental validation tweak:
+  scripts/run_regression.sh --test foreign_key --timeout 300 --port 55991
+  matched 1178/1252 queries, 74 mismatches, 609 diff lines, no timeout, in
+  /var/folders/tc/1psz8_jd0hnfmgyyr0n2wtzh0000gn/T/pgrust_regress_results.honolulu-v4.REgAsV.
+- A later experiment that skipped root validation for partitioned referenced
+  tables timed out at the old partition-update statement and was reverted.
+  The remaining first mismatch is the false FK validation error when enabling
+  fk_notpartitioned_fk_a_b_fkey2 against fk_partitioned_pk.

@@ -2851,6 +2851,13 @@ pub(crate) fn eval_pg_describe_object(
                         quote_qualified_identifier(&namespace.nspname, &row.stxname)
                     ))
                 }),
+                "pg_constraint" => catalog.constraint_row_by_oid(objid).map(|row| {
+                    let relation_name = catalog
+                        .class_row_by_oid(row.conrelid)
+                        .map(|class| class.relname)
+                        .unwrap_or_else(|| row.conrelid.to_string());
+                    format!("constraint {} on table {}", row.conname, relation_name)
+                }),
                 _ => None,
             };
             Ok(description
