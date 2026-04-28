@@ -27,9 +27,7 @@ use crate::backend::access::transam::{
     ControlFileError,
 };
 use crate::backend::catalog::catalog::{CatalogIndexBuildOptions, column_desc};
-use crate::backend::catalog::indexing::{
-    rebuild_system_catalog_indexes_in_pool, vacuum_system_catalog_heaps_and_indexes_for_kinds_in_db,
-};
+use crate::backend::catalog::indexing::rebuild_system_catalog_indexes_in_pool;
 use crate::backend::catalog::namespace::effective_search_path as namespace_effective_search_path;
 use crate::backend::catalog::rows::physical_catalog_rows_from_catcache;
 use crate::backend::catalog::store::{CatalogMutationEffect, CatalogWriteContext};
@@ -71,7 +69,7 @@ pub(crate) use crate::backend::utils::activity::{
 };
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::inval::{
-    CatalogInvalidation, accept_invalidation_messages, catalog_invalidation_from_effect,
+    AcceptInvalidationMessages, CatalogInvalidation, catalog_invalidation_from_effect,
     finalize_aborted_local_catalog_invalidations, finalize_command_end_local_catalog_invalidations,
     finalize_committed_catalog_effects,
 };
@@ -1838,7 +1836,7 @@ impl Database {
     }
 
     pub(crate) fn accept_invalidation_messages(&self, client_id: ClientId) {
-        accept_invalidation_messages(self, client_id);
+        AcceptInvalidationMessages(self, client_id);
     }
 
     pub(crate) fn current_database_name(&self) -> String {

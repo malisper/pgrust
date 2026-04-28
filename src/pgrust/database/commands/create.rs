@@ -15,7 +15,7 @@ use crate::backend::parser::{
 };
 use crate::backend::rewrite::render_view_query_sql;
 use crate::backend::utils::cache::syscache::{
-    SysCacheId, SysCacheTuple, search_sys_cache_list1_db, search_sys_cache1_db,
+    SearchSysCache1, SearchSysCacheList1, SysCacheId, SysCacheTuple,
 };
 use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::utils::misc::notices::{
@@ -4601,11 +4601,11 @@ impl Database {
         txn_ctx: Option<(TransactionId, CommandId)>,
         role_oid: u32,
     ) -> Result<Option<PgAuthIdRow>, ExecError> {
-        Ok(search_sys_cache1_db(
+        Ok(SearchSysCache1(
             self,
             client_id,
             txn_ctx,
-            SysCacheId::AuthIdOid,
+            SysCacheId::AUTHOID,
             Value::Int64(i64::from(role_oid)),
         )
         .map_err(map_catalog_error)?
@@ -4622,11 +4622,11 @@ impl Database {
         txn_ctx: Option<(TransactionId, CommandId)>,
         member_oid: u32,
     ) -> Result<Vec<PgAuthMembersRow>, ExecError> {
-        Ok(search_sys_cache_list1_db(
+        Ok(SearchSysCacheList1(
             self,
             client_id,
             txn_ctx,
-            SysCacheId::AuthMembersMemberRole,
+            SysCacheId::AUTHMEMMEMROLE,
             Value::Int64(i64::from(member_oid)),
         )
         .map_err(map_catalog_error)?

@@ -5,7 +5,7 @@ use crate::backend::commands::tablecmds::{
 use crate::backend::executor::value_io::{decode_value, missing_column_value};
 use crate::backend::executor::{ExecError, ExecutorContext};
 use crate::backend::parser::{
-    BoundIndexRelation, relation_get_index_expressions, relation_get_index_predicate,
+    BoundIndexRelation, RelationGetIndexExpressions, RelationGetIndexPredicate,
 };
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::include::access::amapi::IndexBuildContext;
@@ -98,10 +98,10 @@ impl IndexBuildKeyProjector {
             CatalogError::Io("index build missing visible catalog for index evaluation".into())
         })?;
         let mut index_meta = ctx.index_meta.clone();
-        let index_exprs = relation_get_index_expressions(&mut index_meta, &ctx.heap_desc, catalog)
+        let index_exprs = RelationGetIndexExpressions(&mut index_meta, &ctx.heap_desc, catalog)
             .map_err(|err| CatalogError::Io(format!("index expression bind failed: {err:?}")))?;
         let index_predicate =
-            relation_get_index_predicate(&mut index_meta, &ctx.heap_desc, catalog)
+            RelationGetIndexPredicate(&mut index_meta, &ctx.heap_desc, catalog)
                 .map_err(|err| CatalogError::Io(format!("index predicate bind failed: {err:?}")))?;
         let compiled_predicate = index_predicate
             .as_ref()

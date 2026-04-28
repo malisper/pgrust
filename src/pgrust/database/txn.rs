@@ -258,7 +258,6 @@ impl Database {
                 self.commit_enum_labels_created_by(xid);
                 self.txn_waiter.unregister_holder(xid);
                 self.txn_waiter.notify();
-                self.vacuum_dead_system_catalog_rows_after_relation_drop(catalog_effects);
                 Ok(r)
             }
             Err(e) => {
@@ -281,37 +280,6 @@ impl Database {
                 Err(e)
             }
         }
-    }
-
-    fn vacuum_dead_system_catalog_rows_after_relation_drop(
-        &self,
-        catalog_effects: &[CatalogMutationEffect],
-    ) {
-        let mut kinds = Vec::new();
-        for effect in catalog_effects {
-            if effect.dropped_rels.is_empty() {
-                continue;
-            }
-            for kind in &effect.touched_catalogs {
-                if !kinds.contains(kind) {
-                    kinds.push(*kind);
-                }
-            }
-        }
-        if kinds.is_empty() {
-            return;
-        }
-
-        // :HACK: pgrust keeps catalog rows MVCC-visible on disk, but the
-        // regression DDL loop repeatedly loads whole catalog snapshots. Prune
-        // committed dead catalog rows after relation drops so later catalog
-        // reads do not walk every dropped test object.
-        let _ = vacuum_system_catalog_heaps_and_indexes_for_kinds_in_db(
-            &self.pool,
-            &self.txns,
-            self.database_oid,
-            &kinds,
-        );
     }
 }
 

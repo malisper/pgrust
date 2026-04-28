@@ -1,5 +1,5 @@
 use super::*;
-use crate::backend::utils::cache::syscache::{SysCacheId, SysCacheTuple, search_sys_cache1_db};
+use crate::backend::utils::cache::syscache::{SearchSysCache1, SysCacheId, SysCacheTuple};
 
 impl Database {
     pub(crate) fn temp_db_oid(temp_backend_id: TempBackendId) -> u32 {
@@ -65,11 +65,11 @@ impl Database {
             lookup_names.push(folded);
         }
         lookup_names.into_iter().find_map(|lookup_name| {
-            search_sys_cache1_db(
+            SearchSysCache1(
                 self,
                 client_id,
                 txn_ctx,
-                SysCacheId::NamespaceName,
+                SysCacheId::NAMESPACENAME,
                 Value::Text(lookup_name.into()),
             )
             .ok()?

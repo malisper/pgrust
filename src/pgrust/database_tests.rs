@@ -12874,6 +12874,141 @@ fn relation_descriptor_cache_survives_command_id_changes_and_invalidates() {
 }
 
 #[test]
+fn postgres_named_syscache_wrappers_lookup_and_invalidate() {
+    let base = temp_dir("postgres_named_syscache_wrappers");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pg_named_syscache_lookup (id int4)")
+        .unwrap();
+    let relation = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("pg_named_syscache_lookup")
+        .unwrap();
+    let relation_oid = relation.relation_oid;
+    let oid_key = Value::Int64(i64::from(relation_oid));
+
+    let class_rows = crate::backend::utils::cache::syscache::SearchSysCache1(
+        &db,
+        1,
+        None,
+        crate::backend::utils::cache::syscache::SysCacheId::RELOID,
+        oid_key.clone(),
+    )
+    .unwrap();
+    assert_eq!(class_rows.len(), 1);
+    assert_eq!(
+        crate::backend::utils::cache::syscache::SysCacheGetAttr(&class_rows[0], "relname"),
+        Some(Value::Text("pg_named_syscache_lookup".into()))
+    );
+    assert_eq!(
+        crate::backend::utils::cache::syscache::GetSysCacheOid(
+            &db,
+            1,
+            None,
+            crate::backend::utils::cache::syscache::SysCacheId::RELOID,
+            vec![oid_key.clone()],
+        )
+        .unwrap(),
+        Some(relation_oid)
+    );
+
+    let attrs = crate::backend::utils::cache::syscache::SearchSysCacheList1(
+        &db,
+        1,
+        None,
+        crate::backend::utils::cache::syscache::SysCacheId::ATTNUM,
+        oid_key.clone(),
+    )
+    .unwrap();
+    assert!(attrs.iter().any(|tuple| {
+        crate::backend::utils::cache::syscache::SysCacheGetAttr(tuple, "attname")
+            == Some(Value::Text("id".into()))
+    }));
+    assert!(
+        !crate::backend::utils::cache::syscache::SearchSysCacheExists(
+            &db,
+            1,
+            None,
+            crate::backend::utils::cache::syscache::SysCacheId::RELOID,
+            vec![Value::Int64(999_999_999)],
+        )
+        .unwrap()
+    );
+
+    crate::backend::utils::cache::inval::InvalidateSystemCaches(&db, 1);
+    assert!(
+        crate::backend::utils::cache::syscache::SearchSysCacheExists(
+            &db,
+            1,
+            None,
+            crate::backend::utils::cache::syscache::SysCacheId::RELOID,
+            vec![oid_key],
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn postgres_named_relcache_wrappers_lookup_and_invalidate_by_oid() {
+    let base = temp_dir("postgres_named_relcache_wrappers");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pg_named_relcache_lookup (id int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create index pg_named_relcache_lookup_idx on pg_named_relcache_lookup (id)",
+    )
+    .unwrap();
+    let relation = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("pg_named_relcache_lookup")
+        .unwrap();
+    let index_relation = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("pg_named_relcache_lookup_idx")
+        .unwrap();
+
+    let relcache_entry = crate::backend::utils::cache::syscache::RelationIdGetRelation(
+        &db,
+        1,
+        None,
+        relation.relation_oid,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(relcache_entry.relation_oid, relation.relation_oid);
+    assert_eq!(
+        crate::backend::utils::cache::lsyscache::RelationGetIndexList(
+            &db,
+            1,
+            None,
+            relation.relation_oid,
+        ),
+        vec![index_relation.relation_oid]
+    );
+
+    crate::backend::utils::cache::inval::CacheInvalidateRelcache(&db, 1, relation.relation_oid);
+    assert!(
+        !db.backend_cache_states
+            .read()
+            .get(&1)
+            .unwrap()
+            .relation_cache
+            .contains_key(&relation.relation_oid)
+    );
+    let relcache_entry = crate::backend::utils::cache::syscache::RelationIdGetRelation(
+        &db,
+        1,
+        None,
+        relation.relation_oid,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(relcache_entry.relation_oid, relation.relation_oid);
+}
+
+#[test]
 fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
     let base = temp_dir("commit_catalog_invalidation_fanout");
     let db = Database::open(&base, 16).unwrap();

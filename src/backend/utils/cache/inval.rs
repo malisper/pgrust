@@ -80,6 +80,22 @@ pub fn apply_backend_cache_invalidation(
     state.catalog_snapshot_ctx = None;
 }
 
+#[allow(non_snake_case)]
+pub fn InvalidateSystemCaches(db: &Database, client_id: ClientId) {
+    let invalidation = CatalogInvalidation {
+        full_reset: true,
+        ..CatalogInvalidation::default()
+    };
+    apply_backend_cache_invalidation(db, client_id, &invalidation);
+}
+
+#[allow(non_snake_case)]
+pub fn CacheInvalidateRelcache(db: &Database, client_id: ClientId, relation_oid: u32) {
+    let mut invalidation = CatalogInvalidation::default();
+    invalidation.relation_oids.insert(relation_oid);
+    apply_backend_cache_invalidation(db, client_id, &invalidation);
+}
+
 fn queue_backend_cache_invalidation(
     db: &Database,
     source_client_id: Option<ClientId>,
@@ -123,6 +139,11 @@ pub fn accept_invalidation_messages(db: &Database, client_id: ClientId) {
     for invalidation in drain_pending_invalidations(db, client_id) {
         apply_backend_cache_invalidation(db, client_id, &invalidation);
     }
+}
+
+#[allow(non_snake_case)]
+pub fn AcceptInvalidationMessages(db: &Database, client_id: ClientId) {
+    accept_invalidation_messages(db, client_id);
 }
 
 pub fn finalize_command_end_local_catalog_invalidations(

@@ -1726,7 +1726,7 @@ pub(crate) fn index_key_values_for_row(
                 })
             })?;
             let mut index_meta = index.index_meta.clone();
-            fallback_exprs = crate::backend::parser::relation_get_index_expressions(
+            fallback_exprs = crate::backend::parser::RelationGetIndexExpressions(
                 &mut index_meta,
                 heap_desc,
                 catalog,

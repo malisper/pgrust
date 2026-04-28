@@ -702,7 +702,7 @@ fn search_input_tlist_entry<'a>(
     input: &Path,
     tlist: &'a IndexedTlist,
 ) -> Option<&'a IndexedTlistEntry> {
-    let flattened_expr = root.map(|root| flatten_join_alias_vars(root, expr.clone()));
+    let flattened_expr = root.and_then(|root| maybe_flatten_join_alias_vars(root, expr));
     search_tlist_entry(root, expr, tlist).or_else(|| {
         let mut matched_index = None;
         for entry in &tlist.entries {
@@ -737,6 +737,146 @@ fn search_input_tlist_entry<'a>(
         }
         matched_index.and_then(|index| tlist.entries.iter().find(|entry| entry.index == index))
     })
+}
+
+fn maybe_flatten_join_alias_vars(root: &PlannerInfo, expr: &Expr) -> Option<Expr> {
+    expr_references_join_alias_var(root, expr).then(|| flatten_join_alias_vars(root, expr.clone()))
+}
+
+fn expr_references_join_alias_var(root: &PlannerInfo, expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => root
+            .parse
+            .rtable
+            .get(var.varno.saturating_sub(1))
+            .is_some_and(|rte| matches!(rte.kind, RangeTblEntryKind::Join { .. })),
+        Expr::Aggref(aggref) => {
+            aggref
+                .direct_args
+                .iter()
+                .any(|expr| expr_references_join_alias_var(root, expr))
+                || aggref
+                    .args
+                    .iter()
+                    .any(|expr| expr_references_join_alias_var(root, expr))
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|entry| expr_references_join_alias_var(root, &entry.expr))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(|expr| expr_references_join_alias_var(root, expr))
+        }
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|expr| expr_references_join_alias_var(root, expr))
+                || case_expr.args.iter().any(|arm| {
+                    expr_references_join_alias_var(root, &arm.expr)
+                        || expr_references_join_alias_var(root, &arm.result)
+                })
+                || expr_references_join_alias_var(root, &case_expr.defresult)
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_ref()
+            .is_some_and(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_ref()
+            .is_some_and(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::ScalarArrayOp(op) => {
+            expr_references_join_alias_var(root, &op.left)
+                || expr_references_join_alias_var(root, &op.right)
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::Cast(inner, _) => expr_references_join_alias_var(root, inner),
+        Expr::Collate { expr, .. } => expr_references_join_alias_var(root, expr),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_references_join_alias_var(root, expr)
+                || expr_references_join_alias_var(root, pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_references_join_alias_var(root, expr))
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_references_join_alias_var(root, inner),
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            expr_references_join_alias_var(root, left)
+                || expr_references_join_alias_var(root, right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_references_join_alias_var(root, expr)),
+        Expr::FieldSelect { expr, .. } => expr_references_join_alias_var(root, expr),
+        Expr::Coalesce(left, right) => {
+            expr_references_join_alias_var(root, left)
+                || expr_references_join_alias_var(root, right)
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_references_join_alias_var(root, array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| expr_references_join_alias_var(root, expr))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| expr_references_join_alias_var(root, expr))
+                })
+        }
+        Expr::SqlJsonQueryFunction(_)
+        | Expr::SetReturning(_)
+        | Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
 }
 
 fn output_component_matches_expr(candidate: &Expr, expr: &Expr) -> bool {
@@ -5656,7 +5796,14 @@ fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bo
     let Some(root) = root else {
         return false;
     };
-    flatten_join_alias_vars(root, left.clone()) == flatten_join_alias_vars(root, right.clone())
+    let flattened_left = maybe_flatten_join_alias_vars(root, left);
+    let flattened_right = maybe_flatten_join_alias_vars(root, right);
+    match (flattened_left.as_ref(), flattened_right.as_ref()) {
+        (None, None) => false,
+        (Some(left), None) => left == right,
+        (None, Some(right)) => left == right,
+        (Some(left), Some(right)) => left == right,
+    }
 }
 
 fn rebuild_setrefs_expr(
@@ -5973,10 +6120,9 @@ fn fully_expand_output_expr(expr: Expr, path: &Path) -> Expr {
 }
 
 fn fully_expand_output_expr_with_root(root: Option<&PlannerInfo>, expr: Expr, path: &Path) -> Expr {
-    let expr = match root {
-        Some(root) => flatten_join_alias_vars(root, expr),
-        None => expr,
-    };
+    let expr = root
+        .and_then(|root| maybe_flatten_join_alias_vars(root, &expr))
+        .unwrap_or(expr);
     fully_expand_output_expr(expr, path)
 }
 
