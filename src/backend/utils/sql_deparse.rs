@@ -83,6 +83,7 @@ fn normalize_infix_spacing(input: &str) -> String {
                 push_spaced_operator(&mut out, &operator);
             }
             '=' => push_spaced_operator(&mut out, "="),
+            '+' => push_spaced_operator(&mut out, "+"),
             _ => out.push(ch),
         }
     }

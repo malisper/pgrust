@@ -3902,7 +3902,7 @@ fn partition_spec_for_relation_best_effort(
 }
 
 fn partition_key_collation_display_name(
-    catalog: &dyn CatalogLookup,
+    _catalog: &dyn CatalogLookup,
     row: &crate::include::catalog::PgPartitionedTableRow,
     index: usize,
 ) -> Option<String> {
@@ -3910,8 +3910,7 @@ fn partition_key_collation_display_name(
     if matches!(collation_oid, 0 | DEFAULT_COLLATION_OID) {
         return None;
     }
-    catalog
-        .collation_rows()
+    crate::include::catalog::bootstrap_pg_collation_rows()
         .into_iter()
         .find(|row| row.oid == collation_oid)
         .map(|row| quote_identifier_if_needed(&row.collname))
@@ -4254,7 +4253,7 @@ fn format_indexdef_for_catalog(
         .find(|row| row.oid == index.index_meta.am_oid)
         .map(|row| row.amname)
         .unwrap_or_else(|| "btree".into());
-    let all_columns = index_definition_columns(relation, index);
+    let all_columns = index_definition_columns(catalog, relation, index);
     let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
     let key_columns = all_columns
         .iter()
@@ -4271,8 +4270,9 @@ fn format_indexdef_for_catalog(
     } else {
         ""
     };
+    let only = if index.relkind == 'I' { " ONLY" } else { "" };
     let mut definition = format!(
-        "CREATE {unique}INDEX {} ON {} USING {} ({})",
+        "CREATE {unique}INDEX {} ON{only} {} USING {} ({})",
         index.name,
         table_name,
         amname,
@@ -4301,6 +4301,7 @@ fn format_indexdef_for_catalog(
 }
 
 fn index_definition_columns(
+    catalog: &dyn CatalogLookup,
     relation: &crate::backend::parser::BoundRelation,
     index: &crate::backend::parser::BoundIndexRelation,
 ) -> Vec<String> {
@@ -4318,11 +4319,27 @@ fn index_definition_columns(
         .enumerate()
         .map(|(index_column, attnum)| {
             if *attnum > 0 {
-                return relation
+                let Some(column) = relation
                     .desc
                     .columns
                     .get((*attnum as usize).saturating_sub(1))
-                    .map(|column| column.name.clone())
+                else {
+                    return index
+                        .desc
+                        .columns
+                        .get(index_column)
+                        .map(|column| column.name.clone())
+                        .unwrap_or_else(|| format!("column{}", index_column + 1));
+                };
+                let name = index_column_definition_with_metadata(
+                    catalog,
+                    index,
+                    index_column,
+                    column.name.clone(),
+                    column.sql_type,
+                    column.collation_oid,
+                );
+                return Some(name)
                     .or_else(|| {
                         index
                             .desc
@@ -4349,16 +4366,118 @@ fn index_definition_columns(
         .collect()
 }
 
+fn index_column_definition_with_metadata(
+    catalog: &dyn CatalogLookup,
+    index: &crate::backend::parser::BoundIndexRelation,
+    index_column: usize,
+    mut base: String,
+    sql_type: SqlType,
+    column_collation_oid: u32,
+) -> String {
+    if let Some(collation) =
+        index_column_collation_display_name(catalog, index, index_column, column_collation_oid)
+    {
+        base.push_str(" COLLATE ");
+        base.push_str(&collation);
+    }
+    if let Some(opclass) = index_column_opclass_display_name(catalog, index, index_column, sql_type)
+    {
+        base.push(' ');
+        base.push_str(&opclass);
+    }
+    if let Some(options) = index_column_opclass_options_display(index, index_column) {
+        base.push(' ');
+        base.push_str(&options);
+    }
+    base
+}
+
+fn index_column_collation_display_name(
+    _catalog: &dyn CatalogLookup,
+    index: &crate::backend::parser::BoundIndexRelation,
+    index_column: usize,
+    column_collation_oid: u32,
+) -> Option<String> {
+    let collation_oid = *index.index_meta.indcollation.get(index_column)?;
+    if collation_oid == 0
+        || collation_oid == crate::include::catalog::DEFAULT_COLLATION_OID
+        || collation_oid == column_collation_oid
+    {
+        return None;
+    }
+    crate::include::catalog::bootstrap_pg_collation_rows()
+        .into_iter()
+        .find(|row| row.oid == collation_oid)
+        .map(|row| quote_identifier_if_needed(&row.collname))
+}
+
+fn index_column_opclass_display_name(
+    _catalog: &dyn CatalogLookup,
+    index: &crate::backend::parser::BoundIndexRelation,
+    index_column: usize,
+    sql_type: SqlType,
+) -> Option<String> {
+    let opclass_oid = *index.index_meta.indclass.get(index_column)?;
+    if opclass_oid == 0 {
+        return None;
+    }
+    let type_oid = crate::backend::utils::cache::catcache::sql_type_oid(sql_type);
+    if crate::include::catalog::default_opclass_oid_for_am(
+        index.index_meta.am_oid,
+        type_oid,
+        sql_type,
+    ) == Some(opclass_oid)
+        && index
+            .index_meta
+            .indclass_options
+            .get(index_column)
+            .is_none_or(Vec::is_empty)
+    {
+        return None;
+    }
+    crate::include::catalog::bootstrap_pg_opclass_rows()
+        .into_iter()
+        .find(|row| row.oid == opclass_oid)
+        .map(|row| quote_identifier_if_needed(&row.opcname))
+}
+
+fn index_column_opclass_options_display(
+    index: &crate::backend::parser::BoundIndexRelation,
+    index_column: usize,
+) -> Option<String> {
+    let options = index
+        .index_meta
+        .indclass_options
+        .get(index_column)
+        .filter(|options| !options.is_empty())?;
+    let rendered = options
+        .iter()
+        .map(|(name, value)| {
+            format!(
+                "{}='{}'",
+                name.to_ascii_lowercase(),
+                sql_quote_literal(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("({rendered})"))
+}
+
+fn sql_quote_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
 fn parenthesized_index_expression(expr_sql: &str) -> String {
     let trimmed = expr_sql.trim();
     if let Some(function_call) = normalized_function_call_expression(trimmed) {
         return function_call;
     }
-    if (trimmed.starts_with('(') && trimmed.ends_with(')')) || looks_like_function_call(trimmed) {
-        trimmed.to_string()
-    } else {
-        format!("({trimmed})")
+    if looks_like_function_call(trimmed) {
+        return trimmed.to_string();
     }
+    let inner = strip_outer_parens_once(trimmed);
+    format!("(({inner}))")
 }
 
 fn normalized_function_call_expression(expr_sql: &str) -> Option<String> {

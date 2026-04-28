@@ -19,6 +19,7 @@ fn array_subscript_element_type(array_type: SqlType) -> SqlType {
     }
     match array_type.kind {
         SqlTypeKind::Jsonb => SqlType::new(SqlTypeKind::Jsonb),
+        SqlTypeKind::Box => SqlType::new(SqlTypeKind::Point),
         SqlTypeKind::Point => SqlType::new(SqlTypeKind::Float8),
         SqlTypeKind::Int2Vector => SqlType::new(SqlTypeKind::Int2),
         SqlTypeKind::OidVector => SqlType::new(SqlTypeKind::Oid),
@@ -454,6 +455,22 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 ),
                 catalog,
             );
+            if !array_type.is_array
+                && matches!(array_type.kind, SqlTypeKind::Box | SqlTypeKind::Point)
+            {
+                let mut current_type = array_type.element_type();
+                for subscript in subscripts {
+                    if subscript.is_slice {
+                        return SqlType::array_of(current_type);
+                    }
+                    current_type = match current_type.kind {
+                        SqlTypeKind::Box => SqlType::new(SqlTypeKind::Point),
+                        SqlTypeKind::Point => SqlType::new(SqlTypeKind::Float8),
+                        _ => current_type.element_type(),
+                    };
+                }
+                return current_type;
+            }
             let element_type = array_subscript_element_type(array_type);
             if subscripts.iter().any(|subscript| subscript.upper.is_some()) {
                 SqlType::array_of(element_type)

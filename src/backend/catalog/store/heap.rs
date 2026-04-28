@@ -3888,15 +3888,65 @@ impl CatalogStore {
                         && row.deptype == DEPENDENCY_NORMAL
                 })
                 .collect::<Vec<_>>();
+        let remaining_inherits = current_inherits
+            .iter()
+            .filter(|row| row.inhparent != parent_oid)
+            .cloned()
+            .collect::<Vec<_>>();
+        let current_parent_relations = current_inherits
+            .iter()
+            .map(|row| {
+                self.relation_id_get_relation(ctx, row.inhparent)?
+                    .ok_or_else(|| CatalogError::UnknownTable(row.inhparent.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let remaining_parent_relations = remaining_inherits
+            .iter()
+            .map(|row| {
+                self.relation_id_get_relation(ctx, row.inhparent)?
+                    .ok_or_else(|| CatalogError::UnknownTable(row.inhparent.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let child_relation = self
+            .relation_id_get_relation(ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let child_class = class_row_by_oid_mvcc(self, ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let child_name = child_class.relname.clone();
+        let old_child_entry = catalog_entry_from_relation_row(&child_class, &child_relation);
+        let mut new_child_entry = old_child_entry.clone();
+        for column in &mut new_child_entry.desc.columns {
+            if column.dropped {
+                continue;
+            }
+            let current_parent_match_count =
+                inherited_parent_column_match_count(&current_parent_relations, &column.name);
+            let remaining_parent_match_count =
+                inherited_parent_column_match_count(&remaining_parent_relations, &column.name);
+            let had_local_column_definition =
+                column.attislocal && column.attinhcount == current_parent_match_count as i16;
+            column.attinhcount = remaining_parent_match_count as i16;
+            column.attislocal = had_local_column_definition || remaining_parent_match_count == 0;
+        }
+        let old_attributes = relation_attributes_mvcc(self, ctx, relation_oid)?;
+        let new_attributes = {
+            let type_lookup = CatalogStoreTypeLookup { store: &*self, ctx };
+            rows_for_new_relation_entry(&type_lookup, &child_name, &new_child_entry)?.attributes
+        };
 
         let rows_to_delete = PhysicalCatalogRows {
             inherits: vec![removed_inherit],
             depends: removed_depends,
+            attributes: old_attributes,
             ..PhysicalCatalogRows::default()
         };
-        let rows_to_insert = PhysicalCatalogRows::default();
+        let rows_to_insert = PhysicalCatalogRows {
+            attributes: new_attributes,
+            ..PhysicalCatalogRows::default()
+        };
 
         let mut kinds = vec![
+            BootstrapCatalogKind::PgAttribute,
             BootstrapCatalogKind::PgDepend,
             BootstrapCatalogKind::PgInherits,
         ];
@@ -7143,7 +7193,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, _control| {
-                if !matches!(entry.relkind, 'r' | 'f') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -7161,6 +7211,62 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
+    pub fn alter_index_relation_for_column_type_mvcc(
+        &mut self,
+        index_oid: u32,
+        new_desc: RelationDesc,
+        new_index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, index_oid, ctx, move |entry, _control| {
+                if !matches!(entry.relkind, 'i' | 'I') {
+                    return Err(CatalogError::UnknownTable(index_oid.to_string()));
+                }
+                entry.desc = new_desc;
+                entry.index_meta = Some(CatalogIndexMeta {
+                    indrelid: new_index_meta.indrelid,
+                    indkey: new_index_meta.indkey,
+                    indisunique: new_index_meta.indisunique,
+                    indnullsnotdistinct: new_index_meta.indnullsnotdistinct,
+                    indisprimary: new_index_meta.indisprimary,
+                    indisexclusion: new_index_meta.indisexclusion,
+                    indimmediate: new_index_meta.indimmediate,
+                    indisvalid: new_index_meta.indisvalid,
+                    indisready: new_index_meta.indisready,
+                    indislive: new_index_meta.indislive,
+                    indclass: new_index_meta.indclass,
+                    indclass_options: new_index_meta.indclass_options,
+                    indcollation: new_index_meta.indcollation,
+                    indoption: new_index_meta.indoption,
+                    indexprs: new_index_meta.indexprs,
+                    indpred: new_index_meta.indpred,
+                    btree_options: new_index_meta.btree_options,
+                    brin_options: new_index_meta.brin_options,
+                    gin_options: new_index_meta.gin_options,
+                    hash_options: new_index_meta.hash_options,
+                });
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgClass,
+                        BootstrapCatalogKind::PgAttribute,
+                        BootstrapCatalogKind::PgIndex,
+                        BootstrapCatalogKind::PgDepend,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, index_oid);
+        if let Some(index_meta) = &new_entry.index_meta {
+            effect_record_oid(&mut effect.relation_oids, index_meta.indrelid);
+        }
         effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
         Ok(effect)
     }
@@ -11127,11 +11233,9 @@ fn rows_for_existing_relation_mvcc(
         rows.types.push(row);
     }
     if matches!(entry.relkind, 'i' | 'I') {
-        rows.indexes.extend(index_rows_for_relation_mvcc(
-            store,
-            ctx,
-            entry.relation_oid,
-        )?);
+        if let Some(row) = index_row_by_index_oid_mvcc(store, ctx, entry.relation_oid)? {
+            rows.indexes.push(row);
+        }
     }
 
     collect_depend_rows_for_object_mvcc(

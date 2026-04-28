@@ -12577,6 +12577,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("range_intersect", BuiltinScalarFunction::RangeIntersect),
         ("range_difference", BuiltinScalarFunction::RangeDifference),
         ("range_merge", BuiltinScalarFunction::RangeMerge),
+        ("box_high", BuiltinScalarFunction::GeoBoxHigh),
+        ("box_low", BuiltinScalarFunction::GeoBoxLow),
         ("pointx", BuiltinScalarFunction::GeoPointX),
         ("pointy", BuiltinScalarFunction::GeoPointY),
         (

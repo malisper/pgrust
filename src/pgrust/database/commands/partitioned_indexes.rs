@@ -1006,14 +1006,16 @@ impl Database {
             .iter()
             .any(|row| row.inhparent == parent_table.relation_oid)
         {
+            let parent_table_name = installer.relation_name(parent_table.relation_oid)?;
             return Err(ExecError::DetailedError {
                 message: format!(
                     "cannot attach index \"{}\" as a partition of index \"{}\"",
                     stmt.child_index_name, stmt.parent_index_name
                 ),
-                detail: Some(
-                    "The child index is not on a partition of the parent index's table.".into(),
-                ),
+                detail: Some(format!(
+                    "Index \"{}\" is not an index on any partition of table \"{}\".",
+                    stmt.child_index_name, parent_table_name
+                )),
                 hint: None,
                 sqlstate: "42809",
             });

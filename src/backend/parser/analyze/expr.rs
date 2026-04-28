@@ -943,23 +943,88 @@ fn fixed_length_array_slice_error() -> ParseError {
     }
 }
 
-fn point_coordinate_subscript(
-    subscripts: &[crate::include::nodes::parsenodes::ArraySubscript],
+fn fixed_geometry_subscript_error(sql_type: SqlType) -> ParseError {
+    ParseError::UndefinedOperator {
+        op: "[]",
+        left_type: sql_type_name(sql_type),
+        right_type: "integer".into(),
+    }
+}
+
+fn fixed_geometry_subscript_index(
+    subscript: &crate::include::nodes::parsenodes::ArraySubscript,
 ) -> Option<i32> {
-    let [subscript] = subscripts else {
-        return None;
-    };
-    if subscript.is_slice || subscript.upper.is_some() {
+    if subscript.is_slice {
         return None;
     }
-    match subscript.lower.as_deref()? {
+    match subscript.lower.as_deref().or(subscript.upper.as_deref())? {
         SqlExpr::IntegerLiteral(value) => {
+            normalize_numeric_literal_token(value).parse::<i32>().ok()
+        }
+        SqlExpr::NumericLiteral(value) => {
             normalize_numeric_literal_token(value).parse::<i32>().ok()
         }
         SqlExpr::Const(Value::Int16(value)) => Some(i32::from(*value)),
         SqlExpr::Const(Value::Int32(value)) => Some(*value),
         _ => None,
     }
+}
+
+fn point_coordinate_subscript(
+    subscripts: &[crate::include::nodes::parsenodes::ArraySubscript],
+) -> Option<i32> {
+    let [subscript] = subscripts else {
+        return None;
+    };
+    fixed_geometry_subscript_index(subscript)
+}
+
+fn bind_fixed_geometry_subscripts(
+    array: &SqlExpr,
+    array_type: SqlType,
+    subscripts: &[crate::include::nodes::parsenodes::ArraySubscript],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let mut expr =
+        bind_expr_with_outer_and_ctes(array, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let mut current_type = array_type.element_type();
+    for subscript in subscripts {
+        if subscript.is_slice {
+            return Err(fixed_length_array_slice_error());
+        }
+        let Some(index) = fixed_geometry_subscript_index(subscript) else {
+            return Err(fixed_geometry_subscript_error(current_type));
+        };
+        if !(0..=1).contains(&index) {
+            return Err(fixed_geometry_subscript_error(current_type));
+        }
+        let (func, result_type) = match current_type.kind {
+            SqlTypeKind::Box if index == 0 => (
+                BuiltinScalarFunction::GeoBoxHigh,
+                SqlType::new(SqlTypeKind::Point),
+            ),
+            SqlTypeKind::Box => (
+                BuiltinScalarFunction::GeoBoxLow,
+                SqlType::new(SqlTypeKind::Point),
+            ),
+            SqlTypeKind::Point if index == 0 => (
+                BuiltinScalarFunction::GeoPointX,
+                SqlType::new(SqlTypeKind::Float8),
+            ),
+            SqlTypeKind::Point => (
+                BuiltinScalarFunction::GeoPointY,
+                SqlType::new(SqlTypeKind::Float8),
+            ),
+            _ => return Err(fixed_geometry_subscript_error(current_type)),
+        };
+        expr = Expr::builtin_func(func, Some(result_type), false, vec![expr]);
+        current_type = result_type;
+    }
+    Ok(expr)
 }
 
 #[allow(dead_code)]
@@ -4291,13 +4356,13 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 );
             }
-            if array_type.kind == SqlTypeKind::Point
+            if matches!(array_type.kind, SqlTypeKind::Box | SqlTypeKind::Point)
                 && !array_type.is_array
-                && let Some(index) = point_coordinate_subscript(subscripts)
             {
-                return bind_geometry_subscript(
+                return bind_fixed_geometry_subscripts(
                     array,
-                    index,
+                    array_type,
+                    subscripts,
                     scope,
                     catalog,
                     outer_scopes,
@@ -4305,7 +4370,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 );
             }
-            if array_type.kind == SqlTypeKind::Point
+            if matches!(array_type.kind, SqlTypeKind::Box | SqlTypeKind::Point)
                 && subscripts.iter().any(|subscript| subscript.is_slice)
             {
                 return Err(fixed_length_array_slice_error());

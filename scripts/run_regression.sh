@@ -639,6 +639,9 @@ direct_test_dependencies() {
         brin_bloom|brin_multi)
             echo "brin"
             ;;
+        brin)
+            echo "create_index"
+            ;;
         create_index_spgist|index_including|index_including_gist)
             echo "create_index"
             ;;

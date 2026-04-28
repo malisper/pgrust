@@ -3623,6 +3623,9 @@ fn render_explain_func_expr(
             );
         }
     }
+    if let Some(rendered) = render_explain_geometry_subscript_func(func, qualifier, column_names) {
+        return rendered;
+    }
     if matches!(
         func.implementation,
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Timezone)
@@ -3643,6 +3646,41 @@ fn render_explain_func_expr(
         .collect::<Vec<_>>()
         .join(", ");
     format!("{name}({args})")
+}
+
+fn render_explain_geometry_subscript_func(
+    func: &FuncExpr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> Option<String> {
+    let index = match func.implementation {
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxHigh)
+        | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointX) => 0,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxLow)
+        | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointY) => 1,
+        _ => return None,
+    };
+    let arg = func.args.first()?;
+    let rendered_arg = render_explain_expr_inner_with_qualifier(arg, qualifier, column_names);
+    Some(match func.implementation {
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxHigh)
+        | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxLow) => {
+            format!("{rendered_arg}[{index}]")
+        }
+        _ if matches!(
+            arg,
+            Expr::Func(inner)
+                if matches!(
+                    inner.implementation,
+                    ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxHigh)
+                        | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxLow)
+                )
+        ) =>
+        {
+            format!("(({rendered_arg})[{index}])")
+        }
+        _ => format!("{rendered_arg}[{index}]"),
+    })
 }
 
 fn render_explain_scalar_array_op(
