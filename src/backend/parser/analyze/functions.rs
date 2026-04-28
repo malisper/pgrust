@@ -1135,6 +1135,9 @@ fn match_proc_arg_type(
     if let Some(cost) = arg_type_match_cost(actual_type, declared_type) {
         return Some((cost, declared_type));
     }
+    if inherited_composite_arg_can_coerce_to(catalog, actual_type, declared_type) {
+        return Some((1, declared_type));
+    }
     if catalog_implicit_cast_exists(catalog, actual_type, declared_oid) {
         return Some((3, declared_type));
     }
@@ -1149,6 +1152,38 @@ fn match_proc_arg_type(
         return Some((3, declared_type));
     }
     None
+}
+
+fn inherited_composite_arg_can_coerce_to(
+    catalog: &dyn CatalogLookup,
+    actual_type: SqlType,
+    declared_type: SqlType,
+) -> bool {
+    if actual_type.is_array
+        || declared_type.is_array
+        || actual_type.kind != SqlTypeKind::Composite
+        || declared_type.kind != SqlTypeKind::Composite
+        || actual_type.typrelid == 0
+        || declared_type.typrelid == 0
+        || actual_type.typrelid == declared_type.typrelid
+    {
+        return false;
+    }
+
+    let mut pending = vec![actual_type.typrelid];
+    let mut seen = BTreeSet::new();
+    while let Some(relation_oid) = pending.pop() {
+        if !seen.insert(relation_oid) {
+            continue;
+        }
+        for parent in catalog.inheritance_parents(relation_oid) {
+            if parent.inhparent == declared_type.typrelid {
+                return true;
+            }
+            pending.push(parent.inhparent);
+        }
+    }
+    false
 }
 
 fn resolve_proc_result_type(

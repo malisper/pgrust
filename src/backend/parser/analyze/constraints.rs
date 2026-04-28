@@ -309,21 +309,31 @@ fn check_constraint_name_column(expr_sql: &str, relation_columns: &[String]) -> 
         .iter()
         .map(|column| column.to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
-    let mut referenced = BTreeSet::new();
-    collect_check_expr_column_names(&expr, &relation_column_names, &mut referenced);
-    (referenced.len() == 1).then(|| referenced.into_iter().next().expect("one column"))
+    let mut user_columns = BTreeSet::new();
+    let mut system_columns = BTreeSet::new();
+    collect_check_expr_column_names(
+        &expr,
+        &relation_column_names,
+        &mut user_columns,
+        &mut system_columns,
+    );
+    (user_columns.len() == 1 && system_columns.is_empty())
+        .then(|| user_columns.into_iter().next().expect("one column"))
 }
 
 fn collect_check_expr_column_names(
     expr: &SqlExpr,
     relation_columns: &BTreeSet<String>,
-    out: &mut BTreeSet<String>,
+    user_columns: &mut BTreeSet<String>,
+    system_columns: &mut BTreeSet<String>,
 ) {
     match expr {
         SqlExpr::Column(name) => {
             let column_name = name.rsplit('.').next().unwrap_or(name).to_ascii_lowercase();
             if relation_columns.contains(&column_name) {
-                out.insert(column_name);
+                user_columns.insert(column_name);
+            } else if is_system_column_name_for_check(&column_name) {
+                system_columns.insert(column_name);
             }
         }
         SqlExpr::Add(left, right)
@@ -359,13 +369,13 @@ fn collect_check_expr_column_names(
         | SqlExpr::JsonGetText(left, right)
         | SqlExpr::JsonPath(left, right)
         | SqlExpr::JsonPathText(left, right) => {
-            collect_check_expr_column_names(left, relation_columns, out);
-            collect_check_expr_column_names(right, relation_columns, out);
+            collect_check_expr_column_names(left, relation_columns, user_columns, system_columns);
+            collect_check_expr_column_names(right, relation_columns, user_columns, system_columns);
         }
         SqlExpr::BinaryOperator { left, right, .. }
         | SqlExpr::GeometryBinaryOp { left, right, .. } => {
-            collect_check_expr_column_names(left, relation_columns, out);
-            collect_check_expr_column_names(right, relation_columns, out);
+            collect_check_expr_column_names(left, relation_columns, user_columns, system_columns);
+            collect_check_expr_column_names(right, relation_columns, user_columns, system_columns);
         }
         SqlExpr::UnaryPlus(inner)
         | SqlExpr::Negate(inner)
@@ -378,14 +388,14 @@ fn collect_check_expr_column_names(
         | SqlExpr::IsNotNull(inner)
         | SqlExpr::FieldSelect { expr: inner, .. }
         | SqlExpr::GeometryUnaryOp { expr: inner, .. } => {
-            collect_check_expr_column_names(inner, relation_columns, out);
+            collect_check_expr_column_names(inner, relation_columns, user_columns, system_columns);
         }
         SqlExpr::Subscript { expr, .. } => {
-            collect_check_expr_column_names(expr, relation_columns, out);
+            collect_check_expr_column_names(expr, relation_columns, user_columns, system_columns);
         }
         SqlExpr::AtTimeZone { expr, zone } => {
-            collect_check_expr_column_names(expr, relation_columns, out);
-            collect_check_expr_column_names(zone, relation_columns, out);
+            collect_check_expr_column_names(expr, relation_columns, user_columns, system_columns);
+            collect_check_expr_column_names(zone, relation_columns, user_columns, system_columns);
         }
         SqlExpr::Like {
             expr,
@@ -399,10 +409,20 @@ fn collect_check_expr_column_names(
             escape,
             ..
         } => {
-            collect_check_expr_column_names(expr, relation_columns, out);
-            collect_check_expr_column_names(pattern, relation_columns, out);
+            collect_check_expr_column_names(expr, relation_columns, user_columns, system_columns);
+            collect_check_expr_column_names(
+                pattern,
+                relation_columns,
+                user_columns,
+                system_columns,
+            );
             if let Some(escape) = escape {
-                collect_check_expr_column_names(escape, relation_columns, out);
+                collect_check_expr_column_names(
+                    escape,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
             }
         }
         SqlExpr::Case {
@@ -411,40 +431,85 @@ fn collect_check_expr_column_names(
             defresult,
         } => {
             if let Some(arg) = arg {
-                collect_check_expr_column_names(arg, relation_columns, out);
+                collect_check_expr_column_names(
+                    arg,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
             }
             for when in args {
-                collect_check_expr_column_names(&when.expr, relation_columns, out);
-                collect_check_expr_column_names(&when.result, relation_columns, out);
+                collect_check_expr_column_names(
+                    &when.expr,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
+                collect_check_expr_column_names(
+                    &when.result,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
             }
             if let Some(defresult) = defresult {
-                collect_check_expr_column_names(defresult, relation_columns, out);
+                collect_check_expr_column_names(
+                    defresult,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
             }
         }
         SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => {
             for element in elements {
-                collect_check_expr_column_names(element, relation_columns, out);
+                collect_check_expr_column_names(
+                    element,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
             }
         }
         SqlExpr::ArraySubscript { array, subscripts } => {
-            collect_check_expr_column_names(array, relation_columns, out);
+            collect_check_expr_column_names(array, relation_columns, user_columns, system_columns);
             for subscript in subscripts {
                 if let Some(lower) = &subscript.lower {
-                    collect_check_expr_column_names(lower, relation_columns, out);
+                    collect_check_expr_column_names(
+                        lower,
+                        relation_columns,
+                        user_columns,
+                        system_columns,
+                    );
                 }
                 if let Some(upper) = &subscript.upper {
-                    collect_check_expr_column_names(upper, relation_columns, out);
+                    collect_check_expr_column_names(
+                        upper,
+                        relation_columns,
+                        user_columns,
+                        system_columns,
+                    );
                 }
             }
         }
         SqlExpr::Xml(xml) => {
             for child in xml.child_exprs() {
-                collect_check_expr_column_names(child, relation_columns, out);
+                collect_check_expr_column_names(
+                    child,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
             }
         }
         SqlExpr::JsonQueryFunction(func) => {
             for child in func.child_exprs() {
-                collect_check_expr_column_names(child, relation_columns, out);
+                collect_check_expr_column_names(
+                    child,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
             }
         }
         SqlExpr::FuncCall {
@@ -455,27 +520,54 @@ fn collect_check_expr_column_names(
             ..
         } => {
             for arg in args.args() {
-                collect_check_expr_column_names(&arg.value, relation_columns, out);
+                collect_check_expr_column_names(
+                    &arg.value,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
             }
             for item in order_by {
-                collect_check_expr_column_names(&item.expr, relation_columns, out);
+                collect_check_expr_column_names(
+                    &item.expr,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
             }
             if let Some(within_group) = within_group {
                 for item in within_group {
-                    collect_check_expr_column_names(&item.expr, relation_columns, out);
+                    collect_check_expr_column_names(
+                        &item.expr,
+                        relation_columns,
+                        user_columns,
+                        system_columns,
+                    );
                 }
             }
             if let Some(filter) = filter {
-                collect_check_expr_column_names(filter, relation_columns, out);
+                collect_check_expr_column_names(
+                    filter,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
             }
         }
         SqlExpr::InSubquery { expr, .. }
         | SqlExpr::QuantifiedArray { left: expr, .. }
         | SqlExpr::QuantifiedSubquery { left: expr, .. } => {
-            collect_check_expr_column_names(expr, relation_columns, out);
+            collect_check_expr_column_names(expr, relation_columns, user_columns, system_columns);
         }
         _ => {}
     }
+}
+
+fn is_system_column_name_for_check(name: &str) -> bool {
+    matches!(
+        name,
+        "tableoid" | "ctid" | "xmin" | "xmax" | "cmin" | "cmax"
+    )
 }
 
 #[derive(Debug, Clone)]
