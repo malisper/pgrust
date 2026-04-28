@@ -799,19 +799,19 @@ fn explain_delete_lines(
         if let Some(alias) = &alias {
             lines.push(format!("  Delete on {} {}", target.relation_name, alias));
         }
-        push_explain_line(
-            "  ->  Result",
-            crate::include::nodes::plannodes::PlanEstimate::default(),
-            show_costs,
-            &mut lines,
-        );
         if is_const_false(target.predicate.as_ref()) {
+            push_explain_line(
+                "  ->  Result",
+                crate::include::nodes::plannodes::PlanEstimate::default(),
+                show_costs,
+                &mut lines,
+            );
             lines.push("        One-Time Filter: false".into());
             return lines;
         }
         push_explain_line(
             &format!(
-                "        ->  {}",
+                "  ->  {}",
                 explain_delete_scan_label(target, alias.as_deref())
             ),
             crate::include::nodes::plannodes::PlanEstimate::default(),
@@ -820,7 +820,7 @@ fn explain_delete_lines(
         );
         if let Some(predicate) = &target.predicate {
             lines.push(format!(
-                "              Filter: {}",
+                "        Filter: {}",
                 crate::backend::executor::render_explain_expr(
                     predicate,
                     &target
@@ -890,13 +890,13 @@ fn explain_update_lines(
         if let Some(alias) = &alias {
             lines.push(format!("  Update on {} {}", target.relation_name, alias));
         }
-        push_explain_line(
-            "  ->  Result",
-            crate::include::nodes::plannodes::PlanEstimate::default(),
-            show_costs,
-            &mut lines,
-        );
         if is_const_false(target.predicate.as_ref()) {
+            push_explain_line(
+                "  ->  Result",
+                crate::include::nodes::plannodes::PlanEstimate::default(),
+                show_costs,
+                &mut lines,
+            );
             if verbose {
                 lines.push(format!(
                     "        Output: {}",
@@ -908,7 +908,7 @@ fn explain_update_lines(
         }
         push_explain_line(
             &format!(
-                "        ->  {}",
+                "  ->  {}",
                 explain_update_scan_label(target, alias.as_deref())
             ),
             crate::include::nodes::plannodes::PlanEstimate::default(),
@@ -916,10 +916,10 @@ fn explain_update_lines(
             &mut lines,
         );
         if let Some(index_cond) = explain_update_index_cond(target) {
-            lines.push(format!("              Index Cond: {index_cond}"));
+            lines.push(format!("        Index Cond: {index_cond}"));
         } else if let Some(predicate) = &target.predicate {
             lines.push(format!(
-                "              Filter: {}",
+                "        Filter: {}",
                 crate::backend::executor::render_explain_expr(
                     predicate,
                     &target

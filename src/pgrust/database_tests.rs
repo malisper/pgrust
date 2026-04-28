@@ -9860,6 +9860,46 @@ fn explain_update_from_uses_join_plan_and_alias_header() {
 }
 
 #[test]
+fn explain_partitioned_update_delete_scan_without_result_wrapper() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table upd_part (a int) partition by list (a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table upd_part1 partition of upd_part for values in (1)",
+        )
+        .unwrap();
+
+    let update_plan =
+        explain_lines(&db, 1, "(costs off) update upd_part set a = a where a = 1").join("\n");
+    assert!(
+        update_plan.contains("Update on upd_part1 upd_part_1"),
+        "{update_plan}"
+    );
+    assert!(
+        update_plan.contains("->  Seq Scan on upd_part1 upd_part_1"),
+        "{update_plan}"
+    );
+    assert!(!update_plan.contains("->  Result"), "{update_plan}");
+
+    let delete_plan =
+        explain_lines(&db, 1, "(costs off) delete from upd_part where a = 1").join("\n");
+    assert!(
+        delete_plan.contains("Delete on upd_part1 upd_part_1"),
+        "{delete_plan}"
+    );
+    assert!(
+        delete_plan.contains("->  Seq Scan on upd_part1 upd_part_1"),
+        "{delete_plan}"
+    );
+    assert!(!delete_plan.contains("->  Result"), "{delete_plan}");
+}
+
+#[test]
 fn inherited_scan_tableoid_tracks_physical_child_relation() {
     let dir = temp_dir("inheritance_tableoid");
     let db = Database::open(&dir, 128).unwrap();
