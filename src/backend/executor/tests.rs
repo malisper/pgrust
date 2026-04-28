@@ -20091,7 +20091,7 @@ fn jsonpath_arithmetic_recursive_and_subscripts_work() {
 }
 
 #[test]
-fn jsonpath_exists_returns_false_for_silent_errors() {
+fn jsonpath_exists_returns_null_for_silent_errors() {
     let base = temp_dir("jsonpath_exists_silent_errors");
     let txns = TransactionManager::new_durable(&base).unwrap();
 
@@ -20104,7 +20104,7 @@ fn jsonpath_exists_returns_false_for_silent_errors() {
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Bool(false), Value::Bool(false)]]);
+            assert_eq!(rows, vec![vec![Value::Null, Value::Null]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -20122,11 +20122,15 @@ fn jsonpath_exists_propagates_non_silent_errors() {
         "select jsonb_path_exists('[{\"a\":1},{\"a\":2},3]'::jsonb, 'strict $[*].a', silent => false)",
     )
     .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::InvalidStorageValue { column, details }
-            if column == "jsonpath" && details == "jsonpath member access requires object"
-    ));
+    assert!(
+        matches!(
+            &err,
+            ExecError::InvalidStorageValue { column, details }
+            if column == "jsonpath"
+                && details == "jsonpath member accessor can only be applied to an object"
+        ),
+        "{err:?}"
+    );
 }
 
 #[test]

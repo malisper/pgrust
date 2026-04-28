@@ -2642,11 +2642,13 @@ fn bind_function_from_item_with_ctes(
                     JsonTableFunction::ArrayElementsText => {
                         vec![QueryColumn::text("value")]
                     }
-                    JsonTableFunction::JsonbPathQuery => vec![QueryColumn {
-                        name: "jsonb_path_query".into(),
-                        sql_type: SqlType::new(SqlTypeKind::Jsonb),
-                        wire_type_oid: None,
-                    }],
+                    JsonTableFunction::JsonbPathQuery | JsonTableFunction::JsonbPathQueryTz => {
+                        vec![QueryColumn {
+                            name: "jsonb_path_query".into(),
+                            sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                            wire_type_oid: None,
+                        }]
+                    }
                     JsonTableFunction::JsonbObjectKeys => {
                         vec![QueryColumn::text("jsonb_object_keys")]
                     }
@@ -3317,7 +3319,10 @@ fn bind_json_table_function_args(
         .enumerate()
         .map(|(index, arg)| {
             let target_type = match (kind, index) {
-                (JsonTableFunction::JsonbPathQuery, 0 | 2)
+                (
+                    JsonTableFunction::JsonbPathQuery | JsonTableFunction::JsonbPathQueryTz,
+                    0 | 2,
+                )
                 | (JsonTableFunction::JsonbObjectKeys, 0)
                 | (JsonTableFunction::JsonbEach, 0)
                 | (JsonTableFunction::JsonbEachText, 0)
@@ -3325,8 +3330,12 @@ fn bind_json_table_function_args(
                 | (JsonTableFunction::JsonbArrayElementsText, 0) => {
                     Some(SqlType::new(SqlTypeKind::Jsonb))
                 }
-                (JsonTableFunction::JsonbPathQuery, 1) => Some(SqlType::new(SqlTypeKind::JsonPath)),
-                (JsonTableFunction::JsonbPathQuery, 3) => Some(SqlType::new(SqlTypeKind::Bool)),
+                (JsonTableFunction::JsonbPathQuery | JsonTableFunction::JsonbPathQueryTz, 1) => {
+                    Some(SqlType::new(SqlTypeKind::JsonPath))
+                }
+                (JsonTableFunction::JsonbPathQuery | JsonTableFunction::JsonbPathQueryTz, 3) => {
+                    Some(SqlType::new(SqlTypeKind::Bool))
+                }
                 _ => None,
             };
             let raw_arg_type = infer_sql_expr_type_with_ctes(
