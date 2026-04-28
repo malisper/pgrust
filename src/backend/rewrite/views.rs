@@ -2650,6 +2650,7 @@ fn render_builtin_function_name(func: BuiltinScalarFunction) -> &'static str {
     match func {
         BuiltinScalarFunction::CurrentDatabase => "current_database",
         BuiltinScalarFunction::PgGetUserById => "pg_get_userbyid",
+        BuiltinScalarFunction::SatisfiesHashPartition => "satisfies_hash_partition",
         BuiltinScalarFunction::PgGetExpr => "pg_get_expr",
         BuiltinScalarFunction::PgGetViewDef => "pg_get_viewdef",
         BuiltinScalarFunction::CurrentSetting => "current_setting",

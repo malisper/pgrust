@@ -1799,6 +1799,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgTsDictIsVisible
             | BuiltinScalarFunction::PgTsTemplateIsVisible
             | BuiltinScalarFunction::PgTsConfigIsVisible => args.len() == 1,
+            BuiltinScalarFunction::SatisfiesHashPartition => args.len() >= 3,
             BuiltinScalarFunction::DatePart | BuiltinScalarFunction::Extract => args.len() == 2,
             BuiltinScalarFunction::DateTrunc => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::DateBin => args.len() == 3,
@@ -2539,6 +2540,9 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::HashValueExtended(_) => {
             return Some(SqlType::new(SqlTypeKind::Int8));
         }
+        BuiltinScalarFunction::SatisfiesHashPartition => {
+            return Some(SqlType::new(SqlTypeKind::Bool));
+        }
         BuiltinScalarFunction::TxidCurrent | BuiltinScalarFunction::TxidCurrentIfAssigned => {
             return Some(SqlType::new(SqlTypeKind::Int8));
         }
@@ -3122,6 +3126,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgEncodingToChar,
         ),
         ("pg_partition_root", BuiltinScalarFunction::PgPartitionRoot),
+        (
+            "satisfies_hash_partition",
+            BuiltinScalarFunction::SatisfiesHashPartition,
+        ),
         (
             "pg_relation_filenode",
             BuiltinScalarFunction::PgRelationFilenode,
@@ -4886,6 +4894,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::CurrentDatabase
             | BuiltinScalarFunction::PgBackendPid
             | BuiltinScalarFunction::PgPartitionRoot
+            | BuiltinScalarFunction::SatisfiesHashPartition
             | BuiltinScalarFunction::PgGetPartKeyDef
             | BuiltinScalarFunction::PgTableIsVisible
             | BuiltinScalarFunction::PgTypeIsVisible

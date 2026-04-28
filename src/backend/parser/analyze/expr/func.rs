@@ -615,6 +615,11 @@ fn bind_scalar_function_call_from_bound_args(
         .into_iter()
         .map(|(bound, _)| bound)
         .collect::<Vec<_>>();
+    let bound_args = if matches!(func, BuiltinScalarFunction::SatisfiesHashPartition) {
+        preserve_satisfies_hash_partition_arg_types(bound_args, &arg_types)
+    } else {
+        bound_args
+    };
     let rewritten_bound_args = rewrite_variadic_bound_args(
         bound_args.clone(),
         &arg_types,
@@ -3614,6 +3619,23 @@ fn bind_scalar_function_call_from_bound_args(
         }
         _ => Ok(build_func(func_variadic, rewritten_bound_args)),
     }
+}
+
+fn preserve_satisfies_hash_partition_arg_types(
+    bound_args: Vec<Expr>,
+    arg_types: &[SqlType],
+) -> Vec<Expr> {
+    bound_args
+        .into_iter()
+        .zip(arg_types.iter().copied())
+        .map(|(arg, sql_type)| {
+            if expr_sql_type_hint(&arg).is_none() {
+                Expr::Cast(Box::new(arg), sql_type)
+            } else {
+                arg
+            }
+        })
+        .collect()
 }
 
 fn rewrite_variadic_bound_args(

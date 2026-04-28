@@ -463,6 +463,7 @@ pub enum BuiltinScalarFunction {
     Version,
     PgBackendPid,
     PgPartitionRoot,
+    SatisfiesHashPartition,
     PgGetPartKeyDef,
     PgTableIsVisible,
     PgTypeIsVisible,
