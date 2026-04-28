@@ -3717,6 +3717,45 @@ fn evaluate_default_value(
     eval_expr(&bound, &mut slot, ctx)
 }
 
+fn evaluate_referencing_default_value(
+    constraint: &BoundReferencedByForeignKey,
+    row: &ReferencingRow,
+    column_index: usize,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    if constraint.child_relation_oid == row.relation.relation_oid {
+        return evaluate_default_value(&row.relation.desc, column_index, ctx);
+    }
+    let root_index = map_column_indexes_by_name(
+        &row.relation.desc,
+        &constraint.child_desc,
+        std::slice::from_ref(&column_index),
+    )?
+    .into_iter()
+    .next()
+    .ok_or_else(|| ExecError::DetailedError {
+        message: "foreign key action failed".into(),
+        detail: Some("missing root column for partition default".into()),
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    evaluate_default_value(&constraint.child_desc, root_index, ctx)
+}
+
+fn recheck_values_for_referencing_row(
+    constraint: &BoundReferencedByForeignKey,
+    write_info: &UpdatedRowWriteInfo,
+) -> Result<Vec<Value>, ExecError> {
+    if write_info.relation_oid == constraint.child_relation_oid {
+        return Ok(write_info.values.clone());
+    }
+    remap_partition_row_to_parent_layout(
+        &write_info.values,
+        &write_info.desc,
+        &constraint.child_desc,
+    )
+}
+
 pub(super) fn materialize_generated_columns(
     desc: &RelationDesc,
     values: &mut [Value],
@@ -4230,7 +4269,7 @@ fn apply_referential_action_to_rows(
                             .cloned()
                             .collect::<Vec<_>>()
                     });
-                let current_values = row.values;
+                let current_values = row.values.clone();
                 let mut updated_values = current_values.clone();
                 match action {
                     ForeignKeyAction::Cascade => {
@@ -4254,9 +4293,12 @@ fn apply_referential_action_to_rows(
                         for column_index in target_columns {
                             updated_values[*column_index] = match action {
                                 ForeignKeyAction::SetNull => Value::Null,
-                                ForeignKeyAction::SetDefault => {
-                                    evaluate_default_value(&row.relation.desc, *column_index, ctx)?
-                                }
+                                ForeignKeyAction::SetDefault => evaluate_referencing_default_value(
+                                    constraint,
+                                    &row,
+                                    *column_index,
+                                    ctx,
+                                )?,
                                 ForeignKeyAction::NoAction
                                 | ForeignKeyAction::Restrict
                                 | ForeignKeyAction::Cascade => unreachable!(),
@@ -4289,7 +4331,7 @@ fn apply_referential_action_to_rows(
                         ctx,
                     )?;
                 }
-                let _ = write_updated_row(
+                let write_result = write_updated_row(
                     &relation_name,
                     row.relation.rel,
                     row.relation.relation_oid,
@@ -4314,8 +4356,10 @@ fn apply_referential_action_to_rows(
                     &updated_values,
                 );
                 triggers.after_row_update(&current_values, &updated_values, ctx)?;
-                if matches!(action, ForeignKeyAction::SetDefault) {
-                    updated_rows.push(updated_values);
+                if matches!(action, ForeignKeyAction::SetDefault)
+                    && let WriteUpdatedRowResult::Updated(_, write_info, _, _) = write_result
+                {
+                    updated_rows.push(recheck_values_for_referencing_row(constraint, &write_info)?);
                 }
             }
             ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => unreachable!(),

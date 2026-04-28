@@ -1118,22 +1118,69 @@ pub fn bind_referenced_by_foreign_keys(
         .into_iter()
         .map(|row| (row.oid, row))
         .collect::<BTreeMap<_, _>>();
-    if rows.is_empty()
-        && catalog
-            .relation_by_oid(relation_oid)
-            .is_some_and(|relation| relation.relispartition)
+    for row in catalog.constraint_rows().into_iter().filter(|row| {
+        row.contype == crate::include::catalog::CONSTRAINT_FOREIGN && row.confrelid == relation_oid
+    }) {
+        rows.entry(row.oid).or_insert(row);
+    }
+    if catalog
+        .relation_by_oid(relation_oid)
+        .is_some_and(|relation| relation.relispartition)
     {
         let mut pending = catalog.inheritance_parents(relation_oid);
         while let Some(parent) = pending.pop() {
             for row in catalog.foreign_key_constraint_rows_referencing_relation(parent.inhparent) {
                 rows.entry(row.oid).or_insert(row);
             }
+            for row in catalog.constraint_rows().into_iter().filter(|row| {
+                row.contype == crate::include::catalog::CONSTRAINT_FOREIGN
+                    && row.confrelid == parent.inhparent
+            }) {
+                rows.entry(row.oid).or_insert(row);
+            }
             pending.extend(catalog.inheritance_parents(parent.inhparent));
         }
     }
-    rows.into_values()
+    let mut rows = rows.into_values().collect::<Vec<_>>();
+    rows.sort_by_key(|row| inbound_foreign_key_row_priority(relation_oid, row, catalog));
+    rows.into_iter()
         .map(|row| bind_inbound_foreign_key_constraint(relation_oid, desc, row, catalog))
         .collect()
+}
+
+fn inbound_foreign_key_row_priority(
+    referenced_relation_oid: u32,
+    row: &PgConstraintRow,
+    catalog: &dyn super::CatalogLookup,
+) -> (u8, u32) {
+    let exact_referenced_relation = row.confrelid == referenced_relation_oid;
+    let referenced_side_clone = is_referenced_side_foreign_key_clone(row, catalog);
+    let references_ancestor = row.confrelid != referenced_relation_oid
+        && partition_contains_relation(catalog, row.confrelid, referenced_relation_oid);
+    let child_is_partitioned = catalog
+        .relation_by_oid(row.conrelid)
+        .is_some_and(|relation| relation.relkind == 'p');
+
+    let priority = if exact_referenced_relation && referenced_side_clone {
+        0
+    } else if exact_referenced_relation && row.conparentid == 0 && child_is_partitioned {
+        1
+    } else if exact_referenced_relation && row.conparentid == 0 {
+        2
+    } else if exact_referenced_relation {
+        3
+    } else if references_ancestor && referenced_side_clone {
+        4
+    } else if references_ancestor && row.conparentid != 0 {
+        5
+    } else if references_ancestor && !child_is_partitioned {
+        6
+    } else if references_ancestor {
+        7
+    } else {
+        8
+    };
+    (priority, row.oid)
 }
 
 pub fn normalize_alter_table_add_constraint(
@@ -2592,6 +2639,14 @@ fn bind_inbound_foreign_key_constraint(
         .lookup_relation_by_oid(relation_oid)
         .or_else(|| catalog.relation_by_oid(relation_oid))
         .ok_or_else(|| ParseError::UnknownTable(relation_oid.to_string()))?;
+    let constraint_referenced_relation = if row.confrelid == relation_oid {
+        referenced_relation.clone()
+    } else {
+        catalog
+            .lookup_relation_by_oid(row.confrelid)
+            .or_else(|| catalog.relation_by_oid(row.confrelid))
+            .ok_or_else(|| ParseError::UnknownTable(row.confrelid.to_string()))?
+    };
     let child_relation = catalog
         .lookup_relation_by_oid(row.conrelid)
         .or_else(|| catalog.relation_by_oid(row.conrelid))
@@ -2608,11 +2663,14 @@ fn bind_inbound_foreign_key_constraint(
     let constraint_name = row.conname.clone();
     let (display_constraint_name, display_child_relation_name) =
         inbound_foreign_key_display_names(relation_oid, &row, &child_relation, catalog);
+    let referenced_column_names =
+        attnums_to_column_names(&constraint_referenced_relation.desc, &referenced_attnums)?;
+    let referenced_column_indexes = column_indexes_for_names(desc, &referenced_column_names)?;
     Ok(BoundReferencedByForeignKey {
         constraint_oid: row.oid,
         constraint_name: constraint_name.clone(),
         display_constraint_name,
-        referenced_relation_oid: relation_oid,
+        referenced_relation_oid: row.confrelid,
         child_relation_name: relation_display_name(catalog, child_relation.relation_oid, "<child>"),
         display_child_relation_name,
         child_relation_oid: child_relation.relation_oid,
@@ -2635,11 +2693,11 @@ fn bind_inbound_foreign_key_constraint(
         referenced_rel: referenced_relation.rel,
         referenced_toast: referenced_relation.toast,
         referenced_desc: desc.clone(),
-        referenced_column_names: attnums_to_column_names(desc, &referenced_attnums)?,
-        referenced_column_indexes: attnums_to_column_indexes(desc, &referenced_attnums)?,
+        referenced_column_names,
+        referenced_column_indexes: referenced_column_indexes.clone(),
         referenced_period_column_index: if row.conperiod {
             Some(
-                *attnums_to_column_indexes(desc, &referenced_attnums)?
+                *referenced_column_indexes
                     .last()
                     .ok_or_else(|| ParseError::UnexpectedToken {
                         expected: "referenced foreign-key period column",
@@ -3284,6 +3342,21 @@ fn attnums_to_column_names(
         .map(|&attnum| {
             let index = column_index_for_attnum(desc, attnum)?;
             Ok(desc.columns[index].name.clone())
+        })
+        .collect()
+}
+
+fn column_indexes_for_names(
+    desc: &RelationDesc,
+    names: &[String],
+) -> Result<Vec<usize>, ParseError> {
+    names
+        .iter()
+        .map(|name| {
+            desc.columns
+                .iter()
+                .position(|column| !column.dropped && column.name.eq_ignore_ascii_case(name))
+                .ok_or_else(|| ParseError::UnknownColumn(name.clone()))
         })
         .collect()
 }

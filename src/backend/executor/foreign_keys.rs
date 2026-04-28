@@ -11,8 +11,8 @@ use crate::backend::access::transam::xact::{CommandId, Snapshot};
 use crate::backend::commands::trigger::trigger_is_enabled_for_session;
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::parser::{
-    BoundForeignKeyConstraint, BoundReferencedByForeignKey, BoundRelation, CatalogLookup,
-    ForeignKeyAction, ForeignKeyMatchType,
+    BoundForeignKeyConstraint, BoundIndexRelation, BoundReferencedByForeignKey, BoundRelation,
+    CatalogLookup, ForeignKeyAction, ForeignKeyMatchType,
 };
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
@@ -236,6 +236,15 @@ pub(crate) fn enforce_outbound_foreign_keys(
     Ok(())
 }
 
+pub(crate) fn validate_outbound_foreign_key_for_ddl(
+    relation_name: &str,
+    constraint: &BoundForeignKeyConstraint,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    enforce_outbound_foreign_key_impl(relation_name, constraint, None, values, ctx, false, false)
+}
+
 fn enforce_outbound_foreign_key(
     relation_name: &str,
     constraint: &BoundForeignKeyConstraint,
@@ -243,10 +252,32 @@ fn enforce_outbound_foreign_key(
     values: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
+    enforce_outbound_foreign_key_impl(
+        relation_name,
+        constraint,
+        previous_values,
+        values,
+        ctx,
+        true,
+        true,
+    )
+}
+
+fn enforce_outbound_foreign_key_impl(
+    relation_name: &str,
+    constraint: &BoundForeignKeyConstraint,
+    previous_values: Option<&[Value]>,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+    check_triggers: bool,
+    check_select_privilege: bool,
+) -> Result<(), ExecError> {
     if !constraint.enforced {
         return Ok(());
     }
-    if !foreign_key_check_trigger_enabled(constraint, previous_values.is_some(), ctx) {
+    if check_triggers
+        && !foreign_key_check_trigger_enabled(constraint, previous_values.is_some(), ctx)
+    {
         return Ok(());
     }
     if previous_values
@@ -279,7 +310,9 @@ fn enforce_outbound_foreign_key(
     if maybe_defer_constraint(ctx, relation_name, constraint, previous_values, values) {
         return Ok(());
     }
-    check_referenced_table_select_privilege(constraint, ctx)?;
+    if check_select_privilege {
+        check_referenced_table_select_privilege(constraint, ctx)?;
+    }
     let exists = if constraint.period_column_index.is_some() {
         temporal_referenced_key_exists(constraint, values, ctx)?
     } else {
@@ -667,6 +700,25 @@ fn partitioned_referenced_key_exists(
             &leaf.desc,
             &constraint.referenced_column_indexes,
         )?;
+        let mut checked_index = false;
+        for index in catalog.index_relations_for_heap(leaf.relation_oid) {
+            let Some(leaf_key_values) = key_values_in_index_order_for_column_indexes(
+                &index,
+                &leaf_key_indexes,
+                key_values,
+            )?
+            else {
+                continue;
+            };
+            checked_index = true;
+            if index_has_visible_row(leaf.rel, &index, &leaf_key_values, snapshot, ctx)? {
+                return Ok(true);
+            }
+            break;
+        }
+        if checked_index {
+            continue;
+        }
         if heap_has_matching_row(
             leaf.rel,
             leaf.toast,
@@ -680,6 +732,41 @@ fn partitioned_referenced_key_exists(
         }
     }
     Ok(false)
+}
+
+fn key_values_in_index_order_for_column_indexes(
+    index: &BoundIndexRelation,
+    column_indexes: &[usize],
+    key_values: &[Value],
+) -> Result<Option<Vec<Value>>, ExecError> {
+    let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0))
+        .map_err(|_| foreign_key_internal_error("invalid referenced index key count"))?;
+    if key_count != column_indexes.len()
+        || key_count != key_values.len()
+        || key_count > index.index_meta.indkey.len()
+    {
+        return Ok(None);
+    }
+
+    let mut reordered = Vec::with_capacity(key_count);
+    for index_attnum in index.index_meta.indkey.iter().take(key_count) {
+        if *index_attnum <= 0 {
+            return Ok(None);
+        }
+        let Some(position) = column_indexes
+            .iter()
+            .position(|column_index| (*column_index as i16) + 1 == *index_attnum)
+        else {
+            return Ok(None);
+        };
+        reordered.push(
+            key_values
+                .get(position)
+                .cloned()
+                .ok_or_else(|| foreign_key_internal_error("missing foreign key value"))?,
+        );
+    }
+    Ok(Some(reordered))
 }
 
 fn referenced_key_values_in_index_order(

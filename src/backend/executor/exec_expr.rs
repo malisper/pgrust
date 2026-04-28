@@ -4165,12 +4165,14 @@ fn append_constraint_deferrability(
     def: &mut String,
     row: &crate::include::catalog::PgConstraintRow,
 ) {
-    if !row.condeferrable {
-        return;
+    if row.condeferrable {
+        def.push_str(" DEFERRABLE");
+        if row.condeferred {
+            def.push_str(" INITIALLY DEFERRED");
+        }
     }
-    def.push_str(" DEFERRABLE");
-    if row.condeferred {
-        def.push_str(" INITIALLY DEFERRED");
+    if !row.conenforced {
+        def.push_str(" NOT ENFORCED");
     }
 }
 

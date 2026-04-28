@@ -24,6 +24,49 @@ fn relation_basename(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
+fn relation_by_oid_for_constraint_command(
+    db: &Database,
+    client_id: ClientId,
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> Option<crate::backend::parser::BoundRelation> {
+    catalog.relation_by_oid(relation_oid).or_else(|| {
+        db.lazy_catalog_lookup(client_id, None, None)
+            .relation_by_oid(relation_oid)
+    })
+}
+
+fn inherited_foreign_key_alter_error(
+    row: &PgConstraintRow,
+    relation_name: &str,
+    catalog: &dyn CatalogLookup,
+) -> ExecError {
+    let parent = (row.conparentid != 0)
+        .then(|| catalog.constraint_row_by_oid(row.conparentid))
+        .flatten();
+    let parent_relation_name = parent
+        .as_ref()
+        .and_then(|parent| catalog.class_row_by_oid(parent.conrelid))
+        .map(|class| class.relname);
+
+    ExecError::DetailedError {
+        message: format!(
+            "cannot alter constraint \"{}\" on relation \"{}\"",
+            row.conname, relation_name
+        ),
+        detail: parent.as_ref().and_then(|parent| {
+            parent_relation_name.as_ref().map(|relname| {
+                format!(
+                    "Constraint \"{}\" is derived from constraint \"{}\" of relation \"{}\".",
+                    row.conname, parent.conname, relname
+                )
+            })
+        }),
+        hint: parent.map(|_| "You may alter the constraint it derives from instead.".into()),
+        sqlstate: "55000",
+    }
+}
+
 fn reject_constraint_with_dependent_rule(
     db: &Database,
     client_id: ClientId,
@@ -899,6 +942,11 @@ fn validate_foreign_key_rows(
         datetime_config,
         interrupts,
     )?;
+    if referenced_relation.relkind == 'p' {
+        ctx.catalog = Some(crate::backend::executor::executor_catalog(
+            db.lazy_catalog_lookup(client_id, None, None),
+        ));
+    }
     let referenced_column_indexes =
         column_indexes_for_names(&referenced_relation.desc, &action.referenced_columns)?;
     let referenced_period_column_index =
@@ -932,10 +980,9 @@ fn validate_foreign_key_rows(
         let rows =
             collect_matching_rows_heap(target.rel, &target.desc, target.toast, None, &mut ctx)?;
         for (_, values) in rows {
-            crate::backend::executor::enforce_outbound_foreign_keys(
+            crate::backend::executor::validate_outbound_foreign_key_for_ddl(
                 &target_name,
-                std::slice::from_ref(&constraint),
-                None,
+                &constraint,
                 &values,
                 &mut ctx,
             )?;
@@ -1593,16 +1640,11 @@ impl Database {
             });
         }
         if row.conparentid != 0 || row.coninhcount > 0 {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "cannot alter inherited constraint \"{}\" on relation \"{}\"",
-                    row.conname,
-                    relation_basename(&alter_stmt.table_name),
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "55000",
-            });
+            return Err(inherited_foreign_key_alter_error(
+                &row,
+                relation_basename(&alter_stmt.table_name),
+                &catalog,
+            ));
         }
         let (deferrable, initially_deferred, enforced) =
             resolve_alter_constraint_deferrability(&row, alter_stmt)?;
@@ -1784,7 +1826,13 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let mut next_cid = cid;
         while let Some((parent_row, child_row)) = pending.pop() {
-            let child_relation = catalog.relation_by_oid(child_row.conrelid).ok_or_else(|| {
+            let child_relation = relation_by_oid_for_constraint_command(
+                self,
+                client_id,
+                catalog,
+                child_row.conrelid,
+            )
+            .ok_or_else(|| {
                 ExecError::Parse(ParseError::UnknownTable(child_row.conrelid.to_string()))
             })?;
             let referenced_side = parent_row.conrelid == child_row.conrelid;
@@ -1933,6 +1981,53 @@ impl Database {
             next_cid = next_cid.saturating_add(1);
         }
         Ok(next_cid)
+    }
+
+    pub(super) fn detach_partition_child_foreign_key_constraints_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent_oid: u32,
+        child_oid: u32,
+        catalog: &dyn CatalogLookup,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let inherited_constraints = catalog
+            .constraint_rows_for_relation(child_oid)
+            .into_iter()
+            .filter(|row| {
+                row.contype == CONSTRAINT_FOREIGN
+                    && row.conparentid != 0
+                    && catalog
+                        .constraint_row_by_oid(row.conparentid)
+                        .is_some_and(|parent| parent.conrelid == parent_oid)
+            })
+            .collect::<Vec<_>>();
+        if inherited_constraints.is_empty() {
+            return Ok(cid);
+        }
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        for row in inherited_constraints {
+            let effect = self
+                .catalog
+                .write()
+                .update_foreign_key_constraint_inheritance_mvcc(
+                    child_oid, row.oid, 0, true, 0, &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
+        Ok(cid.saturating_add(1))
     }
 
     pub(crate) fn execute_alter_table_rename_constraint_stmt_with_search_path(
@@ -2861,34 +2956,147 @@ impl Database {
                 interrupts: std::sync::Arc::clone(&interrupts),
             };
             next_cid = next_cid.saturating_add(1);
-            let (constraint_row, effect) = self
-                .catalog
-                .write()
-                .create_foreign_key_constraint_mvcc(
-                    child.relation_oid,
-                    action.constraint_name.clone(),
-                    action.deferrable,
-                    action.initially_deferred,
-                    action.enforced,
-                    action.enforced && !action.not_valid,
+            let mut existing = None;
+            let mut already_inherited = None;
+            for row in catalog.constraint_rows_for_relation(child.relation_oid) {
+                if !foreign_key_attach_key_matches(
+                    &row,
+                    parent_constraint,
                     &local_attnums,
-                    action.referenced_relation_oid,
-                    action.referenced_index_oid,
                     referenced_attnums,
-                    foreign_key_action_code(action.on_update),
-                    foreign_key_action_code(action.on_delete),
-                    foreign_key_match_code(action.match_type),
                     child_delete_set_attnums.as_deref(),
-                    action.period.is_some(),
-                    parent_constraint.oid,
-                    false,
-                    1,
-                    &ctx,
-                )
-                .map_err(map_catalog_error)?;
-            self.apply_catalog_mutation_effect_immediate(&effect)?;
-            catalog_effects.push(effect);
-            if action.enforced {
+                ) {
+                    continue;
+                }
+                if row.conenforced != parent_constraint.conenforced {
+                    let relation_name = catalog
+                        .class_row_by_oid(child.relation_oid)
+                        .map(|class| class.relname)
+                        .unwrap_or_else(|| child.relation_oid.to_string());
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "constraint \"{}\" enforceability conflicts with constraint \"{}\" on relation \"{}\"",
+                            parent_constraint.conname, row.conname, relation_name
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P16",
+                    });
+                }
+                if !foreign_key_attach_attributes_match(&row, parent_constraint) {
+                    continue;
+                }
+                if row.conparentid == parent_constraint.oid {
+                    already_inherited = Some(row);
+                    break;
+                }
+                if row.conparentid == 0 {
+                    existing = Some(row);
+                    break;
+                }
+            }
+            let constraint_row = if let Some(row) = already_inherited {
+                row
+            } else if let Some(existing) = existing {
+                let child_validated =
+                    existing.convalidated || (parent_constraint.convalidated && action.enforced);
+                if parent_constraint.convalidated && !existing.convalidated && action.enforced {
+                    validate_attached_foreign_key_rows_if_needed(
+                        self,
+                        &child,
+                        &existing,
+                        &local_attnums,
+                        referenced_attnums,
+                        &catalog,
+                        client_id,
+                        xid,
+                        next_cid,
+                        std::sync::Arc::clone(&interrupts),
+                    )?;
+                }
+                let effect = self
+                    .catalog
+                    .write()
+                    .update_foreign_key_constraint_inheritance_mvcc(
+                        child.relation_oid,
+                        existing.oid,
+                        parent_constraint.oid,
+                        false,
+                        existing.coninhcount.saturating_add(1),
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+                let mut row = existing.clone();
+                row.conparentid = parent_constraint.oid;
+                row.conislocal = false;
+                row.coninhcount = row.coninhcount.saturating_add(1);
+                if row.convalidated != child_validated {
+                    let attr_ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid: next_cid,
+                        client_id,
+                        waiter: None,
+                        interrupts: std::sync::Arc::clone(&interrupts),
+                    };
+                    next_cid = next_cid.saturating_add(1);
+                    let effect = self
+                        .catalog
+                        .write()
+                        .alter_foreign_key_constraint_attributes_mvcc(
+                            child.relation_oid,
+                            &row.conname,
+                            row.condeferrable,
+                            row.condeferred,
+                            row.conenforced,
+                            child_validated,
+                            &attr_ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                    row.convalidated = child_validated;
+                }
+                row
+            } else {
+                let (constraint_row, effect) = self
+                    .catalog
+                    .write()
+                    .create_foreign_key_constraint_mvcc(
+                        child.relation_oid,
+                        action.constraint_name.clone(),
+                        action.deferrable,
+                        action.initially_deferred,
+                        action.enforced,
+                        action.enforced && !action.not_valid,
+                        &local_attnums,
+                        action.referenced_relation_oid,
+                        action.referenced_index_oid,
+                        referenced_attnums,
+                        foreign_key_action_code(action.on_update),
+                        foreign_key_action_code(action.on_delete),
+                        foreign_key_match_code(action.match_type),
+                        child_delete_set_attnums.as_deref(),
+                        action.period.is_some(),
+                        parent_constraint.oid,
+                        false,
+                        1,
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+                constraint_row
+            };
+            if action.enforced
+                && catalog
+                    .trigger_rows_for_relation(child.relation_oid)
+                    .into_iter()
+                    .all(|row| row.tgconstraint != constraint_row.oid)
+            {
                 next_cid = self.create_foreign_key_check_triggers_in_transaction(
                     client_id,
                     xid,
@@ -3819,8 +4027,9 @@ impl Database {
                 return Err(ExecError::Parse(ParseError::UnexpectedToken {
                     expected: "existing table constraint",
                     actual: format!(
-                        "constraint \"{}\" does not exist",
-                        drop_stmt.constraint_name
+                        "constraint \"{}\" of relation \"{}\" does not exist",
+                        drop_stmt.constraint_name,
+                        relation_basename(&drop_stmt.table_name)
                     ),
                 }));
             }

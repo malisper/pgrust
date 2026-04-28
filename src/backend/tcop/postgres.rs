@@ -6782,10 +6782,11 @@ fn foreign_key_constraint_def(
         .collect::<Option<Vec<_>>>()?;
     let referenced_relation =
         db.describe_relation_by_oid(session.client_id, session.catalog_txn_ctx(), row.confrelid)?;
+    let search_path = session.configured_search_path();
     let referenced_relation_name = db.relation_display_name(
         session.client_id,
         session.catalog_txn_ctx(),
-        None,
+        search_path.as_deref(),
         row.confrelid,
     )?;
     let mut referenced_columns = row
@@ -6832,7 +6833,23 @@ fn foreign_key_constraint_def(
         def.push_str(&set_columns.join(", "));
         def.push(')');
     }
+    append_foreign_key_constraint_options(&mut def, row);
     Some(def)
+}
+
+fn append_foreign_key_constraint_options(
+    def: &mut String,
+    row: &crate::include::catalog::PgConstraintRow,
+) {
+    if row.condeferrable {
+        def.push_str(" DEFERRABLE");
+        if row.condeferred {
+            def.push_str(" INITIALLY DEFERRED");
+        }
+    }
+    if !row.conenforced {
+        def.push_str(" NOT ENFORCED");
+    }
 }
 
 fn relation_column_names_for_attnums(
