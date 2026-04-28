@@ -350,6 +350,18 @@ transform_create_type_fixture() {
     " "$input_path" > "$output_path"
 }
 
+transform_psql_fixture() {
+    local input_path="$1"
+    local output_path="$2"
+
+    # :HACK: pg_regress runs the upstream psql test in database "regression".
+    # This runner keeps the shared pgrust fixture database named "postgres",
+    # so rewrite only the psql current-database-qualified no-such patterns.
+    perl -0pe '
+        s/\bregression\."no\.such\.schema"/postgres."no.such.schema"/g;
+    ' "$input_path" > "$output_path"
+}
+
 prepare_setup_fixture() {
     local input_path="$1"
     local output_path="$2"
@@ -441,6 +453,13 @@ prepare_test_fixture() {
             PREPARED_SQL_FILE="$fixture_dir/${test_name}.sql"
             PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
             transform_join_fixture "$sql_file" "$expected_file" "$PREPARED_SQL_FILE" "$PREPARED_EXPECTED_FILE"
+            ;;
+        psql)
+            mkdir -p "$fixture_dir"
+            PREPARED_SQL_FILE="$fixture_dir/${test_name}.sql"
+            PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
+            transform_psql_fixture "$sql_file" "$PREPARED_SQL_FILE"
+            transform_psql_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
             ;;
         *)
             ;;
