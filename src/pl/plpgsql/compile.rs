@@ -29,9 +29,9 @@ use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, Var, user_attrno};
 
 use super::ast::{
-    AliasTarget, AssignIndirection, AssignTarget, Block, CursorArg, CursorDecl, CursorDirection,
-    Decl, ExceptionCondition, ForQuerySource, ForTarget, OpenCursorSource, RaiseCondition,
-    RaiseLevel, RaiseUsingOption, Stmt, VarDecl,
+    AliasTarget, AssignTarget, Block, CursorArg, CursorDecl, CursorDirection, Decl,
+    ExceptionCondition, ForQuerySource, ForTarget, OpenCursorSource, RaiseCondition, RaiseLevel,
+    RaiseUsingOption, Stmt, VarDecl,
 };
 use super::gram::parse_block;
 
@@ -97,6 +97,7 @@ pub(crate) struct CompiledVar {
     pub(crate) ty: SqlType,
     pub(crate) default_expr: Option<CompiledExpr>,
     pub(crate) not_null: bool,
+    pub(crate) line: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -292,10 +293,15 @@ pub(crate) enum CompiledStmt {
         name: Option<String>,
         not_null: bool,
         expr: CompiledExpr,
+        line: usize,
     },
-    AssignIndirect {
-        target: CompiledIndirectAssignTarget,
+    AssignSubscript {
+        slot: usize,
+        root_ty: SqlType,
+        target_ty: SqlType,
+        subscripts: Vec<CompiledExpr>,
         expr: CompiledExpr,
+        line: usize,
     },
     Null,
     If {
@@ -353,6 +359,7 @@ pub(crate) enum CompiledStmt {
     Continue,
     Return {
         expr: Option<CompiledExpr>,
+        line: usize,
     },
     ReturnNext {
         expr: Option<CompiledExpr>,
@@ -1039,9 +1046,9 @@ pub(crate) fn compile_function_from_proc(
 
     let return_contract = function_return_contract(row, catalog, &output_slots)?;
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
-    let context_arg_type_names = parameter_slots
+    let context_arg_type_names = input_type_oids
         .iter()
-        .map(|slot| crate::backend::parser::analyze::sql_type_name(slot.ty))
+        .map(|oid| crate::backend::executor::expr_reg::format_type_text(*oid, None, catalog))
         .collect();
     Ok(CompiledFunction {
         name: row.proname.clone(),
@@ -1371,6 +1378,7 @@ fn compile_var_decl(
         ty,
         default_expr,
         not_null: decl.strict,
+        line: decl.line,
     })
 }
 
@@ -1405,6 +1413,7 @@ fn compile_cursor_decl(
             env,
         )?),
         not_null: false,
+        line: 1,
     })
 }
 
@@ -1501,21 +1510,34 @@ fn compile_stmt(
         Stmt::Block(block) => {
             CompiledStmt::Block(compile_block(block, catalog, env, return_contract)?)
         }
-        Stmt::Assign { target, expr } => {
-            match compile_indirect_assign_target(target, catalog, env)? {
-                Some(target) => CompiledStmt::AssignIndirect {
-                    target,
+        Stmt::Assign { target, expr, line } => {
+            if let AssignTarget::Subscript { name, subscripts } = target {
+                let (slot, root_ty, _, _) =
+                    resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
+                CompiledStmt::AssignSubscript {
+                    slot,
+                    root_ty,
+                    target_ty: subscripted_assignment_target_type(
+                        root_ty,
+                        subscripts.len(),
+                        catalog,
+                    )?,
+                    subscripts: subscripts
+                        .iter()
+                        .map(|subscript| compile_expr_text(subscript, catalog, env))
+                        .collect::<Result<Vec<_>, _>>()?,
                     expr: compile_assignment_expr_text(expr, catalog, env)?,
-                },
-                None => {
-                    let (slot, ty, name, not_null) = resolve_assign_target(target, env)?;
-                    CompiledStmt::Assign {
-                        slot,
-                        ty,
-                        name,
-                        not_null,
-                        expr: compile_assignment_expr_text(expr, catalog, env)?,
-                    }
+                    line: *line,
+                }
+            } else {
+                let (slot, ty, name, not_null) = resolve_assign_target(target, env)?;
+                CompiledStmt::Assign {
+                    slot,
+                    ty,
+                    name,
+                    not_null,
+                    expr: compile_assignment_expr_text(expr, catalog, env)?,
+                    line: *line,
                 }
             }
         }
@@ -1607,8 +1629,8 @@ fn compile_stmt(
                 .transpose()?,
         },
         Stmt::Continue => CompiledStmt::Continue,
-        Stmt::Return { expr } => {
-            compile_return_stmt(expr.as_deref(), catalog, env, return_contract)?
+        Stmt::Return { expr, line } => {
+            compile_return_stmt(expr.as_deref(), *line, catalog, env, return_contract)?
         }
         Stmt::ReturnNext { expr } => {
             compile_return_next_stmt(expr.as_deref(), catalog, env, return_contract)?
@@ -1906,6 +1928,7 @@ fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
 
 fn compile_return_stmt(
     expr: Option<&str>,
+    line: usize,
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
     return_contract: Option<&FunctionReturnContract>,
@@ -1975,6 +1998,7 @@ fn compile_return_stmt(
         (FunctionReturnContract::Scalar { setof: false, .. }, Some(expr)) => {
             Ok(CompiledStmt::Return {
                 expr: Some(compile_expr_text(expr, catalog, env)?),
+                line,
             })
         }
         (
@@ -1986,11 +2010,11 @@ fn compile_return_stmt(
             },
             None,
         ) if output_slot.is_some() || *setof || ty.kind == SqlTypeKind::Void => {
-            Ok(CompiledStmt::Return { expr: None })
+            Ok(CompiledStmt::Return { expr: None, line })
         }
         (FunctionReturnContract::FixedRow { .. }, None)
         | (FunctionReturnContract::AnonymousRecord { .. }, None) => {
-            Ok(CompiledStmt::Return { expr: None })
+            Ok(CompiledStmt::Return { expr: None, line })
         }
         (
             FunctionReturnContract::FixedRow { setof: false, .. }
@@ -1998,6 +2022,7 @@ fn compile_return_stmt(
             Some(expr),
         ) => Ok(CompiledStmt::Return {
             expr: Some(compile_expr_text(expr, catalog, env)?),
+            line,
         }),
         _ => Err(ParseError::FeatureNotSupported(
             "RETURN expr is only supported for scalar function returns".into(),
@@ -5531,13 +5556,6 @@ fn resolve_assign_target(
     env: &CompileEnv,
 ) -> Result<(usize, SqlType, Option<String>, bool), ParseError> {
     match target {
-        AssignTarget::Parameter(index) => env
-            .get_parameter(*index)
-            .map(|var| (var.slot, var.ty, None, var.not_null))
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "existing positional parameter assignment target",
-                actual: format!("${index}"),
-            }),
         AssignTarget::Name(name) => env
             .get_var(name)
             .map(|var| {
@@ -5558,9 +5576,46 @@ fn resolve_assign_target(
             .get_relation_field(relation, field)
             .map(|column| (column.slot, column.sql_type, None, false))
             .ok_or_else(|| ParseError::UnknownColumn(format!("{relation}.{field}"))),
-        AssignTarget::Indirect { .. } => Err(ParseError::FeatureNotSupported(
-            "indirect assignment target is only supported for assignment statements".into(),
-        )),
+        AssignTarget::Subscript { name, .. } => env
+            .get_var(name)
+            .map(|var| (var.slot, var.ty, Some(name.clone()), var.not_null))
+            .ok_or_else(|| ParseError::UnknownColumn(name.clone())),
+    }
+}
+
+fn subscripted_assignment_target_type(
+    root_ty: SqlType,
+    subscript_count: usize,
+    catalog: &dyn CatalogLookup,
+) -> Result<SqlType, ParseError> {
+    let mut ty = root_ty;
+    for _ in 0..subscript_count {
+        ty = plpgsql_assignment_navigation_sql_type(ty, catalog);
+        if !ty.is_array {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "cannot subscript type {} because it does not support subscripting",
+                    crate::backend::parser::analyze::sql_type_name(ty)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+        ty = ty.element_type();
+    }
+    Ok(plpgsql_assignment_navigation_sql_type(ty, catalog))
+}
+
+fn plpgsql_assignment_navigation_sql_type(mut ty: SqlType, catalog: &dyn CatalogLookup) -> SqlType {
+    loop {
+        let Some(domain) = catalog.domain_by_type_oid(ty.type_oid) else {
+            return ty;
+        };
+        if ty.is_array && !domain.sql_type.is_array {
+            return SqlType::array_of(domain.sql_type);
+        }
+        ty = domain.sql_type;
     }
 }
 
@@ -5575,31 +5630,6 @@ fn compile_select_into_target(
         name,
         not_null,
     })
-}
-
-fn compile_indirect_assign_target(
-    target: &AssignTarget,
-    catalog: &dyn CatalogLookup,
-    env: &CompileEnv,
-) -> Result<Option<CompiledIndirectAssignTarget>, ParseError> {
-    let AssignTarget::Indirect { base, indirection } = target else {
-        return Ok(None);
-    };
-    let (slot, ty, _, _) = resolve_assign_target(base, env)?;
-    let indirection = indirection
-        .iter()
-        .map(|step| match step {
-            AssignIndirection::Field(field) => Ok(CompiledAssignIndirection::Field(field.clone())),
-            AssignIndirection::Subscript(expr) => Ok(CompiledAssignIndirection::Subscript(
-                compile_expr_text(expr, catalog, env)?,
-            )),
-        })
-        .collect::<Result<Vec<_>, ParseError>>()?;
-    Ok(Some(CompiledIndirectAssignTarget {
-        slot,
-        ty,
-        indirection,
-    }))
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
@@ -5772,6 +5802,7 @@ mod tests {
 
         let stmt = compile_return_stmt(
             Some("ps"),
+            1,
             &EmptyCatalog,
             &env,
             Some(&FunctionReturnContract::Trigger { bindings }),

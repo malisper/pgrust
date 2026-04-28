@@ -2072,17 +2072,24 @@ impl Database {
         comment_stmt: &CommentOnConstraintStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
-        let interrupts = self.interrupt_state(client_id);
-        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation =
-            lookup_table_or_partitioned_relation_for_comment(&catalog, &comment_stmt.table_name)?;
-        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
-        self.table_locks.lock_table_interruptible(
-            lock_tag,
-            TableLockMode::AccessExclusive,
-            client_id,
-            interrupts.as_ref(),
-        )?;
+        let lock_tag = if comment_stmt.domain_name.is_none() {
+            let interrupts = self.interrupt_state(client_id);
+            let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+            let relation = lookup_table_or_partitioned_relation_for_comment(
+                &catalog,
+                &comment_stmt.table_name,
+            )?;
+            let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
+            self.table_locks.lock_table_interruptible(
+                lock_tag,
+                TableLockMode::AccessExclusive,
+                client_id,
+                interrupts.as_ref(),
+            )?;
+            Some(lock_tag)
+        } else {
+            None
+        };
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
@@ -2096,7 +2103,9 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(lock_tag, client_id);
+        if let Some(lock_tag) = lock_tag {
+            self.table_locks.unlock_table(lock_tag, client_id);
+        }
         result
     }
 
@@ -2862,6 +2871,52 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
+        if let Some(domain_name) = &comment_stmt.domain_name {
+            let (normalized, _, _) =
+                self.normalize_domain_name_for_create(domain_name, configured_search_path)?;
+            let domain = self
+                .domains
+                .read()
+                .get(&normalized)
+                .cloned()
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnsupportedType(domain_name.clone()))
+                })?;
+            let constraint_oid = domain
+                .constraints
+                .iter()
+                .find(|constraint| {
+                    constraint
+                        .name
+                        .eq_ignore_ascii_case(&comment_stmt.constraint_name)
+                })
+                .map(|constraint| constraint.oid)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!(
+                        "constraint \"{}\" for domain \"{}\" does not exist",
+                        comment_stmt.constraint_name, domain.name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                })?;
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid,
+                client_id,
+                waiter: None,
+                interrupts: Arc::clone(&interrupts),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .comment_constraint_mvcc(constraint_oid, comment_stmt.comment.as_deref(), &ctx)
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+            return Ok(StatementResult::AffectedRows(0));
+        }
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation =
             lookup_table_or_partitioned_relation_for_comment(&catalog, &comment_stmt.table_name)?;

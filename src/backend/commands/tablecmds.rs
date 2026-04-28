@@ -65,7 +65,7 @@ use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_e
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::expr_geometry::circle_bound_box;
 use crate::backend::executor::value_io::{
-    coerce_assignment_value_with_config, encode_tuple_values_with_config,
+    coerce_assignment_value_with_catalog_and_config, encode_tuple_values_with_config,
 };
 use crate::backend::executor::{
     ConstraintTiming, ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef,
@@ -1634,6 +1634,47 @@ fn explain_update_lines(
         if let Some(alias) = &alias {
             lines.push(format!("  Update on {} {}", target.relation_name, alias));
         }
+        if verbose {
+            if is_const_false(target.predicate.as_ref()) {
+                push_explain_line(
+                    "  ->  Result",
+                    crate::include::nodes::plannodes::PlanEstimate::default(),
+                    show_costs,
+                    &mut lines,
+                );
+                lines.push(format!(
+                    "        Output: {}",
+                    render_update_projection_output(&stmt.table_name, target)
+                ));
+                lines.push("        One-Time Filter: false".into());
+                return lines;
+            }
+            push_explain_line(
+                &format!(
+                    "  ->  {}",
+                    explain_update_verbose_scan_label(target, alias.as_deref())
+                ),
+                crate::include::nodes::plannodes::PlanEstimate::default(),
+                show_costs,
+                &mut lines,
+            );
+            lines.push(format!(
+                "        Output: {}",
+                render_update_scan_projection_output(target)
+            ));
+            if let Some(index_cond) = explain_update_index_cond(target) {
+                lines.push(format!("        Index Cond: {index_cond}"));
+            } else if let Some(predicate) = &target.predicate {
+                lines.push(format!(
+                    "        Filter: {}",
+                    crate::backend::executor::render_explain_expr(
+                        predicate,
+                        &qualified_update_scan_column_names(target),
+                    )
+                ));
+            }
+            return lines;
+        }
         if is_const_false(target.predicate.as_ref()) {
             push_explain_line(
                 "  ->  Result",
@@ -1641,12 +1682,6 @@ fn explain_update_lines(
                 show_costs,
                 &mut lines,
             );
-            if verbose {
-                lines.push(format!(
-                    "        Output: {}",
-                    render_update_projection_output(&stmt.table_name, target)
-                ));
-            }
             lines.push("        One-Time Filter: false".into());
             return lines;
         }
@@ -1760,6 +1795,168 @@ fn render_update_projection_output(target_name: &str, target: &BoundUpdateTarget
     outputs.join(", ")
 }
 
+fn render_update_scan_projection_output(target: &BoundUpdateTarget) -> String {
+    let column_names = target
+        .desc
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    let mut outputs = if let Some(rendered) =
+        render_update_array_field_assignment_projection(target, &column_names)
+    {
+        vec![rendered]
+    } else if update_assignments_replace_composite_field_values(target) {
+        vec![format!(
+            "ROW({})",
+            target
+                .assignments
+                .iter()
+                .map(|assignment| {
+                    crate::backend::executor::render_explain_projection_expr_with_qualifier(
+                        &assignment.expr,
+                        None,
+                        &column_names,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        )]
+    } else {
+        target
+            .assignments
+            .iter()
+            .map(|assignment| {
+                crate::backend::executor::render_explain_projection_expr_with_qualifier(
+                    &assignment.expr,
+                    None,
+                    &column_names,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    outputs.push("ctid".into());
+    outputs.join(", ")
+}
+
+fn render_update_array_field_assignment_projection(
+    target: &BoundUpdateTarget,
+    column_names: &[String],
+) -> Option<String> {
+    let [first, second] = target.assignments.as_slice() else {
+        return None;
+    };
+    if first.column_index != second.column_index
+        || first.field_path.len() != 1
+        || second.field_path.len() != 1
+        || !first
+            .indirection
+            .iter()
+            .any(|step| matches!(step, BoundAssignmentTargetIndirection::Subscript(_)))
+    {
+        return None;
+    }
+
+    let column_name = target.desc.columns.get(first.column_index)?.name.clone();
+    let first_target =
+        render_update_assignment_path(&column_name, &first.indirection, column_names);
+    let second_suffix = render_update_assignment_suffix(&second.indirection, column_names);
+    let first_expr = crate::backend::executor::render_explain_projection_expr_with_qualifier(
+        &first.expr,
+        None,
+        column_names,
+    );
+    let second_expr = crate::backend::executor::render_explain_projection_expr_with_qualifier(
+        &second.expr,
+        None,
+        column_names,
+    );
+    Some(format!(
+        "({first_target} := {first_expr}){second_suffix} := {second_expr}"
+    ))
+}
+
+fn render_update_assignment_path(
+    column_name: &str,
+    indirection: &[BoundAssignmentTargetIndirection],
+    column_names: &[String],
+) -> String {
+    let mut out = column_name.to_string();
+    out.push_str(&render_update_assignment_suffix(indirection, column_names));
+    out
+}
+
+fn render_update_assignment_suffix(
+    indirection: &[BoundAssignmentTargetIndirection],
+    column_names: &[String],
+) -> String {
+    let mut out = String::new();
+    for step in indirection {
+        match step {
+            BoundAssignmentTargetIndirection::Field(field) => {
+                out.push('.');
+                out.push_str(field);
+            }
+            BoundAssignmentTargetIndirection::Subscript(subscript) => {
+                out.push('[');
+                if let Some(lower) = &subscript.lower {
+                    let rendered =
+                        crate::backend::executor::render_explain_projection_expr_with_qualifier(
+                            lower,
+                            None,
+                            column_names,
+                        );
+                    out.push_str(strip_outer_parens_once(&rendered));
+                }
+                if subscript.is_slice {
+                    out.push(':');
+                    if let Some(upper) = &subscript.upper {
+                        let rendered =
+                            crate::backend::executor::render_explain_projection_expr_with_qualifier(
+                                upper,
+                                None,
+                                column_names,
+                            );
+                        out.push_str(strip_outer_parens_once(&rendered));
+                    }
+                }
+                out.push(']');
+            }
+        }
+    }
+    out
+}
+
+fn update_assignments_replace_composite_field_values(target: &BoundUpdateTarget) -> bool {
+    let Some(first) = target.assignments.first() else {
+        return false;
+    };
+    if first.subscripts.is_empty()
+        && target.assignments.iter().all(|assignment| {
+            assignment.column_index == first.column_index
+                && assignment.subscripts.is_empty()
+                && assignment.field_path.len() == 1
+        })
+        && let Some(column) = target.desc.columns.get(first.column_index)
+    {
+        return !column.sql_type.is_array
+            && matches!(
+                column.sql_type.kind,
+                crate::backend::parser::SqlTypeKind::Composite
+            );
+    }
+    false
+}
+
+fn qualified_update_scan_column_names(target: &BoundUpdateTarget) -> Vec<String> {
+    target
+        .desc
+        .columns
+        .iter()
+        .map(|column| format!("{}.{}", target.relation_name, column.name))
+        .collect()
+}
+
 fn explain_update_scan_label(target: &BoundUpdateTarget, alias: Option<&str>) -> String {
     match &target.row_source {
         BoundModifyRowSource::Heap => match alias {
@@ -1775,6 +1972,20 @@ fn explain_update_scan_label(target: &BoundUpdateTarget, alias: Option<&str>) ->
                 "Index Scan using {} on {}",
                 index.name, target.relation_name
             ),
+        },
+    }
+}
+
+fn explain_update_verbose_scan_label(target: &BoundUpdateTarget, alias: Option<&str>) -> String {
+    let relation_name = explain_update_target_name(&target.relation_name, true);
+    match &target.row_source {
+        BoundModifyRowSource::Heap => match alias {
+            Some(alias) => format!("Seq Scan on {relation_name} {alias}"),
+            None => format!("Seq Scan on {relation_name}"),
+        },
+        BoundModifyRowSource::Index { index, .. } => match alias {
+            Some(alias) => format!("Index Scan using {} on {relation_name} {alias}", index.name),
+            None => format!("Index Scan using {} on {relation_name}", index.name),
         },
     }
 }
@@ -6449,6 +6660,7 @@ pub fn execute_insert(
                     &stmt.indexes,
                     &values,
                     Some(&stmt.returning),
+                    None,
                     ctx,
                     xid,
                     cid,
@@ -6479,6 +6691,7 @@ pub fn execute_insert(
                 &stmt.indexes,
                 &values,
                 Some(&stmt.returning),
+                None,
                 ctx,
                 xid,
                 cid,
@@ -6647,6 +6860,7 @@ fn execute_insert_rows_with_routing(
     indexes: &[BoundIndexRelation],
     rows: &[Vec<Value>],
     returning: Option<&[TargetEntry]>,
+    row_error_context: Option<&dyn Fn(usize, &ExecError) -> String>,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
@@ -6665,6 +6879,7 @@ fn execute_insert_rows_with_routing(
             indexes,
             rows,
             returning,
+            row_error_context,
             ctx,
             xid,
             cid,
@@ -6684,6 +6899,7 @@ fn execute_insert_rows_with_routing(
             indexes,
             rows,
             returning,
+            row_error_context,
             ctx,
             xid,
             cid,
@@ -6756,6 +6972,7 @@ fn execute_insert_rows_with_routing(
                     rls_write_checks,
                     &result_rel_info.indexes,
                     std::slice::from_ref(leaf_input_row),
+                    None,
                     None,
                     ctx,
                     xid,
@@ -7510,6 +7727,7 @@ fn execute_merge_insert_action(
         &stmt.merge_insert_write_checks,
         &stmt.indexes,
         &[row_values],
+        None,
         None,
         ctx,
         xid,
@@ -8267,7 +8485,12 @@ pub(crate) fn apply_assignment_target(
             &ctx.datetime_config,
         )
     } else {
-        coerce_assignment_value_with_config(&value, assignment_type, &ctx.datetime_config)
+        coerce_assignment_value_with_catalog_and_config(
+            &value,
+            assignment_type,
+            ctx.catalog.as_deref(),
+            &ctx.datetime_config,
+        )
     }
     .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
     let value = coerce_record_assignment_value(value, assignment_type, ctx)?;
@@ -8314,6 +8537,26 @@ pub(crate) fn apply_assignment_target(
     Ok(())
 }
 
+pub(crate) fn apply_sql_type_array_subscript_assignment(
+    current: Value,
+    root_type: SqlType,
+    subscript_values: &[(bool, Option<Value>, Option<Value>)],
+    replacement: Value,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let indirection = subscript_values
+        .iter()
+        .map(|(is_slice, lower, upper)| {
+            ResolvedAssignmentIndirection::Subscript(ResolvedAssignmentSubscript {
+                is_slice: *is_slice,
+                lower: lower.clone(),
+                upper: upper.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    assign_typed_value_ordered(current, root_type, &indirection, replacement, ctx)
+}
+
 fn coerce_record_assignment_value(
     value: Value,
     target_type: SqlType,
@@ -8346,9 +8589,10 @@ fn coerce_record_assignment_value(
     }
     let mut fields = Vec::with_capacity(record.fields.len());
     for (field, value) in descriptor.fields.iter().zip(record.fields.iter()) {
-        fields.push(coerce_assignment_value_with_config(
+        fields.push(coerce_assignment_value_with_catalog_and_config(
             value,
             field.sql_type,
+            ctx.catalog.as_deref(),
             &ctx.datetime_config,
         )?);
     }
@@ -9662,6 +9906,7 @@ pub(crate) fn execute_insert_rows(
     indexes: &[BoundIndexRelation],
     rows: &[Vec<Value>],
     returning: Option<&[TargetEntry]>,
+    row_error_context: Option<&dyn Fn(usize, &ExecError) -> String>,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
@@ -9692,7 +9937,7 @@ pub(crate) fn execute_insert_rows(
     let mut inserted_rows = Vec::new();
     let mut inserted_tids = Vec::new();
     let mut returned_rows = Vec::new();
-    for values in rows {
+    for (row_index, values) in rows.iter().enumerate() {
         let row_result = (|| -> Result<(), ExecError> {
             let Some(mut values) = (match &triggers {
                 Some(triggers) => triggers.before_row_insert(values.clone(), ctx)?,
@@ -9759,7 +10004,13 @@ pub(crate) fn execute_insert_rows(
             for heap_tid in inserted_tids.iter().rev().copied() {
                 let _ = rollback_inserted_row(rel, toast, desc, heap_tid, ctx, xid);
             }
-            return Err(err);
+            return Err(match row_error_context {
+                Some(context) => ExecError::WithContext {
+                    context: context(row_index, &err),
+                    source: Box::new(err),
+                },
+                None => err,
+            });
         }
     }
     for values in &inserted_rows {
@@ -9871,6 +10122,7 @@ pub(crate) fn execute_insert_values(
     rls_write_checks: &[RlsWriteCheck],
     indexes: &[BoundIndexRelation],
     rows: &[Vec<Value>],
+    row_error_context: Option<&dyn Fn(usize, &ExecError) -> String>,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
@@ -9889,6 +10141,7 @@ pub(crate) fn execute_insert_values(
             indexes,
             rows,
             None,
+            row_error_context,
             ctx,
             xid,
             cid,
@@ -9908,6 +10161,7 @@ pub(crate) fn execute_insert_values(
         indexes,
         rows,
         None,
+        row_error_context,
         ctx,
         xid,
         cid,

@@ -2944,6 +2944,19 @@ fn parse_comment_on_constraint_statement() {
         Statement::CommentOnConstraint(CommentOnConstraintStatement {
             constraint_name: "items_pkey".into(),
             table_name: "public.items".into(),
+            domain_name: None,
+            comment: Some("hello".into()),
+        })
+    );
+
+    let stmt =
+        parse_statement("comment on constraint c1 on domain public.dom_int is 'hello'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnConstraint(CommentOnConstraintStatement {
+            constraint_name: "c1".into(),
+            table_name: String::new(),
+            domain_name: Some("public.dom_int".into()),
             comment: Some("hello".into()),
         })
     );
@@ -16411,6 +16424,15 @@ fn parse_prepare_and_execute_statements() {
         Statement::Execute(ExecuteStatement {
             name: "foo".into(),
             args_sql: vec!["true".into()],
+        })
+    );
+
+    let stmt = parse_statement("execute foo(10, NULL)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Execute(ExecuteStatement {
+            name: "foo".into(),
+            args_sql: vec!["10".into(), "NULL".into()],
         })
     );
 

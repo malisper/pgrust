@@ -1247,6 +1247,12 @@ fn bind_copy_column_defaults(
             }
             column
                 .default_expr
+                .clone()
+                .or_else(|| {
+                    catalog
+                        .type_oid_for_sql_type(column.sql_type)
+                        .and_then(|type_oid| catalog.type_default_sql(type_oid))
+                })
                 .as_deref()
                 .map(|sql| {
                     let parsed = crate::backend::parser::parse_expr(sql)?;
@@ -7494,6 +7500,15 @@ impl Session {
             .ok_or_else(|| cursor_not_positioned(name))
     }
 
+    fn prepared_select_query_error() -> ExecError {
+        ExecError::DetailedError {
+            message: "prepared statement is not a SELECT query".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        }
+    }
+
     fn apply_prepare_statement(
         &mut self,
         prepare_stmt: &PrepareStatement,
@@ -11929,26 +11944,30 @@ impl Session {
                     )
                 }
                 Statement::CommentOnConstraint(ref comment_stmt) => {
-                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                    let relation = match catalog.lookup_any_relation(&comment_stmt.table_name) {
-                        Some(relation) if matches!(relation.relkind, 'r' | 'p' | 'f') => relation,
-                        Some(_) => {
-                            return Err(ExecError::Parse(ParseError::WrongObjectType {
-                                name: comment_stmt.table_name.clone(),
-                                expected: "table",
-                            }));
-                        }
-                        None => {
-                            return Err(ExecError::Parse(ParseError::TableDoesNotExist(
-                                comment_stmt.table_name.clone(),
-                            )));
-                        }
-                    };
-                    self.lock_table_if_needed(
-                        db,
-                        crate::pgrust::database::relation_lock_tag(&relation),
-                        TableLockMode::AccessExclusive,
-                    )?;
+                    if comment_stmt.domain_name.is_none() {
+                        let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                        let relation = match catalog.lookup_any_relation(&comment_stmt.table_name) {
+                            Some(relation) if matches!(relation.relkind, 'r' | 'p' | 'f') => {
+                                relation
+                            }
+                            Some(_) => {
+                                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                                    name: comment_stmt.table_name.clone(),
+                                    expected: "table",
+                                }));
+                            }
+                            None => {
+                                return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                                    comment_stmt.table_name.clone(),
+                                )));
+                            }
+                        };
+                        self.lock_table_if_needed(
+                            db,
+                            crate::pgrust::database::relation_lock_tag(&relation),
+                            TableLockMode::AccessExclusive,
+                        )?;
+                    }
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_comment_on_constraint_stmt_in_transaction_with_search_path(
@@ -12735,10 +12754,14 @@ impl Session {
                 }
                 Statement::DropDomain(ref drop_stmt) => {
                     let search_path = self.configured_search_path();
-                    db.execute_drop_domain_stmt_with_search_path(
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_drop_domain_stmt_in_transaction_with_search_path(
                         client_id,
                         drop_stmt,
+                        xid,
+                        cid,
                         search_path.as_deref(),
+                        &mut txn.catalog_effects,
                     )
                 }
                 Statement::DropFunction(ref drop_stmt) => {
@@ -14437,24 +14460,11 @@ impl Session {
                         .into_iter()
                         .filter(|column_index| !target_indexes.contains(column_index))
                         .collect::<Vec<_>>();
-                    let validation_default_indexes = if options.default_marker.is_some() {
-                        desc.visible_column_indexes()
-                    } else {
-                        omitted_default_indexes.clone()
-                    };
-                    for column_index in &validation_default_indexes {
-                        let _ = evaluate_copy_column_default(
-                            &desc,
-                            &column_defaults,
-                            *column_index,
-                            &mut ctx,
-                        )?;
-                    }
 
                     let mut skipped = 0usize;
                     let mut excluded = 0usize;
                     let mut parsed_rows = Vec::with_capacity(rows.len());
-                    for row in rows {
+                    for (row_index, row) in rows.iter().enumerate() {
                         let parsed = (|| -> Result<Option<Vec<Value>>, ExecError> {
                             if row.len() != target_indexes.len() {
                                 return Err(ExecError::Parse(
@@ -14630,7 +14640,21 @@ impl Session {
                             Err(_err) if matches!(options.on_error, CopyOnError::Ignore) => {
                                 skipped = skipped.saturating_add(1);
                             }
-                            Err(err) => return Err(err),
+                            Err(err) => {
+                                let context = copy_row_error_context(
+                                    table_name,
+                                    row_index,
+                                    Some(row),
+                                    &target_indexes,
+                                    &desc,
+                                    &catalog,
+                                    &err,
+                                );
+                                return Err(ExecError::WithContext {
+                                    source: Box::new(err),
+                                    context,
+                                });
+                            }
                         }
                     }
                     if skipped > 0 {
@@ -14659,6 +14683,17 @@ impl Session {
                             },
                         )
                     });
+                    let copy_error_context = |row_index: usize, err: &ExecError| {
+                        copy_row_error_context(
+                            table_name,
+                            row_index,
+                            rows.get(row_index),
+                            &target_indexes,
+                            &desc,
+                            &catalog,
+                            err,
+                        )
+                    };
                     let result = crate::backend::commands::tablecmds::execute_insert_values(
                         table_name,
                         relation_oid,
@@ -14670,6 +14705,7 @@ impl Session {
                         &[],
                         &indexes,
                         &parsed_rows,
+                        Some(&copy_error_context),
                         &mut ctx,
                         xid,
                         cid,
@@ -16508,6 +16544,117 @@ fn first_copy_row_context(text: &str, table_name: &str) -> Option<String> {
         ));
     }
     None
+}
+
+fn copy_row_error_context(
+    table_name: &str,
+    row_index: usize,
+    row: Option<&Vec<String>>,
+    target_indexes: &[usize],
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+    err: &ExecError,
+) -> String {
+    let line_no = row_index + 1;
+    if let Some(row) = row {
+        if matches!(err, ExecError::StringDataRightTruncation { .. })
+            && let Some((column, raw)) =
+                copy_character_typmod_context_column(row, target_indexes, desc, catalog)
+        {
+            return format!(
+                "COPY {table_name}, line {line_no}, column {column}: \"{}\"",
+                copy_display_field(&raw)
+            );
+        }
+        if copy_error_is_domain_null(err)
+            && let Some((column, _raw)) =
+                copy_null_domain_context_column(row, target_indexes, desc, catalog)
+        {
+            return format!("COPY {table_name}, line {line_no}, column {column}: null input");
+        }
+        return format!(
+            "COPY {table_name}, line {line_no}: \"{}\"",
+            copy_display_row(row)
+        );
+    }
+    format!("COPY {table_name}, line {line_no}")
+}
+
+fn copy_character_typmod_context_column(
+    row: &[String],
+    target_indexes: &[usize],
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Option<(String, String)> {
+    row.iter()
+        .zip(target_indexes.iter().copied())
+        .find_map(|(raw, column_index)| {
+            let column = desc.columns.get(column_index)?;
+            copy_type_has_character_typmod(column.sql_type, catalog)
+                .then_some((column.name.clone(), raw.clone()))
+        })
+}
+
+fn copy_null_domain_context_column(
+    row: &[String],
+    target_indexes: &[usize],
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Option<(String, String)> {
+    row.iter()
+        .zip(target_indexes.iter().copied())
+        .find_map(|(raw, column_index)| {
+            if raw != COPY_TEXT_NULL_SENTINEL {
+                return None;
+            }
+            let column = desc.columns.get(column_index)?;
+            catalog
+                .domain_by_type_oid(column.sql_type.type_oid)
+                .is_some()
+                .then_some((column.name.clone(), raw.clone()))
+        })
+}
+
+fn copy_type_has_character_typmod(
+    sql_type: crate::backend::parser::SqlType,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    let base = catalog
+        .domain_by_type_oid(sql_type.type_oid)
+        .map(|domain| domain.sql_type)
+        .unwrap_or(sql_type);
+    let scalar = if base.is_array {
+        base.element_type()
+    } else {
+        base
+    };
+    matches!(
+        scalar.kind,
+        crate::backend::parser::SqlTypeKind::Char | crate::backend::parser::SqlTypeKind::Varchar
+    ) && scalar.char_len().is_some()
+}
+
+fn copy_error_is_domain_null(err: &ExecError) -> bool {
+    matches!(
+        err,
+        ExecError::DetailedError { message, .. }
+            if message.starts_with("domain ") && message.ends_with(" does not allow null values")
+    )
+}
+
+fn copy_display_row(row: &[String]) -> String {
+    row.iter()
+        .map(|field| copy_display_field(field))
+        .collect::<Vec<_>>()
+        .join("\t")
+}
+
+fn copy_display_field(field: &str) -> String {
+    if field == COPY_TEXT_NULL_SENTINEL {
+        "\\N".to_string()
+    } else {
+        field.to_string()
+    }
 }
 
 fn is_parsed_copy_null(field: &str, options: &CopyOptions) -> bool {

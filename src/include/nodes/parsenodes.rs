@@ -3157,6 +3157,7 @@ pub struct CommentOnTypeStatement {
 pub struct CommentOnConstraintStatement {
     pub constraint_name: String,
     pub table_name: String,
+    pub domain_name: Option<String>,
     pub comment: Option<String>,
 }
 
@@ -4101,6 +4102,7 @@ pub struct CreateDomainStatement {
     pub domain_name: String,
     pub ty: RawTypeName,
     pub default: Option<String>,
+    pub collation: Option<String>,
     pub check: Option<String>,
     pub not_null: bool,
     pub constraints: Vec<DomainConstraintSpec>,

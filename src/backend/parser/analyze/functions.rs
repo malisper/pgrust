@@ -779,6 +779,13 @@ fn function_signature_type_name(catalog: &dyn CatalogLookup, ty: SqlType) -> Str
     sql_type_name(ty)
 }
 
+fn is_unknown_null_resolution_type(ty: SqlType) -> bool {
+    !ty.is_array
+        && ty.type_oid == 0
+        && ty.typrelid == 0
+        && matches!(ty.kind, SqlTypeKind::AnyElement)
+}
+
 fn polymorphic_candidate_is_consistent(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
@@ -801,6 +808,9 @@ fn polymorphic_candidate_is_consistent(
             ANYELEMENTOID | ANYARRAYOID | ANYRANGEOID | ANYMULTIRANGEOID
         ) {
             saw_ordinary = true;
+            if is_unknown_null_resolution_type(actual_type) {
+                continue;
+            }
             let Some(base) = ordinary_polymorphic_base_type(declared_oid, actual_type) else {
                 if is_unknown_sql_type(actual_type) {
                     continue;
@@ -1252,15 +1262,17 @@ fn polymorphic_signature_matches_declared(declared_oids: &[u32], actual_types: &
         .zip(actual_types.iter().copied())
     {
         match declared_oid {
-            ANYELEMENTOID => {
-                if is_unknown_sql_type(actual_type) {
+            ANYOID | ANYELEMENTOID => {
+                if is_unknown_null_resolution_type(actual_type) {
+                    continue;
+                }
+                if declared_oid == ANYELEMENTOID && is_unknown_sql_type(actual_type) {
                     continue;
                 }
                 if !merge_exact_polymorphic_subtype(&mut exact_subtype, actual_type) {
                     return false;
                 }
             }
-            ANYOID => {}
             ANYARRAYOID if actual_type.is_array => {
                 if is_unknown_sql_type(actual_type) {
                     continue;
@@ -1435,6 +1447,9 @@ fn match_proc_arg_type(
             .then_some((2, actual_type));
     }
     let declared_type = catalog.type_by_oid(declared_oid)?.sql_type;
+    if is_unknown_null_resolution_type(actual_type) {
+        return Some((4, declared_type));
+    }
     if is_reg_oid_alias_type(declared_type)
         && matches!(
             actual_type.kind,
@@ -1668,6 +1683,7 @@ fn resolve_anyelement_result_type(
         .zip(candidate.declared_arg_types.iter().copied())
     {
         let inferred = match declared_oid {
+            ANYOID | ANYELEMENTOID if is_unknown_null_resolution_type(actual_type) => None,
             _ if is_unknown_sql_type(actual_type) => None,
             ANYOID | ANYELEMENTOID => Some(actual_type),
             ANYENUMOID if matches!(actual_type.kind, SqlTypeKind::Enum) => Some(actual_type),
@@ -2301,6 +2317,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgNotify => args.len() == 2,
             BuiltinScalarFunction::PgNotificationQueueUsage => args.is_empty(),
             BuiltinScalarFunction::PgTypeof
+            | BuiltinScalarFunction::PgBaseType
             | BuiltinScalarFunction::PgColumnCompression
             | BuiltinScalarFunction::PgColumnToastChunkId
             | BuiltinScalarFunction::PgColumnSize => args.len() == 1,
@@ -4223,6 +4240,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("lo_create", BuiltinScalarFunction::LoCreate),
         ("lo_unlink", BuiltinScalarFunction::LoUnlink),
         ("pg_typeof", BuiltinScalarFunction::PgTypeof),
+        ("pg_basetype", BuiltinScalarFunction::PgBaseType),
         (
             "pg_stat_get_checkpointer_num_timed",
             BuiltinScalarFunction::PgStatGetCheckpointerNumTimed,

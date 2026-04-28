@@ -68,6 +68,19 @@ fn random_bound_target_type(args: &[SqlExpr], arg_types: &[SqlType]) -> SqlType 
     }
 }
 
+fn pg_typeof_sql_type_name(ty: SqlType, catalog: &dyn CatalogLookup) -> String {
+    if ty.type_oid != 0
+        && let Some(domain) = catalog.domain_by_type_oid(ty.type_oid)
+    {
+        return if ty.is_array && (!domain.sql_type.is_array || ty.typrelid == domain.array_oid) {
+            format!("{}[]", domain.name)
+        } else {
+            domain.name
+        };
+    }
+    sql_type_name(ty)
+}
+
 pub(super) fn bind_row_to_json_call(
     name: &str,
     args: &[SqlFunctionArg],
@@ -3688,7 +3701,9 @@ fn bind_scalar_function_call_from_bound_args(
                 ));
             }
             Ok(Expr::Cast(
-                Box::new(Expr::Const(Value::Text(sql_type_name(arg_type).into()))),
+                Box::new(Expr::Const(Value::Text(
+                    pg_typeof_sql_type_name(arg_type, catalog).into(),
+                ))),
                 SqlType::new(SqlTypeKind::RegType),
             ))
         }

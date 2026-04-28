@@ -400,6 +400,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             return find_function_coldeflist_error_position(sql, actual);
         }
         ExecError::Parse(crate::backend::parser::ParseError::UnsupportedType(name)) => {
+            if sql
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("drop domain ")
+            {
+                return None;
+            }
             return find_case_insensitive_token_position(sql, name);
         }
         ExecError::Parse(crate::backend::parser::ParseError::UnknownColumn(name)) => {
@@ -541,6 +548,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(position) = create_table_error_position(sql, message) {
                 return Some(position);
             }
+            if let Some(position) = domain_ddl_error_position(sql, message) {
+                return Some(position);
+            }
             if message.starts_with("column \"") && message.contains("WITHOUT OVERLAPS") {
                 return find_without_overlaps_constraint_position(sql);
             }
@@ -565,6 +575,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(position) = trigger_when_error_position(sql, message) {
                 return Some(position);
             }
+            if let Some(position) = insert_column_type_mismatch_position(sql, message) {
+                return Some(position);
+            }
+            if let Some(position) = insert_domain_array_literal_position(sql, message) {
+                return Some(position);
+            }
             if message.starts_with("cannot subscript type ") {
                 return find_subscript_expression_position(sql);
             }
@@ -576,6 +592,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
             if message == "range lower bound must be less than or equal to range upper bound" {
                 return find_range_literal_position(sql);
+            }
+            if let Some(position) = insert_domain_array_literal_position(sql, message) {
+                return Some(position);
             }
             if !suppress_missing_function_position(sql)
                 && let Some(position) = find_missing_function_position(sql, message)
@@ -826,6 +845,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message == "range lower bound must be less than or equal to range upper bound" {
                 return find_range_literal_position(sql);
             }
+            if let Some(position) = insert_domain_array_literal_position(sql, message) {
+                return Some(position);
+            }
             if !suppress_missing_function_position(sql)
                 && let Some(position) = find_missing_function_position(sql, message)
             {
@@ -872,6 +894,124 @@ fn check_constraint_system_column_error_name(message: &str) -> Option<&str> {
         .and_then(|(name, rest)| {
             (rest == " reference in check constraint is invalid").then_some(name)
         })
+}
+
+fn domain_ddl_error_position(sql: &str, message: &str) -> Option<usize> {
+    let lower = sql.trim_start().to_ascii_lowercase();
+    let is_create_domain = lower.starts_with("create domain ");
+    let is_alter_domain = lower.starts_with("alter domain ");
+    if !is_create_domain && !is_alter_domain {
+        return None;
+    }
+
+    match message {
+        "foreign key constraints not possible for domains" => {
+            find_case_insensitive_token_position(sql, "CONSTRAINT")
+                .or_else(|| find_case_insensitive_token_position(sql, "REFERENCES"))
+        }
+        "not-null constraints for domains cannot be marked NO INHERIT" => {
+            find_case_insensitive_token_position(sql, "NOT NULL")
+        }
+        "conflicting NULL/NOT NULL constraints" => {
+            find_last_case_insensitive_token_position(sql, "NULL")
+        }
+        "multiple default expressions" => find_second_option_occurrence(sql, "default"),
+        "unique constraints not possible for domains" => {
+            find_case_insensitive_token_position(sql, "UNIQUE")
+        }
+        "primary key constraints not possible for domains" => {
+            find_case_insensitive_token_position(sql, "PRIMARY")
+        }
+        "specifying GENERATED not supported for domains" => {
+            if is_create_domain {
+                find_case_insensitive_token_position(sql, "CONSTRAINT")
+                    .or_else(|| find_case_insensitive_token_position(sql, "GENERATED"))
+            } else {
+                find_case_insensitive_token_position(sql, "GENERATED")
+            }
+        }
+        "check constraints for domains cannot be marked NO INHERIT" => {
+            if is_create_domain {
+                find_case_insensitive_token_position(sql, "CONSTRAINT")
+                    .or_else(|| find_case_insensitive_token_position(sql, "CHECK"))
+            } else {
+                find_case_insensitive_token_position(sql, "CHECK")
+            }
+        }
+        "specifying constraint deferrability not supported for domains" => {
+            find_case_insensitive_token_position(sql, "DEFERRABLE")
+                .or_else(|| find_case_insensitive_token_position(sql, "INITIALLY"))
+        }
+        "specifying constraint enforceability not supported for domains"
+        | "CHECK constraints cannot be marked ENFORCED"
+        | "CHECK constraints cannot be marked NOT ENFORCED" => {
+            find_constraint_enforcement_attribute_position(sql)
+        }
+        "redundant NOT NULL constraint definition" => {
+            find_last_case_insensitive_token_position(sql, "CONSTRAINT")
+                .or_else(|| find_last_case_insensitive_token_position(sql, "NOT NULL"))
+        }
+        _ if message.starts_with("collations are not supported by type ") && is_create_domain => {
+            find_create_domain_base_type_position(sql)
+        }
+        _ if message.ends_with(" is not a valid base type for a domain") && is_create_domain => {
+            find_create_domain_base_type_position(sql)
+        }
+        _ => None,
+    }
+}
+
+fn find_create_domain_base_type_position(sql: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let mut index = lower.find("create domain")? + "create domain".len();
+    index = skip_sql_whitespace(sql, index);
+    index = skip_sql_identifier(sql, index)?;
+    index = skip_sql_whitespace(sql, index);
+    if lower
+        .get(index..)
+        .is_some_and(|tail| tail.starts_with("as"))
+        && lower
+            .get(index + "as".len()..)
+            .and_then(|tail| tail.chars().next())
+            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+    {
+        index += "as".len();
+        index = skip_sql_whitespace(sql, index);
+    }
+    (index < sql.len()).then_some(index + 1)
+}
+
+fn skip_sql_whitespace(sql: &str, mut index: usize) -> usize {
+    while index < sql.len() && sql.as_bytes()[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    index
+}
+
+fn skip_sql_identifier(sql: &str, mut index: usize) -> Option<usize> {
+    if sql.as_bytes().get(index).is_some_and(|byte| *byte == b'"') {
+        index += 1;
+        while index < sql.len() {
+            if sql.as_bytes()[index] == b'"' {
+                index += 1;
+                if sql.as_bytes().get(index).is_some_and(|byte| *byte == b'"') {
+                    index += 1;
+                    continue;
+                }
+                return Some(index);
+            }
+            index += 1;
+        }
+        return None;
+    }
+    while index < sql.len() {
+        let byte = sql.as_bytes()[index];
+        if !(byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'.') {
+            break;
+        }
+        index += 1;
+    }
+    Some(index)
 }
 
 fn create_table_error_position(sql: &str, message: &str) -> Option<usize> {
@@ -1957,6 +2097,57 @@ fn find_insert_values_item_position(sql: &str, ordinal: usize) -> Option<usize> 
     let open = sql[values_index..].find('(')? + values_index;
     let close = find_matching_delimiter(sql, open, b'(', b')')?;
     find_top_level_item_start(sql, open + 1, close, ordinal)
+}
+
+fn insert_column_type_mismatch_position(sql: &str, message: &str) -> Option<usize> {
+    let column = extract_column_type_mismatch_column(message)?;
+    let ordinal = find_insert_target_column_ordinal(sql, column).unwrap_or(1);
+    find_insert_values_item_position(sql, ordinal)
+}
+
+fn extract_column_type_mismatch_column(message: &str) -> Option<&str> {
+    if !message.contains("\" is of type ") || !message.contains(" but expression is of type ") {
+        return None;
+    }
+    Some(message.strip_prefix("column \"")?.split_once('"')?.0)
+}
+
+fn find_insert_target_column_ordinal(sql: &str, column: &str) -> Option<usize> {
+    let values_index = find_ascii_keyword(sql, "values", 0)?;
+    let open = sql[..values_index].rfind('(')?;
+    let close = find_matching_delimiter(sql, open, b'(', b')')?;
+    if close > values_index {
+        return None;
+    }
+    let mut ordinal = 1;
+    let mut item_start = open + 1;
+    for comma in top_level_commas(sql, open + 1, close) {
+        if insert_target_item_matches_column(sql, item_start, comma, column) {
+            return Some(ordinal);
+        }
+        ordinal += 1;
+        item_start = comma + 1;
+    }
+    insert_target_item_matches_column(sql, item_start, close, column).then_some(ordinal)
+}
+
+fn insert_target_item_matches_column(sql: &str, start: usize, end: usize, column: &str) -> bool {
+    let item = sql[start..end].trim();
+    item.trim_matches('"').eq_ignore_ascii_case(column)
+}
+
+fn insert_domain_array_literal_position(sql: &str, message: &str) -> Option<usize> {
+    if !message.starts_with("value for domain ") || !message.contains(" violates check constraint ")
+    {
+        return None;
+    }
+    if !sql.trim_start().to_ascii_lowercase().starts_with("insert ") {
+        return None;
+    }
+    let position = find_first_string_literal_start_position(sql)?;
+    let index = position.checked_sub(1)?;
+    let bytes = sql.as_bytes();
+    (bytes.get(index) == Some(&b'\'') && bytes.get(index + 1) == Some(&b'{')).then_some(position)
 }
 
 fn find_insert_values_default_ordinal(sql: &str) -> Option<usize> {
@@ -7212,7 +7403,12 @@ fn psql_describe_tableinfo_query(
     let oid = extract_quoted_oid(sql)?;
     let txn_ctx = session.catalog_txn_ctx();
     let entry = db.describe_relation_by_oid(session.client_id, txn_ctx, oid)?;
+    let catalog = session.catalog_lookup(db);
     let relhasindex = db.has_index_on_relation(session.client_id, txn_ctx, oid);
+    let relhasrules = catalog
+        .rewrite_rows_for_relation(oid)
+        .into_iter()
+        .any(|row| row.rulename != "_RETURN");
     let amname = db.access_method_name_for_relation(session.client_id, txn_ctx, oid);
     let relchecks = db
         .constraint_rows_for_relation(session.client_id, txn_ctx, oid)
@@ -7320,7 +7516,7 @@ fn psql_describe_tableinfo_query(
             Value::Int32(relchecks),
             Value::InternalChar(entry.relkind as u8),
             Value::Bool(relhasindex),
-            Value::Bool(false),
+            Value::Bool(relhasrules),
             Value::Bool(entry.relhastriggers),
             Value::Bool(entry.relrowsecurity),
             Value::Bool(entry.relforcerowsecurity),

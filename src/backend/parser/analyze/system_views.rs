@@ -8,7 +8,9 @@ use crate::backend::utils::cache::system_view_registry::{
     SyntheticSystemViewKind, synthetic_system_view,
 };
 use crate::backend::utils::trigger::format_trigger_definition;
-use crate::include::catalog::{CONSTRAINT_CHECK, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID};
+use crate::include::catalog::{
+    CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
+};
 use crate::include::nodes::parsenodes::{JoinTreeNode, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
     SetReturningCall, attrno_index, is_system_attr, set_returning_call_exprs,
@@ -302,6 +304,13 @@ pub(super) fn bind_builtin_system_view(
         SyntheticSystemViewKind::InformationSchemaColumnColumnUsage => {
             information_schema_column_column_usage_rows(catalog)
         }
+        SyntheticSystemViewKind::InformationSchemaColumnDomainUsage => {
+            information_schema_column_domain_usage_rows(catalog)
+        }
+        SyntheticSystemViewKind::InformationSchemaDomainConstraints => {
+            information_schema_domain_constraints_rows(catalog)
+        }
+        SyntheticSystemViewKind::InformationSchemaDomains => information_schema_domain_rows(catalog),
         SyntheticSystemViewKind::InformationSchemaCheckConstraints => {
             information_schema_check_constraint_rows(catalog)
         }
@@ -635,22 +644,208 @@ fn information_schema_column_column_usage_rows(catalog: &dyn CatalogLookup) -> V
         .collect()
 }
 
-fn information_schema_check_constraint_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
-    let mut rows = catalog
-        .constraint_rows()
-        .into_iter()
-        .filter(|row| row.contype == CONSTRAINT_CHECK)
-        .filter_map(|row| {
-            let namespace = catalog.namespace_row_by_oid(row.connamespace)?;
-            let check_clause = information_schema_check_clause(catalog, &row)?;
-            Some(vec![
+fn information_schema_column_domain_usage_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for (schema_name, table_name, relation) in
+        information_schema_relation_rows(catalog, &['r', 'p', 'v', 'f'])
+    {
+        for column in relation
+            .desc
+            .columns
+            .iter()
+            .filter(|column| !column.dropped)
+        {
+            let Some(type_oid) = catalog.type_oid_for_sql_type(column.sql_type) else {
+                continue;
+            };
+            let Some(type_row) = catalog.type_by_oid(type_oid) else {
+                continue;
+            };
+            if type_row.typtype != 'd' {
+                continue;
+            }
+            let Some(domain_schema) = catalog
+                .namespace_row_by_oid(type_row.typnamespace)
+                .map(|row| row.nspname)
+            else {
+                continue;
+            };
+            rows.push(vec![
                 Value::Text(REGRESSION_DATABASE_NAME.into()),
-                Value::Text(namespace.nspname.into()),
-                Value::Text(row.conname.into()),
-                Value::Text(check_clause.into()),
-            ])
-        })
-        .collect::<Vec<_>>();
+                Value::Text(domain_schema.into()),
+                Value::Text(type_row.typname.into()),
+                Value::Text(REGRESSION_DATABASE_NAME.into()),
+                Value::Text(schema_name.clone().into()),
+                Value::Text(table_name.clone().into()),
+                Value::Text(column.name.clone().into()),
+            ]);
+        }
+    }
+    rows.sort_by(|left, right| {
+        value_text(left.get(2))
+            .cmp(value_text(right.get(2)))
+            .then_with(|| value_text(left.get(5)).cmp(value_text(right.get(5))))
+            .then_with(|| value_text(left.get(6)).cmp(value_text(right.get(6))))
+    });
+    rows
+}
+
+fn information_schema_domain_constraints_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for constraint in catalog.constraint_rows() {
+        if constraint.contypid == 0
+            || !matches!(constraint.contype, CONSTRAINT_CHECK | CONSTRAINT_NOTNULL)
+        {
+            continue;
+        }
+        let Some(domain_row) = catalog.type_by_oid(constraint.contypid) else {
+            continue;
+        };
+        if domain_row.typtype != 'd' {
+            continue;
+        }
+        let Some(constraint_schema) = catalog
+            .namespace_row_by_oid(constraint.connamespace)
+            .map(|row| row.nspname)
+        else {
+            continue;
+        };
+        let Some(domain_schema) = catalog
+            .namespace_row_by_oid(domain_row.typnamespace)
+            .map(|row| row.nspname)
+        else {
+            continue;
+        };
+        rows.push(vec![
+            Value::Text(REGRESSION_DATABASE_NAME.into()),
+            Value::Text(constraint_schema.into()),
+            Value::Text(constraint.conname.into()),
+            Value::Text(REGRESSION_DATABASE_NAME.into()),
+            Value::Text(domain_schema.into()),
+            Value::Text(domain_row.typname.into()),
+            yes_or_no(constraint.condeferrable),
+            yes_or_no(constraint.condeferred),
+        ]);
+    }
+    rows.sort_by(|left, right| value_text(left.get(2)).cmp(value_text(right.get(2))));
+    rows
+}
+
+fn information_schema_domain_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for domain_row in catalog
+        .type_rows()
+        .into_iter()
+        .filter(|row| row.typtype == 'd')
+    {
+        let Some(domain_schema) = catalog
+            .namespace_row_by_oid(domain_row.typnamespace)
+            .map(|row| row.nspname)
+        else {
+            continue;
+        };
+        let base_row = information_schema_domain_base_type_row(catalog, domain_row.typbasetype);
+        let base_sql_type = base_row
+            .as_ref()
+            .map(|row| row.sql_type)
+            .unwrap_or(domain_row.sql_type);
+        let (character_maximum_length, character_octet_length) =
+            information_schema_character_metadata(base_sql_type);
+        let (numeric_precision, numeric_precision_radix, numeric_scale) =
+            information_schema_numeric_metadata(base_sql_type);
+        let (udt_schema, udt_name) = base_row
+            .and_then(|row| {
+                let namespace = catalog.namespace_row_by_oid(row.typnamespace)?;
+                Some((namespace.nspname, row.typname))
+            })
+            .unwrap_or_else(|| ("pg_catalog".into(), sql_type_name(base_sql_type)));
+        let domain_default = catalog
+            .domain_by_type_oid(domain_row.oid)
+            .and_then(|domain| domain.default)
+            .or_else(|| catalog.type_default_sql(domain_row.oid));
+        rows.push(vec![
+            Value::Text(REGRESSION_DATABASE_NAME.into()),
+            Value::Text(domain_schema.into()),
+            Value::Text(domain_row.typname.into()),
+            Value::Text(information_schema_data_type(base_sql_type, catalog).into()),
+            character_maximum_length,
+            character_octet_length,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            numeric_precision,
+            numeric_precision_radix,
+            numeric_scale,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            domain_default
+                .map(|value| Value::Text(value.into()))
+                .unwrap_or(Value::Null),
+            Value::Text(REGRESSION_DATABASE_NAME.into()),
+            Value::Text(udt_schema.into()),
+            Value::Text(udt_name.into()),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Text("1".into()),
+        ]);
+    }
+    rows.sort_by(|left, right| value_text(left.get(2)).cmp(value_text(right.get(2))));
+    rows
+}
+
+fn information_schema_check_constraint_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
+    let mut rows = Vec::new();
+    for constraint in catalog.constraint_rows() {
+        if constraint.contypid != 0 {
+            if !matches!(constraint.contype, CONSTRAINT_CHECK | CONSTRAINT_NOTNULL) {
+                continue;
+            }
+            let Some(domain_row) = catalog.type_by_oid(constraint.contypid) else {
+                continue;
+            };
+            if domain_row.typtype != 'd' {
+                continue;
+            }
+            let Some(constraint_schema) = catalog
+                .namespace_row_by_oid(constraint.connamespace)
+                .map(|row| row.nspname)
+            else {
+                continue;
+            };
+            rows.push(vec![
+                Value::Text(REGRESSION_DATABASE_NAME.into()),
+                Value::Text(constraint_schema.into()),
+                Value::Text(constraint.conname.clone().into()),
+                Value::Text(information_schema_domain_check_clause(&constraint).into()),
+            ]);
+            continue;
+        }
+        if constraint.contype != CONSTRAINT_CHECK {
+            continue;
+        }
+        let Some(constraint_schema) = catalog
+            .namespace_row_by_oid(constraint.connamespace)
+            .map(|row| row.nspname)
+        else {
+            continue;
+        };
+        let Some(check_clause) = information_schema_relation_check_clause(catalog, &constraint)
+        else {
+            continue;
+        };
+        rows.push(vec![
+            Value::Text(REGRESSION_DATABASE_NAME.into()),
+            Value::Text(constraint_schema.into()),
+            Value::Text(constraint.conname.into()),
+            Value::Text(check_clause.into()),
+        ]);
+    }
     rows.sort_by(|left, right| {
         value_text(left.get(1))
             .cmp(value_text(right.get(1)))
@@ -659,7 +854,53 @@ fn information_schema_check_constraint_rows(catalog: &dyn CatalogLookup) -> Vec<
     rows
 }
 
-fn information_schema_check_clause(
+fn information_schema_domain_base_type_row(
+    catalog: &dyn CatalogLookup,
+    type_oid: u32,
+) -> Option<crate::include::catalog::PgTypeRow> {
+    let mut current_oid = type_oid;
+    for _ in 0..64 {
+        let row = catalog.type_by_oid(current_oid)?;
+        if row.typtype != 'd' || row.typbasetype == 0 {
+            return Some(row);
+        }
+        current_oid = row.typbasetype;
+    }
+    None
+}
+
+fn information_schema_character_metadata(sql_type: SqlType) -> (Value, Value) {
+    match sql_type.kind {
+        SqlTypeKind::Varchar | SqlTypeKind::Char => match sql_type.char_len() {
+            Some(length) => (Value::Int32(length), Value::Int32(length.saturating_mul(4))),
+            None => (Value::Null, Value::Null),
+        },
+        _ => (Value::Null, Value::Null),
+    }
+}
+
+fn information_schema_numeric_metadata(sql_type: SqlType) -> (Value, Value, Value) {
+    match sql_type.kind {
+        SqlTypeKind::Int2 => (Value::Int32(16), Value::Int32(2), Value::Int32(0)),
+        SqlTypeKind::Int4 | SqlTypeKind::Oid => {
+            (Value::Int32(32), Value::Int32(2), Value::Int32(0))
+        }
+        SqlTypeKind::Int8 => (Value::Int32(64), Value::Int32(2), Value::Int32(0)),
+        SqlTypeKind::Float4 => (Value::Int32(24), Value::Int32(2), Value::Null),
+        SqlTypeKind::Float8 => (Value::Int32(53), Value::Int32(2), Value::Null),
+        SqlTypeKind::Numeric => match sql_type.numeric_precision_scale() {
+            Some((precision, scale)) => (
+                Value::Int32(precision),
+                Value::Int32(10),
+                Value::Int32(scale),
+            ),
+            None => (Value::Null, Value::Int32(10), Value::Null),
+        },
+        _ => (Value::Null, Value::Null, Value::Null),
+    }
+}
+
+fn information_schema_relation_check_clause(
     catalog: &dyn CatalogLookup,
     row: &crate::include::catalog::PgConstraintRow,
 ) -> Option<String> {
@@ -698,6 +939,48 @@ fn canonicalize_check_clause_sql(
 fn contains_sql_json_query_function(expr_sql: &str) -> bool {
     let upper = expr_sql.to_ascii_uppercase();
     upper.contains("JSON_QUERY(") || upper.contains("JSON_VALUE(") || upper.contains("JSON_EXISTS(")
+}
+
+fn information_schema_domain_check_clause(
+    constraint: &crate::include::catalog::PgConstraintRow,
+) -> String {
+    if constraint.contype == CONSTRAINT_NOTNULL {
+        return "VALUE IS NOT NULL".into();
+    }
+    let expr = constraint.conbin.as_deref().unwrap_or_default().trim();
+    if expr.starts_with('(') {
+        information_schema_domain_value_name(expr)
+    } else {
+        format!("({})", information_schema_domain_value_name(expr))
+    }
+}
+
+fn information_schema_domain_value_name(expr: &str) -> String {
+    let mut out = String::with_capacity(expr.len());
+    let mut token = String::new();
+    for ch in expr.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            token.push(ch);
+            continue;
+        }
+        if !token.is_empty() {
+            if token.eq_ignore_ascii_case("value") {
+                out.push_str("VALUE");
+            } else {
+                out.push_str(&token);
+            }
+            token.clear();
+        }
+        out.push(ch);
+    }
+    if !token.is_empty() {
+        if token.eq_ignore_ascii_case("value") {
+            out.push_str("VALUE");
+        } else {
+            out.push_str(&token);
+        }
+    }
+    out
 }
 
 fn information_schema_data_type(sql_type: SqlType, catalog: &dyn CatalogLookup) -> String {

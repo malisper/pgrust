@@ -1,7 +1,7 @@
 use crate::backend::parser::{
-    AssignmentTarget, AssignmentTargetIndirection, CatalogLookup, InsertSource, InsertStatement,
-    RawTypeName, SelectStatement, SqlCallArgs, SqlExpr, SqlType, SqlTypeKind, Statement,
-    parse_statement, sql_type_name,
+    Assignment, AssignmentTarget, AssignmentTargetIndirection, CatalogLookup, InsertSource,
+    InsertStatement, RawTypeName, SelectStatement, SqlCallArgs, SqlExpr, SqlType, SqlTypeKind,
+    Statement, UpdateStatement, parse_statement, sql_type_name,
 };
 use crate::include::catalog::PgRewriteRow;
 use crate::include::nodes::datum::Value;
@@ -54,12 +54,16 @@ fn format_stored_rule_definition_inner(
         definition.push_str(" NOTHING");
     } else if actions.len() == 1 {
         definition.push(' ');
-        definition.push_str(&format_stored_rule_action(actions[0], catalog));
+        definition.push_str(&format_stored_rule_action(
+            actions[0],
+            relation_name,
+            catalog,
+        ));
     } else {
         definition.push_str(" (\n");
         for (index, action) in actions.iter().enumerate() {
             definition.push_str("    ");
-            definition.push_str(&format_stored_rule_action(action, catalog));
+            definition.push_str(&format_stored_rule_action(action, relation_name, catalog));
             if index + 1 != actions.len() {
                 definition.push_str(";\n");
             } else {
@@ -72,13 +76,289 @@ fn format_stored_rule_definition_inner(
     definition
 }
 
-fn format_stored_rule_action(action: &str, catalog: Option<&dyn CatalogLookup>) -> String {
+fn format_stored_rule_action(
+    action: &str,
+    relation_name: &str,
+    catalog: Option<&dyn CatalogLookup>,
+) -> String {
     match parse_statement(action) {
         Ok(Statement::Insert(stmt)) => {
             format_rule_insert_statement(&stmt, catalog).unwrap_or_else(|| action.to_string())
         }
+        Ok(Statement::Update(stmt)) => format_rule_update_statement(&stmt, relation_name, catalog)
+            .unwrap_or_else(|| action.to_string()),
         _ => action.to_string(),
     }
+}
+
+fn format_rule_update_statement(
+    stmt: &UpdateStatement,
+    relation_name: &str,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Option<String> {
+    if stmt.with_recursive
+        || !stmt.with.is_empty()
+        || stmt.target_alias.is_some()
+        || stmt.only
+        || stmt.from.is_some()
+        || !stmt.returning.is_empty()
+    {
+        return None;
+    }
+
+    let catalog = catalog?;
+    let relation = catalog.lookup_any_relation(&stmt.table_name)?;
+    let ctx = UpdateRuleExprContext {
+        relation_name,
+        desc: &relation.desc,
+        catalog,
+    };
+    let assignments = stmt
+        .assignments
+        .iter()
+        .map(|assignment| format_rule_update_assignment(assignment, &ctx))
+        .collect::<Option<Vec<_>>>()?
+        .join(", ");
+
+    let mut sql = format!("UPDATE {} SET {assignments}", stmt.table_name);
+    if let Some(where_clause) = &stmt.where_clause {
+        sql.push_str("\n  WHERE ");
+        sql.push_str(&render_update_rule_expr(where_clause, &ctx, None));
+    }
+    Some(sql)
+}
+
+fn format_rule_update_assignment(
+    assignment: &Assignment,
+    ctx: &UpdateRuleExprContext<'_>,
+) -> Option<String> {
+    let target_type =
+        resolve_rule_assignment_target_type(&assignment.target, ctx.desc, ctx.catalog);
+    Some(format!(
+        "{} = {}",
+        render_rule_assignment_target(&assignment.target),
+        render_update_rule_expr(&assignment.expr, ctx, target_type)
+    ))
+}
+
+struct UpdateRuleExprContext<'a> {
+    relation_name: &'a str,
+    desc: &'a RelationDesc,
+    catalog: &'a dyn CatalogLookup,
+}
+
+fn render_update_rule_expr(
+    expr: &SqlExpr,
+    ctx: &UpdateRuleExprContext<'_>,
+    target_type: Option<SqlType>,
+) -> String {
+    match expr {
+        SqlExpr::Column(name) => render_update_rule_column(name, ctx),
+        SqlExpr::IntegerLiteral(value) | SqlExpr::NumericLiteral(value) => {
+            render_update_rule_numeric_literal(value, target_type)
+        }
+        SqlExpr::Const(Value::Int16(value)) => {
+            render_update_rule_numeric_literal(&value.to_string(), target_type)
+        }
+        SqlExpr::Const(Value::Int32(value)) => {
+            render_update_rule_numeric_literal(&value.to_string(), target_type)
+        }
+        SqlExpr::Const(Value::Int64(value)) => {
+            render_update_rule_numeric_literal(&value.to_string(), target_type)
+        }
+        SqlExpr::Const(Value::Float64(value)) => {
+            render_update_rule_numeric_literal(&value.to_string(), target_type)
+        }
+        SqlExpr::Const(Value::Numeric(value)) => {
+            render_update_rule_numeric_literal(&value.render(), target_type)
+        }
+        SqlExpr::Const(Value::Text(value)) => render_rule_string_literal(value, target_type),
+        SqlExpr::Add(left, right) => render_update_rule_binary_expr(left, "+", right, ctx),
+        SqlExpr::Sub(left, right) => render_update_rule_binary_expr(left, "-", right, ctx),
+        SqlExpr::Mul(left, right) => render_update_rule_binary_expr(left, "*", right, ctx),
+        SqlExpr::Div(left, right) => render_update_rule_binary_expr(left, "/", right, ctx),
+        SqlExpr::Eq(left, right) => render_update_rule_binary_expr(left, "=", right, ctx),
+        SqlExpr::NotEq(left, right) => render_update_rule_binary_expr(left, "<>", right, ctx),
+        SqlExpr::Lt(left, right) => render_update_rule_binary_expr(left, "<", right, ctx),
+        SqlExpr::LtEq(left, right) => render_update_rule_binary_expr(left, "<=", right, ctx),
+        SqlExpr::Gt(left, right) => render_update_rule_binary_expr(left, ">", right, ctx),
+        SqlExpr::GtEq(left, right) => render_update_rule_binary_expr(left, ">=", right, ctx),
+        SqlExpr::Cast(inner, ty) => {
+            format!(
+                "{}::{}",
+                render_update_rule_expr(inner, ctx, None),
+                render_raw_type_name(ty)
+            )
+        }
+        SqlExpr::FieldSelect { expr, field } => render_update_rule_field_select(expr, field, ctx),
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            let mut out = render_update_rule_expr(array, ctx, None);
+            for subscript in subscripts {
+                out.push('[');
+                if let Some(lower) = &subscript.lower {
+                    out.push_str(&render_update_rule_expr(lower, ctx, None));
+                }
+                if subscript.is_slice {
+                    out.push(':');
+                    if let Some(upper) = &subscript.upper {
+                        out.push_str(&render_update_rule_expr(upper, ctx, None));
+                    }
+                }
+                out.push(']');
+            }
+            out
+        }
+        SqlExpr::ArrayLiteral(elements) => format!(
+            "ARRAY[{}]",
+            elements
+                .iter()
+                .map(|element| render_update_rule_expr(element, ctx, None))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        SqlExpr::Row(fields) => format!(
+            "ROW({})",
+            fields
+                .iter()
+                .map(|field| render_update_rule_expr(field, ctx, None))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        SqlExpr::FuncCall { name, args, .. } => render_update_rule_func_call(name, args, ctx),
+        _ => render_rule_expr(expr, target_type),
+    }
+}
+
+fn render_update_rule_column(name: &str, ctx: &UpdateRuleExprContext<'_>) -> String {
+    if rule_relation_column_type(name, ctx).is_some() {
+        format!("{}.{}", ctx.relation_name, name)
+    } else {
+        name.to_string()
+    }
+}
+
+fn render_update_rule_numeric_literal(value: &str, target_type: Option<SqlType>) -> String {
+    match target_type.map(|ty| ty.kind) {
+        Some(SqlTypeKind::Float8) => format!("{value}::double precision"),
+        Some(SqlTypeKind::Float4) => format!("{value}::real"),
+        _ => value.to_string(),
+    }
+}
+
+fn render_update_rule_binary_expr(
+    left: &SqlExpr,
+    op: &str,
+    right: &SqlExpr,
+    ctx: &UpdateRuleExprContext<'_>,
+) -> String {
+    let display_type = rule_update_binary_display_type(left, right, ctx);
+    format!(
+        "{} {op} {}",
+        render_update_rule_expr(left, ctx, display_type),
+        render_update_rule_expr(right, ctx, display_type)
+    )
+}
+
+fn render_update_rule_field_select(
+    inner: &SqlExpr,
+    field: &str,
+    ctx: &UpdateRuleExprContext<'_>,
+) -> String {
+    if let SqlExpr::Column(name) = inner
+        && matches!(name.to_ascii_lowercase().as_str(), "old" | "new")
+    {
+        return format!("{name}.{field}");
+    }
+
+    let rendered = render_update_rule_expr(inner, ctx, None);
+    if matches!(inner, SqlExpr::ArraySubscript { .. }) {
+        format!("{rendered}.{field}")
+    } else {
+        format!("({rendered}).{field}")
+    }
+}
+
+fn render_update_rule_func_call(
+    name: &str,
+    args: &SqlCallArgs,
+    ctx: &UpdateRuleExprContext<'_>,
+) -> String {
+    if args.is_star() {
+        return format!("{name}(*)");
+    }
+    format!(
+        "{}({})",
+        name,
+        args.args()
+            .iter()
+            .map(|arg| {
+                let rendered = render_update_rule_expr(&arg.value, ctx, None);
+                if let Some(name) = &arg.name {
+                    format!("{name} => {rendered}")
+                } else {
+                    rendered
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn rule_update_binary_display_type(
+    left: &SqlExpr,
+    right: &SqlExpr,
+    ctx: &UpdateRuleExprContext<'_>,
+) -> Option<SqlType> {
+    let left_type = rule_update_expr_type(left, ctx);
+    let right_type = rule_update_expr_type(right, ctx);
+    left_type
+        .filter(|ty| rule_type_should_drive_numeric_literal(*ty))
+        .or_else(|| right_type.filter(|ty| rule_type_should_drive_numeric_literal(*ty)))
+}
+
+fn rule_type_should_drive_numeric_literal(ty: SqlType) -> bool {
+    !ty.is_array && matches!(ty.kind, SqlTypeKind::Float8 | SqlTypeKind::Float4)
+}
+
+fn rule_update_expr_type(expr: &SqlExpr, ctx: &UpdateRuleExprContext<'_>) -> Option<SqlType> {
+    match expr {
+        SqlExpr::Column(name) => rule_relation_column_type(name, ctx),
+        SqlExpr::FieldSelect { expr, field } => {
+            resolve_rule_field_type(rule_update_expr_type(expr, ctx)?, field, ctx.catalog)
+        }
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            let mut current = rule_update_expr_type(array, ctx)?;
+            for subscript in subscripts {
+                current = rule_navigation_sql_type(current, ctx.catalog);
+                if current.is_array {
+                    current = if subscript.is_slice {
+                        SqlType::array_of(current.element_type())
+                    } else {
+                        current.element_type()
+                    };
+                } else {
+                    return None;
+                }
+            }
+            Some(current)
+        }
+        SqlExpr::Cast(_, ty) => ty.as_builtin(),
+        SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right) => {
+            rule_update_expr_type(left, ctx).or_else(|| rule_update_expr_type(right, ctx))
+        }
+        _ => None,
+    }
+}
+
+fn rule_relation_column_type(name: &str, ctx: &UpdateRuleExprContext<'_>) -> Option<SqlType> {
+    ctx.desc
+        .columns
+        .iter()
+        .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(name))
+        .map(|column| column.sql_type)
 }
 
 fn format_rule_insert_statement(

@@ -2667,6 +2667,48 @@ fn eval_regtype_to_text_function(
     }
 }
 
+fn eval_pg_basetype_function(
+    values: &[Value],
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let oid = match value {
+        Value::Int32(oid) if *oid >= 0 => *oid as u32,
+        Value::Int64(oid) if *oid >= 0 && *oid <= i64::from(u32::MAX) => *oid as u32,
+        _ => return Ok(Value::Null),
+    };
+    let Some(catalog) = catalog_lookup(ctx) else {
+        return Err(ExecError::DetailedError {
+            message: "catalog helper requires executor context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    let mut current_oid = oid;
+    let mut saw_domain = false;
+    for _ in 0..64 {
+        let Some(row) = catalog.type_by_oid(current_oid) else {
+            return Ok(Value::Null);
+        };
+        if row.typtype != 'd' || row.typbasetype == 0 {
+            return if saw_domain {
+                Ok(Value::Int64(i64::from(current_oid)))
+            } else {
+                Ok(Value::Null)
+            };
+        }
+        saw_domain = true;
+        current_oid = row.typbasetype;
+    }
+    Ok(Value::Null)
+}
+
 fn eval_text_to_regclass_function(
     values: &[Value],
     ctx: Option<&ExecutorContext>,
@@ -5383,6 +5425,7 @@ fn eval_pg_get_ruledef(values: &[Value], ctx: &ExecutorContext) -> Result<Value,
     if pretty {
         definition = definition
             .replace(" AS ON ", " AS\n    ON ")
+            .replace(" DO INSTEAD UPDATE ", " DO INSTEAD  UPDATE ")
             .replace(" DO ALSO ", " DO  ");
     }
     Ok(Value::Text(definition.into()))
@@ -8440,8 +8483,9 @@ pub fn eval_expr(
             }
         },
         Expr::ArraySubscript { array, subscripts } => {
+            let array_type = expr_sql_type_hint(array);
             let value = eval_expr(array, slot, ctx)?;
-            eval_array_subscript(value, subscripts, slot, ctx)
+            eval_array_subscript(value, array_type, subscripts, slot, ctx)
         }
         Expr::Random => Ok(Value::Float64(ctx.random_state.lock().double())),
         Expr::CurrentDate => Ok(current_date_value_from_timestamp_with_config(
@@ -9426,6 +9470,7 @@ fn eval_plpgsql_builtin_function(
             eval_to_reg_object_function(&values, SqlTypeKind::RegType, None)
         }
         BuiltinScalarFunction::ToRegTypeMod => eval_to_regtypemod_function(&values, None),
+        BuiltinScalarFunction::PgBaseType => eval_pg_basetype_function(&values, None),
         BuiltinScalarFunction::ToRegRole => {
             eval_to_reg_object_function(&values, SqlTypeKind::RegRole, None)
         }
@@ -10985,6 +11030,25 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
     }
 }
 
+fn pg_typeof_type_name(ty: SqlType, ctx: &ExecutorContext) -> String {
+    let Some(catalog) = ctx.catalog.as_deref() else {
+        return sql_type_name(ty);
+    };
+    if ty.type_oid != 0
+        && let Some(domain) = catalog.domain_by_type_oid(ty.type_oid)
+    {
+        return if ty.is_array && (!domain.sql_type.is_array || ty.typrelid == domain.array_oid) {
+            format!("{}[]", domain.name)
+        } else {
+            domain.name
+        };
+    }
+    if ty.type_oid != 0 && !ty.is_array {
+        return expr_reg::format_type_text(ty.type_oid, None, catalog);
+    }
+    sql_type_name(ty)
+}
+
 pub(crate) fn eval_builtin_function(
     func: BuiltinScalarFunction,
     result_type: Option<SqlType>,
@@ -11089,7 +11153,7 @@ pub(crate) fn eval_builtin_function(
                 .and_then(expr_sql_type_hint)
                 .unwrap_or(SqlType::new(SqlTypeKind::Text)),
         };
-        return Ok(Value::Text(sql_type_name(ty).into()));
+        return Ok(Value::Text(pg_typeof_type_name(ty, ctx).into()));
     }
     let values = args
         .iter()
@@ -12063,6 +12127,7 @@ pub(crate) fn eval_builtin_function(
             eval_to_reg_object_function(&values, SqlTypeKind::RegType, Some(ctx))
         }
         BuiltinScalarFunction::ToRegTypeMod => eval_to_regtypemod_function(&values, Some(ctx)),
+        BuiltinScalarFunction::PgBaseType => eval_pg_basetype_function(&values, Some(ctx)),
         BuiltinScalarFunction::ToRegRole => {
             eval_to_reg_object_function(&values, SqlTypeKind::RegRole, Some(ctx))
         }

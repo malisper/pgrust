@@ -2901,26 +2901,20 @@ fn push_verbose_projected_scan_plan(
     );
 
     let detail_prefix = explain_detail_prefix(indent);
-    let input_names = verbose_scan_projection_input_names(input);
+    let output_names = verbose_scan_projection_output_names(input);
+    let detail_names = verbose_scan_projection_detail_names(input);
     let output = ctx.scan_output_override.clone().unwrap_or_else(|| {
         targets
             .iter()
-            .filter(|target| !target.resjunk)
-            .map(|target| {
-                if matches!(input.as_ref(), Plan::FunctionScan { .. })
-                    && let Expr::Cast(inner, _) = &target.expr
-                {
-                    render_verbose_expr(inner, &input_names, ctx)
-                } else {
-                    render_verbose_expr(&target.expr, &input_names, ctx)
-                }
+            .filter_map(|target| {
+                render_verbose_scan_projection_target(input, target, &output_names, ctx)
             })
             .collect::<Vec<_>>()
     });
     if !output.is_empty() {
         lines.push(format!("{detail_prefix}Output: {}", output.join(", ")));
     }
-    push_verbose_scan_details(input, indent, &input_names, ctx, lines);
+    push_verbose_scan_details(input, indent, &detail_names, ctx, lines);
     push_direct_plan_subplans(plan, subplans, indent, show_costs, true, ctx, lines);
     true
 }
@@ -3239,18 +3233,78 @@ fn projected_join_whole_row_field(
 fn projection_targets_are_verbose_scan_projection(
     input: &Plan,
     targets: &[TargetEntry],
-    _ctx: &VerboseExplainContext,
+    ctx: &VerboseExplainContext,
 ) -> bool {
-    matches!(
-        input,
-        Plan::SeqScan { .. }
-            | Plan::IndexOnlyScan { .. }
-            | Plan::IndexScan { .. }
-            | Plan::FunctionScan { .. }
-    ) && targets.iter().all(|target| !target.resjunk)
+    if targets.iter().any(|target| target.resjunk) {
+        return false;
+    }
+    if matches!(input, Plan::FunctionScan { .. }) {
+        return true;
+    }
+    let Some(scan) = verbose_projection_scan(input) else {
+        return false;
+    };
+    ctx.scan_output_override.is_some()
+        || targets.len() > scan.column_names().len()
+        || !projection_targets_are_explain_passthrough(input, targets)
 }
 
-fn verbose_scan_projection_input_names(input: &Plan) -> Vec<String> {
+fn render_verbose_scan_projection_target(
+    input: &Plan,
+    target: &TargetEntry,
+    input_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    match target.name.as_str() {
+        "__update_target_tableoid" | "__merge_target_tableoid" => None,
+        "__update_target_ctid" | "__merge_target_ctid" => Some("ctid".into()),
+        _ => {
+            let expr = if matches!(input, Plan::FunctionScan { .. })
+                && let Expr::Cast(inner, _) = &target.expr
+            {
+                inner.as_ref()
+            } else {
+                &target.expr
+            };
+            Some(render_verbose_expr(expr, input_names, ctx))
+        }
+    }
+}
+
+fn verbose_projection_scan(input: &Plan) -> Option<&Plan> {
+    match input {
+        Plan::SeqScan { .. } | Plan::IndexOnlyScan { .. } | Plan::IndexScan { .. } => Some(input),
+        Plan::Filter { input, .. } => verbose_projection_scan(input),
+        _ => None,
+    }
+}
+
+fn verbose_scan_projection_output_names(input: &Plan) -> Vec<String> {
+    match input {
+        Plan::SeqScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexOnlyScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexScan {
+            relation_name,
+            desc,
+            ..
+        } => qualified_scan_output_exprs(relation_name, desc),
+        Plan::FunctionScan {
+            call, table_alias, ..
+        } => verbose_function_scan_output_exprs(call, table_alias.as_deref()),
+        Plan::Filter { input, .. } => verbose_scan_projection_output_names(input),
+        _ => Vec::new(),
+    }
+}
+
+fn verbose_scan_projection_detail_names(input: &Plan) -> Vec<String> {
     match input {
         Plan::SeqScan {
             relation_name,
@@ -3270,6 +3324,7 @@ fn verbose_scan_projection_input_names(input: &Plan) -> Vec<String> {
         Plan::FunctionScan {
             call, table_alias, ..
         } => verbose_function_scan_output_exprs(call, table_alias.as_deref()),
+        Plan::Filter { input, .. } => verbose_scan_projection_detail_names(input),
         _ => Vec::new(),
     }
 }
@@ -3283,6 +3338,15 @@ fn push_verbose_scan_details(
 ) {
     let prefix = explain_detail_prefix(indent);
     match input {
+        Plan::Filter {
+            input, predicate, ..
+        } => {
+            push_verbose_scan_details(input, indent, key_column_names, ctx, lines);
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_verbose_expr(predicate, key_column_names, ctx)
+            ));
+        }
         Plan::IndexOnlyScan {
             keys,
             order_by_keys,
@@ -3321,6 +3385,7 @@ fn push_verbose_scan_details(
 
 fn verbose_scan_plan_label(input: &Plan, ctx: &VerboseExplainContext) -> Option<String> {
     match input {
+        Plan::Filter { input, .. } => verbose_scan_plan_label(input),
         Plan::SeqScan { relation_name, .. } => Some(format!(
             "Seq Scan on {}",
             verbose_relation_name_with_alias(

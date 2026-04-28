@@ -4,9 +4,9 @@ use super::ExecError;
 use super::exec_expr::parse_numeric_text;
 use super::expr_bit::{coerce_bit_string, render_bit_text};
 use super::expr_casts::{
-    cast_numeric_value, cast_text_value_with_config, cast_value, cast_value_with_config,
-    parse_text_array_literal_with_options, render_internal_char_text,
-    render_interval_text_with_config, render_pg_lsn_text,
+    cast_numeric_value, cast_text_value_with_catalog_and_config, cast_text_value_with_config,
+    cast_value, cast_value_with_config, parse_text_array_literal_with_catalog_op_and_explicit,
+    render_internal_char_text, render_interval_text_with_config, render_pg_lsn_text,
 };
 use super::expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 use super::expr_geometry::{
@@ -26,7 +26,7 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use crate::backend::executor::jsonb::{decode_jsonb, render_jsonb_bytes};
 use crate::backend::libpq::pqformat::{FloatFormatOptions, format_float4_text, format_float8_text};
-use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::record::register_anonymous_record_descriptor;
 use crate::include::access::htup::{HeapTuple, TupleValue};
@@ -1808,6 +1808,15 @@ pub(crate) fn coerce_assignment_value_with_config(
     target: SqlType,
     datetime_config: &DateTimeConfig,
 ) -> Result<Value, ExecError> {
+    coerce_assignment_value_with_catalog_and_config(value, target, None, datetime_config)
+}
+
+pub(crate) fn coerce_assignment_value_with_catalog_and_config(
+    value: &Value,
+    target: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
+    datetime_config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
     if target.kind == SqlTypeKind::AnyArray {
         return match value {
             Value::Null => Ok(Value::Null),
@@ -1842,9 +1851,10 @@ pub(crate) fn coerce_assignment_value_with_config(
                     )?;
                     let mut coerced = Vec::with_capacity(array.elements.len());
                     for item in &array.elements {
-                        coerced.push(coerce_assignment_value_with_config(
+                        coerced.push(coerce_assignment_value_with_catalog_and_config(
                             item,
                             element_type,
+                            catalog,
                             datetime_config,
                         )?);
                     }
@@ -1855,9 +1865,10 @@ pub(crate) fn coerce_assignment_value_with_config(
                 } else {
                     let mut coerced = Vec::with_capacity(items.len());
                     for item in items {
-                        coerced.push(coerce_assignment_value_with_config(
+                        coerced.push(coerce_assignment_value_with_catalog_and_config(
                             item,
                             element_type,
+                            catalog,
                             datetime_config,
                         )?);
                     }
@@ -1868,9 +1879,10 @@ pub(crate) fn coerce_assignment_value_with_config(
                 let element_type = target.element_type();
                 let mut coerced = Vec::with_capacity(array.elements.len());
                 for item in &array.elements {
-                    coerced.push(coerce_assignment_value_with_config(
+                    coerced.push(coerce_assignment_value_with_catalog_and_config(
                         item,
                         element_type,
+                        catalog,
                         datetime_config,
                     )?);
                 }
@@ -1880,11 +1892,12 @@ pub(crate) fn coerce_assignment_value_with_config(
                 )))
             }
             other => match other.as_text() {
-                Some(text) => parse_text_array_literal_with_options(
+                Some(text) => parse_text_array_literal_with_catalog_op_and_explicit(
                     text,
                     target.element_type(),
                     "copy assignment",
                     false,
+                    catalog,
                 ),
                 None => Err(ExecError::TypeMismatch {
                     op: "copy assignment",
@@ -1998,12 +2011,20 @@ pub(crate) fn coerce_assignment_value_with_config(
             false,
             datetime_config,
         ),
-        Value::Text(text) => {
-            cast_text_value_with_config(text.as_str(), target, false, datetime_config)
-        }
-        Value::TextRef(_, _) => {
-            cast_text_value_with_config(value.as_text().unwrap(), target, false, datetime_config)
-        }
+        Value::Text(text) => cast_text_value_with_catalog_and_config(
+            text.as_str(),
+            target,
+            false,
+            catalog,
+            datetime_config,
+        ),
+        Value::TextRef(_, _) => cast_text_value_with_catalog_and_config(
+            value.as_text().unwrap(),
+            target,
+            false,
+            catalog,
+            datetime_config,
+        ),
         Value::InternalChar(byte) => {
             cast_value_with_config(Value::InternalChar(*byte), target, datetime_config)
         }

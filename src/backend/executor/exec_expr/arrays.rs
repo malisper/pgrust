@@ -50,6 +50,7 @@ pub(super) fn eval_quantified_array(
 
 pub(super) fn eval_array_subscript(
     value: Value,
+    array_type: Option<SqlType>,
     subscripts: &[crate::include::nodes::primnodes::ExprArraySubscript],
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
@@ -74,7 +75,11 @@ pub(super) fn eval_array_subscript(
             })
         })
         .collect::<Result<Vec<_>, ExecError>>()?;
-    apply_array_subscripts(value, &resolved)
+    apply_array_subscripts(
+        value,
+        &resolved,
+        preserves_partial_scalar_subscript(array_type, ctx.catalog.as_deref()),
+    )
 }
 
 pub(super) fn eval_array_subscript_plpgsql(
@@ -102,7 +107,7 @@ pub(super) fn eval_array_subscript_plpgsql(
             })
         })
         .collect::<Result<Vec<_>, ExecError>>()?;
-    apply_array_subscripts(value, &resolved)
+    apply_array_subscripts(value, &resolved, false)
 }
 
 #[derive(Clone)]
@@ -117,6 +122,7 @@ struct ResolvedArraySubscript {
 fn apply_array_subscripts(
     value: Value,
     subscripts: &[ResolvedArraySubscript],
+    preserves_partial_scalar_subscript: bool,
 ) -> Result<Value, ExecError> {
     if subscripts.len() > 6 {
         return Err(ExecError::DetailedError {
@@ -152,7 +158,31 @@ fn apply_array_subscripts(
             Ok(Value::Null)
         };
     }
+    if !any_slice && subscripts.len() < array.ndim() && !preserves_partial_scalar_subscript {
+        return Ok(Value::Null);
+    }
     apply_array_subscripts_to_value(&array, subscripts, any_slice)
+}
+
+fn preserves_partial_scalar_subscript(
+    array_type: Option<SqlType>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> bool {
+    let (Some(sql_type), Some(catalog)) = (array_type, catalog) else {
+        return false;
+    };
+    if !sql_type.is_array || sql_type.typrelid == 0 {
+        return false;
+    }
+    catalog
+        .domain_by_type_oid(sql_type.type_oid)
+        .is_some_and(|domain| {
+            domain.sql_type.is_array
+                && sql_type.typrelid == domain.array_oid
+                && catalog
+                    .domain_by_type_oid(domain.sql_type.type_oid)
+                    .is_some()
+        })
 }
 
 fn apply_array_subscripts_to_value(

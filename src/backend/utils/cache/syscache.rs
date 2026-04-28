@@ -1392,6 +1392,7 @@ impl CatalogStore {
                     _ => None,
                 })
                 .or_else(|| extra_types_by_oid.get(&attr.atttypid).copied())
+                .or_else(|| attr.attisdropped.then_some(SqlType::new(SqlTypeKind::Int4)))
                 .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
             let mut desc = column_desc(
                 attr.attname,
@@ -1759,6 +1760,7 @@ pub(crate) fn relation_id_get_relation_db(
             dynamic_types_by_oid
                 .get(&attr.atttypid)
                 .copied()
+                .or_else(|| attr.attisdropped.then_some(SqlType::new(SqlTypeKind::Int4)))
                 .ok_or(CatalogError::Corrupt("unknown atttypid"))?
         };
         let mut desc = column_desc(

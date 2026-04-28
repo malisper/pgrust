@@ -569,6 +569,7 @@ fn visible_domain_by_name(
     let domain = domains.values().find(|domain| domain.oid == type_row.oid)?;
     Some(DomainLookup {
         oid: domain.oid,
+        array_oid: domain.array_oid,
         name: domain.name.clone(),
         sql_type: domain.sql_type,
         default: domain.default.clone(),

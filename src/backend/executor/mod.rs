@@ -84,13 +84,16 @@ pub(crate) use expr_bit::render_bit_text;
 pub(crate) use expr_casts::cast_value_with_source_type_catalog_and_config;
 pub(crate) use expr_casts::parse_bytea_text;
 pub(crate) use expr_casts::parse_interval_text_value;
-pub(crate) use expr_casts::parse_text_array_literal_with_catalog_and_op;
 pub(crate) use expr_casts::parse_text_array_literal_with_op;
 pub use expr_casts::render_internal_char_text;
 pub(crate) use expr_casts::render_interval_text;
 pub(crate) use expr_casts::render_interval_text_with_config;
 pub(crate) use expr_casts::render_pg_lsn_text;
 pub(crate) use expr_casts::{cast_value, cast_value_with_config};
+pub(crate) use expr_casts::{
+    parse_text_array_literal_with_catalog_and_op,
+    parse_text_array_literal_with_catalog_op_and_explicit,
+};
 pub(crate) use expr_datetime::current_timestamp_value;
 pub use expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 pub(crate) use expr_geometry::eval_geometry_function;

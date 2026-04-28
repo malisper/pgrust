@@ -11544,6 +11544,7 @@ fn relation_desc_from_catalog_rows_mvcc(
         let sql_type =
             type_row_by_oid_mvcc_with_extra_type_rows(store, ctx, attr.atttypid, extra_type_rows)?
                 .map(|row| row.sql_type)
+                .or_else(|| attr.attisdropped.then_some(SqlType::new(SqlTypeKind::Int4)))
                 .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
         let mut desc = crate::backend::catalog::catalog::column_desc(
             attr.attname.clone(),

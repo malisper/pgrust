@@ -84,9 +84,6 @@ fn enforce_domain_constraints_for_value_ref_as(
     if domain.not_null && matches!(value, Value::Null) {
         return Err(domain_not_null_violation(violation_domain_name));
     }
-    if matches!(value, Value::Null) {
-        return Ok(());
-    }
 
     let mut checks = domain
         .constraints

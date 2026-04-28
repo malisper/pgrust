@@ -6,8 +6,10 @@ use std::sync::Arc;
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, TransactionId};
 use crate::backend::commands::tablecmds::{
-    collect_matching_rows_heap, execute_delete, execute_insert, execute_update,
+    apply_sql_type_array_subscript_assignment, collect_matching_rows_heap, execute_delete,
+    execute_insert, execute_update,
 };
+use crate::backend::executor::expr_reg::format_type_text;
 use crate::backend::executor::function_guc::{
     apply_function_guc, parsed_proconfig, restore_function_gucs,
 };
@@ -786,11 +788,7 @@ fn proc_context_arg_type_names(row: &PgProcRow, catalog: &dyn CatalogLookup) -> 
     parse_proc_argtype_oids(&row.proargtypes)
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|oid| {
-            catalog
-                .type_by_oid(oid)
-                .map(|row| sql_type_name(row.sql_type))
-        })
+        .map(|oid| format_type_text(oid, None, catalog))
         .collect()
 }
 
@@ -1649,21 +1647,17 @@ fn exec_do_stmt(
             name,
             not_null,
             expr,
+            ..
         } => {
             let value = cast_value(eval_do_expr(expr, values)?, *ty)?;
             ensure_not_null_assignment(name.as_deref(), *not_null, &value)?;
             values[*slot] = value;
             Ok(DoControl::Continue)
         }
-        CompiledStmt::AssignIndirect { target, expr } => {
-            let replacement = eval_do_expr(expr, values)?;
-            let current = values[target.slot].clone();
-            let indirection = eval_assign_indirection_do(target, values)?;
-            values[target.slot] = cast_value(
-                assign_indirect_value(current, target.ty, &indirection, replacement, None)?,
-                target.ty,
-            )?;
-            Ok(DoControl::Continue)
+        CompiledStmt::AssignSubscript { .. } => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "subscripted PL/pgSQL assignment is only supported inside CREATE FUNCTION".into(),
+            )))
         }
         CompiledStmt::Null => Ok(DoControl::Continue),
         CompiledStmt::If {
@@ -1977,13 +1971,16 @@ fn exec_function_block(
     for local in &block.local_slots {
         let (value, source_type) = match &local.default_expr {
             Some(expr) => (
-                eval_function_expr(expr, &state.values, ctx)?,
+                eval_function_expr(expr, &state.values, ctx)
+                    .map_err(|err| with_plpgsql_local_init_context(err, compiled, local.line))?,
                 compiled_expr_sql_type_hint(expr),
             ),
             None => (Value::Null, None),
         };
-        let value = cast_function_value(value, source_type, local.ty, ctx)?;
-        ensure_not_null_assignment(Some(&local.name), local.not_null, &value)?;
+        let value = cast_function_value(value, source_type, local.ty, ctx)
+            .map_err(|err| with_plpgsql_local_init_context(err, compiled, local.line))?;
+        ensure_not_null_assignment(Some(&local.name), local.not_null, &value)
+            .map_err(|err| with_plpgsql_local_init_context(err, compiled, local.line))?;
         state.values[local.slot] = value;
     }
     for stmt in &block.statements {
@@ -2116,6 +2113,7 @@ fn exec_function_stmt(
             name,
             not_null,
             expr,
+            ..
         } => {
             let value = eval_function_expr(expr, &state.values, ctx)?;
             let value = cast_function_value(value, compiled_expr_sql_type_hint(expr), *ty, ctx)?;
@@ -2123,14 +2121,30 @@ fn exec_function_stmt(
             state.values[*slot] = value;
             Ok(FunctionControl::Continue)
         }
-        CompiledStmt::AssignIndirect { target, expr } => {
-            let replacement = eval_function_expr(expr, &state.values, ctx)?;
-            let current = state.values[target.slot].clone();
-            let indirection = eval_assign_indirection_function(target, &state.values, ctx)?;
-            let updated =
-                assign_indirect_value(current, target.ty, &indirection, replacement, Some(&*ctx))?;
-            let updated = cast_function_value(updated, None, target.ty, ctx)?;
-            state.values[target.slot] = updated;
+        CompiledStmt::AssignSubscript {
+            slot,
+            root_ty,
+            target_ty,
+            subscripts,
+            expr,
+            ..
+        } => {
+            let mut subscript_values = Vec::with_capacity(subscripts.len());
+            for subscript in subscripts {
+                let value = eval_function_expr(subscript, &state.values, ctx)?;
+                subscript_values.push((false, Some(value), None));
+            }
+            let value = eval_function_expr(expr, &state.values, ctx)?;
+            let value =
+                cast_function_value(value, compiled_expr_sql_type_hint(expr), *target_ty, ctx)?;
+            let assigned = apply_sql_type_array_subscript_assignment(
+                state.values[*slot].clone(),
+                *root_ty,
+                &subscript_values,
+                value,
+                ctx,
+            )?;
+            state.values[*slot] = enforce_domain_constraints_for_value(assigned, *root_ty, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::Null => Ok(FunctionControl::Continue),
@@ -2358,7 +2372,8 @@ fn exec_function_stmt(
             };
             Err(assert_failure(message))
         }
-        CompiledStmt::Return { expr } => {
+        CompiledStmt::Continue => Ok(FunctionControl::LoopContinue),
+        CompiledStmt::Return { expr, .. } => {
             exec_function_return(expr.as_ref(), compiled, expected_record_shape, state, ctx)
         }
         CompiledStmt::ReturnNext { expr } => {
@@ -6951,6 +6966,20 @@ fn with_plpgsql_function_context(err: ExecError, compiled: &CompiledFunction) ->
     }
 }
 
+fn with_plpgsql_local_init_context(
+    err: ExecError,
+    compiled: &CompiledFunction,
+    line: usize,
+) -> ExecError {
+    ExecError::WithContext {
+        source: Box::new(err),
+        context: format!(
+            "PL/pgSQL function {} line {line} during statement block local variable initialization",
+            compiled_context_name(compiled)
+        ),
+    }
+}
+
 fn with_plpgsql_return_cast_context(err: ExecError, compiled: &CompiledFunction) -> ExecError {
     ExecError::WithContext {
         source: Box::new(err),
@@ -7068,8 +7097,11 @@ fn stmt_context_line(stmt: &CompiledStmt) -> usize {
     match stmt {
         CompiledStmt::WithLine { line, .. } => *line,
         CompiledStmt::Perform { line, .. } => *line,
-        CompiledStmt::Raise { line, .. } => *line,
-        CompiledStmt::DynamicExecute { line, .. } => *line,
+        CompiledStmt::Raise { line, .. }
+        | CompiledStmt::DynamicExecute { line, .. }
+        | CompiledStmt::Assign { line, .. }
+        | CompiledStmt::AssignSubscript { line, .. }
+        | CompiledStmt::Return { line, .. } => *line,
         _ => 1,
     }
 }
@@ -7078,7 +7110,7 @@ fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
     match stmt {
         CompiledStmt::WithLine { stmt, .. } => stmt_context_action(stmt),
         CompiledStmt::Block(_) => "statement block",
-        CompiledStmt::Assign { .. } | CompiledStmt::AssignIndirect { .. } => "assignment",
+        CompiledStmt::Assign { .. } | CompiledStmt::AssignSubscript { .. } => "assignment",
         CompiledStmt::Null => "NULL",
         CompiledStmt::If { .. } => "IF",
         CompiledStmt::While { .. } => "WHILE",

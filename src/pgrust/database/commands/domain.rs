@@ -579,9 +579,6 @@ fn validate_domain_constraint_for_relation_column(
                 .map_err(ExecError::Parse)?;
             for (_, values) in rows {
                 let value = values.get(column_index).cloned().unwrap_or(Value::Null);
-                if matches!(value, Value::Null) {
-                    continue;
-                }
                 let mut slot = TupleSlot::virtual_row(vec![value]);
                 match eval_expr(&bound, &mut slot, &mut ctx)? {
                     Value::Null | Value::Bool(true) => {}
@@ -699,12 +696,6 @@ fn sql_type_has_unsupported_domain_dependency(
     domain_oid: u32,
     visited_type_oids: &mut Vec<u32>,
 ) -> bool {
-    if sql_type.type_oid != 0 {
-        if visited_type_oids.contains(&sql_type.type_oid) {
-            return false;
-        }
-        visited_type_oids.push(sql_type.type_oid);
-    }
     if sql_type.is_array {
         return sql_type_has_unsupported_domain_dependency(
             catalog,
@@ -712,6 +703,12 @@ fn sql_type_has_unsupported_domain_dependency(
             domain_oid,
             visited_type_oids,
         );
+    }
+    if sql_type.type_oid != 0 {
+        if visited_type_oids.contains(&sql_type.type_oid) {
+            return false;
+        }
+        visited_type_oids.push(sql_type.type_oid);
     }
     if let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid) {
         if sql_type_uses_domain(catalog, domain.sql_type, domain_oid) {
@@ -729,6 +726,18 @@ fn sql_type_has_unsupported_domain_dependency(
         || sql_type.multirange_range_oid == domain_oid
     {
         return true;
+    }
+    if let Some(range_row) = catalog.range_row_by_type_oid(sql_type.type_oid) {
+        if range_row.rngsubtype == domain_oid || range_row.rngmultitypid == domain_oid {
+            return true;
+        }
+        if range_row.rngsubtype != 0
+            && catalog
+                .type_by_oid(range_row.rngsubtype)
+                .is_some_and(|row| sql_type_uses_domain(catalog, row.sql_type, domain_oid))
+        {
+            return true;
+        }
     }
     if sql_type.range_subtype_oid != 0
         && catalog

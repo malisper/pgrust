@@ -12250,6 +12250,46 @@ fn explain_verbose_update_where_false_is_accepted() {
 }
 
 #[test]
+fn explain_verbose_update_composite_fields_uses_scan_projection() {
+    let dir = temp_dir("explain_update_composite_fields");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create type explain_comp as (r float8, i float8)")
+        .unwrap();
+    db.execute(1, "create table explain_comp_tab (d1 explain_comp)")
+        .unwrap();
+
+    let lines = explain_lines(
+        &db,
+        1,
+        "(verbose, costs off) update explain_comp_tab set d1.r = (d1).r - 1, d1.i = (d1).i + 1 where (d1).i > 0",
+    );
+
+    assert_eq!(
+        lines.first().map(String::as_str),
+        Some("Update on public.explain_comp_tab")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "  ->  Seq Scan on public.explain_comp_tab"),
+        "expected EXPLAIN VERBOSE UPDATE to fold projection into scan, got {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line == "        Output: ROW(((d1).r - '1'::double precision), ((d1).i + '1'::double precision)), ctid"
+        }),
+        "expected EXPLAIN VERBOSE UPDATE to render composite-field output, got {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line == "        Filter: ((explain_comp_tab.d1).i > '0'::double precision)"
+        }),
+        "expected EXPLAIN VERBOSE UPDATE to render composite-field filter, got {lines:?}"
+    );
+}
+
+#[test]
 fn explain_update_from_uses_join_plan_and_alias_header() {
     let dir = temp_dir("explain_update_from");
     let db = Database::open(&dir, 128).unwrap();
@@ -20772,6 +20812,35 @@ fn pg_get_ruledef_formats_insert_rule_actions_with_casts() {
         ),
         vec![vec![Value::Text(
             "CREATE RULE rule_src_ins AS\n    ON INSERT TO rule_src DO  INSERT INTO rule_dst (f4[1].if1, f4[1].if2[2]) VALUES (1,'fool'::text), (new.f1,new.f2)"
+                .into(),
+        )]]
+    );
+}
+
+#[test]
+fn pg_get_ruledef_formats_update_rule_actions_with_composite_fields() {
+    let base = temp_dir("rule_update_display");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create type rule_comptype as (r float8, i float8)")
+        .unwrap();
+    db.execute(1, "create table rule_tab (d1 rule_comptype)")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule rule_tab_del as on delete to rule_tab do instead \
+         update rule_tab set d1.r = (d1).r - 1, d1.i = (d1).i + 1 where (d1).i > 0",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_ruledef(oid, true) from pg_rewrite where rulename = 'rule_tab_del'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE RULE rule_tab_del AS\n    ON DELETE TO rule_tab DO INSTEAD  UPDATE rule_tab SET d1.r = (rule_tab.d1).r - 1::double precision, d1.i = (rule_tab.d1).i + 1::double precision\n  WHERE (rule_tab.d1).i > 0::double precision"
                 .into(),
         )]]
     );
@@ -54473,6 +54542,121 @@ fn alter_domain_constraints_update_catalog_and_enforcement() {
 }
 
 #[test]
+fn alter_type_rename_domain_then_drop() {
+    let dir = temp_dir("alter_type_rename_domain_then_drop");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create domain testdomain1 as int").unwrap();
+    db.execute(1, "alter domain testdomain1 rename to testdomain2")
+        .unwrap();
+    db.execute(1, "alter type testdomain2 rename to testdomain3")
+        .unwrap();
+    db.execute(1, "drop domain testdomain3").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select typname from pg_type where typname like 'testdomain%' order by typname",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
+fn create_domain_rejects_invalid_ddl_forms() {
+    let dir = temp_dir("create_domain_invalid_ddl");
+    let db = Database::open(&dir, 64).unwrap();
+
+    for (sql, expected) in [
+        (
+            "create domain d_fail as int constraint cc references missing_table(i)",
+            "foreign key constraints not possible for domains",
+        ),
+        (
+            "create domain d_fail as int4 not null no inherit",
+            "not-null constraints for domains cannot be marked NO INHERIT",
+        ),
+        (
+            "create domain d_fail as int4 not null null",
+            "conflicting NULL/NOT NULL constraints",
+        ),
+        (
+            "create domain d_fail as int4 default 3 default 3",
+            "multiple default expressions",
+        ),
+        (
+            "create domain d_fail int4 collate \"C\"",
+            "collations are not supported by type integer",
+        ),
+        (
+            "create domain d_fail as anyelement",
+            "\"anyelement\" is not a valid base type for a domain",
+        ),
+        (
+            "create domain d_fail as int4 unique",
+            "unique constraints not possible for domains",
+        ),
+        (
+            "create domain d_fail as int4 primary key",
+            "primary key constraints not possible for domains",
+        ),
+        (
+            "create domain d_fail as int4 constraint cc generated by default as identity",
+            "specifying GENERATED not supported for domains",
+        ),
+        (
+            "create domain d_fail as int4 constraint cc check (value > 1) no inherit",
+            "check constraints for domains cannot be marked NO INHERIT",
+        ),
+        (
+            "create domain d_fail as int4 constraint cc check (value > 1) deferrable",
+            "specifying constraint deferrability not supported for domains",
+        ),
+        (
+            "create domain d_fail as int4 constraint cc check (value > 1) enforced",
+            "specifying constraint enforceability not supported for domains",
+        ),
+        (
+            "create domain d_fail as int4 constraint cc check (value > 1) not enforced",
+            "specifying constraint enforceability not supported for domains",
+        ),
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::Parse(ParseError::DetailedError { message, .. }))
+            | Err(ExecError::DetailedError { message, .. }) => assert_eq!(message, expected),
+            other => panic!("expected {expected:?} for {sql:?}, got {other:?}"),
+        }
+    }
+
+    match db.execute(1, "create domain d_fail int4 default 3 + 'h'") {
+        Err(ExecError::InvalidIntegerInput { ty, value }) => {
+            assert_eq!(ty, "integer");
+            assert_eq!(value, "h");
+        }
+        other => panic!("expected invalid integer input, got {other:?}"),
+    }
+
+    db.execute(1, "create domain constraint_enforced_dom as int")
+        .unwrap();
+    for (sql, expected) in [
+        (
+            "alter domain constraint_enforced_dom add constraint the_constraint check (value > 0) enforced",
+            "CHECK constraints cannot be marked ENFORCED",
+        ),
+        (
+            "alter domain constraint_enforced_dom add constraint the_constraint check (value > 0) not enforced",
+            "CHECK constraints cannot be marked NOT ENFORCED",
+        ),
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::Parse(ParseError::DetailedError { message, .. }))
+            | Err(ExecError::DetailedError { message, .. }) => assert_eq!(message, expected),
+            other => panic!("expected {expected:?} for {sql:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn domain_constraints_are_enforced_for_casts_and_input_info() {
     let dir = temp_dir("domain_cast_constraint_enforcement");
     let db = Database::open(&dir, 64).unwrap();
@@ -54727,6 +54911,111 @@ fn alter_domain_rejects_unsupported_derived_type_columns() {
             );
         }
         other => panic!("expected derived type dependency rejection, got {other:?}"),
+    }
+
+    db.execute(1, "create domain range_posint as int4").unwrap();
+    db.execute(
+        1,
+        "create type range_posintrange as range(subtype = range_posint)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table range_dependency_table (f1 range_posintrange)",
+    )
+    .unwrap();
+    db.execute(1, "insert into range_dependency_table values ('(-1,3]')")
+        .unwrap();
+    match db.execute(
+        1,
+        "alter domain range_posint add constraint c1 check (value >= 0)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "0A000");
+            assert_eq!(
+                message,
+                "cannot alter type \"range_posint\" because column \"range_dependency_table.f1\" uses it"
+            );
+        }
+        other => panic!("expected range subtype domain dependency rejection, got {other:?}"),
+    }
+
+    db.execute(1, "create domain text_posint as int4").unwrap();
+    db.execute(1, "create type text_pair as (f1 text_posint)")
+        .unwrap();
+    db.execute(1, "create table text_pair_table (f1 text_pair[])")
+        .unwrap();
+    db.execute(1, "insert into text_pair_table values ('{(-1)}')")
+        .unwrap();
+    match db.execute(
+        1,
+        "alter domain text_posint add constraint c1 check (value >= 0)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "0A000");
+            assert_eq!(
+                message,
+                "cannot alter type \"text_posint\" because column \"text_pair_table.f1\" uses it"
+            );
+        }
+        other => panic!("expected composite array domain dependency rejection, got {other:?}"),
+    }
+
+    db.execute(1, "create domain text_domain_posint as int4")
+        .unwrap();
+    db.execute(1, "create type text_domain_pair as (f1 text_domain_posint)")
+        .unwrap();
+    db.execute(
+        1,
+        "create domain text_domain_pair_domain as text_domain_pair",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table text_pair_domain_table (f1 text_domain_pair_domain)",
+    )
+    .unwrap();
+    db.execute(1, "insert into text_pair_domain_table values ('(-1)')")
+        .unwrap();
+    match db.execute(
+        1,
+        "alter domain text_domain_posint add constraint c1 check (value >= 0)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "0A000");
+            assert_eq!(
+                message,
+                "cannot alter type \"text_domain_posint\" because column \"text_pair_domain_table.f1\" uses it"
+            );
+        }
+        other => panic!("expected domain-over-composite dependency rejection, got {other:?}"),
+    }
+
+    db.execute(1, "create type alter_pair as (r float8, i float8)")
+        .unwrap();
+    db.execute(1, "create domain alter_pair_domain as alter_pair")
+        .unwrap();
+    db.execute(
+        1,
+        "alter domain alter_pair_domain add constraint c1 check ((value).r > 0)",
+    )
+    .unwrap();
+    match db.execute(1, "alter type alter_pair alter attribute r type varchar") {
+        Err(ExecError::Parse(ParseError::UndefinedOperator {
+            left_type,
+            right_type,
+            ..
+        })) => {
+            assert_eq!(left_type, "character varying");
+            assert_eq!(right_type, "double precision");
+        }
+        other => panic!("expected preserved composite-domain CHECK operator error, got {other:?}"),
     }
 }
 

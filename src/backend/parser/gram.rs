@@ -3302,12 +3302,6 @@ fn try_parse_constraint_comment_statement(sql: &str) -> Result<Option<Statement>
     if !lowered.starts_with("comment on constraint ") {
         return Ok(None);
     }
-    if lowered["comment on constraint ".len()..]
-        .trim_start()
-        .starts_with("on domain ")
-    {
-        return Ok(None);
-    }
     build_comment_on_constraint_statement(trimmed)
         .map(|stmt| Some(Statement::CommentOnConstraint(stmt)))
 }
@@ -3865,11 +3859,23 @@ fn build_comment_on_constraint_statement(
         });
     }
     rest = consume_keyword(rest, "on").trim_start();
-    let (parts, mut rest) = parse_qualified_identifier_parts(rest)?;
-    let table_name = match parts.as_slice() {
-        [name] => name.clone(),
-        [schema, name] => format!("{schema}.{name}"),
-        _ => return Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
+    let (table_name, domain_name, mut rest) = if keyword_at_start(rest, "domain") {
+        rest = consume_keyword(rest, "domain").trim_start();
+        let (parts, parsed_rest) = parse_qualified_identifier_parts(rest)?;
+        let domain_name = match parts.as_slice() {
+            [name] => name.clone(),
+            [schema, name] => format!("{schema}.{name}"),
+            _ => return Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
+        };
+        (String::new(), Some(domain_name), parsed_rest)
+    } else {
+        let (parts, parsed_rest) = parse_qualified_identifier_parts(rest)?;
+        let table_name = match parts.as_slice() {
+            [name] => name.clone(),
+            [schema, name] => format!("{schema}.{name}"),
+            _ => return Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
+        };
+        (table_name, None, parsed_rest)
     };
     rest = rest.trim_start();
     if !keyword_at_start(rest, "is") {
@@ -3900,6 +3906,7 @@ fn build_comment_on_constraint_statement(
     Ok(CommentOnConstraintStatement {
         constraint_name,
         table_name,
+        domain_name,
         comment,
     })
 }
@@ -14630,6 +14637,7 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
         domain_name: domain_name.to_string(),
         ty: parse_type_name(&normalized_type_sql)?,
         default: clauses.default,
+        collation: clauses.collation,
         check: clauses.check,
         not_null: clauses.not_null,
         constraints: clauses.constraints,
@@ -14640,31 +14648,32 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
 #[derive(Default)]
 struct CreateDomainClauses {
     default: Option<String>,
+    collation: Option<String>,
     check: Option<String>,
     check_name: Option<String>,
     not_null: bool,
+    null: bool,
     constraints: Vec<DomainConstraintSpec>,
 }
 
+const CREATE_DOMAIN_CLAUSE_KEYWORDS: &[&str] = &[
+    "constraint",
+    "default",
+    "check",
+    "not",
+    "null",
+    "collate",
+    "references",
+    "unique",
+    "primary",
+    "generated",
+    "deferrable",
+    "no",
+];
+
 fn split_create_domain_type_and_clauses(type_sql: &str) -> (&str, &str) {
-    let boundary = find_next_top_level_keyword(
-        type_sql,
-        &[
-            "constraint",
-            "default",
-            "check",
-            "not",
-            "null",
-            "collate",
-            "references",
-            "unique",
-            "primary",
-            "generated",
-            "deferrable",
-            "no",
-        ],
-    )
-    .unwrap_or(type_sql.len());
+    let boundary = find_next_top_level_keyword(type_sql, CREATE_DOMAIN_CLAUSE_KEYWORDS)
+        .unwrap_or(type_sql.len());
     (
         type_sql[..boundary].trim_end(),
         type_sql[boundary..].trim_start(),
@@ -14679,10 +14688,9 @@ fn parse_create_domain_clauses(mut input: &str) -> Result<CreateDomainClauses, P
         if keyword_at_boundary(input, 0, "constraint") {
             let after_constraint = input["constraint".len()..].trim_start();
             let (constraint_name, after_name) = parse_domain_constraint_name(after_constraint)?;
-            let Some(next_clause) = find_next_top_level_keyword(
-                after_name,
-                &["default", "check", "not", "null", "collate"],
-            ) else {
+            let Some(next_clause) =
+                find_next_top_level_keyword(after_name, CREATE_DOMAIN_CLAUSE_KEYWORDS)
+            else {
                 return Err(ParseError::UnexpectedToken {
                     expected: "domain constraint",
                     actual: after_name.into(),
@@ -14699,7 +14707,8 @@ fn parse_create_domain_clauses(mut input: &str) -> Result<CreateDomainClauses, P
                 expr: check.clone(),
             };
             let (attrs, rest) = split_domain_constraint_attribute_prefix(rest);
-            let not_valid = parse_domain_constraint_attributes(&attrs, &kind)?;
+            let not_valid =
+                parse_domain_constraint_attributes(&attrs, &kind, DomainConstraintContext::Create)?;
             clauses.check_name = name.clone();
             clauses.check = Some(check.clone());
             clauses.constraints.push(DomainConstraintSpec {
@@ -14711,12 +14720,18 @@ fn parse_create_domain_clauses(mut input: &str) -> Result<CreateDomainClauses, P
             continue;
         }
         if keyword_at_boundary(input, 0, "default") {
+            if clauses.default.is_some() {
+                return Err(ParseError::DetailedError {
+                    message: "multiple default expressions".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
+                });
+            }
             let after_default = input["default".len()..].trim_start();
-            let boundary = find_next_top_level_keyword(
-                after_default,
-                &["constraint", "check", "not", "null", "collate"],
-            )
-            .unwrap_or(after_default.len());
+            let boundary =
+                find_next_top_level_keyword(after_default, CREATE_DOMAIN_CLAUSE_KEYWORDS)
+                    .unwrap_or(after_default.len());
             clauses.default = Some(after_default[..boundary].trim().to_string());
             input = after_default[boundary..].trim_start();
             continue;
@@ -14728,6 +14743,9 @@ fn parse_create_domain_clauses(mut input: &str) -> Result<CreateDomainClauses, P
                     expected: "NULL",
                     actual: after_not.into(),
                 });
+            }
+            if clauses.null {
+                return Err(conflicting_domain_nullability_error());
             }
             if clauses.not_null {
                 return Err(ParseError::DetailedError {
@@ -14741,7 +14759,8 @@ fn parse_create_domain_clauses(mut input: &str) -> Result<CreateDomainClauses, P
             let kind = DomainConstraintSpecKind::NotNull;
             let (attrs, rest) =
                 split_domain_constraint_attribute_prefix(&after_not["null".len()..]);
-            let not_valid = parse_domain_constraint_attributes(&attrs, &kind)?;
+            let not_valid =
+                parse_domain_constraint_attributes(&attrs, &kind, DomainConstraintContext::Create)?;
             clauses.constraints.push(DomainConstraintSpec {
                 name: pending_constraint_name.take(),
                 kind,
@@ -14751,24 +14770,72 @@ fn parse_create_domain_clauses(mut input: &str) -> Result<CreateDomainClauses, P
             continue;
         }
         if keyword_at_boundary(input, 0, "null") {
+            if clauses.not_null {
+                return Err(conflicting_domain_nullability_error());
+            }
+            clauses.null = true;
             input = input["null".len()..].trim_start();
             continue;
         }
         if keyword_at_boundary(input, 0, "collate") {
             let after_collate = input["collate".len()..].trim_start();
-            let boundary = find_next_top_level_keyword(
-                after_collate,
-                &["constraint", "default", "check", "not", "null"],
-            )
-            .unwrap_or(after_collate.len());
+            let boundary =
+                find_next_top_level_keyword(after_collate, CREATE_DOMAIN_CLAUSE_KEYWORDS)
+                    .unwrap_or(after_collate.len());
+            let collation = after_collate[..boundary].trim();
+            if collation.is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "collation name",
+                    actual: after_collate.into(),
+                });
+            }
+            clauses.collation = Some(collation.to_string());
             input = after_collate[boundary..].trim_start();
             continue;
         }
-        return Err(ParseError::FeatureNotSupported(
-            "CREATE DOMAIN constraint is not supported yet".into(),
+        if keyword_at_boundary(input, 0, "references") {
+            return Err(create_domain_unsupported_constraint_error(
+                "foreign key constraints not possible for domains",
+            ));
+        }
+        if keyword_at_boundary(input, 0, "unique") {
+            return Err(create_domain_unsupported_constraint_error(
+                "unique constraints not possible for domains",
+            ));
+        }
+        if keyword_at_boundary(input, 0, "primary") {
+            return Err(create_domain_unsupported_constraint_error(
+                "primary key constraints not possible for domains",
+            ));
+        }
+        if keyword_at_boundary(input, 0, "generated") {
+            return Err(create_domain_unsupported_constraint_error(
+                "specifying GENERATED not supported for domains",
+            ));
+        }
+        return Err(create_domain_unsupported_constraint_error(
+            "CREATE DOMAIN constraint is not supported yet",
         ));
     }
     Ok(clauses)
+}
+
+fn conflicting_domain_nullability_error() -> ParseError {
+    ParseError::DetailedError {
+        message: "conflicting NULL/NOT NULL constraints".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "42601",
+    }
+}
+
+fn create_domain_unsupported_constraint_error(message: &'static str) -> ParseError {
+    ParseError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
 }
 
 fn parse_create_domain_check_clause(input: &str) -> Result<(String, &str), ParseError> {
@@ -15088,7 +15155,8 @@ fn parse_alter_domain_constraint(input: &str) -> Result<DomainConstraintSpec, Pa
             actual: input.into(),
         });
     };
-    let not_valid = parse_domain_constraint_attributes(attrs, &kind)?;
+    let not_valid =
+        parse_domain_constraint_attributes(attrs, &kind, DomainConstraintContext::Alter)?;
     Ok(DomainConstraintSpec {
         name,
         kind,
@@ -15096,9 +15164,16 @@ fn parse_alter_domain_constraint(input: &str) -> Result<DomainConstraintSpec, Pa
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DomainConstraintContext {
+    Create,
+    Alter,
+}
+
 fn parse_domain_constraint_attributes(
     attrs: &str,
     kind: &DomainConstraintSpecKind,
+    context: DomainConstraintContext,
 ) -> Result<bool, ParseError> {
     let attrs = attrs.trim();
     if attrs.is_empty() {
@@ -15106,23 +15181,43 @@ fn parse_domain_constraint_attributes(
     }
     let lowered = attrs.to_ascii_lowercase();
     if lowered.contains("not enforced") {
+        if context == DomainConstraintContext::Create {
+            return Err(domain_constraint_enforceability_error());
+        }
         return Err(domain_constraint_attribute_error(kind, "NOT ENFORCED"));
     }
     if lowered
         .split_whitespace()
         .any(|part| part.eq_ignore_ascii_case("enforced"))
     {
+        if context == DomainConstraintContext::Create {
+            return Err(domain_constraint_enforceability_error());
+        }
         return Err(domain_constraint_attribute_error(kind, "ENFORCED"));
     }
     if lowered.contains("deferrable") || lowered.contains("initially") {
-        return Err(ParseError::FeatureNotSupported(
-            "specifying constraint deferrability not supported for domains".into(),
-        ));
+        return Err(ParseError::DetailedError {
+            message: "specifying constraint deferrability not supported for domains".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
     }
     if lowered.contains("no inherit") {
-        return Err(ParseError::FeatureNotSupported(
-            "check constraints for domains cannot be marked NO INHERIT".into(),
-        ));
+        let message = match kind {
+            DomainConstraintSpecKind::Check { .. } => {
+                "check constraints for domains cannot be marked NO INHERIT"
+            }
+            DomainConstraintSpecKind::NotNull => {
+                "not-null constraints for domains cannot be marked NO INHERIT"
+            }
+        };
+        return Err(ParseError::DetailedError {
+            message: message.into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
     }
     let not_valid = lowered.contains("not valid");
     let stripped = lowered
@@ -15137,6 +15232,15 @@ fn parse_domain_constraint_attributes(
         });
     }
     Ok(not_valid)
+}
+
+fn domain_constraint_enforceability_error() -> ParseError {
+    ParseError::DetailedError {
+        message: "specifying constraint enforceability not supported for domains".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
 }
 
 fn split_domain_constraint_attribute_prefix(input: &str) -> (String, &str) {
@@ -16563,23 +16667,30 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier => name = Some(build_identifier(part)),
-            Rule::prepare_arg_types => {
+            Rule::prepare_type_list => {
                 parameter_types = part
                     .into_inner()
                     .filter(|inner| inner.as_rule() == Rule::type_name)
                     .map(build_type_name)
                     .collect();
             }
-            Rule::select_stmt => {
-                query_sql = Some(part.as_str().trim().to_string());
-                query = Some(PreparedStatementQuery::Select(build_select(part)?));
-            }
-            Rule::update_stmt => {
-                query_sql = Some(part.as_str().trim().to_string());
-                query = Some(PreparedStatementQuery::Update(build_update(part)?));
-            }
-            Rule::type_name => {
-                parameter_types.push(build_type_name(part));
+            Rule::prepare_query_sql => {
+                let sql = part.as_str().trim().to_string();
+                query = match parse_statement_with_options_inner(
+                    sql.clone(),
+                    ParseOptions::default(),
+                ) {
+                    Ok(Statement::Select(select)) => Some(PreparedStatementQuery::Select(select)),
+                    Ok(Statement::Update(update)) => Some(PreparedStatementQuery::Update(update)),
+                    Ok(statement) => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "prepared SELECT or UPDATE statement",
+                            actual: format!("{statement:?}"),
+                        });
+                    }
+                    Err(err) => return Err(err),
+                };
+                query_sql = Some(sql);
             }
             _ => {}
         }
@@ -16587,7 +16698,7 @@ fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, Par
     Ok(PrepareStatement {
         name: name.ok_or(ParseError::UnexpectedEof)?,
         parameter_types,
-        query: query.ok_or(ParseError::UnexpectedEof)?,
+        query,
         query_sql: query_sql.ok_or(ParseError::UnexpectedEof)?,
     })
 }
@@ -16598,11 +16709,11 @@ fn build_execute_statement(pair: Pair<'_, Rule>) -> Result<ExecuteStatement, Par
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
-            Rule::expr_list => {
+            Rule::execute_arg_list => {
                 args_sql.extend(
                     part.into_inner()
-                        .filter(|inner| inner.as_rule() == Rule::expr)
-                        .map(|inner| inner.as_str().trim().to_string()),
+                        .filter(|inner| inner.as_rule() == Rule::execute_arg)
+                        .map(|arg| arg.as_str().trim().to_string()),
                 );
             }
             _ => {}

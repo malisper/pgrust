@@ -3491,15 +3491,23 @@ fn visible_assignment_targets(desc: &RelationDesc) -> Vec<BoundAssignmentTarget>
 
 fn bind_insert_assignment_expr(
     expr: &SqlExpr,
+    desc: &RelationDesc,
     target: &BoundAssignmentTarget,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     local_ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
+    let expr_type =
+        infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, None, local_ctes);
+    reject_invalid_domain_array_assignment(desc, target, expr_type, catalog)?;
     if let SqlExpr::ArrayLiteral(elements) = expr {
         let target_type = assignment_navigation_sql_type(target.target_sql_type, catalog);
-        if target_type.is_array {
+        let target_is_domain_array = target.target_sql_type.is_array
+            && catalog
+                .domain_by_type_oid(target.target_sql_type.type_oid)
+                .is_some();
+        if target_type.is_array && !target_is_domain_array {
             return Ok(Expr::ArrayLiteral {
                 elements: elements
                     .iter()
@@ -3561,6 +3569,50 @@ fn whole_row_star_relation_name(expr: &SqlExpr) -> Option<&str> {
         }
         _ => None,
     }
+}
+
+fn reject_invalid_domain_array_assignment(
+    desc: &RelationDesc,
+    target: &BoundAssignmentTarget,
+    source_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ParseError> {
+    if source_type == target.target_sql_type {
+        return Ok(());
+    }
+    if !is_array_of_domain_over_array_type(target.target_sql_type, catalog) {
+        return Ok(());
+    }
+    if !source_type.is_array {
+        return Ok(());
+    }
+    let column = &desc.columns[target.column_index];
+    Err(ParseError::DetailedError {
+        message: format!(
+            "column \"{}\" is of type {} but expression is of type {}",
+            column.name,
+            sql_type_name_with_domains(target.target_sql_type, catalog),
+            sql_type_name_with_domains(source_type, catalog)
+        ),
+        detail: None,
+        hint: Some("You will need to rewrite or cast the expression.".into()),
+        sqlstate: "42804",
+    })
+}
+
+fn sql_type_name_with_domains(sql_type: SqlType, catalog: &dyn CatalogLookup) -> String {
+    if sql_type.type_oid != 0
+        && let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid)
+    {
+        return if sql_type.is_array
+            && (!domain.sql_type.is_array || sql_type.typrelid == domain.array_oid)
+        {
+            format!("{}[]", domain.name)
+        } else {
+            domain.name
+        };
+    }
+    sql_type_name(sql_type)
 }
 
 pub(super) fn ensure_generated_assignment_allowed(
@@ -3943,6 +3995,7 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                                     NormalizedInsertExpr::Expr(expr) => {
                                         bind_insert_assignment_expr(
                                             expr,
+                                            &entry.desc,
                                             target,
                                             &expr_scope,
                                             catalog,
@@ -4022,6 +4075,12 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
                 query.target_list.iter_mut().zip(target_columns.iter())
             {
                 let source_type = target_entry.sql_type;
+                reject_invalid_domain_array_assignment(
+                    &entry.desc,
+                    target_column,
+                    source_type,
+                    catalog,
+                )?;
                 if source_type != target_column.target_sql_type {
                     target_entry.expr = coerce_bound_expr(
                         target_entry.expr.clone(),

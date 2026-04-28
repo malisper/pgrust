@@ -3587,6 +3587,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             's',
         ),
         proc_row(
+            6602,
+            "pg_basetype",
+            REGTYPE_TYPE_OID,
+            &oid_argtypes(&[REGTYPE_TYPE_OID]),
+            "pg_basetype",
+            1,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
             6604,
             "pg_column_compression",
             TEXT_TYPE_OID,
@@ -11988,6 +12000,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("lo_create", BuiltinScalarFunction::LoCreate),
         ("lo_unlink", BuiltinScalarFunction::LoUnlink),
         ("pg_typeof", BuiltinScalarFunction::PgTypeof),
+        ("pg_basetype", BuiltinScalarFunction::PgBaseType),
         (
             "pg_column_compression",
             BuiltinScalarFunction::PgColumnCompression,
