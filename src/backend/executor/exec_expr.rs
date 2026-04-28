@@ -2200,7 +2200,19 @@ fn eval_regrole_to_text_function(
 
 fn relation_name_for_regclass_oid(oid: u32, catalog: Option<&dyn CatalogLookup>) -> Option<String> {
     let catalog = catalog?;
-    catalog.class_row_by_oid(oid).map(|row| row.relname)
+    let row = catalog.class_row_by_oid(oid)?;
+    let relname = quote_identifier_if_needed(&row.relname);
+    if row.relnamespace == PG_TOAST_NAMESPACE_OID {
+        let nspname = catalog
+            .namespace_row_by_oid(row.relnamespace)
+            .map(|namespace| namespace.nspname)
+            .unwrap_or_else(|| "pg_toast".into());
+        return Some(format!(
+            "{}.{relname}",
+            quote_identifier_if_needed(&nspname)
+        ));
+    }
+    Some(relname)
 }
 
 fn eval_regclass_to_text_function(

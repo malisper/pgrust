@@ -1142,6 +1142,7 @@ fn suppress_unknown_column_position(sql: &str) -> bool {
     let lower = sql.trim_start().to_ascii_lowercase();
     (lower.starts_with("alter table ") && lower.contains(" rename column "))
         || (lower.starts_with("create table ") && lower.contains(" of "))
+        || lower.starts_with("create statistics ")
 }
 
 fn find_interval_input_position(sql: &str) -> Option<usize> {

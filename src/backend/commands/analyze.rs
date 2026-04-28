@@ -734,6 +734,10 @@ fn build_statistics_ext_data_rows(
         if stat.stxstattarget == Some(0) {
             continue;
         }
+        if statistics_has_zero_column_target(&stat, relation) {
+            push_extended_statistics_warning(&stat, relation, catalog);
+            continue;
+        }
         let expression_texts = statistics_expression_texts(&stat.stxexprs)?;
         let mut target_ids = stat.stxkeys.clone();
         target_ids.extend((0..expression_texts.len()).map(|idx| -((idx as i16) + 1)));
@@ -755,6 +759,7 @@ fn build_statistics_ext_data_rows(
             column_sample_indices.push(sample_index);
         }
         if missing_column {
+            push_extended_statistics_warning(&stat, relation, catalog);
             continue;
         }
 
@@ -766,6 +771,7 @@ fn build_statistics_ext_data_rows(
             })
             .collect::<Result<Vec<_>, ParseError>>()?;
         if !bound_exprs.is_empty() && selected_columns.len() != relation.desc.columns.len() {
+            push_extended_statistics_warning(&stat, relation, catalog);
             continue;
         }
 
@@ -840,6 +846,53 @@ fn build_statistics_ext_data_rows(
         });
     }
     Ok(out)
+}
+
+fn statistics_has_zero_column_target(
+    stat: &crate::include::catalog::PgStatisticExtRow,
+    relation: &BoundRelation,
+) -> bool {
+    stat.stxkeys.iter().any(|attnum| {
+        attnum
+            .checked_sub(1)
+            .and_then(|idx| relation.desc.columns.get(idx as usize))
+            .is_some_and(|column| column.attstattarget == 0)
+    })
+}
+
+fn push_extended_statistics_warning(
+    stat: &crate::include::catalog::PgStatisticExtRow,
+    relation: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+) {
+    let stat_name = qualified_statistics_name(stat, catalog);
+    let relation_name = qualified_relation_name(relation, catalog);
+    crate::backend::utils::misc::notices::push_warning(format!(
+        "statistics object \"{stat_name}\" could not be computed for relation \"{relation_name}\""
+    ));
+}
+
+fn qualified_statistics_name(
+    stat: &crate::include::catalog::PgStatisticExtRow,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let namespace = catalog
+        .namespace_row_by_oid(stat.stxnamespace)
+        .map(|row| row.nspname)
+        .unwrap_or_else(|| stat.stxnamespace.to_string());
+    format!("{namespace}.{}", stat.stxname)
+}
+
+fn qualified_relation_name(relation: &BoundRelation, catalog: &dyn CatalogLookup) -> String {
+    let namespace = catalog
+        .namespace_row_by_oid(relation.namespace_oid)
+        .map(|row| row.nspname)
+        .unwrap_or_else(|| relation.namespace_oid.to_string());
+    let relname = catalog
+        .class_row_by_oid(relation.relation_oid)
+        .map(|row| row.relname)
+        .unwrap_or_else(|| relation.relation_oid.to_string());
+    format!("{namespace}.{relname}")
 }
 
 fn build_expression_statistics_rows(

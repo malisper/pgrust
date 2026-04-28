@@ -21675,6 +21675,52 @@ fn pg_mcv_list_items_decodes_extended_statistics_payload() {
 }
 
 #[test]
+fn analyze_warns_when_extended_statistics_cannot_be_computed() {
+    let base = temp_dir("analyze_extended_statistics_warning");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table stats_warn (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "alter table stats_warn alter a set statistics 0")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into stats_warn select i, i % 23 from generate_series(1, 1000) i",
+    )
+    .unwrap();
+    db.execute(1, "create statistics stats_warn_ab on a, b from stats_warn")
+        .unwrap();
+
+    clear_backend_notices();
+    db.execute(1, "analyze stats_warn").unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![
+            "statistics object \"public.stats_warn_ab\" could not be computed for relation \"public.stats_warn\""
+                .to_string()
+        ]
+    );
+
+    db.execute(1, "alter table stats_warn alter a set statistics -1")
+        .unwrap();
+    clear_backend_notices();
+    db.execute(1, "analyze stats_warn (a)").unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![
+            "statistics object \"public.stats_warn_ab\" could not be computed for relation \"public.stats_warn\""
+                .to_string()
+        ]
+    );
+
+    db.execute(1, "alter statistics stats_warn_ab set statistics 0")
+        .unwrap();
+    clear_backend_notices();
+    db.execute(1, "analyze stats_warn").unwrap();
+    assert!(take_backend_notice_messages().is_empty());
+}
+
+#[test]
 fn stats_ext_dependencies_use_postgres_selectivity_formula() {
     let base = temp_dir("stats_ext_dependencies_selectivity");
     let db = Database::open(&base, 64).unwrap();
@@ -42211,6 +42257,60 @@ fn plpgsql_runtime_errors_include_statement_context() {
         }
         other => panic!("expected PL/pgSQL context, got {other:?}"),
     }
+}
+
+#[test]
+fn plpgsql_decl_default_accepts_query_expression() {
+    let dir = temp_dir("plpgsql_decl_default_query");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table decl_default_src (label text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into decl_default_src values ('ok')")
+        .unwrap();
+
+    clear_notices();
+    session
+        .execute(
+            &db,
+            "do $$ \
+             declare \
+               loaded text := label from decl_default_src; \
+               rel_name text := oid::regclass from pg_class where relname = 'decl_default_src'; \
+             begin \
+               raise notice 'label % relation %', loaded, rel_name; \
+             end \
+             $$",
+        )
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec!["label ok relation decl_default_src".to_string()]
+    );
+
+    session
+        .execute(&db, "create view decl_default_view as select 1::int4 as a")
+        .unwrap();
+    clear_notices();
+    session
+        .execute(
+            &db,
+            "do $$ \
+             begin \
+               execute 'create statistics decl_default_bad_stats on a from decl_default_view'; \
+             exception when wrong_object_type then \
+               raise notice 'caught wrong object'; \
+             end \
+             $$",
+        )
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec!["caught wrong object".to_string()]
+    );
 }
 
 #[test]
