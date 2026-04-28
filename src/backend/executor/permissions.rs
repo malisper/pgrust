@@ -4,7 +4,10 @@ use super::ExecutorContext;
 use crate::backend::catalog::role_memberships::has_effective_membership;
 use crate::backend::catalog::roles::has_bypassrls_privilege;
 use crate::backend::parser::CatalogLookup;
-use crate::include::catalog::{PgAuthIdRow, PgAuthMembersRow, PgClassRow};
+use crate::include::catalog::{
+    PG_CATALOG_NAMESPACE_OID, PG_MAINTAIN_OID, PG_READ_ALL_DATA_OID, PG_TOAST_NAMESPACE_OID,
+    PG_WRITE_ALL_DATA_OID, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
+};
 
 pub(crate) fn relation_values_visible_for_error_detail(
     relation_oid: u32,
@@ -75,6 +78,35 @@ fn relation_has_table_select_privilege(
     )
 }
 
+fn predefined_role_grants_relation_privilege(
+    class_row: &PgClassRow,
+    authid_rows: &[PgAuthIdRow],
+    auth_members_rows: &[PgAuthMembersRow],
+    current_user_oid: u32,
+    privilege: char,
+) -> bool {
+    if matches!(privilege, 'a' | 'w' | 'd' | 'm')
+        && matches!(
+            class_row.relnamespace,
+            PG_CATALOG_NAMESPACE_OID | PG_TOAST_NAMESPACE_OID
+        )
+    {
+        return false;
+    }
+    let target_role = match privilege {
+        'r' => PG_READ_ALL_DATA_OID,
+        'a' | 'w' | 'd' => PG_WRITE_ALL_DATA_OID,
+        'm' => PG_MAINTAIN_OID,
+        _ => return false,
+    };
+    has_effective_membership(
+        current_user_oid,
+        target_role,
+        authid_rows,
+        auth_members_rows,
+    )
+}
+
 pub(crate) fn relation_has_table_privilege(
     class_row: &PgClassRow,
     authid_rows: &[PgAuthIdRow],
@@ -87,6 +119,15 @@ pub(crate) fn relation_has_table_privilege(
         class_row.relowner,
         authid_rows,
         auth_members_rows,
+    ) {
+        return true;
+    }
+    if predefined_role_grants_relation_privilege(
+        class_row,
+        authid_rows,
+        auth_members_rows,
+        current_user_oid,
+        privilege,
     ) {
         return true;
     }

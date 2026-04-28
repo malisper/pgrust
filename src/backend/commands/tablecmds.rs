@@ -75,10 +75,11 @@ use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
     ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID, BOX_TYPE_OID, BPCHAR_TYPE_OID,
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID, HASH_AM_OID,
-    PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PUBLISH_GENCOLS_STORED, PgAmRow,
-    PgOpclassRow, PgPublicationRelRow, PgPublicationRow, SPGIST_AM_OID, TEXT_TYPE_OID,
-    VARCHAR_TYPE_OID, bootstrap_pg_am_rows, builtin_range_name_for_sql_type,
-    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_MAINTAIN_OID, PG_READ_ALL_DATA_OID,
+    PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID, PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow,
+    PgPublicationRelRow, PgPublicationRow, SPGIST_AM_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+    bootstrap_pg_am_rows, builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type,
+    range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
@@ -5790,6 +5791,29 @@ pub(crate) fn relation_acl_allows(
     relation_acl_allows_as(ctx, relation_oid, privilege, None)
 }
 
+fn predefined_role_grants_relation_privilege(
+    class_row: &crate::include::catalog::PgClassRow,
+    auth: &AuthState,
+    auth_catalog: &AuthCatalog,
+    privilege: char,
+) -> bool {
+    if matches!(privilege, 'a' | 'w' | 'd' | 'm')
+        && matches!(
+            class_row.relnamespace,
+            PG_CATALOG_NAMESPACE_OID | PG_TOAST_NAMESPACE_OID
+        )
+    {
+        return false;
+    }
+    let target_role = match privilege {
+        'r' => PG_READ_ALL_DATA_OID,
+        'a' | 'w' | 'd' => PG_WRITE_ALL_DATA_OID,
+        'm' => PG_MAINTAIN_OID,
+        _ => return false,
+    };
+    auth.has_effective_membership(target_role, auth_catalog)
+}
+
 fn relation_acl_allows_as(
     ctx: &ExecutorContext,
     relation_oid: u32,
@@ -5827,6 +5851,9 @@ fn relation_acl_allows_as(
         // PostgreSQL exposes role membership rows through pg_auth_members to
         // ordinary users while still protecting writes through system catalog
         // update checks.
+        return Ok(true);
+    }
+    if predefined_role_grants_relation_privilege(&class_row, &auth, &auth_catalog, privilege) {
         return Ok(true);
     }
     let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
@@ -5900,6 +5927,9 @@ fn relation_or_all_column_acls_allow_as(
         // update checks.
         return Ok(true);
     }
+    if predefined_role_grants_relation_privilege(&class_row, &auth, &auth_catalog, privilege) {
+        return Ok(true);
+    }
     let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
     if class_row
         .relacl
@@ -5949,11 +5979,13 @@ fn relation_permission_denied_for_requirement(
     } else {
         "table"
     };
+    let relation_name = requirement
+        .relation_name
+        .strip_prefix("pg_catalog.")
+        .or_else(|| requirement.relation_name.strip_prefix("pg_toast."))
+        .unwrap_or(&requirement.relation_name);
     ExecError::DetailedError {
-        message: format!(
-            "permission denied for {relation_kind} {}",
-            requirement.relation_name
-        ),
+        message: format!("permission denied for {relation_kind} {relation_name}"),
         detail: None,
         hint: None,
         sqlstate: "42501",

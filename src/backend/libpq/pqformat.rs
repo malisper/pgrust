@@ -364,6 +364,7 @@ pub(crate) fn infer_command_tag(sql: &str, affected: usize) -> String {
         ("UNLISTEN", _) => "UNLISTEN".to_string(),
         ("LOAD", _) => "LOAD".to_string(),
         ("DISCARD", _) => "DISCARD".to_string(),
+        ("LOCK", _) => "LOCK TABLE".to_string(),
         ("VACUUM", _) => "VACUUM".to_string(),
         ("PREPARE", _) => "PREPARE".to_string(),
         ("SET", _) => "SET".to_string(),

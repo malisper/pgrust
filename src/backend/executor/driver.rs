@@ -637,6 +637,12 @@ fn execute_statement_with_source(
             expected: "DROP MATERIALIZED VIEW handled by database/session layer",
             actual: "DROP MATERIALIZED VIEW".into(),
         })),
+        Statement::LockTable(_) => Err(ExecError::DetailedError {
+            message: "LOCK TABLE can only be used in transaction blocks".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "25P01",
+        }),
         Statement::TruncateTable(stmt) => execute_truncate_table(stmt, catalog, ctx, xid),
         Statement::Vacuum(stmt) => execute_vacuum(stmt, catalog, ctx),
         Statement::Insert(stmt) => {

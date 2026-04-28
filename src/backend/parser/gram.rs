@@ -15134,6 +15134,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::drop_schema_stmt => Ok(Statement::DropSchema(build_drop_schema(inner)?)),
         Rule::drop_owned_stmt => Ok(Statement::DropOwned(build_drop_owned(inner)?)),
         Rule::reassign_owned_stmt => Ok(Statement::ReassignOwned(build_reassign_owned(inner)?)),
+        Rule::lock_table_stmt => Ok(Statement::LockTable(build_lock_table(inner)?)),
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
         Rule::vacuum_stmt => Ok(Statement::Vacuum(build_vacuum(inner)?)),
         Rule::insert_stmt => Ok(Statement::Insert(build_insert(inner)?)),
@@ -20643,6 +20644,78 @@ fn build_drop_owned(pair: Pair<'_, Rule>) -> Result<DropOwnedStatement, ParseErr
         role_names,
         cascade,
     })
+}
+
+fn build_qualified_identifier_string(pair: Pair<'_, Rule>) -> String {
+    let (schema, name) = build_relation_name(pair);
+    schema
+        .map(|schema| format!("{schema}.{name}"))
+        .unwrap_or(name)
+}
+
+fn build_qualified_identifier_list(pair: Pair<'_, Rule>) -> Vec<String> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::qualified_identifier)
+        .map(build_qualified_identifier_string)
+        .collect()
+}
+
+fn build_lock_table(pair: Pair<'_, Rule>) -> Result<LockTableStatement, ParseError> {
+    let mut table_names = Vec::new();
+    let mut mode = LockTableMode::AccessExclusive;
+    let mut nowait = false;
+
+    // :HACK: PostgreSQL's LockStmt carries RangeVar details for ONLY,
+    // inheritance recursion, trailing '*', and view recursion. This raw node
+    // keeps just direct relation names until those semantics are modeled.
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::qualified_ident_list => {
+                table_names.extend(build_qualified_identifier_list(part));
+            }
+            Rule::lock_table_mode_clause => mode = build_lock_table_mode_clause(part)?,
+            Rule::lock_nowait_clause => nowait = true,
+            _ => {}
+        }
+    }
+    if table_names.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(LockTableStatement {
+        table_names,
+        mode,
+        nowait,
+    })
+}
+
+fn build_lock_table_mode_clause(pair: Pair<'_, Rule>) -> Result<LockTableMode, ParseError> {
+    let mode = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::lock_table_mode)
+        .ok_or(ParseError::UnexpectedEof)?;
+    build_lock_table_mode(mode.as_str())
+}
+
+fn build_lock_table_mode(mode_sql: &str) -> Result<LockTableMode, ParseError> {
+    let normalized = mode_sql
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "access share" => Ok(LockTableMode::AccessShare),
+        "row share" => Ok(LockTableMode::RowShare),
+        "row exclusive" => Ok(LockTableMode::RowExclusive),
+        "share update exclusive" => Ok(LockTableMode::ShareUpdateExclusive),
+        "share" => Ok(LockTableMode::Share),
+        "share row exclusive" => Ok(LockTableMode::ShareRowExclusive),
+        "exclusive" => Ok(LockTableMode::Exclusive),
+        "access exclusive" => Ok(LockTableMode::AccessExclusive),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "LOCK TABLE mode",
+            actual: mode_sql.into(),
+        }),
+    }
 }
 
 fn build_truncate_table(pair: Pair<'_, Rule>) -> Result<TruncateTableStatement, ParseError> {

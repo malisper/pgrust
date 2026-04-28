@@ -23,11 +23,11 @@ use crate::include::nodes::parsenodes::{
     CreateTypeStatement, DomainConstraintSpecKind, DropAggregateStatement, DropCastStatement,
     DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType,
     GrantObjectPrivilege, GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement,
-    JoinTreeNode, OverridingKind, PartitionStrategy, PublicationObjectSpec, PublicationOption,
-    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
-    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
-    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
-    TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
+    JoinTreeNode, LockTableMode, LockTableStatement, OverridingKind, PartitionStrategy,
+    PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
+    RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
+    SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec,
+    TriggerLevel, TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
     AttrNumber, INNER_VAR, JoinType, OUTER_VAR, Var, is_system_attr,
@@ -10705,6 +10705,68 @@ fn parse_insert_update_delete() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn parse_lock_table_statement_modes() {
+    let stmt = parse_statement("lock atest1").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::LockTable(LockTableStatement {
+            table_names,
+            mode: LockTableMode::AccessExclusive,
+            nowait: false,
+        }) if table_names == vec!["atest1"]
+    ));
+
+    let stmt =
+        parse_statement("lock table public.atest1, atest2 in access share mode nowait").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::LockTable(LockTableStatement {
+            table_names,
+            mode: LockTableMode::AccessShare,
+            nowait: true,
+        }) if table_names == vec!["public.atest1", "atest2"]
+    ));
+
+    for (sql, expected_mode) in [
+        (
+            "lock table atest1 in access share mode",
+            LockTableMode::AccessShare,
+        ),
+        (
+            "lock table atest1 in row share mode",
+            LockTableMode::RowShare,
+        ),
+        (
+            "lock table atest1 in row exclusive mode",
+            LockTableMode::RowExclusive,
+        ),
+        (
+            "lock table atest1 in share update exclusive mode",
+            LockTableMode::ShareUpdateExclusive,
+        ),
+        ("lock table atest1 in share mode", LockTableMode::Share),
+        (
+            "lock table atest1 in share row exclusive mode",
+            LockTableMode::ShareRowExclusive,
+        ),
+        (
+            "lock table atest1 in exclusive mode",
+            LockTableMode::Exclusive,
+        ),
+        (
+            "lock table atest1 in access exclusive mode",
+            LockTableMode::AccessExclusive,
+        ),
+    ] {
+        let stmt = parse_statement(sql).unwrap();
+        assert!(matches!(
+            stmt,
+            Statement::LockTable(LockTableStatement { mode, .. }) if mode == expected_mode
+        ));
+    }
 }
 
 #[test]

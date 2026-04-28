@@ -6203,7 +6203,7 @@ fn autovacuum_once_skips_locked_table_without_blocking() {
     let rel = relation_locator_for(&db, 1, "av_locked_items");
     db.table_locks.lock_table(
         rel,
-        crate::backend::storage::lmgr::TableLockMode::RowExclusive,
+        crate::backend::storage::lmgr::TableLockMode::ShareUpdateExclusive,
         99,
     );
     let result = db.run_autovacuum_once();
@@ -9983,6 +9983,272 @@ fn relation_privileges_gate_select_dml_copy_and_locking() {
         .execute(&db, "set session authorization rel_tenant")
         .unwrap();
     session.execute(&db, "truncate rel_acl").unwrap();
+}
+
+#[test]
+fn lock_table_requires_transaction_block() {
+    let dir = temp_dir("lock_table_requires_transaction");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table lock_outside_txn(id int4)")
+        .unwrap();
+    match session.execute(&db, "lock table lock_outside_txn") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "LOCK TABLE can only be used in transaction blocks");
+            assert_eq!(sqlstate, "25P01");
+        }
+        other => panic!("expected transaction block error, got {other:?}"),
+    }
+}
+
+#[test]
+fn lock_table_permissions_follow_postgres() {
+    fn lock_allowed(session: &mut Session, db: &Database, sql: &str) {
+        session.execute(db, "begin").unwrap();
+        session.execute(db, sql).unwrap();
+        session.execute(db, "rollback").unwrap();
+    }
+
+    fn assert_lock_permission_denied(session: &mut Session, db: &Database, sql: &str, table: &str) {
+        session.execute(db, "begin").unwrap();
+        match session.execute(db, sql) {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(message, format!("permission denied for table {table}"));
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected table permission error for {table}, got {other:?}"),
+        }
+        session.execute(db, "rollback").unwrap();
+    }
+
+    let dir = temp_dir("lock_table_permissions");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role lock_owner login")
+        .unwrap();
+    for role in [
+        "lock_reader",
+        "lock_inserter",
+        "lock_updater",
+        "lock_deleter",
+        "lock_truncater",
+        "lock_maintainer",
+        "lock_pg_maintainer",
+    ] {
+        session
+            .execute(&db, &format!("create role {role} login"))
+            .unwrap();
+    }
+    for table in [
+        "lock_select_acl",
+        "lock_insert_acl",
+        "lock_update_acl",
+        "lock_delete_acl",
+        "lock_truncate_acl",
+        "lock_maintain_acl",
+        "lock_pg_maintain_acl",
+    ] {
+        session
+            .execute(&db, &format!("create table {table}(id int4)"))
+            .unwrap();
+        session
+            .execute(&db, &format!("alter table {table} owner to lock_owner"))
+            .unwrap();
+    }
+    session
+        .execute(&db, "grant select on lock_select_acl to lock_reader")
+        .unwrap();
+    session
+        .execute(&db, "grant insert on lock_insert_acl to lock_inserter")
+        .unwrap();
+    session
+        .execute(&db, "grant update on lock_update_acl to lock_updater")
+        .unwrap();
+    session
+        .execute(&db, "grant delete on lock_delete_acl to lock_deleter")
+        .unwrap();
+    session
+        .execute(&db, "grant truncate on lock_truncate_acl to lock_truncater")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant maintain on lock_maintain_acl to lock_maintainer",
+        )
+        .unwrap();
+    session
+        .execute(&db, "grant pg_maintain to lock_pg_maintainer")
+        .unwrap();
+
+    session
+        .execute(&db, "set session authorization lock_reader")
+        .unwrap();
+    lock_allowed(
+        &mut session,
+        &db,
+        "lock table lock_select_acl in access share mode",
+    );
+    assert_lock_permission_denied(
+        &mut session,
+        &db,
+        "lock table lock_select_acl in row share mode",
+        "lock_select_acl",
+    );
+
+    session.execute(&db, "reset session authorization").unwrap();
+    session
+        .execute(&db, "set session authorization lock_inserter")
+        .unwrap();
+    lock_allowed(
+        &mut session,
+        &db,
+        "lock table lock_insert_acl in access share mode",
+    );
+    lock_allowed(
+        &mut session,
+        &db,
+        "lock table lock_insert_acl in row share mode",
+    );
+    lock_allowed(
+        &mut session,
+        &db,
+        "lock table lock_insert_acl in row exclusive mode",
+    );
+    assert_lock_permission_denied(
+        &mut session,
+        &db,
+        "lock table lock_insert_acl in share update exclusive mode",
+        "lock_insert_acl",
+    );
+
+    for (role, table) in [
+        ("lock_updater", "lock_update_acl"),
+        ("lock_deleter", "lock_delete_acl"),
+        ("lock_truncater", "lock_truncate_acl"),
+        ("lock_maintainer", "lock_maintain_acl"),
+        ("lock_pg_maintainer", "lock_pg_maintain_acl"),
+    ] {
+        session.execute(&db, "reset session authorization").unwrap();
+        session
+            .execute(&db, &format!("set session authorization {role}"))
+            .unwrap();
+        lock_allowed(
+            &mut session,
+            &db,
+            &format!("lock table {table} in access exclusive mode"),
+        );
+    }
+}
+
+#[test]
+fn lock_table_nowait_reports_lock_not_available() {
+    let dir = temp_dir("lock_table_nowait");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder
+        .execute(&db, "create table lock_nowait_items(id int4)")
+        .unwrap();
+    holder.execute(&db, "begin").unwrap();
+    holder
+        .execute(&db, "lock table lock_nowait_items in access exclusive mode")
+        .unwrap();
+
+    waiter.execute(&db, "begin").unwrap();
+    match waiter.execute(
+        &db,
+        "lock table lock_nowait_items in access share mode nowait",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "could not obtain lock on relation \"lock_nowait_items\""
+            );
+            assert_eq!(sqlstate, "55P03");
+        }
+        other => panic!("expected lock-not-available error, got {other:?}"),
+    }
+    waiter.execute(&db, "rollback").unwrap();
+    holder.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn lock_table_locks_persist_until_transaction_end() {
+    let dir = temp_dir("lock_table_pg_locks_lifetime");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut holder = Session::new(1);
+
+    holder
+        .execute(&db, "create table lock_lifetime_items(id int4)")
+        .unwrap();
+    let relation_oid = relation_oid_for(&db, 1, "lock_lifetime_items");
+    holder.execute(&db, "begin").unwrap();
+    holder
+        .execute(&db, "lock table lock_lifetime_items in share mode")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            2,
+            &format!(
+                "select mode, granted from pg_locks \
+                 where locktype = 'relation' and relation = {relation_oid} and pid = 1"
+            ),
+        ),
+        vec![vec![Value::Text("ShareLock".into()), Value::Bool(true)]]
+    );
+
+    holder.execute(&db, "commit").unwrap();
+    assert!(
+        query_rows(
+            &db,
+            2,
+            &format!(
+                "select mode from pg_locks \
+                 where locktype = 'relation' and relation = {relation_oid} and pid = 1"
+            ),
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn pg_write_all_data_does_not_allow_system_catalog_writes() {
+    let dir = temp_dir("pg_write_all_data_system_catalog_writes");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role catalog_writer login")
+        .unwrap();
+    session
+        .execute(&db, "grant pg_write_all_data to catalog_writer")
+        .unwrap();
+    session
+        .execute(&db, "set session authorization catalog_writer")
+        .unwrap();
+
+    match session.execute(&db, "update pg_catalog.pg_class set relname = 'blocked'") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "permission denied for table pg_class");
+            assert_eq!(sqlstate, "42501");
+        }
+        other => panic!("expected system catalog write permission error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -41034,10 +41300,7 @@ fn bootstrap_toast_relations_resolve_before_privilege_checks() {
         Err(ExecError::DetailedError {
             message, sqlstate, ..
         }) => {
-            assert_eq!(
-                message,
-                "permission denied for table pg_toast.pg_toast_1213"
-            );
+            assert_eq!(message, "permission denied for table pg_toast_1213");
             assert_eq!(sqlstate, "42501");
         }
         other => panic!("expected toast table permission error, got {other:?}"),
