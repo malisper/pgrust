@@ -6144,10 +6144,12 @@ fn build_create_foreign_table_statement(
     } else {
         format!("create table {qualified_name} {columns_sql}")
     };
-    let create_table = match parse_statement(&create_table_sql)? {
+    let mut create_table = match parse_statement(&create_table_sql)? {
         Statement::CreateTable(stmt) => stmt,
         _ => unreachable!("CREATE TABLE parser must produce CreateTable"),
     };
+    create_table.schema_name = schema_name;
+    create_table.table_name = table_name;
     Ok(CreateForeignTableStatement {
         create_table,
         server_name,
@@ -6920,6 +6922,9 @@ fn build_grant_statement(sql: &str) -> Result<Statement, ParseError> {
     if lowered.starts_with("grant all on schema ") {
         return Ok(Statement::GrantObject(build_grant_schema_all(sql)?));
     }
+    if lowered.starts_with("grant create on schema ") {
+        return Ok(Statement::GrantObject(build_grant_schema_create(sql)?));
+    }
     if lowered.starts_with("grant usage on schema ") {
         return Ok(Statement::GrantObject(build_grant_schema_usage(sql)?));
     }
@@ -6972,6 +6977,9 @@ fn build_revoke_statement(sql: &str) -> Result<Statement, ParseError> {
     }
     if lowered.starts_with("revoke all on schema ") {
         return Ok(Statement::RevokeObject(build_revoke_schema_all(sql)?));
+    }
+    if lowered.starts_with("revoke create on schema ") {
+        return Ok(Statement::RevokeObject(build_revoke_schema_create(sql)?));
     }
     if lowered.starts_with("revoke usage on schema ") {
         return Ok(Statement::RevokeObject(build_revoke_schema_usage(sql)?));
@@ -7316,6 +7324,23 @@ fn build_grant_schema_usage(sql: &str) -> Result<GrantObjectStatement, ParseErro
     })
 }
 
+fn build_grant_schema_create(sql: &str) -> Result<GrantObjectStatement, ParseError> {
+    let prefix = "grant create on schema ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_names, rest) = split_once_keyword(rest, "to")?;
+    let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
+    Ok(GrantObjectStatement {
+        privilege: GrantObjectPrivilege::CreateOnSchema,
+        columns: Vec::new(),
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        with_grant_option,
+    })
+}
+
 fn build_grant_type_usage(sql: &str) -> Result<GrantObjectStatement, ParseError> {
     let rest = type_usage_prefix(sql, "grant")?;
     let (object_names, rest) = split_once_keyword(rest, "to")?;
@@ -7556,6 +7581,23 @@ fn build_revoke_schema_usage(sql: &str) -> Result<RevokeObjectStatement, ParseEr
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::UsageOnSchema,
+        columns: Vec::new(),
+        object_names: parse_identifier_list(object_names)?,
+        grantee_names,
+        cascade,
+    })
+}
+
+fn build_revoke_schema_create(sql: &str) -> Result<RevokeObjectStatement, ParseError> {
+    let prefix = "revoke create on schema ";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (object_names, rest) = split_once_keyword(rest, "from")?;
+    let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
+    Ok(RevokeObjectStatement {
+        privilege: GrantObjectPrivilege::CreateOnSchema,
         columns: Vec::new(),
         object_names: parse_identifier_list(object_names)?,
         grantee_names,
@@ -11342,7 +11384,7 @@ fn build_create_policy_statement(sql: &str) -> Result<CreatePolicyStatement, Par
     }
     rest = consume_keyword(rest, "on").trim_start();
     let ((schema_name, table_name), after_table) = parse_schema_qualified_name(rest)?;
-    let _ = schema_name;
+    let table_name = qualified_policy_table_name(schema_name, table_name);
     rest = after_table.trim_start();
 
     let mut permissive = true;
@@ -11461,7 +11503,7 @@ fn build_alter_policy_statement(sql: &str) -> Result<AlterPolicyStatement, Parse
     }
     rest = consume_keyword(rest, "on").trim_start();
     let ((schema_name, table_name), after_table) = parse_schema_qualified_name(rest)?;
-    let _ = schema_name;
+    let table_name = qualified_policy_table_name(schema_name, table_name);
     rest = after_table.trim_start();
 
     if keyword_at_start(rest, "rename") {
@@ -11586,7 +11628,7 @@ fn build_drop_policy_statement(sql: &str) -> Result<DropPolicyStatement, ParseEr
     }
     rest = consume_keyword(rest, "on").trim_start();
     let ((schema_name, table_name), remainder) = parse_schema_qualified_name(rest)?;
-    let _ = schema_name;
+    let table_name = qualified_policy_table_name(schema_name, table_name);
     if !remainder.trim().is_empty() {
         return Err(ParseError::UnexpectedToken {
             expected: "end of statement",
@@ -11598,6 +11640,12 @@ fn build_drop_policy_statement(sql: &str) -> Result<DropPolicyStatement, ParseEr
         policy_name,
         table_name,
     })
+}
+
+fn qualified_policy_table_name(schema_name: Option<String>, table_name: String) -> String {
+    schema_name
+        .map(|schema| format!("{schema}.{table_name}"))
+        .unwrap_or(table_name)
 }
 
 fn parse_policy_command(input: &str) -> Result<(PolicyCommand, &str), ParseError> {
@@ -24443,160 +24491,20 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 Rule::quantified_similar_suffix => build_quantified_similar_predicate(left, next),
                 Rule::like_suffix => build_like_predicate(left, next),
                 Rule::similar_suffix => build_similar_predicate(left, next),
+                Rule::comparison_suffix => {
+                    let mut suffix_parts = next.into_inner();
+                    let op = suffix_parts.next().ok_or(ParseError::UnexpectedEof)?;
+                    let right = build_expr(suffix_parts.next().ok_or(ParseError::UnexpectedEof)?)?;
+                    let comparison = build_comparison_expr(left, op.as_str(), right)?;
+                    if let Some(null_suffix) = suffix_parts.next() {
+                        build_null_predicate(comparison, null_suffix)
+                    } else {
+                        Ok(comparison)
+                    }
+                }
                 Rule::comp_op => {
                     let right = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
-                    Ok(match next.as_str() {
-                        "<->" => SqlExpr::GeometryBinaryOp {
-                            op: GeometryBinaryOp::Distance,
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "##" => SqlExpr::GeometryBinaryOp {
-                            op: GeometryBinaryOp::ClosestPoint,
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "?#" => SqlExpr::GeometryBinaryOp {
-                            op: GeometryBinaryOp::Intersects,
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "?||" => SqlExpr::GeometryBinaryOp {
-                            op: GeometryBinaryOp::Parallel,
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "?-|" => SqlExpr::GeometryBinaryOp {
-                            op: GeometryBinaryOp::Perpendicular,
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "~=" => SqlExpr::GeometryBinaryOp {
-                            op: GeometryBinaryOp::Same,
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "&<" => SqlExpr::GeometryBinaryOp {
-                            op: GeometryBinaryOp::OverLeft,
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "&>" => SqlExpr::GeometryBinaryOp {
-                            op: GeometryBinaryOp::OverRight,
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "<<|" | "<^" => SqlExpr::GeometryBinaryOp {
-                            op: GeometryBinaryOp::Below,
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "|>>" | ">^" => SqlExpr::GeometryBinaryOp {
-                            op: GeometryBinaryOp::Above,
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "&<|" => SqlExpr::GeometryBinaryOp {
-                            op: GeometryBinaryOp::OverBelow,
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "|&>" => SqlExpr::GeometryBinaryOp {
-                            op: GeometryBinaryOp::OverAbove,
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "?-" => SqlExpr::GeometryBinaryOp {
-                            op: GeometryBinaryOp::IsHorizontal,
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "@>" if expr_is_array_syntax(&left) && expr_is_array_syntax(&right) => {
-                            SqlExpr::ArrayContains(Box::new(left), Box::new(right))
-                        }
-                        "@>" => SqlExpr::JsonbContains(Box::new(left), Box::new(right)),
-                        "<@" if expr_is_array_syntax(&left) && expr_is_array_syntax(&right) => {
-                            SqlExpr::ArrayContained(Box::new(left), Box::new(right))
-                        }
-                        "<@" => SqlExpr::JsonbContained(Box::new(left), Box::new(right)),
-                        "@?" => SqlExpr::JsonbPathExists(Box::new(left), Box::new(right)),
-                        "@@" if expr_is_jsonb_syntax(&left) && expr_is_jsonpath_syntax(&right) => {
-                            SqlExpr::JsonbPathMatch(Box::new(left), Box::new(right))
-                        }
-                        "@@" => SqlExpr::BinaryOperator {
-                            op: "@@".into(),
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "?" => SqlExpr::JsonbExists(Box::new(left), Box::new(right)),
-                        "?|" => SqlExpr::JsonbExistsAny(Box::new(left), Box::new(right)),
-                        "?&" => SqlExpr::JsonbExistsAll(Box::new(left), Box::new(right)),
-                        "&&" if expr_is_array_syntax(&left) && expr_is_array_syntax(&right) => {
-                            SqlExpr::ArrayOverlap(Box::new(left), Box::new(right))
-                        }
-                        "&&" => SqlExpr::BinaryOperator {
-                            op: "&&".into(),
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "~<~" => SqlExpr::BinaryOperator {
-                            op: "~<~".into(),
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "~<=~" => SqlExpr::BinaryOperator {
-                            op: "~<=~".into(),
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "~>=~" => SqlExpr::BinaryOperator {
-                            op: "~>=~".into(),
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "~>~" => SqlExpr::BinaryOperator {
-                            op: "~>~".into(),
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "^@" => SqlExpr::BinaryOperator {
-                            op: "^@".into(),
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "<<=" => SqlExpr::BinaryOperator {
-                            op: "<<=".into(),
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        ">>=" => SqlExpr::BinaryOperator {
-                            op: ">>=".into(),
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "-|-" => SqlExpr::BinaryOperator {
-                            op: "-|-".into(),
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "<%" => SqlExpr::BinaryOperator {
-                            op: "<%".into(),
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        },
-                        "=" => SqlExpr::Eq(Box::new(left), Box::new(right)),
-                        "<>" | "!=" => SqlExpr::NotEq(Box::new(left), Box::new(right)),
-                        "<" => SqlExpr::Lt(Box::new(left), Box::new(right)),
-                        "<=" => SqlExpr::LtEq(Box::new(left), Box::new(right)),
-                        ">" => SqlExpr::Gt(Box::new(left), Box::new(right)),
-                        ">=" => SqlExpr::GtEq(Box::new(left), Box::new(right)),
-                        "~" => SqlExpr::RegexMatch(Box::new(left), Box::new(right)),
-                        "!~" => SqlExpr::Not(Box::new(SqlExpr::RegexMatch(
-                            Box::new(left),
-                            Box::new(right),
-                        ))),
-                        _ => unreachable!(),
-                    })
+                    build_comparison_expr(left, next.as_str(), right)
                 }
                 _ => Err(ParseError::UnexpectedToken {
                     expected: "comparison",
@@ -25565,6 +25473,166 @@ fn build_copy_from(pair: Pair<'_, Rule>) -> Result<CopyFromStatement, ParseError
         columns,
         source: source.ok_or(ParseError::UnexpectedEof)?,
         options: CopyOptions::default(),
+    })
+}
+
+fn build_comparison_expr(left: SqlExpr, op: &str, right: SqlExpr) -> Result<SqlExpr, ParseError> {
+    Ok(match op {
+        "<->" => SqlExpr::GeometryBinaryOp {
+            op: GeometryBinaryOp::Distance,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "##" => SqlExpr::GeometryBinaryOp {
+            op: GeometryBinaryOp::ClosestPoint,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "?#" => SqlExpr::GeometryBinaryOp {
+            op: GeometryBinaryOp::Intersects,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "?||" => SqlExpr::GeometryBinaryOp {
+            op: GeometryBinaryOp::Parallel,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "?-|" => SqlExpr::GeometryBinaryOp {
+            op: GeometryBinaryOp::Perpendicular,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "~=" => SqlExpr::GeometryBinaryOp {
+            op: GeometryBinaryOp::Same,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "&<" => SqlExpr::GeometryBinaryOp {
+            op: GeometryBinaryOp::OverLeft,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "&>" => SqlExpr::GeometryBinaryOp {
+            op: GeometryBinaryOp::OverRight,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "<<|" | "<^" => SqlExpr::GeometryBinaryOp {
+            op: GeometryBinaryOp::Below,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "|>>" | ">^" => SqlExpr::GeometryBinaryOp {
+            op: GeometryBinaryOp::Above,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "&<|" => SqlExpr::GeometryBinaryOp {
+            op: GeometryBinaryOp::OverBelow,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "|&>" => SqlExpr::GeometryBinaryOp {
+            op: GeometryBinaryOp::OverAbove,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "?-" => SqlExpr::GeometryBinaryOp {
+            op: GeometryBinaryOp::IsHorizontal,
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "@>" if expr_is_array_syntax(&left) && expr_is_array_syntax(&right) => {
+            SqlExpr::ArrayContains(Box::new(left), Box::new(right))
+        }
+        "@>" => SqlExpr::JsonbContains(Box::new(left), Box::new(right)),
+        "<@" if expr_is_array_syntax(&left) && expr_is_array_syntax(&right) => {
+            SqlExpr::ArrayContained(Box::new(left), Box::new(right))
+        }
+        "<@" => SqlExpr::JsonbContained(Box::new(left), Box::new(right)),
+        "@?" => SqlExpr::JsonbPathExists(Box::new(left), Box::new(right)),
+        "@@" if expr_is_jsonb_syntax(&left) && expr_is_jsonpath_syntax(&right) => {
+            SqlExpr::JsonbPathMatch(Box::new(left), Box::new(right))
+        }
+        "@@" => SqlExpr::BinaryOperator {
+            op: "@@".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "?" => SqlExpr::JsonbExists(Box::new(left), Box::new(right)),
+        "?|" => SqlExpr::JsonbExistsAny(Box::new(left), Box::new(right)),
+        "?&" => SqlExpr::JsonbExistsAll(Box::new(left), Box::new(right)),
+        "&&" if expr_is_array_syntax(&left) && expr_is_array_syntax(&right) => {
+            SqlExpr::ArrayOverlap(Box::new(left), Box::new(right))
+        }
+        "&&" => SqlExpr::BinaryOperator {
+            op: "&&".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "~<~" => SqlExpr::BinaryOperator {
+            op: "~<~".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "~<=~" => SqlExpr::BinaryOperator {
+            op: "~<=~".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "~>=~" => SqlExpr::BinaryOperator {
+            op: "~>=~".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "~>~" => SqlExpr::BinaryOperator {
+            op: "~>~".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "^@" => SqlExpr::BinaryOperator {
+            op: "^@".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "<<=" => SqlExpr::BinaryOperator {
+            op: "<<=".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        ">>=" => SqlExpr::BinaryOperator {
+            op: ">>=".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "-|-" => SqlExpr::BinaryOperator {
+            op: "-|-".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "<%" => SqlExpr::BinaryOperator {
+            op: "<%".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "<<<" => SqlExpr::BinaryOperator {
+            op: "<<<".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        "=" => SqlExpr::Eq(Box::new(left), Box::new(right)),
+        "<>" | "!=" => SqlExpr::NotEq(Box::new(left), Box::new(right)),
+        "<" => SqlExpr::Lt(Box::new(left), Box::new(right)),
+        "<=" => SqlExpr::LtEq(Box::new(left), Box::new(right)),
+        ">" => SqlExpr::Gt(Box::new(left), Box::new(right)),
+        ">=" => SqlExpr::GtEq(Box::new(left), Box::new(right)),
+        "~" => SqlExpr::RegexMatch(Box::new(left), Box::new(right)),
+        "!~" => SqlExpr::Not(Box::new(SqlExpr::RegexMatch(
+            Box::new(left),
+            Box::new(right),
+        ))),
+        _ => unreachable!(),
     })
 }
 

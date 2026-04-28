@@ -144,20 +144,24 @@ fn build_mcv_payload(
     } else {
         statistics_target as usize
     };
-    for (values, (count, _)) in ranked
-        .into_iter()
-        .filter(|(_, (count, _))| *count > 1)
-        .take(target)
-    {
+    for (values, (count, _)) in ranked.into_iter() {
         let base_frequency = values.iter().enumerate().fold(1.0, |acc, (index, value)| {
             let marginal = marginal_counts[index].get(value).copied().unwrap_or(0) as f64;
             acc * (marginal / sample_total as f64)
         });
+        let frequency = rounded_stat_frequency(count as f64 / sample_total as f64);
+        let base_frequency = rounded_stat_frequency(base_frequency);
+        if count == 1 && sample_total > target {
+            continue;
+        }
         items.push(PgMcvItem {
             values,
-            frequency: rounded_stat_frequency(count as f64 / sample_total as f64),
-            base_frequency: rounded_stat_frequency(base_frequency),
+            frequency,
+            base_frequency,
         });
+        if items.len() >= target {
+            break;
+        }
     }
     loop {
         let payload = PgMcvListPayload {

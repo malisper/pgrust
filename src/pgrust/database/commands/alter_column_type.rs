@@ -9,7 +9,8 @@ use crate::backend::executor::{ExecutorContext, RelationDesc, TupleSlot, eval_ex
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
-    BTREE_AM_OID, PG_CATALOG_NAMESPACE_OID, PgStatisticExtRow, default_btree_opclass_oid,
+    BTREE_AM_OID, PG_CATALOG_NAMESPACE_OID, PgStatisticExtRow, PgStatisticRow,
+    default_btree_opclass_oid,
 };
 use crate::pgrust::database::ddl::{
     lookup_heap_relation_for_alter_table, reject_column_type_change_with_rule_dependencies,
@@ -591,6 +592,14 @@ impl Database {
                     target.relation.relation_oid,
                     &alter_stmt.column_name,
                     target.new_desc.columns[target.column_index].clone(),
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+            let effect = store
+                .replace_relation_statistics_mvcc(
+                    target.relation.relation_oid,
+                    Vec::<PgStatisticRow>::new(),
                     &ctx,
                 )
                 .map_err(map_catalog_error)?;

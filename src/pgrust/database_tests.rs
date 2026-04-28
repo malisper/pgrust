@@ -21925,6 +21925,30 @@ fn stats_ext_mcv_or_and_array_selectivity_match_postgres_shapes() {
 }
 
 #[test]
+fn grouping_subquery_left_join_estimates_outer_rows() {
+    let base = temp_dir("grouping_subquery_left_join_estimate");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table grouping_unique (x integer)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into grouping_unique (x) select gs from generate_series(1,1000) as gs",
+    )
+    .unwrap();
+    db.execute(1, "analyze grouping_unique").unwrap();
+
+    let sql = "select * from generate_series(1, 1) t1 left join \
+               (select x from grouping_unique t2 group by x) as q1 on t1.t1 = q1.x";
+    assert_eq!(
+        explain_estimated_rows(&db, 1, sql),
+        1,
+        "{:?}",
+        explain_lines(&db, 1, sql)
+    );
+}
+
+#[test]
 fn alter_table_add_without_overlaps_on_inherited_columns() {
     let base = temp_dir("without_overlaps_inherited_alter");
     let db = Database::open(&base, 16).unwrap();

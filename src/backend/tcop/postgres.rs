@@ -45,7 +45,7 @@ use crate::backend::utils::sql_deparse::{
 use crate::include::access::htup::TupleError;
 use crate::include::catalog::{
     ANYELEMENTOID, PG_CLASS_RELATION_OID, PG_DEPENDENCIES_TYPE_OID, PG_MCV_LIST_TYPE_OID,
-    PG_NDISTINCT_TYPE_OID, RECORD_TYPE_OID,
+    PG_NDISTINCT_TYPE_OID, PgNamespaceRow, RECORD_TYPE_OID,
 };
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::datum::{
@@ -5349,6 +5349,9 @@ fn psql_statistics_object_is_visible(
         else {
             continue;
         };
+        if !psql_namespace_visible_to_current_user(catalog, &namespace) {
+            continue;
+        }
         if let Some(visible) =
             catalog.statistic_ext_row_by_name_namespace(&row.stxname, namespace.oid)
         {
@@ -5356,6 +5359,84 @@ fn psql_statistics_object_is_visible(
         }
     }
     false
+}
+
+fn psql_namespace_visible_to_current_user(
+    catalog: &dyn CatalogLookup,
+    namespace: &PgNamespaceRow,
+) -> bool {
+    let current_user_oid = catalog.current_user_oid();
+    let authids = catalog.authid_rows();
+    if current_user_oid == crate::include::catalog::BOOTSTRAP_SUPERUSER_OID
+        || authids
+            .iter()
+            .find(|row| row.oid == current_user_oid)
+            .is_some_and(|row| row.rolsuper)
+    {
+        return true;
+    }
+    let auth_members = catalog.auth_members_rows();
+    if psql_role_is_member_of(current_user_oid, namespace.nspowner, &auth_members) {
+        return true;
+    }
+    let effective_names = psql_effective_acl_names(current_user_oid, &authids, &auth_members);
+    namespace.nspacl.as_ref().is_some_and(|acl| {
+        acl.iter()
+            .any(|item| psql_acl_item_grants(item, &effective_names, 'U'))
+    })
+}
+
+fn psql_role_is_member_of(
+    member: u32,
+    role: u32,
+    auth_members: &[crate::include::catalog::PgAuthMembersRow],
+) -> bool {
+    if member == role {
+        return true;
+    }
+    let mut pending = vec![member];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        for row in auth_members.iter().filter(|row| row.member == current) {
+            if row.roleid == role {
+                return true;
+            }
+            pending.push(row.roleid);
+        }
+    }
+    false
+}
+
+fn psql_effective_acl_names(
+    current_user_oid: u32,
+    authids: &[crate::include::catalog::PgAuthIdRow],
+    auth_members: &[crate::include::catalog::PgAuthMembersRow],
+) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::from([String::new()]);
+    for role in authids {
+        if psql_role_is_member_of(current_user_oid, role.oid, auth_members) {
+            names.insert(role.rolname.clone());
+        }
+    }
+    names
+}
+
+fn psql_acl_item_grants(
+    item: &str,
+    effective_names: &std::collections::BTreeSet<String>,
+    privilege: char,
+) -> bool {
+    let Some((grantee, rest)) = item.split_once('=') else {
+        return false;
+    };
+    if !effective_names.contains(grantee) {
+        return false;
+    }
+    let privileges = rest.split_once('/').map(|(privs, _)| privs).unwrap_or(rest);
+    privileges.chars().any(|ch| ch == privilege)
 }
 
 fn psql_list_statistics_query(
@@ -5721,7 +5802,7 @@ fn statistics_row_columns_text(
                     if statistics_expr_looks_like_function_call(&expr) {
                         expr
                     } else {
-                        format!("({})", format_statistics_expr_text(&expr))
+                        format!("({})", format_statistics_expr_text(&expr, &relation.desc))
                     }
                 }),
         );
@@ -5744,7 +5825,7 @@ fn statistics_expr_looks_like_function_call(expr: &str) -> bool {
         })
 }
 
-fn format_statistics_expr_text(expr: &str) -> String {
+fn format_statistics_expr_text(expr: &str, desc: &RelationDesc) -> String {
     let mut out = String::with_capacity(expr.len() + 8);
     let mut chars = expr.chars().peekable();
     let mut prev_non_space: Option<char> = None;
@@ -5766,7 +5847,37 @@ fn format_statistics_expr_text(expr: &str) -> String {
             prev_non_space = Some(ch);
         }
     }
-    out
+    format_numeric_statistics_expr_literals(&out, desc)
+}
+
+fn format_numeric_statistics_expr_literals(expr: &str, desc: &RelationDesc) -> String {
+    let parts = expr.split_whitespace().collect::<Vec<_>>();
+    let [left, op, right] = parts.as_slice() else {
+        return expr.to_string();
+    };
+    if !matches!(*op, "+" | "-" | "*" | "/") {
+        return expr.to_string();
+    }
+    if statistics_expr_is_numeric_column(left, desc) && statistics_expr_is_integer_literal(right) {
+        return format!("{left} {op} {right}::numeric");
+    }
+    if statistics_expr_is_integer_literal(left) && statistics_expr_is_numeric_column(right, desc) {
+        return format!("{left}::numeric {op} {right}");
+    }
+    expr.to_string()
+}
+
+fn statistics_expr_is_numeric_column(token: &str, desc: &RelationDesc) -> bool {
+    let token = token.trim_matches('"');
+    desc.columns.iter().any(|column| {
+        !column.dropped
+            && column.name.eq_ignore_ascii_case(token)
+            && matches!(column.sql_type.kind, SqlTypeKind::Numeric)
+    })
+}
+
+fn statistics_expr_is_integer_literal(token: &str) -> bool {
+    !token.contains("::") && token.parse::<i64>().is_ok()
 }
 
 fn statistics_minus_is_binary(prev_non_space: Option<char>) -> bool {

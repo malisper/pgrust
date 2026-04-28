@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::super::*;
+use super::privilege::{acl_grants_privilege, effective_acl_grantee_names};
 use crate::backend::parser::{
     AlterStatisticsAction, AlterStatisticsStatement, CommentOnStatisticsStatement,
     CreateStatisticsStatement, DropStatisticsStatement, ParseError,
@@ -14,11 +15,62 @@ use crate::pgrust::database::ddl::{
     normalize_statistics_target,
 };
 
+const SCHEMA_CREATE_PRIVILEGE_CHAR: char = 'C';
+
 #[derive(Debug, Clone)]
 struct ResolvedStatisticsTargets {
     column_keys: Vec<i16>,
     expression_texts: Vec<String>,
     kind_bytes: Vec<u8>,
+}
+
+fn ensure_statistics_schema_create_privilege(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    namespace_oid: u32,
+) -> Result<(), ExecError> {
+    let auth = db.auth_state(client_id);
+    let auth_catalog = db
+        .auth_catalog(client_id, txn_ctx)
+        .map_err(map_catalog_error)?;
+    if auth_catalog
+        .role_by_oid(auth.current_user_oid())
+        .is_some_and(|row| row.rolsuper)
+    {
+        return Ok(());
+    }
+    let catalog = db.lazy_catalog_lookup(client_id, txn_ctx, None);
+    let namespace =
+        catalog
+            .namespace_row_by_oid(namespace_oid)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("schema with OID {namespace_oid} does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "3F000",
+            })?;
+    if auth.has_effective_membership(namespace.nspowner, &auth_catalog) {
+        return Ok(());
+    }
+    let owner_name = auth_catalog
+        .role_by_oid(namespace.nspowner)
+        .map(|row| row.rolname.clone())
+        .unwrap_or_default();
+    let acl = namespace
+        .nspacl
+        .clone()
+        .unwrap_or_else(|| vec![format!("{owner_name}=UC/{owner_name}")]);
+    let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
+    if acl_grants_privilege(&acl, &effective_names, SCHEMA_CREATE_PRIVILEGE_CHAR) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("permission denied for schema {}", namespace.nspname),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
 }
 
 impl Database {
@@ -94,6 +146,12 @@ impl Database {
             &relation,
             temp_effects,
             catalog_effects,
+        )?;
+        ensure_statistics_schema_create_privilege(
+            self,
+            client_id,
+            Some((xid, cid)),
+            namespace_oid,
         )?;
 
         let catcache = self

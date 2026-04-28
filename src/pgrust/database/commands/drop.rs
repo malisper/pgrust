@@ -381,7 +381,7 @@ fn drop_table_relation_kind_name(relkind: char) -> &'static str {
 
 fn drop_schema_relation_drop_priority(relkind: char) -> u8 {
     match relkind {
-        'r' | 'p' | 'm' | 'S' => 0,
+        'f' | 'r' | 'p' | 'm' | 'S' => 0,
         'v' => 1,
         'c' => 2,
         'i' | 'I' | 't' => 3,
@@ -1787,7 +1787,7 @@ impl Database {
             .class_rows()
             .into_iter()
             .filter(|row| row.relnamespace == schema_oid)
-            .filter(|row| matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'S' | 'v'))
+            .filter(|row| matches!(row.relkind, 'c' | 'f' | 'r' | 'p' | 'm' | 'S' | 'v'))
             .filter(|row| {
                 row.relkind != 'S'
                     || !sequence_is_owned_by_relation_in_schema(&catcache, row.oid, schema_oid)
@@ -2653,6 +2653,42 @@ impl Database {
                             .get(&row.opfmethod)
                             .map(String::as_str)
                             .unwrap_or("unknown")
+                    ));
+                }
+
+                let mut relation_notice_rows = relation_rows
+                    .iter()
+                    .filter(|row| {
+                        !row.relispartition
+                            && matches!(row.relkind, 'c' | 'f' | 'r' | 'p' | 'm' | 'S' | 'v')
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let relation_notice_oids = relation_notice_rows
+                    .iter()
+                    .map(|row| row.oid)
+                    .collect::<BTreeSet<_>>();
+                let inheritance_parent_oids = catcache
+                    .inherit_rows()
+                    .into_iter()
+                    .filter(|row| {
+                        relation_notice_oids.contains(&row.inhparent)
+                            && relation_notice_oids.contains(&row.inhrelid)
+                    })
+                    .map(|row| row.inhparent)
+                    .collect::<BTreeSet<_>>();
+                relation_notice_rows
+                    .sort_by_key(|row| (!inheritance_parent_oids.contains(&row.oid), row.oid));
+                for relation in relation_notice_rows {
+                    notices.push(format!(
+                        "drop cascades to {} {}",
+                        drop_table_relation_kind_name(relation.relkind),
+                        drop_schema_display_object_name(
+                            &catcache,
+                            &visible_namespaces,
+                            relation.relnamespace,
+                            &relation.relname
+                        )
                     ));
                 }
 

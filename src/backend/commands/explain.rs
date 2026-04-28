@@ -818,6 +818,47 @@ fn push_nonverbose_plan_details(
             }
             true
         }
+        Plan::MergeJoin {
+            left,
+            right,
+            merge_clauses,
+            join_qual,
+            qual,
+            ..
+        } => {
+            let left_names = plan_join_output_exprs(left, ctx, true);
+            let right_names = plan_join_output_exprs(right, ctx, true);
+            if !merge_clauses.is_empty() {
+                let rendered = merge_clauses
+                    .iter()
+                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                let rendered = if merge_clauses.len() > 1 {
+                    format!("({rendered})")
+                } else {
+                    rendered
+                };
+                lines.push(format!("{prefix}Merge Cond: {rendered}"));
+            }
+            if !join_qual.is_empty() {
+                let rendered = join_qual
+                    .iter()
+                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                lines.push(format!("{prefix}Join Filter: {rendered}"));
+            }
+            if !qual.is_empty() {
+                let rendered = qual
+                    .iter()
+                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                lines.push(format!("{prefix}Filter: {rendered}"));
+            }
+            true
+        }
         Plan::IndexOnlyScan {
             keys,
             order_by_keys,
@@ -1175,20 +1216,52 @@ fn render_hash_join_condition(
     if outer_hash_keys.len() != inner_hash_keys.len() || outer_hash_keys.is_empty() {
         return None;
     }
-    Some(
-        outer_hash_keys
-            .iter()
-            .zip(inner_hash_keys.iter())
-            .map(|(outer, inner)| {
-                format!(
-                    "({} = {})",
-                    render_verbose_expr(outer, left_names, ctx),
-                    render_verbose_expr(inner, right_names, ctx)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" AND "),
-    )
+    let mut seen_keys = std::collections::BTreeSet::new();
+    let mut primary_parts = Vec::new();
+    let mut duplicate_parts = Vec::new();
+    for (outer, inner) in outer_hash_keys.iter().zip(inner_hash_keys.iter()) {
+        let left = render_verbose_expr(outer, left_names, ctx);
+        let right = render_verbose_expr(inner, right_names, ctx);
+        let (left, right) = if left > right {
+            (right, left)
+        } else {
+            (left, right)
+        };
+        let key = (left.clone(), right.clone());
+        let part = format!("({left} = {right})");
+        if seen_keys.insert(key) {
+            primary_parts.push(part);
+        } else {
+            duplicate_parts.push(part);
+        }
+    }
+    let parts = primary_parts
+        .iter()
+        .chain(duplicate_parts.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    if parts.len() == 1 {
+        Some(parts[0].clone())
+    } else {
+        Some(format!("({})", parts.join(" AND ")))
+    }
+}
+
+fn render_join_condition_list(
+    exprs: &[Expr],
+    left_names: &[String],
+    right_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    let rendered = exprs
+        .iter()
+        .map(|expr| render_verbose_join_expr(expr, left_names, right_names, ctx))
+        .collect::<Vec<_>>();
+    if rendered.len() == 1 {
+        rendered[0].clone()
+    } else {
+        format!("({})", rendered.join(" AND "))
+    }
 }
 
 fn render_window_clause_for_explain(
@@ -2508,7 +2581,7 @@ fn explain_plan_children_with_context(
             );
         }
         Plan::Hash { input, .. } => {
-            let child_indent = if indent == 0 { 1 } else { indent + 3 };
+            let child_indent = indent + 1;
             format_explain_plan_with_subplans_inner(
                 input,
                 subplans,

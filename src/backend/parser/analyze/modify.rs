@@ -2454,10 +2454,10 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         ));
     }
     let predicate = and_predicates(
+        resolved.combined_predicate.clone(),
         target.predicate.as_ref().map(|expr| {
             rewrite_local_vars_for_output_exprs(expr.clone(), 1, &resolved.visible_output_exprs)
         }),
-        resolved.combined_predicate.clone(),
     );
 
     let targets = auto_view_base_children(&resolved, catalog)?
@@ -2549,10 +2549,10 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
         ));
     }
     let predicate = and_predicates(
+        resolved.combined_predicate.clone(),
         target.predicate.as_ref().map(|expr| {
             rewrite_local_vars_for_output_exprs(expr.clone(), 1, &resolved.visible_output_exprs)
         }),
-        resolved.combined_predicate.clone(),
     );
 
     let targets = auto_view_base_children(&resolved, catalog)?
@@ -3312,7 +3312,7 @@ fn bind_simple_update(
         catalog,
     )?;
     let predicate = match (predicate, target_rls.visibility_qual) {
-        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(predicate, visibility_qual)),
+        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(visibility_qual, predicate)),
         (Some(predicate), None) => Some(predicate),
         (None, Some(visibility_qual)) => Some(visibility_qual),
         (None, None) => None,
@@ -3756,7 +3756,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
         catalog,
     )?;
     let predicate = match (predicate, target_rls.visibility_qual) {
-        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(predicate, visibility_qual)),
+        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(visibility_qual, predicate)),
         (Some(predicate), None) => Some(predicate),
         (None, Some(visibility_qual)) => Some(visibility_qual),
         (None, None) => None,

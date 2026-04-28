@@ -40,11 +40,11 @@ use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument, PlanE
 use crate::include::nodes::primnodes::SetReturningCall;
 use crate::include::nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, JoinType, OpExprKind, OrderByEntry,
-    ProjectSetTarget, QueryColumn, RelationDesc, ScalarFunctionImpl, ToastRelationRef, Var,
-    attrno_index, set_returning_call_exprs, user_attrno,
+    ProjectSetTarget, QueryColumn, RelationDesc, ScalarFunctionImpl, TargetEntry, ToastRelationRef,
+    Var, attrno_index, set_returning_call_exprs, user_attrno,
 };
 
-use super::super::pathnodes::{expr_sql_type, slot_output_target};
+use super::super::pathnodes::{expr_sql_type, rte_slot_id, slot_output_target};
 use super::super::{
     AccessCandidate, CPU_INDEX_TUPLE_COST, CPU_OPERATOR_COST, CPU_TUPLE_COST, DEFAULT_BOOL_SEL,
     DEFAULT_EQ_SEL, DEFAULT_INEQ_SEL, DEFAULT_NUM_PAGES, DEFAULT_NUM_ROWS, ExtendedStatistic,
@@ -54,6 +54,8 @@ use super::super::{
 };
 use super::gistcost::estimate_gist_scan_cost;
 use super::regex_prefix::{RegexFixedPrefix, regex_fixed_prefix, regex_prefix_upper_bound};
+
+const DEFAULT_STATISTICS_TARGET: usize = 100;
 
 fn is_gist_like_am(am_oid: u32) -> bool {
     am_oid == GIST_AM_OID || am_oid == SPGIST_AM_OID
@@ -1384,16 +1386,38 @@ fn load_extended_statistics(
                 .into_iter()
                 .map(|row| (row.staattnum, row))
                 .collect();
+            let statistics_target = row
+                .stxstattarget
+                .map(|target| target.max(1) as usize)
+                .unwrap_or_else(|| extended_statistics_target_for_optimizer(&row.stxkeys, desc));
             Some(ExtendedStatistic {
                 target_ids,
                 expressions,
                 expression_stats,
+                statistics_target,
                 ndistinct,
                 dependencies,
                 mcv,
             })
         })
         .collect()
+}
+
+fn extended_statistics_target_for_optimizer(stxkeys: &[i16], desc: &RelationDesc) -> usize {
+    stxkeys
+        .iter()
+        .filter_map(|attnum| {
+            attnum.checked_sub(1).and_then(|idx| {
+                desc.columns
+                    .get(idx as usize)
+                    .map(|column| column.attstattarget)
+            })
+        })
+        .filter(|target| *target > 0)
+        .max()
+        .map(|target| target as usize)
+        .unwrap_or(DEFAULT_STATISTICS_TARGET)
+        .max(1)
 }
 
 fn statistics_expression_texts(raw: Option<&str>) -> Result<Vec<String>, ParseError> {
@@ -2398,6 +2422,7 @@ fn build_join_paths_internal(
     {
         paths.push(estimate_hash_join_internal(
             root,
+            catalog,
             left.clone(),
             right.clone(),
             kind,
@@ -2438,6 +2463,7 @@ fn build_join_paths_internal(
     {
         paths.push(estimate_hash_join_internal(
             root,
+            catalog,
             right.clone(),
             left.clone(),
             kind,
@@ -3363,7 +3389,13 @@ fn estimate_nested_loop_join_internal(
     let left_rows = clamp_rows(left_info.plan_rows.as_f64());
     let right_rows = clamp_rows(right_info.plan_rows.as_f64());
     let join_sel = selectivity_for_restrict_clauses(&restrict_clauses, left_rows);
-    let rows = estimate_join_rows(left_rows, right_rows, kind, join_sel);
+    let rows = adjust_left_join_rows_for_unique_inner(
+        estimate_join_rows(left_rows, right_rows, kind, join_sel),
+        left_rows,
+        kind,
+        &right,
+        &inner_join_keys_from_clauses(&restrict_clauses, &left, &right),
+    );
     let (inner_first_scan, inner_rescan) =
         nested_loop_inner_scan_costs(kind, &left, &right, right_info);
     let join_tuples = left_rows * right_rows;
@@ -3503,6 +3535,197 @@ fn estimate_join_rows(left_rows: f64, right_rows: f64, kind: JoinType, join_sel:
     }
 }
 
+fn adjust_left_join_rows_for_unique_inner(
+    rows: f64,
+    left_rows: f64,
+    kind: JoinType,
+    inner: &Path,
+    inner_keys: &[Expr],
+) -> f64 {
+    if kind == JoinType::Left && path_is_unique_for_keys(inner, inner_keys) {
+        return clamp_rows(left_rows);
+    }
+    rows
+}
+
+fn inner_join_keys_from_clauses(clauses: &[RestrictInfo], left: &Path, right: &Path) -> Vec<Expr> {
+    let left_relids = path_relids(left);
+    let right_relids = path_relids(right);
+    clauses
+        .iter()
+        .filter_map(|restrict| {
+            clause_sides_match_join(restrict, &left_relids, &right_relids)
+                .map(|(_, inner_key)| inner_key)
+        })
+        .collect()
+}
+
+fn path_is_unique_for_keys(path: &Path, keys: &[Expr]) -> bool {
+    if keys.is_empty() {
+        return false;
+    }
+    match path {
+        Path::Aggregate {
+            slot_id, group_by, ..
+        } => aggregate_is_unique_for_keys(*slot_id, group_by, keys),
+        Path::SubqueryScan {
+            rtindex,
+            query,
+            input,
+            ..
+        } => {
+            let input_vars = input.semantic_output_vars();
+            let mapped_keys = keys
+                .iter()
+                .filter_map(|key| {
+                    subquery_key_to_query_expr(*rtindex, key, query)
+                        .or_else(|| subquery_key_to_input_expr(*rtindex, key, &input_vars))
+                })
+                .collect::<Vec<_>>();
+            mapped_keys.len() == keys.len() && path_is_unique_for_keys(input, &mapped_keys)
+        }
+        Path::Unique {
+            key_indices, input, ..
+        } => {
+            let output = input.semantic_output_vars();
+            let unique_keys = key_indices
+                .iter()
+                .filter_map(|index| output.get(*index))
+                .collect::<Vec<_>>();
+            !unique_keys.is_empty() && unique_keys.iter().all(|key| keys.contains(key))
+        }
+        Path::Projection {
+            slot_id,
+            input,
+            targets,
+            ..
+        } => {
+            let mapped_keys = keys
+                .iter()
+                .map(|key| {
+                    projection_key_to_input_expr(*slot_id, targets, key)
+                        .unwrap_or_else(|| key.clone())
+                })
+                .collect::<Vec<_>>();
+            path_is_unique_for_keys(input, &mapped_keys)
+        }
+        Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => path_is_unique_for_keys(input, keys),
+        _ => false,
+    }
+}
+
+fn aggregate_is_unique_for_keys(slot_id: usize, group_by: &[Expr], keys: &[Expr]) -> bool {
+    if group_by.is_empty() {
+        return true;
+    }
+    let key_exprs = keys
+        .iter()
+        .map(|key| {
+            aggregate_key_to_group_expr(slot_id, group_by, key).unwrap_or_else(|| key.clone())
+        })
+        .collect::<Vec<_>>();
+    group_by.iter().all(|expr| key_exprs.contains(expr))
+}
+
+fn aggregate_key_to_group_expr(slot_id: usize, group_by: &[Expr], key: &Expr) -> Option<Expr> {
+    let key = strip_casts(key);
+    let Expr::Var(var) = key else {
+        return None;
+    };
+    if var.varlevelsup != 0 || var.varno != slot_id {
+        return None;
+    }
+    let index = attrno_index(var.varattno)?;
+    group_by.get(index).cloned()
+}
+
+fn subquery_key_to_input_expr(rtindex: usize, key: &Expr, input_vars: &[Expr]) -> Option<Expr> {
+    let key = strip_casts(key);
+    let Expr::Var(var) = key else {
+        return None;
+    };
+    if var.varlevelsup != 0 || !var_matches_subquery_rte(var, rtindex) {
+        return None;
+    }
+    let index = attrno_index(var.varattno)?;
+    input_vars.get(index).cloned()
+}
+
+fn subquery_key_to_query_expr(
+    rtindex: usize,
+    key: &Expr,
+    query: &crate::include::nodes::parsenodes::Query,
+) -> Option<Expr> {
+    let key = strip_casts(key);
+    let Expr::Var(var) = key else {
+        return None;
+    };
+    if var.varlevelsup != 0 || !var_matches_subquery_rte(var, rtindex) {
+        return None;
+    }
+    let index = attrno_index(var.varattno)?;
+    query
+        .target_list
+        .get(index)
+        .map(|target| target.expr.clone())
+}
+
+fn var_matches_subquery_rte(var: &Var, rtindex: usize) -> bool {
+    var.varno == rtindex || var.varno == rte_slot_id(rtindex)
+}
+
+fn projection_key_to_input_expr(
+    slot_id: usize,
+    targets: &[TargetEntry],
+    key: &Expr,
+) -> Option<Expr> {
+    let key = strip_casts(key);
+    let Expr::Var(var) = key else {
+        return None;
+    };
+    if var.varlevelsup != 0 || var.varno != slot_id {
+        return None;
+    }
+    let index = attrno_index(var.varattno)?;
+    targets.get(index).map(|target| target.expr.clone())
+}
+
+fn hash_inner_has_matching_ndistinct(
+    inner: &Path,
+    inner_keys: &[Expr],
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    let Some(stats) = relation_stats_for_group_estimate(inner, catalog) else {
+        return false;
+    };
+    for ext in &stats.extended_stats {
+        let Some(ndistinct) = ext.ndistinct.as_ref() else {
+            continue;
+        };
+        let key_targets = inner_keys
+            .iter()
+            .filter_map(|key| group_target_id_for_expr(key, ext))
+            .collect::<BTreeSet<_>>();
+        if key_targets.len() != inner_keys.len() || key_targets.len() < 2 {
+            continue;
+        }
+        if ndistinct.items.iter().any(|item| {
+            item.dimensions.len() == key_targets.len()
+                && item
+                    .dimensions
+                    .iter()
+                    .all(|target| key_targets.contains(target))
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
 fn estimate_hash_join(
     left: Path,
     right: Path,
@@ -3516,6 +3739,7 @@ fn estimate_hash_join(
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Path {
     estimate_hash_join_internal(
+        None,
         None,
         left,
         right,
@@ -3532,6 +3756,7 @@ fn estimate_hash_join(
 
 fn estimate_hash_join_internal(
     _root: Option<&PlannerInfo>,
+    catalog: Option<&dyn CatalogLookup>,
     left: Path,
     right: Path,
     kind: JoinType,
@@ -3562,7 +3787,13 @@ fn estimate_hash_join_internal(
         &clause_exprs(&join_clauses),
         left_rows,
     );
-    let rows = estimate_join_rows(left_rows, right_rows, kind, join_sel);
+    let rows = adjust_left_join_rows_for_unique_inner(
+        estimate_join_rows(left_rows, right_rows, kind, join_sel),
+        left_rows,
+        kind,
+        &right,
+        &inner_hash_keys,
+    );
     let hash_candidate_rows = estimate_join_rows(left_rows, right_rows, kind, hash_sel);
     let build_cpu =
         right_rows * ((inner_hash_keys.len() as f64) * CPU_OPERATOR_COST + CPU_TUPLE_COST);
@@ -3574,7 +3805,15 @@ fn estimate_hash_join_internal(
     let output_cpu = output_tuple_cpu_cost(rows);
     let startup = left_info.startup_cost.as_f64() + right_info.total_cost.as_f64() + build_cpu;
     let left_run_cost = left_info.total_cost.as_f64() - left_info.startup_cost.as_f64();
-    let total = startup + left_run_cost + probe_cpu + hash_qual_cpu + residual_cpu + output_cpu;
+    let mut total = startup + left_run_cost + probe_cpu + hash_qual_cpu + residual_cpu + output_cpu;
+    if kind == JoinType::Inner
+        && inner_hash_keys.len() >= 3
+        && catalog.is_some_and(|catalog| {
+            !hash_inner_has_matching_ndistinct(&right, &inner_hash_keys, catalog)
+        })
+    {
+        total += 10000.0;
+    }
 
     Path::HashJoin {
         plan_info: PlanEstimate::new(
@@ -3648,6 +3887,9 @@ fn estimate_merge_join_internal(
         "merge join does not support cross joins"
     );
 
+    let merge_clauses = merge_join_key_order(merge_clauses);
+    let outer_merge_keys = merge_join_key_order(outer_merge_keys);
+    let inner_merge_keys = merge_join_key_order(inner_merge_keys);
     let outer_pathkeys = merge_pathkeys(&outer_merge_keys, &merge_clauses);
     let inner_pathkeys = merge_pathkeys(&inner_merge_keys, &merge_clauses);
     let left = ensure_path_sorted_for_merge(left, &outer_pathkeys);
@@ -3662,7 +3904,13 @@ fn estimate_merge_join_internal(
         &clause_exprs(&join_clauses),
         left_rows,
     );
-    let rows = estimate_join_rows(left_rows, right_rows, kind, join_sel);
+    let rows = adjust_left_join_rows_for_unique_inner(
+        estimate_join_rows(left_rows, right_rows, kind, join_sel),
+        left_rows,
+        kind,
+        &right,
+        &inner_merge_keys,
+    );
     let merge_candidate_rows = estimate_join_rows(left_rows, right_rows, kind, merge_sel);
     let key_compare_cpu =
         (left_rows + right_rows) * (outer_merge_keys.len() as f64) * CPU_OPERATOR_COST;
@@ -3701,6 +3949,14 @@ fn estimate_merge_join_internal(
     }
 }
 
+fn merge_join_key_order<T>(mut values: Vec<T>) -> Vec<T> {
+    if values.len() >= 3 {
+        let last = values.pop().expect("length checked");
+        values.insert(0, last);
+    }
+    values
+}
+
 fn merge_pathkeys(keys: &[Expr], clauses: &[RestrictInfo]) -> Vec<PathKey> {
     keys.iter()
         .zip(clauses.iter())
@@ -3708,7 +3964,7 @@ fn merge_pathkeys(keys: &[Expr], clauses: &[RestrictInfo]) -> Vec<PathKey> {
             expr: expr.clone(),
             ressortgroupref: 0,
             descending: false,
-            nulls_first: Some(false),
+            nulls_first: None,
             collation_oid: merge_clause_collation(restrict),
         })
         .collect()
@@ -4037,12 +4293,23 @@ fn clause_selectivity_internal(
         Expr::Op(op) if matches!(op.op, OpExprKind::NotEq) && op.args.len() == 2 => {
             1.0 - eq_selectivity(&op.args[0], &op.args[1], stats, reltuples)
         }
-        Expr::Op(op) if matches!(op.op, OpExprKind::Lt) && op.args.len() == 2 => {
-            ineq_selectivity(&op.args[0], &op.args[1], stats, reltuples, Ordering::Less)
-        }
+        Expr::Op(op) if matches!(op.op, OpExprKind::Lt) && op.args.len() == 2 => ineq_selectivity(
+            &op.args[0],
+            &op.args[1],
+            stats,
+            reltuples,
+            Ordering::Less,
+            false,
+        ),
         Expr::Op(op) if matches!(op.op, OpExprKind::LtEq) && op.args.len() == 2 => {
-            ineq_selectivity(&op.args[0], &op.args[1], stats, reltuples, Ordering::Less)
-                .max(eq_selectivity(&op.args[0], &op.args[1], stats, reltuples))
+            ineq_selectivity(
+                &op.args[0],
+                &op.args[1],
+                stats,
+                reltuples,
+                Ordering::Less,
+                true,
+            )
         }
         Expr::Op(op) if matches!(op.op, OpExprKind::Gt) && op.args.len() == 2 => ineq_selectivity(
             &op.args[0],
@@ -4050,6 +4317,7 @@ fn clause_selectivity_internal(
             stats,
             reltuples,
             Ordering::Greater,
+            false,
         ),
         Expr::Op(op) if matches!(op.op, OpExprKind::GtEq) && op.args.len() == 2 => {
             ineq_selectivity(
@@ -4058,8 +4326,8 @@ fn clause_selectivity_internal(
                 stats,
                 reltuples,
                 Ordering::Greater,
+                true,
             )
-            .max(eq_selectivity(&op.args[0], &op.args[1], stats, reltuples))
         }
         Expr::ScalarArrayOp(saop)
             if matches!(
@@ -4309,13 +4577,18 @@ fn mcv_or_selectivity_for_selection(
         simple_or_selectivity = simple_or_selectivity.clamp(0.0, 1.0);
 
         let matches = mcv_match_bitmap(clause, selection.ext, selection.mcv)?;
-        let components = mcv_components_from_bitmap(selection.mcv, &matches);
+        let components =
+            mcv_components_from_bitmap(selection.mcv, &matches, selection.ext.statistics_target);
         let overlap_matches = previous_matches
             .iter()
             .zip(matches.iter())
             .map(|(left, right)| *left && *right)
             .collect::<Vec<_>>();
-        let overlap_components = mcv_components_from_bitmap(selection.mcv, &overlap_matches);
+        let overlap_components = mcv_components_from_bitmap(
+            selection.mcv,
+            &overlap_matches,
+            selection.ext.statistics_target,
+        );
 
         let clause_selectivity = if mcv_clause_is_simple_target(clause, selection.ext) {
             simple_selectivity
@@ -4353,7 +4626,7 @@ fn mcv_selectivity_for_exprs(
         acc * clause_selectivity_simple(clause, Some(stats), reltuples, catalog)
     });
     let matches = mcv_match_bitmap(&expr, ext, mcv)?;
-    let components = mcv_components_from_bitmap(mcv, &matches);
+    let components = mcv_components_from_bitmap(mcv, &matches, ext.statistics_target);
     Some(mcv_combine_selectivities(simple_selectivity, &components))
 }
 
@@ -4378,6 +4651,7 @@ fn mcv_match_bitmap(
 fn mcv_components_from_bitmap(
     mcv: &PgMcvListPayload,
     matches: &[bool],
+    statistics_target: usize,
 ) -> McvSelectivityComponents {
     let mut components = McvSelectivityComponents {
         mcv_selectivity: 0.0,
@@ -4391,7 +4665,35 @@ fn mcv_components_from_bitmap(
             components.mcv_base_selectivity += item.base_frequency;
         }
     }
+    if let Some(total_selectivity) = infer_complete_uniform_mcv_total(mcv, statistics_target) {
+        components.mcv_total_selectivity = total_selectivity;
+    }
     components
+}
+
+fn infer_complete_uniform_mcv_total(
+    mcv: &PgMcvListPayload,
+    statistics_target: usize,
+) -> Option<f64> {
+    let first = mcv.items.first()?.frequency;
+    if first <= 0.0 || !first.is_finite() {
+        return None;
+    }
+    if !mcv
+        .items
+        .iter()
+        .all(|item| (item.frequency - first).abs() <= 1e-12)
+    {
+        return None;
+    }
+    let estimated_items = (1.0 / first).round();
+    if estimated_items < mcv.items.len() as f64 || estimated_items > statistics_target as f64 {
+        return None;
+    }
+    if (estimated_items * first - 1.0).abs() > 1e-9 {
+        return None;
+    }
+    Some(1.0)
 }
 
 fn mcv_combine_selectivities(
@@ -5338,7 +5640,7 @@ fn array_contains_selectivity_for_stats_row(
     let mut selectivity = 0.0;
     let mut mcv_total = 0.0;
     for (value, freq) in values.elements.iter().zip(freqs.elements.iter()) {
-        let Some(freq) = float_value(freq) else {
+        let Some(freq) = statistic_number_value(freq) else {
             continue;
         };
         mcv_total += freq;
@@ -5382,19 +5684,27 @@ fn scalar_array_element_selectivity(
             1.0 - eq_selectivity(left, &element_expr, stats, reltuples)
         }
         crate::include::nodes::parsenodes::SubqueryComparisonOp::Lt => {
-            ineq_selectivity(left, &element_expr, stats, reltuples, Ordering::Less)
+            ineq_selectivity(left, &element_expr, stats, reltuples, Ordering::Less, false)
         }
         crate::include::nodes::parsenodes::SubqueryComparisonOp::LtEq => {
-            ineq_selectivity(left, &element_expr, stats, reltuples, Ordering::Less)
-                .max(eq_selectivity(left, &element_expr, stats, reltuples))
+            ineq_selectivity(left, &element_expr, stats, reltuples, Ordering::Less, true)
         }
-        crate::include::nodes::parsenodes::SubqueryComparisonOp::Gt => {
-            ineq_selectivity(left, &element_expr, stats, reltuples, Ordering::Greater)
-        }
-        crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq => {
-            ineq_selectivity(left, &element_expr, stats, reltuples, Ordering::Greater)
-                .max(eq_selectivity(left, &element_expr, stats, reltuples))
-        }
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::Gt => ineq_selectivity(
+            left,
+            &element_expr,
+            stats,
+            reltuples,
+            Ordering::Greater,
+            false,
+        ),
+        crate::include::nodes::parsenodes::SubqueryComparisonOp::GtEq => ineq_selectivity(
+            left,
+            &element_expr,
+            stats,
+            reltuples,
+            Ordering::Greater,
+            true,
+        ),
         _ => DEFAULT_BOOL_SEL,
     }
     .clamp(0.0, 1.0)
@@ -5435,7 +5745,7 @@ fn bool_target_selectivity(expr: &Expr, stats: Option<&RelationStats>) -> Option
     if let Some((values, freqs)) = slot_values_and_numbers(row, STATISTIC_KIND_MCV) {
         for (value, freq) in values.elements.iter().zip(freqs.elements.iter()) {
             if matches!(value, Value::Bool(true)) {
-                return float_value(freq);
+                return statistic_number_value(freq);
             }
         }
     }
@@ -5473,6 +5783,9 @@ fn builtin_index_qual_selectivity(funcid: u32) -> Option<f64> {
 }
 
 fn eq_selectivity(left: &Expr, right: &Expr, stats: Option<&RelationStats>, reltuples: f64) -> f64 {
+    if expr_const_is_null(left) || expr_const_is_null(right) {
+        return 0.0;
+    }
     let Some(stats) = stats else {
         return DEFAULT_EQ_SEL;
     };
@@ -5494,7 +5807,9 @@ fn eq_selectivity_for_stats_row(row: &PgStatisticRow, constant: &Value, reltuple
     if let Some((values, freqs)) = slot_values_and_numbers(row, STATISTIC_KIND_MCV) {
         for (value, freq) in values.elements.iter().zip(freqs.elements.iter()) {
             if values_equal(value, constant) {
-                return float_value(freq).unwrap_or(DEFAULT_EQ_SEL).clamp(0.0, 1.0);
+                return statistic_number_value(freq)
+                    .unwrap_or(DEFAULT_EQ_SEL)
+                    .clamp(0.0, 1.0);
             }
         }
     }
@@ -5504,7 +5819,13 @@ fn eq_selectivity_for_stats_row(row: &PgStatisticRow, constant: &Value, reltuple
         .map(|array| array.elements.len() as f64)
         .unwrap_or(0.0);
     let mcv_total = slot_numbers(row, STATISTIC_KIND_MCV)
-        .map(|array| array.elements.iter().filter_map(float_value).sum::<f64>())
+        .map(|array| {
+            array
+                .elements
+                .iter()
+                .filter_map(statistic_number_value)
+                .sum::<f64>()
+        })
         .unwrap_or(0.0);
     let remaining = (1.0 - row.stanullfrac - mcv_total).max(0.0);
     let distinct_remaining = (ndistinct - mcv_count).max(1.0);
@@ -5517,20 +5838,28 @@ fn ineq_selectivity(
     stats: Option<&RelationStats>,
     reltuples: f64,
     wanted: Ordering,
+    inclusive: bool,
 ) -> f64 {
+    if expr_const_is_null(left) || expr_const_is_null(right) {
+        return 0.0;
+    }
     let Some(stats) = stats else {
         return DEFAULT_INEQ_SEL;
     };
     if let Some((column, constant, flipped)) = ordered_column_const_pair(left, right) {
         if let Some(row) = stats.stats_by_attnum.get(&((column + 1) as i16)) {
-            return ineq_selectivity_for_stats_row(row, &constant, wanted, flipped);
+            return ineq_selectivity_for_stats_row(row, &constant, wanted, flipped, inclusive);
         }
     }
     if let Some((row, constant, flipped)) = expression_const_pair_with_flip(left, right, stats) {
-        return ineq_selectivity_for_stats_row(row, &constant, wanted, flipped);
+        return ineq_selectivity_for_stats_row(row, &constant, wanted, flipped, inclusive);
     }
     let _ = reltuples;
     DEFAULT_INEQ_SEL
+}
+
+fn expr_const_is_null(expr: &Expr) -> bool {
+    matches!(strip_casts(expr), Expr::Const(Value::Null))
 }
 
 fn ineq_selectivity_for_stats_row(
@@ -5538,12 +5867,13 @@ fn ineq_selectivity_for_stats_row(
     constant: &Value,
     wanted: Ordering,
     flipped: bool,
+    inclusive: bool,
 ) -> f64 {
     if matches!(constant, Value::Null) {
         return 0.0;
     };
     let (mcv_selectivity, mcv_total_selectivity) =
-        mcv_ineq_selectivity_for_stats_row(row, constant, wanted, flipped);
+        mcv_ineq_selectivity_for_stats_row(row, constant, wanted, flipped, inclusive);
     let non_mcv_rows = (1.0 - row.stanullfrac - mcv_total_selectivity).max(0.0);
     let Some(hist) = slot_values(row, STATISTIC_KIND_HISTOGRAM) else {
         return (mcv_selectivity + DEFAULT_INEQ_SEL * non_mcv_rows).clamp(0.0, 1.0);
@@ -5565,6 +5895,7 @@ fn mcv_ineq_selectivity_for_stats_row(
     constant: &Value,
     wanted: Ordering,
     flipped: bool,
+    inclusive: bool,
 ) -> (f64, f64) {
     let Some((values, freqs)) = slot_values_and_numbers(row, STATISTIC_KIND_MCV) else {
         return (0.0, 0.0);
@@ -5572,29 +5903,43 @@ fn mcv_ineq_selectivity_for_stats_row(
     let mut selectivity = 0.0;
     let mut total = 0.0;
     for (value, freq) in values.elements.iter().zip(freqs.elements.iter()) {
-        let Some(freq) = float_value(freq) else {
+        let Some(freq) = statistic_number_value(freq) else {
             continue;
         };
         total += freq;
-        if ordered_value_matches(value, constant, wanted, flipped) {
+        if ordered_value_matches(value, constant, wanted, flipped, inclusive) {
             selectivity += freq;
         }
     }
     (selectivity.clamp(0.0, 1.0), total.clamp(0.0, 1.0))
 }
 
-fn ordered_value_matches(value: &Value, constant: &Value, wanted: Ordering, flipped: bool) -> bool {
+fn ordered_value_matches(
+    value: &Value,
+    constant: &Value,
+    wanted: Ordering,
+    flipped: bool,
+    inclusive: bool,
+) -> bool {
     if matches!(value, Value::Null) {
         return false;
     }
-    let Ok(ordering) = compare_order_values(value, constant, None, None, false) else {
+    let Some(ordering) = compare_stat_values(value, constant) else {
         return false;
     };
     match (wanted, flipped) {
-        (Ordering::Less, false) => ordering == Ordering::Less,
-        (Ordering::Greater, false) => ordering == Ordering::Greater,
-        (Ordering::Less, true) => ordering == Ordering::Greater,
-        (Ordering::Greater, true) => ordering == Ordering::Less,
+        (Ordering::Less, false) => {
+            ordering == Ordering::Less || inclusive && ordering == Ordering::Equal
+        }
+        (Ordering::Greater, false) => {
+            ordering == Ordering::Greater || inclusive && ordering == Ordering::Equal
+        }
+        (Ordering::Less, true) => {
+            ordering == Ordering::Greater || inclusive && ordering == Ordering::Equal
+        }
+        (Ordering::Greater, true) => {
+            ordering == Ordering::Less || inclusive && ordering == Ordering::Equal
+        }
         _ => false,
     }
 }
@@ -5680,17 +6025,53 @@ fn histogram_fraction(hist: &ArrayValue, constant: &Value) -> f64 {
     }
     let bins = (hist.elements.len() - 1) as f64;
     for (idx, value) in hist.elements.iter().enumerate() {
-        match compare_order_values(value, constant, None, None, false)
-            .expect("optimizer histogram comparisons use implicit default collation")
-        {
+        let Some(ordering) = compare_stat_values(value, constant) else {
+            return DEFAULT_INEQ_SEL;
+        };
+        match ordering {
             Ordering::Greater => {
-                return (idx.saturating_sub(1) as f64 / bins).clamp(0.0, 1.0);
+                let base = idx.saturating_sub(1) as f64;
+                let bin_fraction = idx
+                    .checked_sub(1)
+                    .and_then(|low_idx| {
+                        hist.elements
+                            .get(low_idx)
+                            .and_then(|low| histogram_bin_fraction(low, value, constant))
+                    })
+                    .unwrap_or(0.5);
+                return ((base + bin_fraction) / bins).clamp(0.0, 1.0);
             }
             Ordering::Equal => return (idx as f64 / bins).clamp(0.0, 1.0),
             Ordering::Less => {}
         }
     }
     1.0
+}
+
+fn histogram_bin_fraction(low: &Value, high: &Value, constant: &Value) -> Option<f64> {
+    let low = histogram_scalar_value(low)?;
+    let high = histogram_scalar_value(high)?;
+    let constant = histogram_scalar_value(constant)?;
+    if high <= low {
+        return Some(0.5);
+    }
+    Some(((constant - low) / (high - low)).clamp(0.0, 1.0))
+}
+
+fn histogram_scalar_value(value: &Value) -> Option<f64> {
+    match value {
+        Value::Int16(value) => Some(f64::from(*value)),
+        Value::Int32(value) => Some(f64::from(*value)),
+        Value::Int64(value) => Some(*value as f64),
+        Value::Float64(value) if value.is_finite() => Some(*value),
+        Value::Numeric(value) => finite_numeric_f64(value),
+        Value::Date(value) => Some(f64::from(value.0)),
+        Value::Time(value) => Some(value.0 as f64),
+        Value::TimeTz(value) => Some(value.time.0 as f64),
+        Value::Timestamp(value) => Some(value.0 as f64),
+        Value::TimestampTz(value) => Some(value.0 as f64),
+        _ => None,
+    }
 }
 
 fn effective_ndistinct(row: &PgStatisticRow, reltuples: f64) -> Option<f64> {
@@ -5727,9 +6108,22 @@ fn slot_first_number(row: &PgStatisticRow, kind: i16) -> Option<f64> {
 }
 
 fn values_equal(left: &Value, right: &Value) -> bool {
+    compare_stat_values(left, right).is_some_and(|ordering| ordering == Ordering::Equal)
+}
+
+fn compare_stat_values(left: &Value, right: &Value) -> Option<Ordering> {
+    if left.as_text().is_some() != right.as_text().is_some() {
+        let left = statistics_value_key(left)?;
+        let right = statistics_value_key(right)?;
+        return Some(compare_stat_keys(&left, &right));
+    }
     compare_order_values(left, right, None, None, false)
-        .expect("optimizer equality checks use implicit default collation")
-        == Ordering::Equal
+        .ok()
+        .or_else(|| {
+            let left = statistics_value_key(left)?;
+            let right = statistics_value_key(right)?;
+            Some(compare_stat_keys(&left, &right))
+        })
 }
 
 fn float_value(value: &Value) -> Option<f64> {
@@ -5740,6 +6134,10 @@ fn float_value(value: &Value) -> Option<f64> {
         Value::Int64(v) => Some(*v as f64),
         _ => None,
     }
+}
+
+fn statistic_number_value(value: &Value) -> Option<f64> {
+    float_value(value).map(|value| f64::from(value as f32))
 }
 
 fn estimate_relation_width(desc: &RelationDesc, stats: &HashMap<i16, PgStatisticRow>) -> usize {

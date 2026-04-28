@@ -1467,10 +1467,12 @@ pub trait CatalogLookup {
         build_pg_stats_ext_rows(
             self.namespace_rows(),
             self.authid_rows(),
+            self.auth_members_rows(),
             self.class_rows(),
             self.attribute_rows(),
             self.statistic_ext_rows(),
             self.statistic_ext_data_rows(),
+            self.current_user_oid(),
         )
     }
 
@@ -1478,9 +1480,11 @@ pub trait CatalogLookup {
         build_pg_stats_ext_exprs_rows(
             self.namespace_rows(),
             self.authid_rows(),
+            self.auth_members_rows(),
             self.class_rows(),
             self.statistic_ext_rows(),
             self.statistic_ext_data_rows(),
+            self.current_user_oid(),
         )
     }
 

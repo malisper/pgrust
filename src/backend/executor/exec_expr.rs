@@ -6874,18 +6874,36 @@ fn eval_bool_expr(
 ) -> Result<Value, ExecError> {
     match bool_expr.boolop {
         BoolExprType::And => {
-            let mut result = Value::Bool(true);
+            let mut saw_null = false;
             for arg in &bool_expr.args {
-                result = eval_and(result, eval_expr(arg, slot, ctx)?)?;
+                match eval_expr(arg, slot, ctx)? {
+                    Value::Bool(false) => return Ok(Value::Bool(false)),
+                    Value::Bool(true) => {}
+                    Value::Null => saw_null = true,
+                    other => return Err(ExecError::NonBoolQual(other)),
+                }
             }
-            Ok(result)
+            Ok(if saw_null {
+                Value::Null
+            } else {
+                Value::Bool(true)
+            })
         }
         BoolExprType::Or => {
-            let mut result = Value::Bool(false);
+            let mut saw_null = false;
             for arg in &bool_expr.args {
-                result = eval_or(result, eval_expr(arg, slot, ctx)?)?;
+                match eval_expr(arg, slot, ctx)? {
+                    Value::Bool(true) => return Ok(Value::Bool(true)),
+                    Value::Bool(false) => {}
+                    Value::Null => saw_null = true,
+                    other => return Err(ExecError::NonBoolQual(other)),
+                }
             }
-            Ok(result)
+            Ok(if saw_null {
+                Value::Null
+            } else {
+                Value::Bool(false)
+            })
         }
         BoolExprType::Not => match bool_expr.args.as_slice() {
             [inner] => match eval_expr(inner, slot, ctx)? {

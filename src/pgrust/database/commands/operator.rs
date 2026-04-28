@@ -38,9 +38,18 @@ fn normalize_operator_namespace(
             }),
         None => {
             let search_path = db.effective_search_path(client_id, configured_search_path);
+            let temp_namespace_name = db
+                .owned_temp_namespace(client_id)
+                .map(|namespace| namespace.name);
             for schema in search_path {
+                let is_temp_schema = schema == "pg_temp"
+                    || schema.starts_with("pg_temp_")
+                    || temp_namespace_name
+                        .as_deref()
+                        .is_some_and(|temp| temp.eq_ignore_ascii_case(&schema));
                 match schema.as_str() {
-                    "" | "$user" | "pg_temp" | "pg_catalog" => continue,
+                    "" | "$user" | "pg_catalog" => continue,
+                    _ if is_temp_schema => continue,
                     "public" => return Ok(PUBLIC_NAMESPACE_OID),
                     _ => {
                         if let Some(namespace_oid) =

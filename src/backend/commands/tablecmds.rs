@@ -5949,11 +5949,13 @@ fn relation_permission_denied_for_requirement(
     } else {
         "table"
     };
+    let relation_name = requirement
+        .relation_name
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(&requirement.relation_name);
     ExecError::DetailedError {
-        message: format!(
-            "permission denied for {relation_kind} {}",
-            requirement.relation_name
-        ),
+        message: format!("permission denied for {relation_kind} {relation_name}"),
         detail: None,
         hint: None,
         sqlstate: "42501",

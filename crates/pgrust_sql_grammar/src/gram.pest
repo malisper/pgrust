@@ -512,8 +512,9 @@ expr = { or_expr }
 or_expr = { and_expr ~ (kw_or ~ and_expr)* }
 and_expr = { not_expr ~ (kw_and ~ not_expr)* }
 not_expr = { kw_not ~ not_expr | cmp_expr }
-cmp_expr = { json_access_expr ~ (is_normalized_suffix | json_predicate_suffix | is_document_suffix | null_predicate_suffix | overlaps_suffix | between_suffix | in_subquery_suffix | in_expr_list_suffix | quantified_suffix | quantified_like_suffix | quantified_similar_suffix | like_suffix | similar_suffix | comp_op ~ cmp_expr)? }
+cmp_expr = { json_access_expr ~ (is_normalized_suffix | json_predicate_suffix | is_document_suffix | null_predicate_suffix | overlaps_suffix | between_suffix | in_subquery_suffix | in_expr_list_suffix | quantified_suffix | quantified_like_suffix | quantified_similar_suffix | like_suffix | similar_suffix | comparison_suffix)? }
 b_expr = { json_access_expr ~ (is_document_suffix | is_not_distinct_suffix | is_distinct_suffix | comp_op ~ json_access_expr)? }
+comparison_suffix = { comp_op ~ json_access_expr ~ null_predicate_suffix? }
 json_access_expr = { concat_expr ~ (json_access_op ~ concat_expr)* }
 concat_expr = { add_expr ~ (concat_op ~ add_expr)* }
 add_expr = { bit_expr ~ (add_op ~ bit_expr)* }
@@ -529,7 +530,7 @@ amp_bit_op = @{ "&" ~ !("&" | "<" | ">") }
 pipe_bit_op = @{ "|" ~ !("|" | "&" | ">" | "/") }
 hash_bit_op = @{ "#" ~ !("#" | ">") }
 shift_op = { left_shift_op | right_shift_op }
-left_shift_op = @{ "<<" ~ !("|" | "=") }
+left_shift_op = @{ "<<" ~ !("|" | "=" | "<") }
 right_shift_op = @{ ">>" ~ !"=" }
 mul_op = { "*" | "/" | "%" }
 pow_op = { "^" ~ !"@" }
@@ -562,7 +563,7 @@ similar_suffix = { kw_not? ~ kw_similar ~ kw_to ~ concat_expr ~ escape_clause? }
 escape_clause = { kw_escape ~ concat_expr }
 is_document_suffix = { kw_is ~ kw_not? ~ kw_document }
 json_access_op = { "#>>" | "#>" | "->>" | "->" }
-comp_op = { "<->" | "##" | "?#" | "?||" | "?-|" | "~=" | "~<=~" | "~>=~" | "~<~" | "~>~" | "^@" | "&<|" | "|&>" | "<<|" | "|>>" | "<<=" | ">>=" | "&<" | "&>" | "<^" | ">^" | "<%" | "?-" | "-|-" | "@>" | "<@" | "@?" | "@@" | "?|" | "?&" | "?" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "!~" | "~" }
+comp_op = { "<->" | "<<<" | "##" | "?#" | "?||" | "?-|" | "~=" | "~<=~" | "~>=~" | "~<~" | "~>~" | "^@" | "&<|" | "|&>" | "<<|" | "|>>" | "<<=" | ">>=" | "&<" | "&>" | "<^" | ">^" | "<%" | "?-" | "-|-" | "@>" | "<@" | "@?" | "@@" | "?|" | "?&" | "?" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "!~" | "~" }
 unary_expr = { positive_expr | negated_expr | primary_expr }
 postfix_expr = { unary_expr ~ (cast_suffix | subscript_suffix | field_select_suffix | collate_suffix | at_time_zone_suffix | at_local_suffix)* }
 cast_suffix = { "::" ~ cast_type_name }
@@ -735,7 +736,7 @@ dollar_quote_start = ${ "$" ~ PUSH(identifier?) ~ "$" }
 dollar_quote_end = ${ "$" ~ POP ~ "$" }
 dollar_string_body = { (!( "$" ~ PEEK ~ "$") ~ ANY)* }
 star = { "*" }
-qualified_star = { simple_identifier ~ "." ~ star }
+qualified_star = { simple_identifier ~ ("." ~ simple_identifier)* ~ "." ~ star }
 
 kw_select = _{ kw_select_atom }
 kw_do = _{ kw_do_atom }

@@ -342,6 +342,7 @@ pub const INT4_UMINUS_PROC_OID: u32 = 212;
 pub const INFORMATION_SCHEMA_EXPANDARRAY_PROC_OID: u32 = 78220;
 pub const INFORMATION_SCHEMA_INDEX_POSITION_PROC_OID: u32 = 78221;
 pub const EQSEL_PROC_OID: u32 = 101;
+pub const SCALARLTSEL_PROC_OID: u32 = 102;
 pub const EQJOINSEL_PROC_OID: u32 = 105;
 pub const AGG_TRANSITION_PROC_OID_BASE: u32 = 880_000;
 
@@ -10646,6 +10647,23 @@ fn selectivity_estimator_proc_rows() -> Vec<PgProcRow> {
                 INT4_TYPE_OID,
             ]),
             "eqsel",
+            4,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            SCALARLTSEL_PROC_OID,
+            "scalarltsel",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                OID_TYPE_OID,
+                INTERNAL_TYPE_OID,
+                INT4_TYPE_OID,
+            ]),
+            "scalarltsel",
             4,
             false,
             false,
