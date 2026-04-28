@@ -4217,6 +4217,7 @@ fn handle_portal_statement(
                             None,
                             None,
                             Some(&enum_labels),
+                            None,
                         )?;
                     }
                 }
@@ -4344,6 +4345,7 @@ fn try_handle_pg_cursors_query(
         None,
         None,
         None,
+        None,
     )?;
     Ok(true)
 }
@@ -4419,6 +4421,7 @@ fn try_handle_pg_prepared_statements_query(
         None,
         None,
         None,
+        None,
     )?;
     Ok(true)
 }
@@ -4471,6 +4474,7 @@ fn try_handle_pg_listening_channels_query(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
+        None,
         None,
         None,
         None,
@@ -4543,6 +4547,7 @@ fn try_handle_current_schemas_query(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
+        None,
         None,
         None,
         None,
@@ -4770,6 +4775,7 @@ fn execute_query_statement(
             let role_names = role_name_map(&catalog);
             let relation_names = relation_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
+            let proc_signatures = proc_signature_map(&catalog);
             let namespace_names = namespace_name_map(&catalog);
             let enum_labels = enum_label_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
@@ -4791,6 +4797,7 @@ fn execute_query_statement(
                 Some(&proc_names),
                 Some(&namespace_names),
                 Some(&enum_labels),
+                Some(&proc_signatures),
             )?;
             Ok(QueryStatementFlow::Continue)
         }
@@ -4873,6 +4880,7 @@ fn try_handle_nonstandard_backslash_select(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
+        None,
         None,
         None,
         None,
@@ -5019,6 +5027,7 @@ fn execute_streaming_select_statement(
             let role_names = role_name_map(&catalog);
             let relation_names = relation_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
+            let proc_signatures = proc_signature_map(&catalog);
             let namespace_names = namespace_name_map(&catalog);
             let enum_labels = enum_label_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
@@ -5052,6 +5061,7 @@ fn execute_streaming_select_statement(
                                     Some(&proc_names),
                                     Some(&namespace_names),
                                     Some(&enum_labels),
+                                    Some(&proc_signatures),
                                 )?;
                                 row_count += 1;
                             }
@@ -5243,6 +5253,19 @@ fn proc_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
         .collect()
 }
 
+fn proc_signature_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
+    catalog
+        .proc_rows()
+        .into_iter()
+        .map(|row| {
+            (
+                row.oid,
+                crate::backend::executor::expr_reg::function_signature_text(&row, catalog),
+            )
+        })
+        .collect()
+}
+
 fn relation_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
     catalog
         .class_rows()
@@ -5280,6 +5303,7 @@ fn try_handle_psql_describe_query(
     let role_names = role_name_map(&catalog);
     let relation_names = relation_name_map(&catalog);
     let proc_names = proc_name_map(&catalog);
+    let proc_signatures = proc_signature_map(&catalog);
     let namespace_names = namespace_name_map(&catalog);
     let enum_labels = enum_label_map(&catalog);
     send_query_result(
@@ -5297,6 +5321,7 @@ fn try_handle_psql_describe_query(
         Some(&proc_names),
         Some(&namespace_names),
         Some(&enum_labels),
+        Some(&proc_signatures),
     )?;
     Ok(true)
 }
@@ -6251,6 +6276,7 @@ fn try_handle_statistics_catalog_query(
     let role_names = role_name_map(&catalog);
     let relation_names = relation_name_map(&catalog);
     let proc_names = proc_name_map(&catalog);
+    let proc_signatures = proc_signature_map(&catalog);
     let namespace_names = namespace_name_map(&catalog);
     let enum_labels = enum_label_map(&catalog);
     send_query_result(
@@ -6268,6 +6294,7 @@ fn try_handle_statistics_catalog_query(
         Some(&proc_names),
         Some(&namespace_names),
         Some(&enum_labels),
+        Some(&proc_signatures),
     )?;
     Ok(true)
 }
@@ -9344,6 +9371,7 @@ fn handle_execute(
                 let role_names = role_name_map(&catalog);
                 let relation_names = relation_name_map(&catalog);
                 let proc_names = proc_name_map(&catalog);
+                let proc_signatures = proc_signature_map(&catalog);
                 let namespace_names = namespace_name_map(&catalog);
                 let enum_labels = enum_label_map(&catalog);
                 let mut row_buf = Vec::new();
@@ -9364,6 +9392,7 @@ fn handle_execute(
                         Some(&proc_names),
                         Some(&namespace_names),
                         Some(&enum_labels),
+                        Some(&proc_signatures),
                     )?;
                 }
                 if result.completed {

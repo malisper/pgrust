@@ -403,6 +403,7 @@ pub(crate) fn send_query_result(
     proc_names: Option<&HashMap<u32, String>>,
     namespace_names: Option<&HashMap<u32, String>>,
     enum_labels: Option<&HashMap<(u32, u32), String>>,
+    proc_signatures: Option<&HashMap<u32, String>>,
 ) -> io::Result<()> {
     send_row_description(stream, columns)?;
     let mut row_buf = Vec::new();
@@ -419,6 +420,7 @@ pub(crate) fn send_query_result(
             proc_names,
             namespace_names,
             enum_labels,
+            proc_signatures,
         )?;
     }
     send_command_complete(stream, tag)
@@ -851,6 +853,7 @@ fn format_typed_oid_text(
     role_names: Option<&HashMap<u32, String>>,
     relation_names: Option<&HashMap<u32, String>>,
     proc_names: Option<&HashMap<u32, String>>,
+    proc_signatures: Option<&HashMap<u32, String>>,
     namespace_names: Option<&HashMap<u32, String>>,
 ) -> Option<String> {
     match kind? {
@@ -862,7 +865,11 @@ fn format_typed_oid_text(
                 .unwrap_or_else(|| format_proc_oid_text(oid, proc_names, true)),
         ),
         SqlTypeKind::RegProcedure => Some(
-            crate::backend::executor::expr_reg::format_regprocedure_oid_optional(oid, None)
+            proc_signatures
+                .and_then(|names| names.get(&oid).cloned())
+                .or_else(|| {
+                    crate::backend::executor::expr_reg::format_regprocedure_oid_optional(oid, None)
+                })
                 .or_else(|| format_proc_oid_text_optional(oid, proc_names))
                 .unwrap_or_else(|| format_catalog_oid_text(oid, None, true)),
         ),
@@ -920,6 +927,7 @@ pub(crate) fn send_typed_data_row(
     proc_names: Option<&HashMap<u32, String>>,
     namespace_names: Option<&HashMap<u32, String>>,
     enum_labels: Option<&HashMap<(u32, u32), String>>,
+    proc_signatures: Option<&HashMap<u32, String>>,
 ) -> io::Result<()> {
     buf.clear();
     buf.extend_from_slice(&(values.len() as i16).to_be_bytes());
@@ -965,6 +973,7 @@ pub(crate) fn send_typed_data_row(
                         role_names,
                         relation_names,
                         proc_names,
+                        proc_signatures,
                         namespace_names,
                     )
                 {
@@ -1040,6 +1049,7 @@ pub(crate) fn send_typed_data_row(
                         role_names,
                         relation_names,
                         proc_names,
+                        proc_signatures,
                         namespace_names,
                     )
                 {
@@ -1385,6 +1395,7 @@ pub(crate) fn format_text_data_value(
         relation_names,
         proc_names,
         namespace_names,
+        None,
         None,
     )
     .map_err(|err| ExecError::DetailedError {
@@ -2659,6 +2670,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -2673,7 +2685,9 @@ mod tests {
         let mut out = Vec::new();
         let mut row_buf = Vec::new();
         let mut proc_names = HashMap::new();
+        let mut proc_signatures = HashMap::new();
         proc_names.insert(6403, "pg_rust_test_fdw_handler".to_string());
+        proc_signatures.insert(6403, "pg_rust_test_fdw_handler(internal)".to_string());
 
         send_typed_data_row(
             &mut out,
@@ -2691,12 +2705,13 @@ mod tests {
             Some(&proc_names),
             None,
             None,
+            Some(&proc_signatures),
         )
         .unwrap();
 
         assert!(
-            out.windows("pg_rust_test_fdw_handler".len())
-                .any(|window| window == b"pg_rust_test_fdw_handler")
+            out.windows("pg_rust_test_fdw_handler(internal)".len())
+                .any(|window| window == b"pg_rust_test_fdw_handler(internal)")
         );
     }
 
@@ -2716,6 +2731,7 @@ mod tests {
             &[],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
             None,
             None,
             None,
@@ -2747,6 +2763,7 @@ mod tests {
             FloatFormatOptions::default(),
             None,
             Some(&relation_names),
+            None,
             None,
             None,
             None,
@@ -2782,6 +2799,7 @@ mod tests {
             None,
             Some(&namespace_names),
             None,
+            None,
         )
         .unwrap();
 
@@ -2810,6 +2828,7 @@ mod tests {
             &[],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
             None,
             None,
             None,
@@ -2847,6 +2866,7 @@ mod tests {
             None,
             None,
             Some(&enum_labels),
+            None,
         )
         .unwrap();
 
@@ -2903,6 +2923,7 @@ mod tests {
             &[1, 1],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
             None,
             None,
             None,
