@@ -1425,6 +1425,22 @@ fn match_proc_arg_type(
             .then_some((2, actual_type));
     }
     let declared_type = catalog.type_by_oid(declared_oid)?.sql_type;
+    if is_reg_oid_alias_type(declared_type)
+        && matches!(
+            actual_type.kind,
+            SqlTypeKind::Oid
+                | SqlTypeKind::Int4
+                | SqlTypeKind::Int8
+                | SqlTypeKind::RegClass
+                | SqlTypeKind::RegType
+                | SqlTypeKind::RegProc
+                | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegOper
+                | SqlTypeKind::RegOperator
+        )
+    {
+        return Some((1, declared_type));
+    }
     if declared_oid == CSTRING_TYPE_OID && is_text_like_type(actual_type) {
         return Some((3, declared_type));
     }
@@ -1488,6 +1504,19 @@ fn inherited_composite_arg_can_coerce_to(
         }
     }
     false
+}
+
+fn is_reg_oid_alias_type(ty: SqlType) -> bool {
+    !ty.is_array
+        && matches!(
+            ty.kind,
+            SqlTypeKind::RegClass
+                | SqlTypeKind::RegType
+                | SqlTypeKind::RegProc
+                | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegOper
+                | SqlTypeKind::RegOperator
+        )
 }
 
 fn resolve_proc_result_type(

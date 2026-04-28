@@ -3706,6 +3706,9 @@ fn rewrite_variadic_bound_args(
     if !func_variadic {
         return Ok(bound_args);
     }
+    if vatype_oid == 0 {
+        return Ok(bound_args);
+    }
     if vatype_oid == ANYOID {
         return Ok(bound_args);
     }
