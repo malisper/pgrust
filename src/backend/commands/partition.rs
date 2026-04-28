@@ -177,13 +177,17 @@ pub(crate) struct PartitionTreeEntry {
     pub level: i32,
 }
 
+fn relkind_has_partitions(relkind: char) -> bool {
+    matches!(relkind, 'p' | 'I')
+}
+
 fn relation_can_participate_in_partition_tree(
     catalog: &dyn CatalogLookup,
     relation_oid: u32,
 ) -> bool {
     catalog
         .relation_by_oid(relation_oid)
-        .is_some_and(|relation| relation.relispartition || relation.partitioned_table.is_some())
+        .is_some_and(|relation| relation.relispartition || relkind_has_partitions(relation.relkind))
 }
 
 fn declarative_parent(
@@ -197,7 +201,7 @@ fn declarative_parent(
         .find_map(|row| {
             catalog
                 .relation_by_oid(row.inhparent)
-                .filter(|parent| parent.partitioned_table.is_some())
+                .filter(|parent| relkind_has_partitions(parent.relkind))
                 .map(|parent| parent.relation_oid)
         });
     parent_oid
@@ -267,10 +271,10 @@ pub(crate) fn partition_tree_entries(
         entries.push(PartitionTreeEntry {
             relid: relation_oid,
             parentrelid: partition_parent_oid(catalog, relation_oid)?,
-            isleaf: relation.partitioned_table.is_none(),
+            isleaf: !relkind_has_partitions(relation.relkind),
             level,
         });
-        if relation.partitioned_table.is_none() {
+        if !relkind_has_partitions(relation.relkind) {
             continue;
         }
         for child in direct_partition_children(catalog, relation_oid)? {
