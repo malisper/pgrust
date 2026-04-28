@@ -3070,6 +3070,14 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::AlterDomain(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_alter_domain_stmt_with_search_path(
+                    self.client_id,
+                    alter_stmt,
+                    search_path.as_deref(),
+                )
+            }
             Statement::CreateConversion(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_create_conversion_stmt_with_search_path(
@@ -5743,6 +5751,14 @@ impl Session {
                 db.execute_create_domain_stmt_with_search_path(
                     client_id,
                     create_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::AlterDomain(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_alter_domain_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
                     search_path.as_deref(),
                 )
             }

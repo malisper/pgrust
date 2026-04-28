@@ -915,7 +915,7 @@ fn function_arguments_text(
             .enumerate()
             .map(|(index, type_oid)| {
                 let mode = modes.get(index).copied().unwrap_or(b'i');
-                let default = if matches!(mode, b'i' | b'b') {
+                let default = if matches!(mode, b'i' | b'b' | b'v') {
                     let default = defaults.get(input_index).and_then(|value| value.as_deref());
                     input_index += 1;
                     default
@@ -7334,6 +7334,15 @@ fn eval_plpgsql_builtin_function(
         }
         BuiltinScalarFunction::PgGetPartKeyDef
         | BuiltinScalarFunction::PgTableIsVisible
+        | BuiltinScalarFunction::PgTypeIsVisible
+        | BuiltinScalarFunction::PgOperatorIsVisible
+        | BuiltinScalarFunction::PgOpclassIsVisible
+        | BuiltinScalarFunction::PgOpfamilyIsVisible
+        | BuiltinScalarFunction::PgConversionIsVisible
+        | BuiltinScalarFunction::PgTsParserIsVisible
+        | BuiltinScalarFunction::PgTsDictIsVisible
+        | BuiltinScalarFunction::PgTsTemplateIsVisible
+        | BuiltinScalarFunction::PgTsConfigIsVisible
         | BuiltinScalarFunction::PgTableSize
         | BuiltinScalarFunction::PgTablespaceLocation => Err(ExecError::DetailedError {
             message: "catalog helper requires executor context".into(),

@@ -499,6 +499,26 @@ fn visible_domain_by_name(
         default: domain.default.clone(),
         check: domain.check.clone(),
         not_null: domain.not_null,
+        constraints: domain
+            .constraints
+            .iter()
+            .map(
+                |constraint| crate::backend::parser::DomainConstraintLookup {
+                    name: constraint.name.clone(),
+                    kind: match constraint.kind {
+                        crate::pgrust::database::DomainConstraintKind::Check => {
+                            crate::backend::parser::DomainConstraintLookupKind::Check
+                        }
+                        crate::pgrust::database::DomainConstraintKind::NotNull => {
+                            crate::backend::parser::DomainConstraintLookupKind::NotNull
+                        }
+                    },
+                    expr: constraint.expr.clone(),
+                    validated: constraint.validated,
+                    enforced: constraint.enforced,
+                },
+            )
+            .collect(),
     })
 }
 
@@ -1805,7 +1825,12 @@ impl CatalogLookup for LazyCatalogLookup {
     }
 
     fn constraint_row_by_oid(&self, oid: u32) -> Option<PgConstraintRow> {
-        constraint_row_by_oid(&self.db, self.client_id, self.txn_ctx, oid)
+        constraint_row_by_oid(&self.db, self.client_id, self.txn_ctx, oid).or_else(|| {
+            self.db
+                .domain_constraint_rows_for_catalog()
+                .into_iter()
+                .find(|row| row.oid == oid)
+        })
     }
 
     fn constraint_rows_for_index(&self, index_oid: u32) -> Vec<PgConstraintRow> {
@@ -1837,7 +1862,10 @@ impl CatalogLookup for LazyCatalogLookup {
     }
 
     fn constraint_rows(&self) -> Vec<PgConstraintRow> {
-        ensure_constraint_rows(&self.db, self.client_id, self.txn_ctx)
+        let mut rows = ensure_constraint_rows(&self.db, self.client_id, self.txn_ctx);
+        rows.extend(self.db.domain_constraint_rows_for_catalog());
+        crate::backend::catalog::pg_constraint::sort_pg_constraint_rows(&mut rows);
+        rows
     }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {

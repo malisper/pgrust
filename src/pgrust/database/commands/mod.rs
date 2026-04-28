@@ -13,6 +13,7 @@ mod create;
 mod create_statistics;
 mod database_cmds;
 mod dependency_drop;
+mod domain;
 mod drop;
 mod drop_column;
 mod execute;

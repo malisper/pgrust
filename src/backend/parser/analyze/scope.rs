@@ -3,7 +3,7 @@ use super::query::{AnalyzedFrom, JoinAliasInfo, shift_expr_rtindexes};
 use super::*;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
-use crate::include::catalog::PgPartitionedTableRow;
+use crate::include::catalog::{ANYOID, PG_CATALOG_NAMESPACE_OID, PgPartitionedTableRow};
 use crate::include::nodes::primnodes::{
     AttrNumber, ColumnDesc, JoinType, JsonRecordFunction, SELF_ITEM_POINTER_ATTR_NO, SqlJsonTable,
     SqlJsonTableBehavior, SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePassingArg,
@@ -2080,7 +2080,28 @@ fn bind_function_from_item_with_ctes(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<(AnalyzedFrom, BoundScope, bool), ParseError> {
-    let args = lower_named_table_function_args(name, args)?;
+    let raw_args = args;
+    let has_named_args = raw_args.iter().any(|arg| arg.name.is_some());
+    let args = match lower_named_table_function_args(name, raw_args) {
+        Ok(args) => args,
+        Err(err) if has_named_args => {
+            if let Some(bound) = try_bind_user_defined_function_from_item_with_arg_defaults(
+                name,
+                raw_args,
+                func_variadic,
+                with_ordinality,
+                column_definitions,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )? {
+                return Ok(bound);
+            }
+            return Err(err);
+        }
+        Err(err) => return Err(err),
+    };
     let call_scope = empty_scope();
     reject_nested_from_function_srfs(
         &args,
@@ -2116,6 +2137,26 @@ fn bind_function_from_item_with_ctes(
         })
         .collect::<Vec<_>>();
     let resolved_result = resolve_function_call(catalog, name, &actual_types, func_variadic);
+    if resolved_result.is_err() {
+        let positional_args = args
+            .iter()
+            .cloned()
+            .map(|value| SqlFunctionArg { name: None, value })
+            .collect::<Vec<_>>();
+        if let Some(bound) = try_bind_user_defined_function_from_item_with_arg_defaults(
+            name,
+            &positional_args,
+            func_variadic,
+            with_ordinality,
+            column_definitions,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )? {
+            return Ok(bound);
+        }
+    }
     let resolved_error = resolved_result.as_ref().err().cloned();
     let resolved = resolved_result.ok();
     let resolved_proc_oid = resolved.as_ref().map(|call| call.proc_oid).unwrap_or(0);
@@ -3091,13 +3132,13 @@ fn bind_function_from_item_with_ctes(
                         ctes,
                     );
                 }
-                let bound_args = bind_user_defined_table_function_args(
+                let bound_args = bind_resolved_user_defined_table_function_args(
                     &args,
                     &call_scope,
                     catalog,
                     outer_scopes,
                     grouped_outer,
-                    &resolved.declared_arg_types,
+                    &resolved,
                 )?;
                 let alias_single_function_output = resolved_row_columns.is_none();
                 let output_columns = resolved_row_columns.unwrap_or_else(|| {
@@ -3194,6 +3235,188 @@ fn unnest_element_type(arg_type: SqlType) -> Option<SqlType> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn try_bind_user_defined_function_from_item_with_arg_defaults(
+    name: &str,
+    args: &[SqlFunctionArg],
+    func_variadic: bool,
+    with_ordinality: bool,
+    column_definitions: Option<&[AliasColumnDef]>,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Option<(AnalyzedFrom, BoundScope, bool)>, ParseError> {
+    let call_scope = empty_scope();
+    let actual_types = args
+        .iter()
+        .map(|arg| {
+            infer_sql_expr_type_with_ctes(
+                &arg.value,
+                &call_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        })
+        .collect::<Vec<_>>();
+    let normalized = match resolve_function_call_with_arg_defaults(
+        catalog,
+        name,
+        args,
+        &actual_types,
+        func_variadic,
+    ) {
+        Ok(normalized) => normalized,
+        Err(err)
+            if is_undefined_function_error(&err)
+                && !user_defined_function_name_exists(catalog, name) =>
+        {
+            return Ok(None);
+        }
+        Err(err) => return Err(err),
+    };
+    if !resolved_call_uses_user_defined_binding(&normalized.resolved) {
+        return Ok(None);
+    }
+    let normalized_args = normalized.args;
+    let resolved = normalized.resolved;
+    reject_nested_from_function_srfs(
+        &normalized_args,
+        &call_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let resolved_row_columns =
+        resolve_function_row_columns(catalog, Some(&resolved), column_definitions)?;
+    Ok(Some(
+        bind_resolved_user_defined_function_from_item_with_ctes(
+            name,
+            &normalized_args,
+            resolved,
+            resolved_row_columns,
+            with_ordinality,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+    ))
+}
+
+fn is_undefined_function_error(err: &ParseError) -> bool {
+    matches!(
+        err,
+        ParseError::DetailedError {
+            sqlstate: "42883",
+            ..
+        }
+    )
+}
+
+fn user_defined_function_name_exists(catalog: &dyn CatalogLookup, name: &str) -> bool {
+    let (lookup_name, namespace_oid) = match name.rsplit_once('.') {
+        Some((schema_name, base_name)) => {
+            let namespace_oid = catalog
+                .namespace_rows()
+                .into_iter()
+                .find(|row| row.nspname.eq_ignore_ascii_case(schema_name))
+                .map(|row| row.oid);
+            (base_name, namespace_oid)
+        }
+        None => (name, None),
+    };
+    catalog
+        .proc_rows_by_name(lookup_name)
+        .into_iter()
+        .any(|row| {
+            if let Some(namespace_oid) = namespace_oid {
+                row.pronamespace == namespace_oid
+            } else {
+                row.pronamespace != PG_CATALOG_NAMESPACE_OID
+            }
+        })
+}
+
+fn resolved_call_uses_user_defined_binding(resolved: &ResolvedFunctionCall) -> bool {
+    resolved.prokind == 'f'
+        && resolved.scalar_impl.is_none()
+        && resolved.srf_impl.is_none()
+        && resolved.agg_impl.is_none()
+        && resolved.hypothetical_agg_impl.is_none()
+        && resolved.window_impl.is_none()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_resolved_user_defined_function_from_item_with_ctes(
+    name: &str,
+    args: &[SqlExpr],
+    resolved: ResolvedFunctionCall,
+    resolved_row_columns: Option<Vec<QueryColumn>>,
+    with_ordinality: bool,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(AnalyzedFrom, BoundScope, bool), ParseError> {
+    if !resolved.proretset {
+        return bind_single_row_function_from_item_with_ctes(
+            name,
+            args,
+            &resolved,
+            resolved_row_columns,
+            with_ordinality,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        );
+    }
+
+    let call_scope = empty_scope();
+    let bound_args = bind_resolved_user_defined_table_function_args(
+        args,
+        &call_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        &resolved,
+    )?;
+    let alias_single_function_output = resolved_row_columns.is_none();
+    let output_columns = resolved_row_columns.unwrap_or_else(|| {
+        vec![QueryColumn {
+            name: name.to_string(),
+            sql_type: resolved.result_type,
+            wire_type_oid: None,
+        }]
+    });
+    let mut output_columns = output_columns;
+    let mut desc_columns = output_columns
+        .iter()
+        .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+        .collect::<Vec<_>>();
+    maybe_append_function_ordinality(with_ordinality, &mut output_columns, &mut desc_columns);
+    let desc = RelationDesc {
+        columns: desc_columns,
+    };
+    let scope = scope_for_relation(Some(name), &desc);
+    Ok((
+        AnalyzedFrom::function(SetReturningCall::UserDefined {
+            proc_oid: resolved.proc_oid,
+            function_name: name.to_string(),
+            func_variadic: resolved.func_variadic,
+            args: bound_args,
+            output_columns,
+            with_ordinality,
+        }),
+        scope,
+        alias_single_function_output,
+    ))
+}
+
 fn bind_single_row_function_from_item_with_ctes(
     name: &str,
     args: &[SqlExpr],
@@ -3206,13 +3429,13 @@ fn bind_single_row_function_from_item_with_ctes(
     ctes: &[BoundCte],
 ) -> Result<(AnalyzedFrom, BoundScope, bool), ParseError> {
     if let Some(mut output_columns) = resolved_row_columns {
-        let bound_args = bind_user_defined_table_function_args(
+        let bound_args = bind_resolved_user_defined_table_function_args(
             args,
             &empty_scope(),
             catalog,
             outer_scopes,
             grouped_outer,
-            &resolved.declared_arg_types,
+            resolved,
         )?;
         let mut desc_columns = output_columns
             .iter()
@@ -3582,6 +3805,90 @@ fn bind_user_defined_table_function_args(
         .zip(declared_arg_types.iter().copied())
         .map(|((arg, actual_type), declared_type)| {
             coerce_bound_expr(arg, actual_type, declared_type)
+        })
+        .collect())
+}
+
+fn bind_resolved_user_defined_table_function_args(
+    args: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    resolved: &ResolvedFunctionCall,
+) -> Result<Vec<Expr>, ParseError> {
+    let arg_types = args
+        .iter()
+        .map(|arg| infer_sql_expr_type(arg, scope, catalog, outer_scopes, grouped_outer))
+        .collect::<Vec<_>>();
+    let bound_args = args
+        .iter()
+        .map(|arg| bind_expr_with_outer(arg, scope, catalog, outer_scopes, grouped_outer))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !resolved.func_variadic {
+        return Ok(bound_args
+            .into_iter()
+            .zip(arg_types)
+            .zip(resolved.declared_arg_types.iter().copied())
+            .map(|((arg, actual_type), declared_type)| {
+                coerce_bound_expr(arg, actual_type, declared_type)
+            })
+            .collect());
+    }
+    if resolved.vatype_oid == ANYOID {
+        return Ok(bound_args);
+    }
+
+    let element_type = catalog
+        .type_by_oid(resolved.vatype_oid)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "known variadic element type",
+            actual: resolved.vatype_oid.to_string(),
+        })?
+        .sql_type;
+    let array_type = SqlType::array_of(element_type);
+
+    if resolved.nvargs > 0 {
+        let fixed_prefix_len = bound_args.len().saturating_sub(resolved.nvargs);
+        let mut rewritten = bound_args
+            .iter()
+            .take(fixed_prefix_len)
+            .cloned()
+            .zip(arg_types.iter().take(fixed_prefix_len).copied())
+            .zip(
+                resolved
+                    .declared_arg_types
+                    .iter()
+                    .take(fixed_prefix_len)
+                    .copied(),
+            )
+            .map(|((arg, actual_type), declared_type)| {
+                coerce_bound_expr(arg, actual_type, declared_type)
+            })
+            .collect::<Vec<_>>();
+        let elements = bound_args[fixed_prefix_len..]
+            .iter()
+            .zip(arg_types[fixed_prefix_len..].iter().copied())
+            .map(|(expr, sql_type)| coerce_bound_expr(expr.clone(), sql_type, element_type))
+            .collect();
+        rewritten.push(Expr::ArrayLiteral {
+            elements,
+            array_type,
+        });
+        return Ok(rewritten);
+    }
+
+    Ok(bound_args
+        .into_iter()
+        .zip(arg_types)
+        .zip(resolved.declared_arg_types.iter().copied())
+        .enumerate()
+        .map(|(index, ((arg, actual_type), declared_type))| {
+            if index + 1 == resolved.declared_arg_types.len() {
+                coerce_bound_expr(arg, actual_type, array_type)
+            } else {
+                coerce_bound_expr(arg, actual_type, declared_type)
+            }
         })
         .collect())
 }

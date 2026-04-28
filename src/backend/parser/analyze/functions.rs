@@ -1,5 +1,6 @@
 use super::*;
 use crate::backend::parser::gram::{SQL_JSON_ARRAYAGG_FUNC, SQL_JSON_OBJECTAGG_FUNC};
+use crate::backend::parser::parse_expr;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
@@ -16,7 +17,7 @@ use crate::include::nodes::primnodes::{
     BuiltinWindowFunction, HashFunctionKind, HypotheticalAggFunc, JsonRecordFunction,
     RegexTableFunction, StringTableFunction, TextSearchTableFunction,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 #[derive(Clone, Copy)]
@@ -87,6 +88,21 @@ struct CandidateMatch {
     vatype_oid: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedFunctionCallWithArgs {
+    pub resolved: ResolvedFunctionCall,
+    pub args: Vec<SqlExpr>,
+    pub actual_types: Vec<SqlType>,
+}
+
+#[derive(Debug, Clone)]
+struct NormalizedFunctionCallArgs {
+    args: Vec<SqlExpr>,
+    actual_types: Vec<SqlType>,
+    func_variadic: bool,
+    used_defaults: bool,
+}
+
 pub(crate) fn resolve_function_call(
     catalog: &dyn CatalogLookup,
     name: &str,
@@ -104,59 +120,14 @@ pub(crate) fn resolve_function_call(
         if namespace_oid.is_some_and(|oid| row.pronamespace != oid) {
             continue;
         }
-        let scalar_impl = builtin_scalar_function_for_proc_row(&row);
-        let srf_impl = builtin_srf_impl_for_proc_row(&row);
-        let agg_impl = aggregate_func_for_proname(&row.proname);
-        let hypothetical_agg_impl = builtin_hypothetical_aggregate_function_for_proc_oid(row.oid);
-        let window_impl = builtin_window_function_for_proc_oid(row.oid);
-
         let Some(candidate) = match_proc_signature(catalog, &row, actual_types, func_variadic)
         else {
             continue;
         };
-        if !polymorphic_candidate_is_consistent(&row, &candidate) {
-            continue;
-        }
-        let Some(result_type) = resolve_proc_result_type(catalog, &row, &candidate) else {
-            continue;
-        };
-        let Some(row_shape) = resolve_function_row_shape(catalog, &row, &candidate, result_type)
+        let Some(resolved) =
+            resolved_function_call_for_candidate(catalog, &row, &candidate, func_variadic)
         else {
             continue;
-        };
-        let declared_arg_types = concrete_declared_arg_types_for_candidate(&row, &candidate)
-            .unwrap_or_else(|| candidate.declared_arg_types.clone());
-
-        let result_type = match (&result_type.kind, &row_shape) {
-            (SqlTypeKind::Record, ResolvedFunctionRowShape::OutParameters(columns)) => {
-                assign_anonymous_record_descriptor(
-                    columns
-                        .iter()
-                        .map(|column| (column.name.clone(), column.sql_type))
-                        .collect(),
-                )
-                .sql_type()
-            }
-            _ => result_type,
-        };
-
-        let resolved = ResolvedFunctionCall {
-            proc_oid: row.oid,
-            proname: row.proname.clone(),
-            prokind: row.prokind,
-            proretset: row.proretset,
-            result_type,
-            declared_arg_types,
-            nvargs: candidate.nvargs,
-            vatype_oid: candidate.vatype_oid,
-            func_variadic: row.provariadic != 0
-                && (func_variadic || (row.provariadic != ANYOID && candidate.nvargs > 0)),
-            scalar_impl,
-            srf_impl,
-            agg_impl,
-            hypothetical_agg_impl,
-            window_impl,
-            row_shape,
         };
 
         let is_variadic = row.provariadic != 0;
@@ -190,6 +161,317 @@ pub(crate) fn resolve_function_call(
         .ok_or_else(|| undefined_function_error(catalog, name, actual_types))
 }
 
+fn resolved_function_call_for_candidate(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgProcRow,
+    candidate: &CandidateMatch,
+    func_variadic: bool,
+) -> Option<ResolvedFunctionCall> {
+    if !polymorphic_candidate_is_consistent(row, candidate) {
+        return None;
+    }
+    let result_type = resolve_proc_result_type(catalog, row, candidate)?;
+    let row_shape = resolve_function_row_shape(catalog, row, candidate, result_type)?;
+    let declared_arg_types = concrete_declared_arg_types_for_candidate(row, candidate)
+        .unwrap_or_else(|| candidate.declared_arg_types.clone());
+    let result_type = match (&result_type.kind, &row_shape) {
+        (SqlTypeKind::Record, ResolvedFunctionRowShape::OutParameters(columns)) => {
+            assign_anonymous_record_descriptor(
+                columns
+                    .iter()
+                    .map(|column| (column.name.clone(), column.sql_type))
+                    .collect(),
+            )
+            .sql_type()
+        }
+        _ => result_type,
+    };
+    Some(ResolvedFunctionCall {
+        proc_oid: row.oid,
+        proname: row.proname.clone(),
+        prokind: row.prokind,
+        proretset: row.proretset,
+        result_type,
+        declared_arg_types,
+        nvargs: candidate.nvargs,
+        vatype_oid: candidate.vatype_oid,
+        func_variadic: row.provariadic != 0
+            && (func_variadic || (row.provariadic != ANYOID && candidate.nvargs > 0)),
+        scalar_impl: builtin_scalar_function_for_proc_row(row),
+        srf_impl: builtin_srf_impl_for_proc_row(row),
+        agg_impl: aggregate_func_for_proname(&row.proname),
+        hypothetical_agg_impl: builtin_hypothetical_aggregate_function_for_proc_oid(row.oid),
+        window_impl: builtin_window_function_for_proc_oid(row.oid),
+        row_shape,
+    })
+}
+
+pub(crate) fn resolve_function_call_with_arg_defaults(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    args: &[SqlFunctionArg],
+    actual_types: &[SqlType],
+    func_variadic: bool,
+) -> Result<ResolvedFunctionCallWithArgs, ParseError> {
+    validate_function_call_arg_order(args)?;
+    let Some((lookup_name, namespace_oid)) = function_lookup_name_and_namespace(catalog, name)
+    else {
+        return Err(undefined_function_error(catalog, name, actual_types));
+    };
+
+    let mut best: Option<(ResolvedFunctionCallWithArgs, usize, bool, bool)> = None;
+    let mut ambiguous = false;
+    for row in catalog.proc_rows_by_name(lookup_name) {
+        if namespace_oid.is_some_and(|oid| row.pronamespace != oid) {
+            continue;
+        }
+        let Some(normalized) =
+            normalize_function_call_args(catalog, &row, args, actual_types, func_variadic)?
+        else {
+            continue;
+        };
+        if !args.iter().any(|arg| arg.name.is_some()) && !normalized.used_defaults {
+            continue;
+        }
+        let Some(candidate) = match_proc_signature(
+            catalog,
+            &row,
+            &normalized.actual_types,
+            normalized.func_variadic,
+        ) else {
+            continue;
+        };
+        let Some(resolved) = resolved_function_call_for_candidate(
+            catalog,
+            &row,
+            &candidate,
+            normalized.func_variadic,
+        ) else {
+            continue;
+        };
+        let is_variadic = row.provariadic != 0;
+        let expanded = row.provariadic != 0 && !normalized.func_variadic && candidate.nvargs > 0;
+        let total_cost = candidate.cost;
+        let normalized_call = ResolvedFunctionCallWithArgs {
+            resolved,
+            args: normalized.args,
+            actual_types: normalized.actual_types,
+        };
+        match &best {
+            None => {
+                best = Some((normalized_call, total_cost, is_variadic, expanded));
+                ambiguous = false;
+            }
+            Some((_, best_cost, best_variadic, best_expanded)) => {
+                let current_rank = (total_cost, is_variadic, expanded);
+                let best_rank = (*best_cost, *best_variadic, *best_expanded);
+                if current_rank < best_rank {
+                    best = Some((normalized_call, total_cost, is_variadic, expanded));
+                    ambiguous = false;
+                } else if current_rank == best_rank {
+                    ambiguous = true;
+                }
+            }
+        }
+    }
+
+    if ambiguous {
+        return Err(ambiguous_function_error(catalog, name, actual_types));
+    }
+    best.map(|(resolved, _, _, _)| resolved)
+        .ok_or_else(|| undefined_function_error(catalog, name, actual_types))
+}
+
+fn validate_function_call_arg_order(args: &[SqlFunctionArg]) -> Result<(), ParseError> {
+    let mut saw_named = false;
+    let mut seen_names = BTreeSet::new();
+    for arg in args {
+        if let Some(name) = arg.name.as_ref() {
+            saw_named = true;
+            if !seen_names.insert(name.to_ascii_lowercase()) {
+                return Err(ParseError::DetailedError {
+                    message: format!("argument name \"{name}\" used more than once"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42701",
+                });
+            }
+        } else if saw_named {
+            return Err(ParseError::UnexpectedToken {
+                expected: "named arguments after positional arguments",
+                actual: "positional argument after named argument".into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn normalize_function_call_args(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgProcRow,
+    args: &[SqlFunctionArg],
+    actual_types: &[SqlType],
+    func_variadic: bool,
+) -> Result<Option<NormalizedFunctionCallArgs>, ParseError> {
+    if args.len() != actual_types.len() {
+        return Ok(None);
+    }
+    let input_oids = parse_proc_argtype_oids(&row.proargtypes).unwrap_or_default();
+    let input_count = input_oids.len();
+    let has_named = args.iter().any(|arg| arg.name.is_some());
+    if !has_named
+        && row.provariadic != 0
+        && !func_variadic
+        && args.len() >= input_count
+        && input_count > 0
+    {
+        return Ok(Some(NormalizedFunctionCallArgs {
+            args: args.iter().map(|arg| arg.value.clone()).collect(),
+            actual_types: actual_types.to_vec(),
+            func_variadic,
+            used_defaults: false,
+        }));
+    }
+
+    let names = callable_proc_arg_names(row, input_count);
+    let defaults = decode_proc_arg_defaults(row, input_count);
+    let mut assigned = vec![None::<(SqlExpr, SqlType)>; input_count];
+    let mut positional_index = 0usize;
+    for (arg, actual_type) in args.iter().zip(actual_types.iter().copied()) {
+        let input_index = if let Some(name) = arg.name.as_ref() {
+            let Some(index) = names
+                .iter()
+                .position(|candidate| candidate.eq_ignore_ascii_case(name))
+            else {
+                return Ok(None);
+            };
+            index
+        } else {
+            let index = positional_index;
+            positional_index += 1;
+            if index >= input_count {
+                return Ok(None);
+            }
+            index
+        };
+        if assigned[input_index].is_some() {
+            return Ok(None);
+        }
+        assigned[input_index] = Some((arg.value.clone(), actual_type));
+    }
+
+    let empty_scope = super::scope::empty_scope();
+    let default_outer_scopes = [];
+    let variadic_input_index = (row.provariadic != 0).then_some(input_count.saturating_sub(1));
+    let mut effective_func_variadic = func_variadic;
+    let mut used_defaults = false;
+    for (index, slot) in assigned.iter_mut().enumerate() {
+        if slot.is_some() {
+            continue;
+        }
+        let Some(default_sql) = defaults.get(index).and_then(|default| default.as_deref()) else {
+            return Ok(None);
+        };
+        let default_expr = parse_expr(default_sql)?;
+        let default_type = default_proc_arg_type(
+            catalog,
+            input_oids.get(index).copied().unwrap_or_default(),
+            &default_expr,
+            &empty_scope,
+            &default_outer_scopes,
+        );
+        *slot = Some((default_expr, default_type));
+        if Some(index) == variadic_input_index {
+            effective_func_variadic = true;
+        }
+        used_defaults = true;
+    }
+
+    let (args, actual_types): (Vec<_>, Vec<_>) = assigned.into_iter().flatten().unzip();
+    Ok(Some(NormalizedFunctionCallArgs {
+        args,
+        actual_types,
+        func_variadic: effective_func_variadic,
+        used_defaults,
+    }))
+}
+
+fn default_proc_arg_type(
+    catalog: &dyn CatalogLookup,
+    target_oid: u32,
+    default_expr: &SqlExpr,
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+) -> SqlType {
+    let inferred =
+        super::infer::infer_sql_expr_type(default_expr, scope, catalog, outer_scopes, None);
+    if matches!(
+        target_oid,
+        ANYOID
+            | ANYELEMENTOID
+            | ANYARRAYOID
+            | ANYENUMOID
+            | ANYRANGEOID
+            | ANYMULTIRANGEOID
+            | ANYCOMPATIBLEOID
+            | ANYCOMPATIBLEARRAYOID
+            | ANYCOMPATIBLERANGEOID
+            | ANYCOMPATIBLEMULTIRANGEOID
+    ) {
+        inferred
+    } else {
+        catalog
+            .type_by_oid(target_oid)
+            .map(|row| row.sql_type)
+            .unwrap_or(inferred)
+    }
+}
+
+pub(crate) fn decode_proc_arg_defaults(
+    row: &crate::include::catalog::PgProcRow,
+    input_count: usize,
+) -> Vec<Option<String>> {
+    let Some(defaults) = row.proargdefaults.as_deref() else {
+        return vec![None; input_count];
+    };
+    if let Ok(parsed) = serde_json::from_str::<Vec<Option<String>>>(defaults)
+        && parsed.len() == input_count
+    {
+        return parsed;
+    }
+    let legacy = defaults
+        .split_whitespace()
+        .map(|default| Some(default.to_string()))
+        .collect::<Vec<_>>();
+    let mut aligned = vec![None; input_count.saturating_sub(legacy.len())];
+    aligned.extend(legacy);
+    aligned.resize(input_count, None);
+    aligned
+}
+
+fn callable_proc_arg_names(
+    row: &crate::include::catalog::PgProcRow,
+    input_count: usize,
+) -> Vec<String> {
+    let names = row.proargnames.clone().unwrap_or_default();
+    if let (Some(_all_argtypes), Some(modes)) =
+        (row.proallargtypes.as_ref(), row.proargmodes.as_ref())
+    {
+        let mut input_names = Vec::with_capacity(input_count);
+        for (index, mode) in modes.iter().copied().enumerate() {
+            if matches!(mode, b'i' | b'b' | b'v') {
+                input_names.push(names.get(index).cloned().unwrap_or_default());
+            }
+        }
+        input_names.resize(input_count, String::new());
+        return input_names;
+    }
+    let mut input_names = names;
+    input_names.resize(input_count, String::new());
+    input_names.truncate(input_count);
+    input_names
+}
+
 fn function_lookup_name_and_namespace<'a>(
     catalog: &dyn CatalogLookup,
     name: &'a str,
@@ -210,13 +492,11 @@ fn undefined_function_error(
     name: &str,
     actual_types: &[SqlType],
 ) -> ParseError {
-    let signature = actual_types
-        .iter()
-        .map(|ty| function_signature_type_name(catalog, *ty))
-        .collect::<Vec<_>>()
-        .join(", ");
     ParseError::DetailedError {
-        message: format!("function {name}({signature}) does not exist"),
+        message: format!(
+            "function {} does not exist",
+            function_signature_text(catalog, name, actual_types)
+        ),
         detail: None,
         hint: Some(
             "No function matches the given name and argument types. You might need to add explicit type casts."
@@ -224,6 +504,38 @@ fn undefined_function_error(
         ),
         sqlstate: "42883",
     }
+}
+
+fn ambiguous_function_error(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    actual_types: &[SqlType],
+) -> ParseError {
+    ParseError::DetailedError {
+        message: format!(
+            "function {} is not unique",
+            function_signature_text(catalog, name, actual_types)
+        ),
+        detail: None,
+        hint: Some(
+            "Could not choose a best candidate function. You might need to add explicit type casts."
+                .into(),
+        ),
+        sqlstate: "42725",
+    }
+}
+
+fn function_signature_text(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    actual_types: &[SqlType],
+) -> String {
+    let signature = actual_types
+        .iter()
+        .map(|ty| function_signature_type_name(catalog, *ty))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({signature})")
 }
 
 fn function_signature_type_name(catalog: &dyn CatalogLookup, ty: SqlType) -> String {
@@ -4291,6 +4603,7 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             BuiltinScalarFunction::PgIndexAmHasProperty,
             BuiltinScalarFunction::PgIndexHasProperty,
             BuiltinScalarFunction::PgIndexColumnHasProperty,
+            BuiltinScalarFunction::PgTypeIsVisible,
             BuiltinScalarFunction::BoolAndStateFunc,
             BuiltinScalarFunction::BoolOrStateFunc,
         ] {

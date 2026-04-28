@@ -38463,6 +38463,102 @@ fn create_function_scalar_calls_work_in_select_and_where() {
 }
 
 #[test]
+fn create_function_defaults_and_named_calls_work() {
+    let dir = temp_dir("create_function_defaults_named");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function dfunc(a int4 = 1, b int4 = 2) returns int4 language sql as $$ select $1 + $2 $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select dfunc(), dfunc(10), dfunc(10, 20)"),
+        vec![vec![Value::Int32(3), Value::Int32(12), Value::Int32(30)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select dfunc(a := 7), dfunc(b => 11, a => 4)"),
+        vec![vec![Value::Int32(9), Value::Int32(15)]]
+    );
+
+    db.execute(
+        1,
+        "create function choose_text(a text, b text default 'fallback', flag bool default true) returns text language sql as $$ select case when $3 then $1 else $2 end $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select choose_text('a'), choose_text('a', 'b', flag := false), choose_text(b => 'b', a => 'a')",
+        ),
+        vec![vec![
+            Value::Text("a".into()),
+            Value::Text("b".into()),
+            Value::Text("a".into()),
+        ]]
+    );
+
+    db.execute(
+        1,
+        "create function default_series(a int4 default 1, b int4 default 2) returns setof int4 language sql as $$ values ($1), ($2) $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from default_series(b => 5)"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(5)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select * from default_series()"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+
+    match db.execute(1, "select choose_text(a => 'a', a => 'b')") {
+        Err(ExecError::Parse(ParseError::DetailedError { message, .. }))
+            if message == "argument name \"a\" used more than once" => {}
+        other => panic!("expected duplicate named argument error, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_or_replace_function_preserves_default_contract() {
+    let dir = temp_dir("create_function_replace_defaults");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function replace_default(a int4 default 1, b int4 default 2) returns int4 language sql as $$ select $1 + $2 $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create or replace function replace_default(a int4 default 10, b int4 default 20) returns int4 language sql as $$ select $1 + $2 $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select replace_default()"),
+        vec![vec![Value::Int32(30)]]
+    );
+
+    match db.execute(
+        1,
+        "create or replace function replace_default(a int4, b int4) returns int4 language sql as $$ select $1 + $2 $$",
+    ) {
+        Err(ExecError::DetailedError { message, .. })
+            if message == "cannot remove parameter defaults from existing function" => {}
+        other => panic!("expected cannot remove defaults error, got {other:?}"),
+    }
+    match db.execute(
+        1,
+        "create or replace function replace_default(x int4 default 10, b int4 default 20) returns int4 language sql as $$ select $1 + $2 $$",
+    ) {
+        Err(ExecError::DetailedError { message, .. })
+            if message == "cannot change name of input parameter \"a\"" => {}
+        other => panic!("expected cannot change input parameter name error, got {other:?}"),
+    }
+}
+
+#[test]
 fn create_or_replace_function_updates_existing_body() {
     let dir = temp_dir("create_or_replace_function");
     let db = Database::open(&dir, 64).unwrap();
@@ -42252,6 +42348,147 @@ fn dynamic_domain_and_range_creation_after_user_range_table() {
         other => panic!("expected restrictedrange check violation, got {other:?}"),
     }
     db.execute(1, "drop table float8range_test").unwrap();
+}
+
+#[test]
+fn alter_domain_constraints_update_catalog_and_enforcement() {
+    let dir = temp_dir("alter_domain_constraints");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create domain things as int").unwrap();
+    db.execute(1, "create table thethings (stuff things)")
+        .unwrap();
+    db.execute(1, "insert into thethings values (55)").unwrap();
+
+    match db.execute(
+        1,
+        "alter domain things add constraint meow check (value < 11)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "column \"stuff\" of table \"thethings\" contains values that violate the new constraint"
+            );
+        }
+        other => panic!("expected domain validation error, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "alter domain things add constraint meow check (value < 11) not valid",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, contype, convalidated, conbin \
+             from pg_constraint \
+             where contypid = 'things'::regtype \
+             order by conname",
+        ),
+        vec![vec![
+            Value::Text("meow".into()),
+            Value::Text("c".into()),
+            Value::Bool(false),
+            Value::Text("value < 11".into()),
+        ]],
+    );
+    match db.execute(1, "insert into thethings values (12)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain things violates check constraint \"meow\""
+            );
+        }
+        other => panic!("expected domain check violation, got {other:?}"),
+    }
+
+    db.execute(1, "update thethings set stuff = 10").unwrap();
+    db.execute(1, "alter domain things validate constraint meow")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select convalidated from pg_constraint where contypid = 'things'::regtype and conname = 'meow'",
+        ),
+        vec![vec![Value::Bool(true)]],
+    );
+
+    db.execute(1, "alter domain things rename constraint meow to bark")
+        .unwrap();
+    db.execute(1, "alter domain things set not null").unwrap();
+    db.execute(1, "alter domain things drop constraint if exists missing")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, contype from pg_constraint \
+             where contypid = 'things'::regtype order by conname",
+        ),
+        vec![
+            vec![Value::Text("bark".into()), Value::Text("c".into())],
+            vec![
+                Value::Text("things_not_null".into()),
+                Value::Text("n".into()),
+            ],
+        ],
+    );
+    match db.execute(1, "insert into thethings values (null)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23502");
+            assert_eq!(message, "domain things does not allow null values");
+        }
+        other => panic!("expected domain not-null violation, got {other:?}"),
+    }
+    match db.execute(1, "update thethings set stuff = null") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23502");
+            assert_eq!(message, "domain things does not allow null values");
+        }
+        other => panic!("expected domain not-null violation on update, got {other:?}"),
+    }
+    db.execute(1, "alter domain things drop not null").unwrap();
+    db.execute(1, "insert into thethings values (null)")
+        .unwrap();
+    db.execute(1, "alter domain things drop constraint bark")
+        .unwrap();
+    db.execute(1, "insert into thethings values (12)").unwrap();
+
+    db.execute(1, "alter domain things set default 7").unwrap();
+    db.execute(1, "alter domain things drop default").unwrap();
+    db.execute(1, "create schema domdst").unwrap();
+    db.execute(1, "alter domain things rename to things2")
+        .unwrap();
+    db.execute(1, "alter domain things2 set schema domdst")
+        .unwrap();
+    db.execute(1, "alter domain domdst.things2 owner to current_user")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select t.typname, n.nspname \
+             from pg_type t join pg_namespace n on n.oid = t.typnamespace \
+             where t.typname = 'things2'",
+        ),
+        vec![vec![
+            Value::Text("things2".into()),
+            Value::Text("domdst".into()),
+        ]],
+    );
 }
 
 #[test]

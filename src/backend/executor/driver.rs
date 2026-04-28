@@ -531,6 +531,10 @@ fn execute_statement_with_source(
             expected: "CREATE DOMAIN handled by database/session layer",
             actual: "CREATE DOMAIN".into(),
         })),
+        Statement::AlterDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER DOMAIN handled by database/session layer",
+            actual: "ALTER DOMAIN".into(),
+        })),
         Statement::CreateConversion(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE CONVERSION handled by database/session layer",
             actual: "CREATE CONVERSION".into(),
@@ -930,6 +934,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::CreateDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE DOMAIN".into(),
+        })),
+        Statement::AlterDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER DOMAIN".into(),
         })),
         Statement::CreateType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
