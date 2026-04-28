@@ -231,3 +231,15 @@ Policy rename bucket:
 - Latest rowsecurity regression result with a 300s file timeout:
   `678/774` matched, `96` mismatches, `1817` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+Policy aggregate-validation bucket:
+- Policy USING/WITH CHECK validation now runs the aggregate-clause checker before
+  scalar binding, so aggregate expressions report
+  `aggregate functions are not allowed in policy expressions` with SQLSTATE
+  `42803` instead of the generic aggregate binding error.
+- Focused policy aggregate test passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `678/774` matched, `96` mismatches, `1808` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.

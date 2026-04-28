@@ -3336,6 +3336,40 @@ pub(crate) fn bind_scalar_expr_in_named_relation_scope(
     columns: &[(String, SqlType)],
     catalog: &dyn CatalogLookup,
 ) -> Result<(Expr, SqlType), ParseError> {
+    let scope = named_relation_scope(relation_scopes, columns);
+    let empty_outer = Vec::new();
+    let bound = bind_expr_with_outer(expr, &scope, catalog, &empty_outer, None)?;
+    let sql_type = infer_sql_expr_type(expr, &scope, catalog, &empty_outer, None);
+    Ok((bound, sql_type))
+}
+
+pub(crate) fn bind_policy_expr_in_named_relation_scope(
+    expr: &SqlExpr,
+    relation_scopes: &[(&str, &RelationDesc)],
+    columns: &[(String, SqlType)],
+    catalog: &dyn CatalogLookup,
+) -> Result<(Expr, SqlType), ParseError> {
+    let scope = named_relation_scope(relation_scopes, columns);
+    let empty_outer = Vec::new();
+    analyze_expr_aggregates_in_clause(
+        expr,
+        AggregateClauseKind::Policy,
+        &scope,
+        catalog,
+        &empty_outer,
+        None,
+        &[],
+        &[],
+    )?;
+    let bound = bind_expr_with_outer(expr, &scope, catalog, &empty_outer, None)?;
+    let sql_type = infer_sql_expr_type(expr, &scope, catalog, &empty_outer, None);
+    Ok((bound, sql_type))
+}
+
+fn named_relation_scope(
+    relation_scopes: &[(&str, &RelationDesc)],
+    columns: &[(String, SqlType)],
+) -> scope::BoundScope {
     let mut desc_columns = columns
         .iter()
         .map(|(name, sql_type)| column_desc(name.clone(), *sql_type, true))
@@ -3381,7 +3415,7 @@ pub(crate) fn bind_scalar_expr_in_named_relation_scope(
     let desc = RelationDesc {
         columns: desc_columns,
     };
-    let scope = scope::BoundScope {
+    scope::BoundScope {
         output_exprs: desc
             .columns
             .iter()
@@ -3398,11 +3432,7 @@ pub(crate) fn bind_scalar_expr_in_named_relation_scope(
         desc,
         columns: scope_columns,
         relations,
-    };
-    let empty_outer = Vec::new();
-    let bound = bind_expr_with_outer(expr, &scope, catalog, &empty_outer, None)?;
-    let sql_type = infer_sql_expr_type(expr, &scope, catalog, &empty_outer, None);
-    Ok((bound, sql_type))
+    }
 }
 
 #[derive(Debug, Clone)]

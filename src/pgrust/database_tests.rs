@@ -43208,6 +43208,22 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
 }
 
 #[test]
+fn create_policy_rejects_aggregate_with_policy_error() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table items (a int4)").unwrap();
+    let err = session
+        .execute(&db, "create policy p1 on items using (max(a))")
+        .unwrap_err();
+    assert_sqlstate(
+        err,
+        "42803",
+        "aggregate functions are not allowed in policy expressions",
+    );
+}
+
+#[test]
 fn create_policy_with_exists_subquery_on_rls_table_returns() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

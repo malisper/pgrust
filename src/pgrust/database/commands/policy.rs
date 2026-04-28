@@ -1,7 +1,7 @@
 use super::super::*;
 use crate::backend::parser::{
     AlterPolicyAction, AlterPolicyStatement, CatalogLookup, CreatePolicyStatement,
-    DropPolicyStatement, ParseError, SqlTypeKind, bind_scalar_expr_in_named_relation_scope,
+    DropPolicyStatement, ParseError, SqlTypeKind, bind_policy_expr_in_named_relation_scope,
 };
 use crate::include::catalog::PgPolicyRow;
 use crate::pgrust::database::ddl::{
@@ -366,7 +366,7 @@ fn validate_policy_stmt(
 ) -> Result<(), ExecError> {
     for expr in [using_expr, with_check_expr].into_iter().flatten() {
         let (_, expr_type) =
-            bind_scalar_expr_in_named_relation_scope(expr, &[(relation_name, desc)], &[], catalog)
+            bind_policy_expr_in_named_relation_scope(expr, &[(relation_name, desc)], &[], catalog)
                 .map_err(ExecError::Parse)?;
         if expr_type.kind != SqlTypeKind::Bool {
             return Err(ExecError::DetailedError {
