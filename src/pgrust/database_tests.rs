@@ -27141,6 +27141,368 @@ fn foreign_keys_block_parent_ddl_and_allow_child_drop() {
     db.execute(1, "drop table parents").unwrap();
 }
 
+fn assert_period_fk_action_error(result: Result<StatementResult, ExecError>, expected: &str) {
+    match result {
+        Err(ExecError::DetailedError { message, .. })
+        | Err(ExecError::Parse(ParseError::DetailedError { message, .. }))
+            if message == expected => {}
+        other => panic!("expected PERIOD FK action error `{expected}`, got {other:?}"),
+    }
+}
+
+#[test]
+fn without_overlaps_remaining_period_foreign_keys_reject_unsupported_actions_before_catalog_writes()
+{
+    let base = temp_dir("period_fk_action_validation");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table period_parent (
+            id int4,
+            valid_at int4range,
+            primary key (id, valid_at without overlaps)
+        )",
+    )
+    .unwrap();
+
+    assert_period_fk_action_error(
+        db.execute(
+            1,
+            "create table period_child_bad (
+                id int4 primary key,
+                parent_id int4,
+                valid_at int4range,
+                foreign key (parent_id, period valid_at)
+                    references period_parent (id, period valid_at)
+                    on update cascade
+            )",
+        ),
+        "unsupported ON UPDATE action for foreign key constraint using PERIOD",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname = 'period_child_bad'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    db.execute(
+        1,
+        "create table period_child_alter (
+            id int4 primary key,
+            parent_id int4,
+            valid_at int4range
+        )",
+    )
+    .unwrap();
+    assert_period_fk_action_error(
+        db.execute(
+            1,
+            "alter table period_child_alter
+             add constraint period_child_alter_fk
+             foreign key (parent_id, period valid_at)
+             references period_parent (id, period valid_at)
+             on delete set null",
+        ),
+        "unsupported ON DELETE action for foreign key constraint using PERIOD",
+    );
+    assert_period_fk_action_error(
+        db.execute(
+            1,
+            "alter table period_child_alter
+             alter column parent_id set default 0,
+             add constraint period_child_alter_fk
+             foreign key (parent_id, period valid_at)
+             references period_parent (id, period valid_at)
+             on delete set default on update set default",
+        ),
+        "unsupported ON UPDATE action for foreign key constraint using PERIOD",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint where conname = 'period_child_alter_fk'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn without_overlaps_remaining_drop_column_cascade_drops_dependent_foreign_key_constraints() {
+    let base = temp_dir("drop_column_cascade_fk");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table cascade_parent (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table cascade_child (
+            id int4 primary key,
+            parent_id int4 constraint cascade_child_fk references cascade_parent
+        )",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table cascade_child drop column parent_id") {
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            ..
+        }) if message
+            == "cannot drop column parent_id of table cascade_child because other objects depend on it"
+            && detail.contains("constraint cascade_child_fk on table cascade_child") => {}
+        other => panic!("expected DROP COLUMN FK dependency blocker, got {other:?}"),
+    }
+
+    clear_backend_notices();
+    db.execute(1, "alter table cascade_child drop column parent_id cascade")
+        .unwrap();
+    assert_eq!(
+        take_backend_notices()
+            .into_iter()
+            .map(|notice| notice.message)
+            .collect::<Vec<_>>(),
+        vec!["drop cascades to constraint cascade_child_fk on table cascade_child"]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint where conname = 'cascade_child_fk'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn without_overlaps_remaining_deferred_temporal_parent_update_reports_parent_side_fk_at_commit() {
+    let base = temp_dir("deferred_temporal_parent_fk");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table temporal_parent (
+                id int4,
+                valid_at int4range,
+                primary key (id, valid_at without overlaps)
+            )",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table temporal_child (
+                id int4 primary key,
+                parent_id int4,
+                valid_at int4range,
+                constraint temporal_child_fk
+                    foreign key (parent_id, period valid_at)
+                    references temporal_parent (id, period valid_at)
+                    deferrable initially deferred
+            )",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into temporal_parent values (1, '[1,10)')")
+        .unwrap();
+    session
+        .execute(&db, "insert into temporal_child values (1, 1, '[1,5)')")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "update temporal_parent set valid_at = '[5,10)' where id = 1",
+        )
+        .unwrap();
+    match session.execute(&db, "commit") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint,
+            message,
+            detail: Some(detail),
+        }) => {
+            assert_eq!(constraint, "temporal_child_fk");
+            assert!(message.contains("update or delete on table \"temporal_parent\""));
+            assert!(detail.contains("is still referenced from table \"temporal_child\""));
+        }
+        other => panic!("expected deferred parent-side FK violation at COMMIT, got {other:?}"),
+    }
+}
+
+#[test]
+fn without_overlaps_remaining_alter_column_range_default_coerces_string_literal() {
+    let base = temp_dir("range_default_string_literal");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table range_defaults (span int4range)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table range_defaults alter column span set default '[-1,-1]'",
+    )
+    .unwrap();
+    db.execute(1, "insert into range_defaults default values")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select span is null from range_defaults"),
+        vec![vec![Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn without_overlaps_remaining_partitioned_temporal_foreign_keys_enforce_leaves_and_row_movement() {
+    let base = temp_dir("partitioned_temporal_fk_row_movement");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pt_parent (
+            id int4,
+            valid_at int4range,
+            primary key (id, valid_at without overlaps)
+        ) partition by list (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pt_parent_1 partition of pt_parent for values in (1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pt_parent_2 partition of pt_parent for values in (2)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into pt_parent values (1, '[1,10)'), (2, '[1,10)')",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "create table pt_child (
+            id int4,
+            parent_id int4,
+            valid_at int4range,
+            primary key (id, valid_at without overlaps),
+            constraint pt_child_fk foreign key (parent_id, period valid_at)
+                references pt_parent (id, period valid_at)
+        ) partition by list (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pt_child_1 partition of pt_child for values in (1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pt_child_2 partition of pt_child for values in (2)",
+    )
+    .unwrap();
+    db.execute(1, "insert into pt_child values (1, 1, '[1,5)')")
+        .unwrap();
+
+    match db.execute(1, "insert into pt_child values (1, 2, '[10,12)')") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "pt_child_fk");
+        }
+        other => panic!("expected partitioned temporal FK insert violation, got {other:?}"),
+    }
+
+    db.execute(1, "update pt_child set id = 2 where id = 1")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tableoid::regclass::text, id, parent_id from pt_child",
+        ),
+        vec![vec![
+            Value::Text("pt_child_2".into()),
+            Value::Int32(2),
+            Value::Int32(1),
+        ]]
+    );
+
+    match db.execute(1, "update pt_parent set valid_at = '[5,10)' where id = 1") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint,
+            message,
+            ..
+        }) => {
+            assert_eq!(constraint, "pt_child_fk_1");
+            assert!(message.contains("update or delete on table \"pt_parent_1\""));
+        }
+        other => panic!("expected partitioned referenced update violation, got {other:?}"),
+    }
+    match db.execute(1, "delete from pt_parent where id = 1") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint,
+            message,
+            ..
+        }) => {
+            assert_eq!(constraint, "pt_child_fk_1");
+            assert!(message.contains("update or delete on table \"pt_parent_1\""));
+        }
+        other => panic!("expected partitioned referenced delete violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn truncate_all_foreign_key_relations_together() {
+    let base = temp_dir("truncate_all_foreign_key_relations");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4 references parents)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1)").unwrap();
+    db.execute(1, "insert into children values (1, 1)").unwrap();
+
+    match db.execute(1, "truncate parents") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
+            if actual.contains("foreign key constraint") => {}
+        other => panic!("expected single-table truncate to be blocked, got {other:?}"),
+    }
+
+    db.execute(1, "truncate parents, children").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from parents")[0][0],
+        Value::Int64(0)
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from children")[0][0],
+        Value::Int64(0)
+    );
+
+    db.execute(1, "insert into parents values (2)").unwrap();
+    db.execute(1, "insert into children values (2, 2)").unwrap();
+
+    let mut session = Session::new(2);
+    session.execute(&db, "truncate parents, children").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from parents")[0][0],
+        Value::Int64(0)
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from children")[0][0],
+        Value::Int64(0)
+    );
+}
+
 #[test]
 fn foreign_key_locking_blocks_parent_delete_until_child_insert_finishes() {
     use std::sync::mpsc;

@@ -81,7 +81,7 @@ use crate::pgrust::database::{
     alter_table_validate_constraint_lock_requests, delete_foreign_key_lock_requests,
     execute_set_constraints, insert_foreign_key_lock_requests, merge_pending_notifications,
     merge_table_lock_requests, prepared_insert_foreign_key_lock_requests,
-    queue_pending_notification, reject_relation_with_referencing_foreign_keys,
+    queue_pending_notification, reject_relation_with_referencing_foreign_keys_except,
     relation_foreign_key_lock_requests, update_foreign_key_lock_requests,
     validate_deferred_constraints, validate_immediate_constraints,
 };
@@ -94,6 +94,76 @@ use crate::pl::plpgsql::{
 };
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
+
+fn validate_alter_table_add_constraint_temporal_fk_actions(
+    stmt: &crate::backend::parser::AlterTableAddConstraintStatement,
+) -> Result<(), ExecError> {
+    let crate::include::nodes::parsenodes::TableConstraint::ForeignKey {
+        period,
+        referenced_period,
+        on_delete,
+        on_update,
+        ..
+    } = &stmt.constraint
+    else {
+        return Ok(());
+    };
+    if period.is_none() && referenced_period.is_none() {
+        return Ok(());
+    }
+    if *on_update != crate::include::nodes::parsenodes::ForeignKeyAction::NoAction {
+        return Err(ExecError::DetailedError {
+            message: "unsupported ON UPDATE action for foreign key constraint using PERIOD".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    if *on_delete != crate::include::nodes::parsenodes::ForeignKeyAction::NoAction {
+        return Err(ExecError::DetailedError {
+            message: "unsupported ON DELETE action for foreign key constraint using PERIOD".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    Ok(())
+}
+
+fn validate_statement_temporal_fk_actions(stmt: &Statement) -> Result<(), ExecError> {
+    match stmt {
+        Statement::AlterTableAddConstraint(add) => {
+            validate_alter_table_add_constraint_temporal_fk_actions(add)
+        }
+        Statement::AlterTableCompound(compound) => {
+            validate_compound_alter_table_temporal_fk_actions(compound)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_compound_alter_table_temporal_fk_actions(
+    stmt: &crate::backend::parser::AlterTableCompoundStatement,
+) -> Result<(), ExecError> {
+    for action in &stmt.actions {
+        validate_statement_temporal_fk_actions(action)?;
+    }
+    Ok(())
+}
+
+fn validate_multi_alter_table_temporal_fk_actions(
+    statements: &[String],
+    options: ParseOptions,
+) -> Result<(), ExecError> {
+    for sql in statements {
+        let stmt = crate::backend::parser::parse_statement_with_options(sql, options)?;
+        validate_statement_temporal_fk_actions(&stmt)?;
+        if let Statement::AlterTableMulti(nested) = stmt {
+            validate_multi_alter_table_temporal_fk_actions(&nested, options)?;
+        }
+    }
+    Ok(())
+}
 
 pub struct SelectGuard {
     pub state: crate::include::nodes::execnodes::PlanState,
@@ -1825,6 +1895,7 @@ impl Session {
         stmt: &crate::backend::parser::AlterTableCompoundStatement,
         statement_lock_scope_id: Option<u64>,
     ) -> Result<StatementResult, ExecError> {
+        validate_compound_alter_table_temporal_fk_actions(stmt)?;
         self.active_txn = Some(self.active_transaction_without_xid(db));
         self.stats_state.write().begin_top_level_xact();
         let result = stmt.actions.iter().try_for_each(|action| {
@@ -2686,6 +2757,13 @@ impl Session {
         };
 
         if let Statement::AlterTableMulti(ref statements) = stmt {
+            validate_multi_alter_table_temporal_fk_actions(
+                statements,
+                ParseOptions {
+                    standard_conforming_strings: self.standard_conforming_strings(),
+                    max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
+                },
+            )?;
             for sql in statements {
                 self.execute_internal(db, sql, statement_lock_scope_id)?;
             }
@@ -5627,6 +5705,13 @@ impl Session {
 
         let result = match stmt {
             Statement::AlterTableMulti(ref statements) => {
+                validate_multi_alter_table_temporal_fk_actions(
+                    statements,
+                    ParseOptions {
+                        standard_conforming_strings: self.standard_conforming_strings(),
+                        max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
+                    },
+                )?;
                 for sql in statements {
                     self.execute_internal(db, sql, _statement_lock_scope_id)?;
                 }
@@ -5671,6 +5756,7 @@ impl Session {
             Statement::Reset(ref reset_stmt) => self.apply_reset(db, reset_stmt),
             Statement::Checkpoint(_) => self.apply_checkpoint(db),
             Statement::AlterTableCompound(ref compound_stmt) => {
+                validate_compound_alter_table_temporal_fk_actions(compound_stmt)?;
                 compound_stmt.actions.iter().try_for_each(|action| {
                     self.execute_in_transaction(db, action.clone(), _statement_lock_scope_id)
                         .map(|_| ())
@@ -8548,10 +8634,15 @@ impl Session {
                     }
                     relations
                 };
+                let target_relation_oids = relations
+                    .iter()
+                    .map(|relation| relation.relation_oid)
+                    .collect::<Vec<_>>();
                 for relation in &relations {
-                    reject_relation_with_referencing_foreign_keys(
+                    reject_relation_with_referencing_foreign_keys_except(
                         &catalog,
                         relation.relation_oid,
+                        &target_relation_oids,
                         "TRUNCATE on table without referencing foreign keys",
                     )?;
                 }

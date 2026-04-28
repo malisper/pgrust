@@ -100,8 +100,8 @@ use crate::pl::plpgsql::PlpgsqlFunctionCache;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
     ensure_can_set_role, ensure_relation_owner, map_catalog_error,
-    reject_column_with_foreign_key_dependencies, reject_index_with_referencing_foreign_keys,
-    reject_relation_with_dependent_views, validate_alter_table_add_column,
+    reject_index_with_referencing_foreign_keys, reject_relation_with_dependent_views,
+    validate_alter_table_add_column,
 };
 pub(crate) use large_objects::LargeObjectRuntime;
 use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};
@@ -145,7 +145,10 @@ pub(crate) use async_notify::{
     AsyncListenAction, AsyncListenOp, AsyncNotifyRuntime, PendingNotification,
     merge_pending_notifications, queue_pending_notification,
 };
-pub(crate) use ddl::reject_relation_with_referencing_foreign_keys;
+pub(crate) use ddl::{
+    reject_relation_with_referencing_foreign_keys,
+    reject_relation_with_referencing_foreign_keys_except,
+};
 pub(crate) use foreign_keys::{
     alter_table_add_constraint_lock_requests, alter_table_validate_constraint_lock_requests,
     delete_foreign_key_lock_requests, execute_set_constraints, insert_foreign_key_lock_requests,

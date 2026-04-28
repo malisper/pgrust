@@ -884,9 +884,19 @@ pub(crate) fn reject_relation_with_referencing_foreign_keys(
     relation_oid: u32,
     operation: &'static str,
 ) -> Result<(), ExecError> {
+    reject_relation_with_referencing_foreign_keys_except(catalog, relation_oid, &[], operation)
+}
+
+pub(crate) fn reject_relation_with_referencing_foreign_keys_except(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    ignored_relation_oids: &[u32],
+    operation: &'static str,
+) -> Result<(), ExecError> {
     let mut references = catalog
         .foreign_key_constraint_rows_referencing_relation(relation_oid)
         .into_iter()
+        .filter(|row| !ignored_relation_oids.contains(&row.conrelid))
         .map(|row| (row.conname, relation_name_for_oid(catalog, row.conrelid)))
         .collect::<Vec<_>>();
     references.sort();
@@ -1753,27 +1763,44 @@ pub(super) fn validate_alter_table_alter_column_default(
         });
     }
 
+    let mut normalized_default_expr_sql = default_expr_sql.map(str::to_string);
     if let Some(expr) = default_expr {
         let (_bound, default_type) =
             bind_scalar_expr_in_scope(expr, &[], catalog).map_err(ExecError::Parse)?;
         if !automatic_alter_type_cast_allowed(catalog, default_type, current_column.sql_type) {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "column \"{}\" is of type {} but default expression is of type {}",
-                    current_column.name,
-                    format_sql_type_name(current_column.sql_type),
-                    format_sql_type_name(default_type),
-                ),
-                detail: None,
-                hint: Some("You will need to rewrite or cast the expression.".into()),
-                sqlstate: "42804",
-            });
+            if let Some(sql) = default_expr_sql
+                && (current_column.sql_type.is_range() || current_column.sql_type.is_multirange())
+                && let SqlExpr::Const(value) = expr
+                && let Some(text) = value.as_text()
+                && crate::backend::executor::cast_value(
+                    Value::Text(text.into()),
+                    current_column.sql_type,
+                )
+                .is_ok()
+            {
+                normalized_default_expr_sql = Some(format!(
+                    "({sql})::{}",
+                    format_sql_type_name(current_column.sql_type)
+                ));
+            } else {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column \"{}\" is of type {} but default expression is of type {}",
+                        current_column.name,
+                        format_sql_type_name(current_column.sql_type),
+                        format_sql_type_name(default_type),
+                    ),
+                    detail: None,
+                    hint: Some("You will need to rewrite or cast the expression.".into()),
+                    sqlstate: "42804",
+                });
+            }
         }
     }
 
     Ok(AlterColumnDefaultPlan {
         column_name: current_column.name.clone(),
-        default_expr_sql: default_expr_sql.map(str::to_string),
+        default_expr_sql: normalized_default_expr_sql,
         default_sequence_oid: default_expr_sql
             .and_then(crate::pgrust::database::default_sequence_oid_from_default_expr),
     })

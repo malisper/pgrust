@@ -674,6 +674,7 @@ fn validate_foreign_key_rows(
     client_id: ClientId,
     xid: TransactionId,
     cid: CommandId,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
     interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
 ) -> Result<(), ExecError> {
     let referenced_relation = catalog
@@ -775,14 +776,13 @@ fn validate_foreign_key_rows(
         initially_deferred: false,
         enforced: true,
     };
-    let datetime_config = crate::backend::utils::misc::guc_datetime::DateTimeConfig::default();
     let mut ctx = ddl_executor_context(
         db,
         catalog,
         client_id,
         xid,
         cid,
-        &datetime_config,
+        datetime_config,
         interrupts,
     )?;
     let rows =
@@ -1327,6 +1327,7 @@ impl Database {
                 client_id,
                 xid,
                 cid,
+                &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 std::sync::Arc::clone(&interrupts),
             )?;
         }
@@ -1509,7 +1510,7 @@ impl Database {
         Ok(next_cid)
     }
 
-    fn drop_partition_child_foreign_key_constraints_in_transaction(
+    pub(super) fn drop_partition_child_foreign_key_constraints_in_transaction(
         &self,
         client_id: ClientId,
         xid: TransactionId,
@@ -2350,6 +2351,7 @@ impl Database {
                             client_id,
                             xid,
                             cid,
+                            datetime_config,
                             std::sync::Arc::clone(&interrupts),
                         )?;
                     }

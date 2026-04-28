@@ -144,8 +144,10 @@ pub struct BoundExclusionConstraint {
 pub struct BoundReferencedByForeignKey {
     pub constraint_oid: u32,
     pub constraint_name: String,
+    pub display_constraint_name: String,
     pub referenced_relation_oid: u32,
     pub child_relation_name: String,
+    pub display_child_relation_name: String,
     pub child_relation_oid: u32,
     pub child_rel: crate::backend::storage::smgr::RelFileLocator,
     pub child_toast: Option<crate::include::nodes::execnodes::ToastRelationRef>,
@@ -845,6 +847,11 @@ pub fn normalize_create_table_constraints(
                     constraint_name,
                 )
             };
+            validate_foreign_key_period_actions(
+                constraint.period.is_some() || referenced_period.is_some(),
+                constraint.on_delete,
+                constraint.on_update,
+            )?;
             Ok(ForeignKeyConstraintAction {
                 constraint_name,
                 columns: local_columns,
@@ -1089,9 +1096,24 @@ pub fn bind_referenced_by_foreign_keys(
     desc: &RelationDesc,
     catalog: &dyn super::CatalogLookup,
 ) -> Result<Vec<BoundReferencedByForeignKey>, ParseError> {
-    catalog
+    let mut rows = catalog
         .foreign_key_constraint_rows_referencing_relation(relation_oid)
         .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    if catalog
+        .relation_by_oid(relation_oid)
+        .is_some_and(|relation| relation.relispartition)
+    {
+        let mut pending = catalog.inheritance_parents(relation_oid);
+        while let Some(parent) = pending.pop() {
+            for row in catalog.foreign_key_constraint_rows_referencing_relation(parent.inhparent) {
+                rows.entry(row.oid).or_insert(row);
+            }
+            pending.extend(catalog.inheritance_parents(parent.inhparent));
+        }
+    }
+    rows.into_values()
         .map(|row| bind_inbound_foreign_key_constraint(relation_oid, desc, row, catalog))
         .collect()
 }
@@ -1505,6 +1527,11 @@ pub fn normalize_alter_table_add_constraint(
                 &child_types,
                 catalog,
             )?;
+            validate_foreign_key_period_actions(
+                period.is_some() || referenced.period.is_some(),
+                *on_delete,
+                *on_update,
+            )?;
             Ok(NormalizedAlterTableConstraint::ForeignKey(
                 ForeignKeyConstraintAction {
                     constraint_name,
@@ -1870,6 +1897,33 @@ fn validate_foreign_key(
         return Err(ParseError::FeatureNotSupported(
             "ON DELETE column lists require SET NULL or SET DEFAULT".into(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_foreign_key_period_actions(
+    uses_period: bool,
+    on_delete: ForeignKeyAction,
+    on_update: ForeignKeyAction,
+) -> Result<(), ParseError> {
+    if !uses_period {
+        return Ok(());
+    }
+    if on_update != ForeignKeyAction::NoAction {
+        return Err(ParseError::DetailedError {
+            message: "unsupported ON UPDATE action for foreign key constraint using PERIOD".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    if on_delete != ForeignKeyAction::NoAction {
+        return Err(ParseError::DetailedError {
+            message: "unsupported ON DELETE action for foreign key constraint using PERIOD".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
     }
     Ok(())
 }
@@ -2534,11 +2588,15 @@ fn bind_inbound_foreign_key_constraint(
             actual: format!("missing confkey for constraint {}", row.conname),
         })?;
     let constraint_name = row.conname.clone();
+    let (display_constraint_name, display_child_relation_name) =
+        inbound_foreign_key_display_names(relation_oid, &row, &child_relation, catalog);
     Ok(BoundReferencedByForeignKey {
         constraint_oid: row.oid,
         constraint_name: constraint_name.clone(),
+        display_constraint_name,
         referenced_relation_oid: relation_oid,
         child_relation_name: relation_display_name(catalog, child_relation.relation_oid, "<child>"),
+        display_child_relation_name,
         child_relation_oid: child_relation.relation_oid,
         child_rel: child_relation.rel,
         child_toast: child_relation.toast,
@@ -2590,6 +2648,96 @@ fn bind_inbound_foreign_key_constraint(
         initially_deferred: row.condeferred,
         enforced: row.conenforced,
     })
+}
+
+fn inbound_foreign_key_display_names(
+    referenced_relation_oid: u32,
+    row: &PgConstraintRow,
+    child_relation: &super::BoundRelation,
+    catalog: &dyn super::CatalogLookup,
+) -> (String, String) {
+    let default_child_name = relation_display_name(catalog, child_relation.relation_oid, "<child>");
+    let Some(parent_row) = (row.conparentid != 0)
+        .then(|| catalog.constraint_row_by_oid(row.conparentid))
+        .flatten()
+    else {
+        return (row.conname.clone(), default_child_name);
+    };
+    let referenced_root_oid = if catalog
+        .relation_by_oid(row.confrelid)
+        .is_some_and(|relation| relation.relkind == 'p')
+    {
+        row.confrelid
+    } else {
+        parent_row.confrelid
+    };
+    if referenced_root_oid == 0 || referenced_relation_oid == referenced_root_oid {
+        return (row.conname.clone(), default_child_name);
+    }
+    if !catalog
+        .relation_by_oid(referenced_root_oid)
+        .is_some_and(|relation| relation.relkind == 'p')
+    {
+        return (row.conname.clone(), default_child_name);
+    }
+    let Some(ordinal) =
+        partition_child_ordinal_for_relation(catalog, referenced_root_oid, referenced_relation_oid)
+    else {
+        return (row.conname.clone(), default_child_name);
+    };
+    let display_child_name = catalog
+        .relation_by_oid(parent_row.conrelid)
+        .map(|relation| relation_display_name(catalog, relation.relation_oid, "<child>"))
+        .unwrap_or(default_child_name);
+    (
+        format!("{}_{}", parent_row.conname, ordinal),
+        display_child_name,
+    )
+}
+
+fn partition_child_ordinal_for_relation(
+    catalog: &dyn super::CatalogLookup,
+    root_oid: u32,
+    relation_oid: u32,
+) -> Option<usize> {
+    let mut children = catalog
+        .inheritance_children(root_oid)
+        .into_iter()
+        .filter(|row| !row.inhdetachpending)
+        .filter_map(|row| catalog.relation_by_oid(row.inhrelid))
+        .collect::<Vec<_>>();
+    children.sort_by(|left, right| {
+        partition_bound_sort_key(left)
+            .cmp(&partition_bound_sort_key(right))
+            .then_with(|| left.relation_oid.cmp(&right.relation_oid))
+    });
+    children.iter().enumerate().find_map(|(index, child)| {
+        (child.relation_oid == relation_oid
+            || partition_contains_relation(catalog, child.relation_oid, relation_oid))
+        .then_some(index + 1)
+    })
+}
+
+fn partition_bound_sort_key(relation: &super::BoundRelation) -> String {
+    relation
+        .relpartbound
+        .clone()
+        .unwrap_or_else(|| relation.relation_oid.to_string())
+}
+
+fn partition_contains_relation(
+    catalog: &dyn super::CatalogLookup,
+    root_oid: u32,
+    relation_oid: u32,
+) -> bool {
+    catalog
+        .inheritance_children(root_oid)
+        .into_iter()
+        .filter(|row| !row.inhdetachpending)
+        .any(|row| {
+            row.inhrelid == relation_oid
+                || partition_contains_relation(catalog, row.inhrelid, relation_oid)
+        })
 }
 
 fn merge_not_null_constraint(
