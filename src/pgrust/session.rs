@@ -3241,6 +3241,51 @@ impl Session {
         }
     }
 
+    fn event_triggers_guc_enabled(&self) -> bool {
+        !self.gucs.get("event_triggers").is_some_and(|value| {
+            let value = value.trim();
+            value.eq_ignore_ascii_case("off") || value.eq_ignore_ascii_case("false") || value == "0"
+        })
+    }
+
+    fn statement_collects_sql_drop_objects(stmt: &Statement) -> bool {
+        matches!(
+            stmt,
+            Statement::AlterTableDropColumn(_)
+                | Statement::AlterTableAlterColumnDefault(_)
+                | Statement::AlterTableDropConstraint(_)
+                | Statement::DropTable(_)
+                | Statement::DropSchema(_)
+                | Statement::DropOwned(_)
+                | Statement::DropIndex(_)
+                | Statement::DropFunction(_)
+                | Statement::DropPolicy(_)
+        )
+    }
+
+    fn statement_may_fire_event_triggers(
+        &self,
+        db: &Database,
+        stmt: &Statement,
+        tag: &str,
+    ) -> Result<bool, ExecError> {
+        if !self.event_triggers_guc_enabled() {
+            return Ok(false);
+        }
+        if db.event_trigger_may_fire(self.client_id, None, "ddl_command_start", tag)? {
+            return Ok(true);
+        }
+        if db.event_trigger_may_fire(self.client_id, None, "ddl_command_end", tag)? {
+            return Ok(true);
+        }
+        if Self::statement_collects_sql_drop_objects(stmt)
+            && db.event_trigger_may_fire(self.client_id, None, "sql_drop", tag)?
+        {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn default_event_trigger_schema(&self) -> Option<String> {
         self.configured_search_path().and_then(|path| {
             path.into_iter()
@@ -4376,8 +4421,9 @@ impl Session {
         }
 
         if self.active_txn.is_none()
-            && Self::event_trigger_command_tag(&stmt).is_some()
             && !matches!(stmt, Statement::ReindexIndex(_))
+            && let Some(tag) = Self::event_trigger_command_tag(&stmt)
+            && self.statement_may_fire_event_triggers(db, &stmt, tag)?
         {
             return self.execute_statement_autocommit(db, stmt, statement_lock_scope_id);
         }
