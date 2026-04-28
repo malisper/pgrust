@@ -2184,7 +2184,12 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
                 };
                 format!("(({})[{index}])", render_sort_key_expr(root, arg, catalog))
             }
-            _ => crate::backend::executor::render_explain_expr(expr, &[]),
+            ScalarFunctionImpl::Builtin(BuiltinScalarFunction::BpcharToText)
+                if func.args.len() == 1 =>
+            {
+                render_sort_key_expr(root, &func.args[0], catalog)
+            }
+            _ => render_sort_key_function_expr(root, func, catalog),
         },
         Expr::Coalesce(left, right) => format!(
             "COALESCE({}, {})",
@@ -2202,6 +2207,37 @@ fn render_sort_key_expr(root: &PlannerInfo, expr: &Expr, catalog: &dyn CatalogLo
         }
         _ => crate::backend::executor::render_explain_expr(expr, &[]),
     }
+}
+
+fn render_sort_key_function_expr(
+    root: &PlannerInfo,
+    func: &crate::include::nodes::primnodes::FuncExpr,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let name = match func.implementation {
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Abs) => "abs".to_string(),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Lower) => "lower".to_string(),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Upper) => "upper".to_string(),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Left) => "\"left\"".to_string(),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Right) => "\"right\"".to_string(),
+        ScalarFunctionImpl::UserDefined { proc_oid } => func
+            .funcname
+            .clone()
+            .unwrap_or_else(|| format!("proc_{proc_oid}")),
+        _ => {
+            return crate::backend::executor::render_explain_expr(
+                &Expr::Func(Box::new(func.clone())),
+                &[],
+            );
+        }
+    };
+    let args = func
+        .args
+        .iter()
+        .map(|arg| render_sort_key_expr(root, arg, catalog))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({args})")
 }
 
 fn render_geometry_sort_arg(
