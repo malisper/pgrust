@@ -312,13 +312,15 @@ pub(crate) fn eval_jsonpath_like_regex(
     flags: &str,
 ) -> Result<bool, ExecError> {
     let flags = parse_jsonpath_like_regex_flags(flags)?;
-    let compiled = compile_pg_regex(pattern, &flags, PgRegexPurpose::Boolean)?;
+    let pattern = normalize_jsonpath_regex_pattern(pattern, &flags);
+    let compiled = compile_pg_regex(&pattern, &flags, PgRegexPurpose::Boolean)?;
     Ok(compiled.is_match(text)?)
 }
 
 pub(crate) fn validate_jsonpath_like_regex(pattern: &str, flags: &str) -> Result<(), ExecError> {
     let flags = parse_jsonpath_like_regex_flags(flags)?;
-    let _ = compile_pg_regex(pattern, &flags, PgRegexPurpose::Boolean)?;
+    let pattern = normalize_jsonpath_regex_pattern(pattern, &flags);
+    let _ = compile_pg_regex(&pattern, &flags, PgRegexPurpose::Boolean)?;
     Ok(())
 }
 
@@ -1015,12 +1017,14 @@ fn parse_pg_regex_flags(flags: &str) -> Result<PgRegexFlags, ExecError> {
 }
 
 fn parse_jsonpath_like_regex_flags(flags: &str) -> Result<PgRegexFlags, ExecError> {
+    let mut dot_all = false;
+    let mut multiline = false;
     let mut mapped = String::new();
     for flag in flags.chars() {
         match flag {
             'i' => mapped.push('i'),
-            's' => {}
-            'm' => mapped.push('m'),
+            's' => dot_all = true,
+            'm' => multiline = true,
             'q' => mapped.push('q'),
             'x' => {
                 return Err(regex_invalid(
@@ -1037,7 +1041,30 @@ fn parse_jsonpath_like_regex_flags(flags: &str) -> Result<PgRegexFlags, ExecErro
             }
         }
     }
+    mapped.push(match (dot_all, multiline) {
+        (false, false) => 'p',
+        (false, true) => 'm',
+        (true, false) => 's',
+        (true, true) => 'w',
+    });
     parse_pg_regex_flags(&mapped)
+}
+
+fn normalize_jsonpath_regex_pattern(pattern: &str, flags: &PgRegexFlags) -> String {
+    if matches!(flags.flavor, PgRegexFlavor::Literal) {
+        return pattern.to_string();
+    }
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && matches!(chars.peek(), Some('b')) {
+            let _ = chars.next();
+            out.push('\u{0008}');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn reject_global_option(

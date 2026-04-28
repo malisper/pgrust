@@ -14,16 +14,17 @@ use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PgAggregateRow, PgAmprocRow, PgAuthIdRow,
     PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow,
     PgDependRow, PgEnumRow, PgForeignDataWrapperRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgRangeRow,
-    PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsTemplateRow, PgTypeRow,
-    bootstrap_pg_aggregate_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_database_rows, bootstrap_pg_enum_rows,
-    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
-    bootstrap_pg_operator_rows, bootstrap_pg_proc_row_by_oid, bootstrap_pg_proc_rows,
-    bootstrap_pg_proc_rows_by_name, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
-    bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_template_rows, builtin_range_rows,
-    builtin_type_rows, synthetic_range_proc_rows_by_name,
+    PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRangeRow, PgRewriteRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTsTemplateRow, PgTypeRow, bootstrap_pg_aggregate_rows,
+    bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_row_by_oid, bootstrap_pg_proc_rows, bootstrap_pg_proc_rows_by_name,
+    bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
+    bootstrap_pg_ts_template_rows, builtin_range_rows, builtin_type_rows,
+    synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::pathnodes::PlannerIndexExprCacheEntry;
 use crate::pgrust::database::DatabaseStatsStore;
@@ -757,6 +758,13 @@ impl CatalogLookup for VisibleCatalog {
             .unwrap_or_default()
     }
 
+    fn attribute_rows(&self) -> Vec<crate::include::catalog::PgAttributeRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.attribute_rows())
+            .unwrap_or_default()
+    }
+
     fn class_rows(&self) -> Vec<PgClassRow> {
         VisibleCatalog::class_rows(self)
     }
@@ -797,6 +805,34 @@ impl CatalogLookup for VisibleCatalog {
                     .filter(|row| row.inhparent == relation_oid)
                     .collect()
             })
+            .unwrap_or_default()
+    }
+
+    fn inheritance_rows(&self) -> Vec<PgInheritsRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.inherit_rows())
+            .unwrap_or_default()
+    }
+
+    fn publication_rows(&self) -> Vec<PgPublicationRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.publication_rows())
+            .unwrap_or_default()
+    }
+
+    fn publication_rel_rows(&self) -> Vec<PgPublicationRelRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.publication_rel_rows())
+            .unwrap_or_default()
+    }
+
+    fn publication_namespace_rows(&self) -> Vec<PgPublicationNamespaceRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.publication_namespace_rows())
             .unwrap_or_default()
     }
 

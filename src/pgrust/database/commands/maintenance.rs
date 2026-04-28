@@ -11,6 +11,7 @@ use super::operator::{
 use super::typed_table::reject_typed_table_ddl;
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_indexes_for_row};
+use crate::backend::executor::expr_reg::format_type_text;
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
 use crate::backend::executor::{ExecutorContext, RelationDesc};
 use crate::backend::parser::{
@@ -337,7 +338,12 @@ fn resolve_exact_function_row(
         None => None,
     };
     let base_name = function_name.rsplit('.').next().unwrap_or(function_name);
-    let signature = format!("{function_name}({})", arg_types.join(", "));
+    let signature_arg_types = desired_arg_oids
+        .iter()
+        .map(|oid| format_type_text(*oid, None, &catalog))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let signature = format!("{function_name}({signature_arg_types})");
     let matches = catalog
         .proc_rows_by_name(base_name)
         .into_iter()

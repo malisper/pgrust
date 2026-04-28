@@ -385,6 +385,16 @@ impl Database {
                 configured_search_path,
                 catalog_effects,
             )?;
+        let next_cid = self
+            .reconcile_partitioned_parent_foreign_keys_for_attached_child_in_transaction(
+                client_id,
+                xid,
+                next_cid,
+                parent.relation_oid,
+                updated_child.relation_oid,
+                configured_search_path,
+                catalog_effects,
+            )?;
         self.clone_parent_row_triggers_to_partition_in_transaction(
             client_id,
             xid,

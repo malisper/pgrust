@@ -1683,10 +1683,22 @@ fn ensure_matching_partition_shape(
             sqlstate: "42P16",
         });
     }
-    for (child, parent_column) in child_columns.iter().zip(parent_columns.iter()) {
-        if !child.name.eq_ignore_ascii_case(&parent_column.name)
-            || child.sql_type != parent_column.sql_type
-        {
+    for parent_column in parent_columns {
+        let Some(child) = child_columns
+            .iter()
+            .find(|column| column.name.eq_ignore_ascii_case(&parent_column.name))
+        else {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "partition \"{}\" has different column layout than partitioned table",
+                    relation_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        };
+        if child.sql_type != parent_column.sql_type {
             return Err(ParseError::DetailedError {
                 message: format!(
                     "partition \"{}\" has different column layout than partitioned table",

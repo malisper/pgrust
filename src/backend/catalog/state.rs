@@ -1206,7 +1206,7 @@ impl Catalog {
         let table = self
             .get_by_oid(relation_oid)
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if table.relkind != 'r' {
+        if !matches!(table.relkind, 'r' | 'p') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
 
@@ -1285,7 +1285,7 @@ impl Catalog {
         let referenced_table = self
             .get_by_oid(referenced_relation_oid)
             .ok_or_else(|| CatalogError::UnknownTable(referenced_relation_oid.to_string()))?;
-        if referenced_table.relkind != 'r' {
+        if !matches!(referenced_table.relkind, 'r' | 'p') {
             return Err(CatalogError::UnknownTable(
                 referenced_relation_oid.to_string(),
             ));
@@ -1293,7 +1293,7 @@ impl Catalog {
         let referenced_index = self
             .get_by_oid(referenced_index_oid)
             .ok_or_else(|| CatalogError::UnknownTable(referenced_index_oid.to_string()))?;
-        if referenced_index.relkind != 'i' {
+        if !matches!(referenced_index.relkind, 'i' | 'I') {
             return Err(CatalogError::UnknownTable(referenced_index_oid.to_string()));
         }
 
@@ -1871,7 +1871,7 @@ impl Catalog {
             .get(&name)
             .cloned()
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if old_entry.relkind != 'r' {
+        if !matches!(old_entry.relkind, 'r' | 'p') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
         let column_index = relation_column_index(&old_entry.desc, column_name)?;
@@ -2503,6 +2503,7 @@ impl Catalog {
             row.tgrelid,
             row.tgfoid,
             &row.tgattr,
+            row.tgconstraint,
         ));
         sort_pg_depend_rows(&mut self.depends);
         if !entry.relhastriggers {

@@ -16,9 +16,9 @@ use crate::include::nodes::plannodes::{AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, Expr, ParamKind, ProjectSetTarget, QueryColumn,
     ScalarFunctionImpl, SetReturningCall, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
-    SqlJsonTableColumnKind, SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SubPlan,
-    TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind, attrno_index,
-    set_returning_call_exprs,
+    SqlJsonTableColumnKind, SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable,
+    SqlXmlTableColumnKind, SubPlan, TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind,
+    attrno_index, set_returning_call_exprs,
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
 
@@ -164,8 +164,10 @@ pub(crate) fn format_verbose_explain_plan_json_with_catalog(
     else {
         return None;
     };
-    let SetReturningCall::SqlJsonTable(_) = call else {
-        return None;
+    let table_function_name = match call {
+        SetReturningCall::SqlJsonTable(_) => "json_table",
+        SetReturningCall::SqlXmlTable(_) => "xmltable",
+        _ => return None,
     };
 
     let output = verbose_function_scan_output_exprs(call, table_alias.as_deref());
@@ -181,7 +183,7 @@ pub(crate) fn format_verbose_explain_plan_json_with_catalog(
         "      \"Node Type\": \"Table Function Scan\",".into(),
         "      \"Parallel Aware\": false,".into(),
         "      \"Async Capable\": false,".into(),
-        "      \"Table Function Name\": \"json_table\",".into(),
+        format!("      \"Table Function Name\": \"{table_function_name}\","),
     ];
     if let Some(alias) = table_alias {
         lines.push(format!("      \"Alias\": {},", json_string_literal(alias)));
@@ -1420,10 +1422,18 @@ fn scan_direction_label(direction: crate::include::access::relscan::ScanDirectio
 }
 
 fn verbose_function_scan_label(call: &SetReturningCall, table_alias: Option<&str>) -> String {
-    if matches!(call, SetReturningCall::SqlJsonTable(_)) {
+    if matches!(
+        call,
+        SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)
+    ) {
+        let name = if matches!(call, SetReturningCall::SqlJsonTable(_)) {
+            "json_table"
+        } else {
+            "xmltable"
+        };
         return match table_alias {
-            Some(alias) => format!("Table Function Scan on \"json_table\" {alias}"),
-            None => "Table Function Scan on \"json_table\"".into(),
+            Some(alias) => format!("Table Function Scan on \"{name}\" {alias}"),
+            None => format!("Table Function Scan on \"{name}\""),
         };
     }
     let func = set_returning_call_label(call);
@@ -1441,13 +1451,21 @@ fn verbose_function_scan_output_exprs(
     call: &SetReturningCall,
     table_alias: Option<&str>,
 ) -> Vec<String> {
-    if matches!(call, SetReturningCall::SqlJsonTable(_)) {
+    if matches!(
+        call,
+        SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)
+    ) {
+        let name = if matches!(call, SetReturningCall::SqlJsonTable(_)) {
+            "json_table"
+        } else {
+            "xmltable"
+        };
         return call
             .output_columns()
             .iter()
             .map(|column| match table_alias {
                 Some(_) => quote_explain_identifier(&column.name),
-                None => format!("\"json_table\".{}", quote_explain_identifier(&column.name)),
+                None => format!("\"{name}\".{}", quote_explain_identifier(&column.name)),
             })
             .collect();
     }
@@ -1695,6 +1713,11 @@ fn collect_plan_type_names(
                 collect_sql_type_name(column.sql_type, catalog, type_names);
             }
         }
+        if let SetReturningCall::SqlXmlTable(table) = call {
+            for column in &table.columns {
+                collect_sql_type_name(column.sql_type, catalog, type_names);
+            }
+        }
     }
     for child in direct_plan_children(plan) {
         collect_plan_type_names(child, catalog, type_names);
@@ -1796,7 +1819,10 @@ fn push_verbose_plan_details(
             }
         }
         Plan::FunctionScan { call, .. } => {
-            let label = if matches!(call, SetReturningCall::SqlJsonTable(_)) {
+            let label = if matches!(
+                call,
+                SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)
+            ) {
                 "Table Function Call"
             } else {
                 "Function Call"
@@ -2706,6 +2732,9 @@ fn render_verbose_set_returning_call(
     if let SetReturningCall::SqlJsonTable(table) = call {
         return render_verbose_sql_json_table_call(table, ctx);
     }
+    if let SetReturningCall::SqlXmlTable(table) = call {
+        return render_verbose_sql_xml_table_call(table, ctx);
+    }
     let name = set_returning_call_label(call);
     let args = match call {
         SetReturningCall::GenerateSeries {
@@ -2763,9 +2792,72 @@ fn render_verbose_set_returning_call(
             .iter()
             .map(|expr| render_verbose_function_arg(expr, ctx))
             .collect(),
-        SetReturningCall::SqlJsonTable(_) => unreachable!("handled above"),
+        SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_) => {
+            unreachable!("handled above")
+        }
     };
     format!("{name}({})", args.join(", "))
+}
+
+fn render_verbose_sql_xml_table_call(table: &SqlXmlTable, ctx: &VerboseExplainContext) -> String {
+    let mut rendered = String::from("XMLTABLE(");
+    if !table.namespaces.is_empty() {
+        rendered.push_str("XMLNAMESPACES (");
+        rendered.push_str(
+            &table
+                .namespaces
+                .iter()
+                .map(|namespace| {
+                    let uri = render_verbose_sql_json_table_expr(&namespace.uri, ctx);
+                    match namespace.name.as_deref() {
+                        Some(name) => format!("{uri} AS {}", quote_explain_identifier(name)),
+                        None => format!("DEFAULT {uri}"),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        rendered.push_str("), ");
+    }
+    rendered.push_str(&render_verbose_sql_json_table_expr(&table.row_path, ctx));
+    rendered.push_str(" PASSING ");
+    rendered.push_str(&render_verbose_sql_json_table_expr(&table.document, ctx));
+    rendered.push_str(" COLUMNS ");
+    rendered.push_str(
+        &table
+            .columns
+            .iter()
+            .map(|column| {
+                let name = quote_explain_identifier(&column.name);
+                match &column.kind {
+                    SqlXmlTableColumnKind::Ordinality => format!("{name} FOR ORDINALITY"),
+                    SqlXmlTableColumnKind::Regular {
+                        path,
+                        default,
+                        not_null,
+                    } => {
+                        let mut column =
+                            format!("{name} {}", render_type_name(column.sql_type, ctx));
+                        if let Some(path) = path {
+                            column.push_str(" PATH ");
+                            column.push_str(&render_verbose_sql_json_table_expr(path, ctx));
+                        }
+                        if let Some(default) = default {
+                            column.push_str(" DEFAULT ");
+                            column.push_str(&render_verbose_sql_json_table_expr(default, ctx));
+                        }
+                        if *not_null {
+                            column.push_str(" NOT NULL");
+                        }
+                        column
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    rendered.push(')');
+    rendered
 }
 
 fn render_verbose_sql_json_table_call(table: &SqlJsonTable, ctx: &VerboseExplainContext) -> String {
@@ -3880,7 +3972,7 @@ fn collect_direct_set_returning_call_subplans<'a>(
                 collect_direct_expr_subplans(arg, out);
             }
         }
-        SetReturningCall::SqlJsonTable(_) => {
+        SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_) => {
             for arg in set_returning_call_exprs(call) {
                 collect_direct_expr_subplans(arg, out);
             }

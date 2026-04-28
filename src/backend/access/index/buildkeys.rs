@@ -111,6 +111,7 @@ impl IndexBuildKeyProjector {
                 name: ctx.index_name.clone(),
                 rel: ctx.index_relation,
                 relation_oid: ctx.index_meta.indexrelid,
+                relkind: 'i',
                 desc: ctx.index_desc.clone(),
                 index_meta,
                 index_exprs,

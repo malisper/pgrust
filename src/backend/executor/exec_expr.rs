@@ -2255,6 +2255,12 @@ fn eval_pg_get_acl(values: &[Value], ctx: &ExecutorContext) -> Result<Value, Exe
                     .class_row_by_oid(objid)
                     .and_then(|row| row.relacl.map(text_acl_array))
                     .unwrap_or(Value::Null),
+                PG_CLASS_RELATION_OID if objsubid > 0 => catalog
+                    .attribute_rows_for_relation(objid)
+                    .into_iter()
+                    .find(|row| i32::from(row.attnum) == objsubid)
+                    .and_then(|row| row.attacl.map(text_acl_array))
+                    .unwrap_or(Value::Null),
                 PG_DATABASE_RELATION_OID if objsubid == 0 => catalog
                     .database_row_by_oid(objid)
                     .and_then(|row| row.datacl.map(text_acl_array))

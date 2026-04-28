@@ -371,7 +371,10 @@ fn catalog_row_identity_key(kind: BootstrapCatalogKind, values: &[Value]) -> Cat
         | BootstrapCatalogKind::PgAggregate
         | BootstrapCatalogKind::PgConstraint
         | BootstrapCatalogKind::PgIndex
-        | BootstrapCatalogKind::PgPartitionedTable => {
+        | BootstrapCatalogKind::PgPartitionedTable
+        | BootstrapCatalogKind::PgPublication
+        | BootstrapCatalogKind::PgPublicationRel
+        | BootstrapCatalogKind::PgPublicationNamespace => {
             catalog_identity_key_from_indexes(values, &[0])
         }
         BootstrapCatalogKind::PgAttribute => catalog_identity_key_from_indexes(values, &[0, 4]),

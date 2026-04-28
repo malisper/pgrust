@@ -9,6 +9,7 @@ use crate::backend::parser::{
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::stack_depth::StackDepthGuard;
+use crate::include::nodes::parsenodes::ReplicaIdentityKind;
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::execute_do_with_gucs;
@@ -89,7 +90,10 @@ fn reject_restricted_views_in_from_item(
         FromItem::Alias { source, .. } | FromItem::Lateral(source) => {
             reject_restricted_views_in_from_item(source, catalog)
         }
-        FromItem::Values { .. } | FromItem::FunctionCall { .. } | FromItem::JsonTable(_) => Ok(()),
+        FromItem::Values { .. }
+        | FromItem::FunctionCall { .. }
+        | FromItem::JsonTable(_)
+        | FromItem::XmlTable(_) => Ok(()),
     }
 }
 
@@ -167,32 +171,40 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        let index = catalog
-            .index_relations_for_heap(relation.relation_oid)
-            .into_iter()
-            .find(|index| index.name.eq_ignore_ascii_case(&stmt.index_name))
-            .ok_or_else(|| {
-                ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
-                    expected: "index on table",
-                    actual: format!(
-                        "index \"{}\" does not exist for table \"{}\"",
-                        stmt.index_name, stmt.table_name
-                    ),
-                })
-            })?;
-        if !index.index_meta.indisunique {
-            return Err(ExecError::Parse(
-                crate::backend::parser::ParseError::DetailedError {
-                    message: format!(
-                        "cannot use non-unique index \"{}\" as replica identity",
-                        stmt.index_name
-                    ),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42809",
-                },
-            ));
-        }
+        let (identity, index_oid) = match &stmt.identity {
+            ReplicaIdentityKind::Default => ('d', None),
+            ReplicaIdentityKind::Full => ('f', None),
+            ReplicaIdentityKind::Nothing => ('n', None),
+            ReplicaIdentityKind::Index(index_name) => {
+                let index = catalog
+                    .index_relations_for_heap(relation.relation_oid)
+                    .into_iter()
+                    .find(|index| index.name.eq_ignore_ascii_case(index_name))
+                    .ok_or_else(|| {
+                        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                            expected: "index on table",
+                            actual: format!(
+                                "index \"{}\" does not exist for table \"{}\"",
+                                index_name, stmt.table_name
+                            ),
+                        })
+                    })?;
+                if !index.index_meta.indisunique {
+                    return Err(ExecError::Parse(
+                        crate::backend::parser::ParseError::DetailedError {
+                            message: format!(
+                                "cannot use non-unique index \"{}\" as replica identity",
+                                index_name
+                            ),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42809",
+                        },
+                    ));
+                }
+                ('i', Some(index.relation_oid))
+            }
+        };
 
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -209,7 +221,7 @@ impl Database {
         let result = self
             .catalog
             .write()
-            .set_replica_identity_index_mvcc(relation.relation_oid, index.relation_oid, &ctx)
+            .set_replica_identity_mvcc(relation.relation_oid, identity, index_oid, &ctx)
             .map(|effect| {
                 catalog_effects.push(effect);
                 StatementResult::AffectedRows(0)
@@ -481,7 +493,7 @@ impl Database {
         result
     }
 
-    fn finish_txn_with_async_notifications(
+    pub(crate) fn finish_txn_with_async_notifications(
         &self,
         client_id: ClientId,
         xid: TransactionId,
@@ -553,7 +565,10 @@ impl Database {
         random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
-        use crate::backend::commands::tablecmds::execute_truncate_table;
+        use crate::backend::commands::tablecmds::{
+            check_planned_stmt_select_for_update_privileges, check_planned_stmt_select_privileges,
+            execute_truncate_table,
+        };
         let interrupts = self.interrupt_state(client_id);
         let session_replication_role = self.session_replication_role(client_id);
 
@@ -1450,9 +1465,10 @@ impl Database {
                         _ => {}
                     }
                 }
-                let (stmt, planned_select, rels) = {
+                let (stmt, planned_select, planned_select_for_update, rels) = {
                     let mut rels = std::collections::BTreeSet::new();
                     let mut planned_select = None;
+                    let mut planned_select_for_update = false;
                     match &stmt {
                         Statement::Select(select) => {
                             let planned_stmt = crate::backend::parser::pg_plan_query_with_config(
@@ -1461,6 +1477,7 @@ impl Database {
                                 planner_config,
                             )?;
                             collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
+                            planned_select_for_update = select.locking_clause.is_some();
                             planned_select = Some(planned_stmt);
                         }
                         Statement::Values(_) => {}
@@ -1477,7 +1494,12 @@ impl Database {
                         }
                         _ => unreachable!(),
                     }
-                    (stmt, planned_select, rels.into_iter().collect::<Vec<_>>())
+                    (
+                        stmt,
+                        planned_select,
+                        planned_select_for_update,
+                        rels.into_iter().collect::<Vec<_>>(),
+                    )
                 };
 
                 lock_relations_interruptible(
@@ -1554,7 +1576,14 @@ impl Database {
                     trigger_depth: 0,
                 };
                 let result = match planned_select {
-                    Some(planned_stmt) => execute_planned_stmt(planned_stmt, &mut ctx),
+                    Some(planned_stmt) => {
+                        if planned_select_for_update {
+                            check_planned_stmt_select_for_update_privileges(&planned_stmt, &ctx)?;
+                        } else {
+                            check_planned_stmt_select_privileges(&planned_stmt, &ctx)?;
+                        }
+                        execute_planned_stmt(planned_stmt, &mut ctx)
+                    }
                     None => execute_readonly_statement_with_config(
                         stmt,
                         &visible_catalog,
@@ -2597,10 +2626,9 @@ impl Database {
             collect_rels_from_planned_stmt(&query_desc.planned_stmt, &mut rels);
             (query_desc, rels.into_iter().collect::<Vec<_>>())
         };
+        let privilege_planned_stmt = query_desc.planned_stmt.clone();
 
-        let interrupts = self.interrupt_state(client_id);
-        lock_relations_interruptible(&self.table_locks, client_id, &rels, interrupts.as_ref())?;
-
+        let transaction_snapshot = snapshot_override.clone();
         let (snapshot, command_id) = match (snapshot_override, txn_ctx) {
             (Some(snapshot), Some((_xid, cid))) => (snapshot, cid),
             (Some(snapshot), None) => {
@@ -2610,9 +2638,17 @@ impl Database {
             (None, Some((xid, cid))) => (self.txns.read().snapshot_for_command(xid, cid)?, cid),
             (None, None) => (self.txns.read().snapshot(INVALID_TRANSACTION_ID)?, 0),
         };
+        let transaction_state: SharedExecutorTransactionState =
+            std::sync::Arc::new(parking_lot::Mutex::new(ExecutorTransactionState {
+                xid: (snapshot.current_xid != INVALID_TRANSACTION_ID)
+                    .then_some(snapshot.current_xid),
+                cid: command_id,
+                transaction_snapshot,
+            }));
         let columns = query_desc.columns();
         let column_names = query_desc.column_names();
         let state = executor_start(query_desc.planned_stmt.plan_tree);
+        let interrupts = self.interrupt_state(client_id);
         let session_replication_role = self.session_replication_role(client_id);
         let ctx = ExecutorContext {
             pool: std::sync::Arc::clone(&self.pool),
@@ -2634,7 +2670,7 @@ impl Database {
             stats: std::sync::Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
             snapshot,
-            transaction_state: None,
+            transaction_state: Some(transaction_state),
             client_id,
             current_database_name: self.current_database_name(),
             session_user_oid: self.auth_state(client_id).session_user_oid(),
@@ -2665,9 +2701,23 @@ impl Database {
             cte_tables: std::collections::HashMap::new(),
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
-            deferred_foreign_keys: None,
+            deferred_foreign_keys: Some(
+                crate::backend::executor::DeferredForeignKeyTracker::default(),
+            ),
             trigger_depth: 0,
         };
+        if select_stmt.locking_clause.is_some() {
+            crate::backend::commands::tablecmds::check_planned_stmt_select_for_update_privileges(
+                &privilege_planned_stmt,
+                &ctx,
+            )?;
+        } else {
+            crate::backend::commands::tablecmds::check_planned_stmt_select_privileges(
+                &privilege_planned_stmt,
+                &ctx,
+            )?;
+        }
+        lock_relations_interruptible(&self.table_locks, client_id, &rels, ctx.interrupts.as_ref())?;
 
         Ok(SelectGuard {
             state,

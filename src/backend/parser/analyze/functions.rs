@@ -124,6 +124,8 @@ pub(crate) fn resolve_function_call(
         else {
             continue;
         };
+        let declared_arg_types = concrete_declared_arg_types_for_candidate(&row, &candidate)
+            .unwrap_or_else(|| candidate.declared_arg_types.clone());
 
         let result_type = match (&result_type.kind, &row_shape) {
             (SqlTypeKind::Record, ResolvedFunctionRowShape::OutParameters(columns)) => {
@@ -144,7 +146,7 @@ pub(crate) fn resolve_function_call(
             prokind: row.prokind,
             proretset: row.proretset,
             result_type,
-            declared_arg_types: candidate.declared_arg_types,
+            declared_arg_types,
             nvargs: candidate.nvargs,
             vatype_oid: candidate.vatype_oid,
             func_variadic: row.provariadic != 0
@@ -255,6 +257,9 @@ fn polymorphic_candidate_is_consistent(
         ) {
             saw_ordinary = true;
             let Some(base) = ordinary_polymorphic_base_type(declared_oid, actual_type) else {
+                if declared_oid == ANYARRAYOID && is_text_like_type(actual_type) {
+                    continue;
+                }
                 return false;
             };
             let base = canonical_polymorphic_type(base);
@@ -276,6 +281,61 @@ fn polymorphic_candidate_is_consistent(
     }
     (!saw_ordinary || ordinary_base.is_some())
         && (!saw_compatible || resolve_anycompatible_element_type(row, candidate).is_some())
+}
+
+fn concrete_declared_arg_types_for_candidate(
+    row: &crate::include::catalog::PgProcRow,
+    candidate: &CandidateMatch,
+) -> Option<Vec<SqlType>> {
+    let declared_oids = candidate_declared_arg_oids(row, candidate)?;
+    let anyelement = resolve_anyelement_result_type(row, candidate);
+    let anyenum = resolve_anyenum_result_type(row, candidate);
+    let anyarray = resolve_anyarray_result_type(row, candidate);
+    let anyrange = resolve_anyrange_result_type(row, candidate);
+    let anymultirange = resolve_anymultirange_result_type(row, candidate);
+    let anycompatible = resolve_anycompatible_element_type(row, candidate);
+    let anycompatiblearray = anycompatible.map(SqlType::array_of);
+    let anycompatiblerange = resolve_anycompatible_range_result_type(row, candidate);
+    let anycompatiblemultirange = resolve_anycompatible_multirange_result_type(row, candidate);
+
+    Some(
+        declared_oids
+            .into_iter()
+            .zip(candidate.declared_arg_types.iter().copied())
+            .map(|(declared_oid, actual_type)| match declared_oid {
+                ANYOID => actual_type,
+                ANYELEMENTOID => anyelement.unwrap_or(actual_type),
+                ANYENUMOID => anyenum.unwrap_or(actual_type),
+                ANYARRAYOID => anyarray.unwrap_or(actual_type),
+                ANYRANGEOID => anyrange.unwrap_or(actual_type),
+                ANYMULTIRANGEOID => anymultirange.unwrap_or(actual_type),
+                ANYCOMPATIBLEOID => anycompatible.unwrap_or(actual_type),
+                ANYCOMPATIBLEARRAYOID => anycompatiblearray.unwrap_or(actual_type),
+                ANYCOMPATIBLERANGEOID => anycompatiblerange.unwrap_or(actual_type),
+                ANYCOMPATIBLEMULTIRANGEOID => anycompatiblemultirange.unwrap_or(actual_type),
+                _ => actual_type,
+            })
+            .collect(),
+    )
+}
+
+fn candidate_declared_arg_oids(
+    row: &crate::include::catalog::PgProcRow,
+    candidate: &CandidateMatch,
+) -> Option<Vec<u32>> {
+    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    if row.provariadic == 0 || candidate.declared_arg_types.len() <= declared_oids.len() {
+        return Some(declared_oids);
+    }
+
+    let fixed_prefix_len = declared_oids.len().saturating_sub(1);
+    let mut expanded = Vec::with_capacity(candidate.declared_arg_types.len());
+    expanded.extend_from_slice(&declared_oids[..fixed_prefix_len]);
+    expanded.extend(std::iter::repeat_n(
+        row.provariadic,
+        candidate.declared_arg_types.len() - fixed_prefix_len,
+    ));
+    Some(expanded)
 }
 
 fn ordinary_polymorphic_base_type(declared_oid: u32, actual_type: SqlType) -> Option<SqlType> {
@@ -704,6 +764,8 @@ fn can_coerce_to_polymorphic_range_anchor(actual: SqlType, target: SqlType) -> b
             | (SqlTypeKind::Int8, SqlTypeKind::Numeric)
             | (SqlTypeKind::Int8, SqlTypeKind::Float4)
             | (SqlTypeKind::Int8, SqlTypeKind::Float8)
+            | (SqlTypeKind::Numeric, SqlTypeKind::Float4)
+            | (SqlTypeKind::Numeric, SqlTypeKind::Float8)
             | (SqlTypeKind::Float4, SqlTypeKind::Float8)
     )
 }
@@ -717,8 +779,10 @@ fn match_proc_arg_type(
         return Some((2, actual_type));
     }
     if matches!(declared_oid, ANYARRAYOID | ANYCOMPATIBLEARRAYOID) {
-        return (actual_type.is_array || actual_type.kind == SqlTypeKind::AnyArray)
-            .then_some((2, actual_type));
+        return (actual_type.is_array
+            || actual_type.kind == SqlTypeKind::AnyArray
+            || is_text_like_type(actual_type))
+        .then_some((2, actual_type));
     }
     if declared_oid == ANYENUMOID {
         if !actual_type.is_array
@@ -901,15 +965,13 @@ fn resolve_anyelement_result_type(
         .zip(candidate.declared_arg_types.iter().copied())
     {
         let inferred = match declared_oid {
-            ANYOID | ANYELEMENTOID | ANYCOMPATIBLEOID => Some(actual_type),
+            ANYOID | ANYELEMENTOID => Some(actual_type),
             ANYENUMOID if matches!(actual_type.kind, SqlTypeKind::Enum) => Some(actual_type),
-            ANYARRAYOID | ANYCOMPATIBLEARRAYOID if actual_type.is_array => {
-                Some(actual_type.element_type())
-            }
-            ANYRANGEOID | ANYCOMPATIBLERANGEOID if actual_type.is_range() => {
+            ANYARRAYOID if actual_type.is_array => Some(actual_type.element_type()),
+            ANYRANGEOID if actual_type.is_range() => {
                 range_type_ref_for_sql_type(actual_type).map(|range_type| range_type.subtype)
             }
-            ANYMULTIRANGEOID | ANYCOMPATIBLEMULTIRANGEOID if actual_type.is_multirange() => {
+            ANYMULTIRANGEOID if actual_type.is_multirange() => {
                 range_type_ref_for_multirange_sql_type(actual_type)
                     .map(|range_type| range_type.subtype)
             }
@@ -951,20 +1013,18 @@ fn resolve_anyarray_result_type(
         .zip(candidate.declared_arg_types.iter().copied())
     {
         let inferred = match declared_oid {
-            ANYARRAYOID | ANYCOMPATIBLEARRAYOID if actual_type.is_array => Some(actual_type),
+            ANYARRAYOID if actual_type.is_array => Some(actual_type),
             ANYENUMOID if matches!(actual_type.kind, SqlTypeKind::Enum) => {
                 Some(SqlType::array_of(actual_type))
             }
-            ANYOID | ANYELEMENTOID | ANYCOMPATIBLEOID
+            ANYOID | ANYELEMENTOID
                 if !actual_type.is_array && actual_type.kind != SqlTypeKind::AnyArray =>
             {
                 Some(SqlType::array_of(actual_type))
             }
-            ANYRANGEOID | ANYCOMPATIBLERANGEOID if actual_type.is_range() => {
-                range_type_ref_for_sql_type(actual_type)
-                    .map(|range_type| SqlType::array_of(range_type.subtype))
-            }
-            ANYMULTIRANGEOID | ANYCOMPATIBLEMULTIRANGEOID if actual_type.is_multirange() => {
+            ANYRANGEOID if actual_type.is_range() => range_type_ref_for_sql_type(actual_type)
+                .map(|range_type| SqlType::array_of(range_type.subtype)),
+            ANYMULTIRANGEOID if actual_type.is_multirange() => {
                 range_type_ref_for_multirange_sql_type(actual_type)
                     .map(|range_type| SqlType::array_of(range_type.subtype))
             }
@@ -992,8 +1052,8 @@ fn resolve_anyrange_result_type(
         .zip(candidate.declared_arg_types.iter().copied())
     {
         let inferred = match declared_oid {
-            ANYRANGEOID | ANYCOMPATIBLERANGEOID if actual_type.is_range() => Some(actual_type),
-            ANYMULTIRANGEOID | ANYCOMPATIBLEMULTIRANGEOID if actual_type.is_multirange() => {
+            ANYRANGEOID if actual_type.is_range() => Some(actual_type),
+            ANYMULTIRANGEOID if actual_type.is_multirange() => {
                 range_type_ref_for_multirange_sql_type(actual_type).map(|range_type| {
                     range_type
                         .sql_type
@@ -1024,10 +1084,8 @@ fn resolve_anymultirange_result_type(
         .zip(candidate.declared_arg_types.iter().copied())
     {
         let inferred = match declared_oid {
-            ANYMULTIRANGEOID | ANYCOMPATIBLEMULTIRANGEOID if actual_type.is_multirange() => {
-                Some(actual_type)
-            }
-            ANYRANGEOID | ANYCOMPATIBLERANGEOID if actual_type.is_range() => {
+            ANYMULTIRANGEOID if actual_type.is_multirange() => Some(actual_type),
+            ANYRANGEOID if actual_type.is_range() => {
                 let range_type = range_type_ref_for_sql_type(actual_type)?;
                 let multirange_type = multirange_type_ref_for_sql_type(
                     SqlType::multirange(range_type.multirange_type_oid, range_type.type_oid())
@@ -1192,17 +1250,18 @@ fn merge_loose_compatible_type(
         {
             Some(Some(existing))
         }
+        Some(existing) if is_text_like_type(next) && !is_text_like_type(existing) => {
+            Some(Some(existing))
+        }
+        Some(existing) if is_text_like_type(existing) && !is_text_like_type(next) => {
+            Some(Some(next))
+        }
         Some(_) => None,
     }
 }
 
 fn can_coerce_to_compatible_anchor(value: SqlType, anchor: SqlType) -> bool {
-    value == anchor
-        || (anchor.kind == SqlTypeKind::Numeric
-            && matches!(
-                value.kind,
-                SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
-            ))
+    can_coerce_to_polymorphic_range_anchor(value, anchor)
 }
 
 fn catalog_implicit_cast_exists(
@@ -3931,6 +3990,7 @@ fn legacy_json_table_function_entries() -> &'static [(&'static str, JsonTableFun
             JsonTableFunction::ArrayElementsText,
         ),
         ("jsonb_path_query", JsonTableFunction::JsonbPathQuery),
+        ("jsonb_path_query_tz", JsonTableFunction::JsonbPathQueryTz),
         ("jsonb_object_keys", JsonTableFunction::JsonbObjectKeys),
         ("jsonb_each", JsonTableFunction::JsonbEach),
         ("jsonb_each_text", JsonTableFunction::JsonbEachText),

@@ -10,6 +10,7 @@ pub enum SyntheticSystemViewKind {
     PgMatviews,
     PgIndexes,
     PgPolicies,
+    PgPublicationTables,
     PgRules,
     PgStats,
     PgSettings,
@@ -114,6 +115,8 @@ const PG_RANGE_ALIASES: &[&str] = &["pg_range", "pg_catalog.pg_range"];
 const PG_MATVIEWS_ALIASES: &[&str] = &["pg_matviews", "pg_catalog.pg_matviews"];
 const PG_INDEXES_ALIASES: &[&str] = &["pg_indexes", "pg_catalog.pg_indexes"];
 const PG_POLICIES_ALIASES: &[&str] = &["pg_policies", "pg_catalog.pg_policies"];
+const PG_PUBLICATION_TABLES_ALIASES: &[&str] =
+    &["pg_publication_tables", "pg_catalog.pg_publication_tables"];
 const PG_RULES_ALIASES: &[&str] = &["pg_rules", "pg_catalog.pg_rules"];
 const PG_STATS_ALIASES: &[&str] = &["pg_stats", "pg_catalog.pg_stats"];
 const PG_SETTINGS_ALIASES: &[&str] = &["pg_settings", "pg_catalog.pg_settings"];
@@ -268,6 +271,31 @@ const PG_POLICIES_DEFINITION_SQL: &str = r#"SELECT
 FROM pg_catalog.pg_policy pol
 JOIN pg_catalog.pg_class c ON (c.oid = pol.polrelid)
 LEFT JOIN pg_catalog.pg_namespace n ON (n.oid = c.relnamespace)"#;
+
+const PG_PUBLICATION_TABLES_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("pubname", SqlType::new(SqlTypeKind::Name)),
+    SyntheticSystemViewColumn::new("schemaname", SqlType::new(SqlTypeKind::Name)),
+    SyntheticSystemViewColumn::new("tablename", SqlType::new(SqlTypeKind::Name)),
+    SyntheticSystemViewColumn::new(
+        "attnames",
+        SqlType::array_of(SqlType::new(SqlTypeKind::Name)),
+    ),
+    SyntheticSystemViewColumn::text("rowfilter"),
+];
+
+const PG_PUBLICATION_TABLES_DEFINITION_SQL: &str = r#"SELECT
+    p.pubname,
+    n.nspname AS schemaname,
+    c.relname AS tablename,
+    (SELECT array_agg(a.attname ORDER BY a.attnum)
+       FROM pg_catalog.pg_attribute a
+      WHERE a.attrelid = gpt.relid AND a.attnum = ANY(gpt.attrs)) AS attnames,
+    pg_catalog.pg_get_expr(gpt.qual, gpt.relid) AS rowfilter
+FROM pg_catalog.pg_publication p,
+     LATERAL pg_catalog.pg_get_publication_tables(p.pubname) gpt(pubid, relid, attrs, qual),
+     pg_catalog.pg_class c
+     JOIN pg_catalog.pg_namespace n ON (n.oid = c.relnamespace)
+WHERE c.oid = gpt.relid"#;
 
 const PG_RULES_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("schemaname"),
@@ -623,7 +651,7 @@ const INFORMATION_SCHEMA_FOREIGN_TABLE_OPTIONS_COLUMNS: &[SyntheticSystemViewCol
     SyntheticSystemViewColumn::text("option_value"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 35] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 36] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgEnum,
         canonical_name: "pg_catalog.pg_enum",
@@ -672,6 +700,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 35] = [
         aliases: PG_POLICIES_ALIASES,
         columns: PG_POLICIES_COLUMNS,
         view_definition_sql: PG_POLICIES_DEFINITION_SQL,
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgPublicationTables,
+        canonical_name: "pg_catalog.pg_publication_tables",
+        aliases: PG_PUBLICATION_TABLES_ALIASES,
+        columns: PG_PUBLICATION_TABLES_COLUMNS,
+        view_definition_sql: PG_PUBLICATION_TABLES_DEFINITION_SQL,
     },
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgRules,
