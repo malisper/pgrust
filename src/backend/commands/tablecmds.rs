@@ -51,6 +51,7 @@ use super::explain::{
 };
 use super::partition::{
     exec_find_partition, exec_setup_partition_tuple_routing, partition_root_oid,
+    remap_partition_row_to_child_layout, remap_partition_row_to_parent_layout,
 };
 use super::trigger::RuntimeTriggers;
 use super::upsert::execute_insert_on_conflict_rows;
@@ -1962,17 +1963,18 @@ fn route_updated_partition_row(
     let Some(root_relation) = catalog.relation_by_oid(root_oid) else {
         return Ok(None);
     };
-    let Some(root_values) =
-        remap_child_row_to_parent(current_values, &current_relation.desc, &root_relation.desc)
-    else {
-        return Ok(None);
-    };
+    let root_values = remap_partition_row_to_parent_layout(
+        current_values,
+        &current_relation.desc,
+        &root_relation.desc,
+    )?;
     let mut proute = exec_setup_partition_tuple_routing(catalog, &root_relation)?;
     let routed = exec_find_partition(catalog, &mut proute, &root_relation, &root_values, ctx)?;
     if routed.relation_oid == relation_oid {
         return Ok(None);
     }
-    let routed_values = remap_partition_row(&root_values, &root_relation.desc, &routed.desc)?;
+    let routed_values =
+        remap_partition_row_to_child_layout(&root_values, &root_relation.desc, &routed.desc)?;
     let relation_info = PartitionResultRelInfo::new(
         catalog,
         relation_name,
@@ -5384,7 +5386,6 @@ struct PartitionResultRelInfo {
     relation_constraints: BoundRelationConstraints,
     indexes: Vec<BoundIndexRelation>,
     toast_index: Option<BoundIndexRelation>,
-    parent_rows: Vec<Vec<Value>>,
     rows: Vec<Vec<Value>>,
 }
 
@@ -5429,7 +5430,6 @@ impl PartitionResultRelInfo {
             relation_constraints,
             indexes,
             toast_index,
-            parent_rows: Vec::new(),
             rows: Vec::new(),
         })
     }
@@ -5494,11 +5494,10 @@ fn execute_insert_rows_with_routing(
     let mut proute = exec_setup_partition_tuple_routing(catalog, &target_relation)?;
     for row in rows {
         let leaf = exec_find_partition(catalog, &mut proute, &target_relation, row, ctx)?;
-        let leaf_row = remap_partition_row(row, &target_relation.desc, &leaf.desc)?;
+        let leaf_row = remap_partition_row_to_child_layout(row, &target_relation.desc, &leaf.desc)?;
         match routed.entry(leaf.relation_oid) {
             Entry::Occupied(mut entry) => {
                 let entry = entry.get_mut();
-                entry.parent_rows.push(row.clone());
                 entry.rows.push(leaf_row);
             }
             Entry::Vacant(entry) => {
@@ -5511,7 +5510,6 @@ fn execute_insert_rows_with_routing(
                     toast_index,
                     leaf,
                 )?;
-                result_rel_info.parent_rows.push(row.clone());
                 result_rel_info.rows.push(leaf_row);
                 entry.insert(result_rel_info);
             }
@@ -5537,14 +5535,12 @@ fn execute_insert_rows_with_routing(
             cid,
         )?;
         if let Some(returning) = returning {
-            for (parent_row, leaf_row) in result_rel_info
-                .parent_rows
-                .iter()
-                .zip(leaf_inserted_rows.iter())
-            {
-                let projected_row =
-                    remap_child_row_to_parent(leaf_row, &result_rel_info.relation.desc, desc)
-                        .unwrap_or_else(|| parent_row.clone());
+            for leaf_row in leaf_inserted_rows.iter() {
+                let projected_row = remap_partition_row_to_parent_layout(
+                    leaf_row,
+                    &result_rel_info.relation.desc,
+                    desc,
+                )?;
                 let row = project_returning_row_with_old_new(
                     returning,
                     &projected_row,
@@ -5562,92 +5558,6 @@ fn execute_insert_rows_with_routing(
         }
     }
     Ok(inserted_rows)
-}
-
-fn remap_partition_row(
-    row: &[Value],
-    parent_desc: &RelationDesc,
-    child_desc: &RelationDesc,
-) -> Result<Vec<Value>, ExecError> {
-    let parent_columns = parent_desc
-        .columns
-        .iter()
-        .enumerate()
-        .filter(|(_, column)| !column.dropped)
-        .collect::<Vec<_>>();
-    let child_columns = child_desc
-        .columns
-        .iter()
-        .enumerate()
-        .filter(|(_, column)| !column.dropped)
-        .collect::<Vec<_>>();
-    if parent_columns.len() != child_columns.len() {
-        return Ok(row.to_vec());
-    }
-    let identity_layout = parent_columns.iter().zip(child_columns.iter()).all(
-        |((parent_idx, parent_column), (child_idx, child_column))| {
-            parent_idx == child_idx
-                && parent_column.name.eq_ignore_ascii_case(&child_column.name)
-                && parent_column.sql_type == child_column.sql_type
-        },
-    );
-    if identity_layout {
-        return Ok(row.to_vec());
-    }
-
-    let mut remapped = vec![Value::Null; child_desc.columns.len()];
-    for (child_idx, child_column) in child_columns {
-        let Some((parent_idx, parent_column)) = parent_columns
-            .iter()
-            .find(|(_, column)| column.name.eq_ignore_ascii_case(&child_column.name))
-        else {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "partition column \"{}\" is missing from partitioned table",
-                    child_column.name
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42P16",
-            });
-        };
-        if parent_column.sql_type != child_column.sql_type {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "partition column \"{}\" has different type than partitioned table",
-                    child_column.name
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42P16",
-            });
-        }
-        remapped[child_idx] = row.get(*parent_idx).cloned().unwrap_or(Value::Null);
-    }
-    Ok(remapped)
-}
-
-fn remap_child_row_to_parent(
-    row: &[Value],
-    child_desc: &RelationDesc,
-    parent_desc: &RelationDesc,
-) -> Option<Vec<Value>> {
-    parent_desc
-        .columns
-        .iter()
-        .filter(|column| !column.dropped)
-        .map(|parent_column| {
-            child_desc
-                .columns
-                .iter()
-                .enumerate()
-                .find(|(_, child_column)| {
-                    !child_column.dropped
-                        && child_column.name.eq_ignore_ascii_case(&parent_column.name)
-                })
-                .and_then(|(index, _)| row.get(index).cloned())
-        })
-        .collect()
 }
 
 fn parse_tid_text(value: &Value) -> Result<Option<ItemPointerData>, ExecError> {
@@ -8991,7 +8901,7 @@ pub fn execute_update_with_waiter(
                         waiter,
                     ) {
                         Ok(WriteUpdatedRowResult::Updated(
-                            _new_tid,
+                            new_tid,
                             write_info,
                             no_action_checks,
                             outbound_checks,
@@ -9009,13 +8919,13 @@ pub fn execute_update_with_waiter(
                                 .write()
                                 .note_relation_update(target.relation_oid);
                             if !stmt.returning.is_empty() {
-                                let row = project_returning_row_with_old_new(
-                                    &stmt.returning,
+                                let row = project_update_from_returning_row(
+                                    &stmt,
+                                    target,
+                                    &current_old_values,
                                     &triggered_values,
-                                    None,
-                                    None,
-                                    Some(&current_old_values),
-                                    Some(&triggered_values),
+                                    &[],
+                                    new_tid,
                                     ctx,
                                 )?;
                                 capture_copy_to_dml_returning_row(row.clone());
@@ -9218,15 +9128,17 @@ fn project_update_from_returning_row(
     tid: ItemPointerData,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
-    let mut visible_values = project_update_target_visible_values(target, new_values, tid, ctx)?;
-    visible_values.extend(source_values.iter().cloned());
+    let old_visible_values = project_update_target_visible_values(target, old_values, tid, ctx)?;
+    let new_visible_values = project_update_target_visible_values(target, new_values, tid, ctx)?;
+    let mut returning_values = new_visible_values.clone();
+    returning_values.extend(source_values.iter().cloned());
     project_returning_row_with_old_new(
         &stmt.returning,
-        &visible_values,
+        &returning_values,
         Some(tid),
         Some(target.relation_oid),
-        Some(old_values),
-        Some(new_values),
+        Some(&old_visible_values),
+        Some(&new_visible_values),
         ctx,
     )
 }

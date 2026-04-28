@@ -24019,6 +24019,54 @@ fn multi_level_partition_routing_remaps_dropped_column_layouts() {
 }
 
 #[test]
+fn partition_update_routing_remaps_dropped_column_layouts() {
+    let base = temp_dir("partitioned_update_drop_column_routing");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table repro_root (b int4, dropme int4, a int4) partition by range (a, b)",
+    )
+    .unwrap();
+    db.execute(1, "alter table repro_root drop column dropme")
+        .unwrap();
+    db.execute(1, "create table repro_low (a int4, b int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table repro_root attach partition repro_low for values from (0, 0) to (10, 10)",
+    )
+    .unwrap();
+    db.execute(1, "create table repro_high (a int4, b int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table repro_root attach partition repro_high for values from (10, 10) to (20, 20)",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into repro_root (a, b) values (1, 1)")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from repro_low"),
+        vec![vec![Value::Int32(1), Value::Int32(1)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "update repro_root set a = 11 where a = 1 returning a, b",
+        ),
+        vec![vec![Value::Int32(11), Value::Int32(1)]]
+    );
+    assert!(query_rows(&db, 1, "select a, b from repro_low").is_empty());
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from repro_high"),
+        vec![vec![Value::Int32(11), Value::Int32(1)]]
+    );
+}
+
+#[test]
 fn foreign_key_on_partitioned_table_creates_child_constraints() {
     let base = temp_dir("foreign_key_partitioned_child_constraints");
     let db = Database::open(&base, 16).unwrap();

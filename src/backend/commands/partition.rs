@@ -1419,7 +1419,7 @@ pub(crate) fn exec_find_partition(
     }
 }
 
-fn remap_partition_row_to_child_layout(
+pub(crate) fn remap_partition_row_to_child_layout(
     row: &[Value],
     parent_desc: &RelationDesc,
     child_desc: &RelationDesc,
@@ -1465,7 +1465,7 @@ fn remap_partition_row_to_child_layout(
     Ok(child_row)
 }
 
-fn remap_partition_row_to_parent_layout(
+pub(crate) fn remap_partition_row_to_parent_layout(
     row: &[Value],
     child_desc: &RelationDesc,
     parent_desc: &RelationDesc,
