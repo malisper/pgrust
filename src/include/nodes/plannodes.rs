@@ -4,7 +4,7 @@ use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::parsenodes::{SelectLockingClause, SetOperator};
+use crate::include::nodes::parsenodes::{SelectLockingClause, SetOperator, TableSampleClause};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
     RelationPrivilegeRequirement, SetReturningCall, TargetEntry, ToastRelationRef, WindowClause,
@@ -181,6 +181,7 @@ pub enum Plan {
         relkind: char,
         relispopulated: bool,
         toast: Option<ToastRelationRef>,
+        tablesample: Option<TableSampleClause>,
         desc: RelationDesc,
         disabled: bool,
     },

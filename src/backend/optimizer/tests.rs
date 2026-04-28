@@ -186,6 +186,7 @@ fn seqscan_path_with_rows(slot_id: usize, startup_cost: f64, total_cost: f64, ro
         relispopulated: true,
         disabled: false,
         toast: None,
+        tablesample: None,
         desc: RelationDesc {
             columns: output_columns
                 .into_iter()

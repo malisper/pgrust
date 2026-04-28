@@ -33,6 +33,7 @@ use crate::include::nodes::datetime::{TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND};
 use crate::include::nodes::datum::{
     ArrayValue, IntervalValue, NumericValue, RecordValue, Value as DatumValue,
 };
+use crate::include::nodes::parsenodes::TableSampleClause;
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, RestrictInfo,
 };
@@ -242,6 +243,7 @@ pub(super) fn optimize_path_with_config(
                 relispopulated,
                 disabled,
                 toast,
+                tablesample,
                 desc,
                 ..
             } => {
@@ -258,6 +260,7 @@ pub(super) fn optimize_path_with_config(
                     relispopulated,
                     disabled,
                     toast,
+                    tablesample,
                     desc,
                 }
             }
@@ -1034,6 +1037,7 @@ fn try_optimize_access_subtree(
         relispopulated,
         disabled,
         toast,
+        tablesample,
         desc,
         filter,
         order_items,
@@ -1048,6 +1052,7 @@ fn try_optimize_access_subtree(
             relispopulated,
             disabled,
             toast,
+            tablesample,
             desc,
             ..
         } => (
@@ -1059,6 +1064,7 @@ fn try_optimize_access_subtree(
             relispopulated,
             disabled,
             toast,
+            tablesample,
             desc,
             None,
             None,
@@ -1076,6 +1082,7 @@ fn try_optimize_access_subtree(
                 relispopulated,
                 disabled,
                 toast,
+                tablesample,
                 desc,
                 ..
             } => (
@@ -1087,6 +1094,7 @@ fn try_optimize_access_subtree(
                 relispopulated,
                 disabled,
                 toast,
+                tablesample,
                 desc,
                 Some(predicate),
                 None,
@@ -1116,6 +1124,7 @@ fn try_optimize_access_subtree(
                 relispopulated,
                 disabled,
                 toast,
+                tablesample,
                 desc,
                 ..
             } => (
@@ -1127,6 +1136,7 @@ fn try_optimize_access_subtree(
                 relispopulated,
                 disabled,
                 toast,
+                tablesample,
                 desc,
                 None,
                 Some(items),
@@ -1144,6 +1154,7 @@ fn try_optimize_access_subtree(
                     relispopulated,
                     disabled,
                     toast,
+                    tablesample,
                     desc,
                     ..
                 } => (
@@ -1155,6 +1166,7 @@ fn try_optimize_access_subtree(
                     relispopulated,
                     disabled,
                     toast,
+                    tablesample,
                     desc,
                     Some(predicate),
                     Some(items),
@@ -1202,6 +1214,7 @@ fn try_optimize_access_subtree(
         relkind,
         relispopulated,
         toast,
+        tablesample,
         desc.clone(),
         &stats,
         filter.clone(),
@@ -1507,6 +1520,7 @@ pub(super) fn estimate_seqscan_candidate(
     relkind: char,
     relispopulated: bool,
     toast: Option<ToastRelationRef>,
+    tablesample: Option<TableSampleClause>,
     desc: RelationDesc,
     stats: &RelationStats,
     filter: Option<Expr>,
@@ -1528,6 +1542,7 @@ pub(super) fn estimate_seqscan_candidate(
         relkind,
         relispopulated,
         toast,
+        tablesample,
         desc: desc.clone(),
         disabled,
     };

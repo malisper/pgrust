@@ -9,7 +9,9 @@ use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::analyze::{
     bind_index_predicate, flatten_and_conjuncts, predicate_implies_index_predicate,
 };
-use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{
+    Query, QueryRowMark, RangeTblEntryKind, TableSampleClause,
+};
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, PlannerSubroot, RestrictInfo};
 use crate::include::nodes::plannodes::{
     ExecParamSource, IndexScanKey, IndexScanKeyArgument, Plan, PlanEstimate, PlanRowMark,
@@ -4082,6 +4084,7 @@ fn set_set_op_references(
 }
 
 fn set_seq_scan_references(
+    ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
     source_id: usize,
     rel: crate::RelFileLocator,
@@ -4091,8 +4094,20 @@ fn set_seq_scan_references(
     relispopulated: bool,
     disabled: bool,
     toast: Option<crate::include::nodes::primnodes::ToastRelationRef>,
+    tablesample: Option<TableSampleClause>,
     desc: crate::include::nodes::primnodes::RelationDesc,
 ) -> Plan {
+    let tablesample = tablesample.map(|sample| TableSampleClause {
+        method: sample.method,
+        args: sample
+            .args
+            .into_iter()
+            .map(|expr| lower_expr(ctx, expr, LowerMode::Scalar))
+            .collect(),
+        repeatable: sample
+            .repeatable
+            .map(|expr| lower_expr(ctx, expr, LowerMode::Scalar)),
+    });
     Plan::SeqScan {
         plan_info,
         source_id,
@@ -4103,6 +4118,7 @@ fn set_seq_scan_references(
         relispopulated,
         disabled,
         toast,
+        tablesample,
         desc,
     }
 }
@@ -5170,9 +5186,11 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relispopulated,
             disabled,
             toast,
+            tablesample,
             desc,
             ..
         } => set_seq_scan_references(
+            ctx,
             plan_info,
             source_id,
             rel,
@@ -5182,6 +5200,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relispopulated,
             disabled,
             toast,
+            tablesample,
             desc,
         ),
         Path::IndexOnlyScan {

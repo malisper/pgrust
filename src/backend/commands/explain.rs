@@ -116,6 +116,26 @@ pub(crate) fn format_explain_plan_with_subplans(
     );
 }
 
+pub(crate) fn format_explain_child_plan_with_subplans(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    lines: &mut Vec<String>,
+) {
+    format_explain_plan_with_subplans_inner(
+        plan,
+        subplans,
+        indent,
+        show_costs,
+        false,
+        true,
+        false,
+        &VerboseExplainContext::default(),
+        lines,
+    );
+}
+
 pub(crate) fn format_verbose_explain_plan_with_subplans(
     plan: &Plan,
     subplans: &[Plan],
@@ -852,6 +872,26 @@ fn push_nonverbose_plan_details(
             }
             true
         }
+        Plan::SeqScan {
+            tablesample: Some(sample),
+            ..
+        } => {
+            let args = sample
+                .args
+                .iter()
+                .map(|expr| render_verbose_expr(expr, &[], ctx))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut detail = format!("{} ({})", sample.method.to_ascii_lowercase(), args);
+            if let Some(repeatable) = &sample.repeatable {
+                detail.push_str(&format!(
+                    " REPEATABLE ({})",
+                    render_verbose_expr(repeatable, &[], ctx)
+                ));
+            }
+            lines.push(format!("{prefix}Sampling: {detail}"));
+            true
+        }
         Plan::BitmapIndexScan {
             keys,
             desc,
@@ -1552,8 +1592,16 @@ fn nonverbose_plan_label(
                 set_returning_call_label(call)
             )
         }),
-        Plan::SeqScan { relation_name, .. } => nonverbose_relation_scan_label(
-            "Seq Scan",
+        Plan::SeqScan {
+            relation_name,
+            tablesample,
+            ..
+        } => nonverbose_relation_scan_label(
+            if tablesample.is_some() {
+                "Sample Scan"
+            } else {
+                "Seq Scan"
+            },
             relation_name,
             ctx.relation_scan_alias.as_deref(),
             is_child,
@@ -2508,7 +2556,7 @@ fn explain_plan_children_with_context(
             );
         }
         Plan::Hash { input, .. } => {
-            let child_indent = if indent == 0 { 1 } else { indent + 3 };
+            let child_indent = indent + 1;
             format_explain_plan_with_subplans_inner(
                 input,
                 subplans,
@@ -2600,11 +2648,9 @@ fn context_for_sibling_scan(
             key,
             inherited_alias_base,
         }) => {
-            if child_ctx.relation_scan_alias.is_none() {
+            if child_ctx.relation_scan_alias.is_none() && inherited_alias_base.is_none() {
                 let seen = relations_seen.entry(key.clone()).or_default();
-                child_ctx.relation_scan_alias = inherited_alias_base
-                    .map(|alias_base| format!("{alias_base}_{}", *seen + 1))
-                    .or_else(|| (*seen > 0).then(|| format!("{key}_{seen}")));
+                child_ctx.relation_scan_alias = (*seen > 0).then(|| format!("{key}_{seen}"));
                 *seen += 1;
             }
         }
@@ -4072,7 +4118,45 @@ fn const_false_filter_result_plan(plan: &Plan) -> Option<PlanEstimate> {
         {
             const_false_filter_result_plan(input)
         }
+        Plan::NestedLoopJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            ..
+        }
+        | Plan::HashJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            ..
+        }
+        | Plan::MergeJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            ..
+        } if join_with_const_false_side_can_render_as_result(*kind, left, right) => {
+            Some(*plan_info)
+        }
         _ => None,
+    }
+}
+
+fn join_with_const_false_side_can_render_as_result(
+    kind: JoinType,
+    left: &Plan,
+    right: &Plan,
+) -> bool {
+    let left_false = const_false_filter_result_plan(left).is_some();
+    let right_false = const_false_filter_result_plan(right).is_some();
+    match kind {
+        JoinType::Inner | JoinType::Cross => left_false || right_false,
+        JoinType::Left | JoinType::Semi | JoinType::Anti => left_false,
+        JoinType::Right => right_false,
+        JoinType::Full => left_false && right_false,
     }
 }
 

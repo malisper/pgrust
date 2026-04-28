@@ -8428,7 +8428,8 @@ fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem
                     .any(raw_xml_table_column_contains_pg_notify)
         }
         crate::backend::parser::FromItem::Lateral(inner)
-        | crate::backend::parser::FromItem::Alias { source: inner, .. } => {
+        | crate::backend::parser::FromItem::Alias { source: inner, .. }
+        | crate::backend::parser::FromItem::TableSample { source: inner, .. } => {
             raw_from_item_contains_pg_notify(inner)
         }
         crate::backend::parser::FromItem::DerivedTable(select_stmt) => {

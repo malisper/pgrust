@@ -4,6 +4,7 @@ use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::catalog::PgInheritsRow;
 use crate::include::nodes::parsenodes::SetOperator;
+use crate::include::nodes::parsenodes::TableSampleClause;
 use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::plannodes::{AggregateStrategy, IndexScanKey, PlanEstimate};
 use crate::include::nodes::primnodes::{
@@ -460,6 +461,7 @@ pub enum Path {
         relkind: char,
         relispopulated: bool,
         toast: Option<ToastRelationRef>,
+        tablesample: Option<TableSampleClause>,
         desc: RelationDesc,
         disabled: bool,
     },

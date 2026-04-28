@@ -438,6 +438,7 @@ fn people_scan_plan() -> Plan {
         relispopulated: true,
         disabled: false,
         toast: None,
+        tablesample: None,
         desc: relation_desc(),
     }
 }
@@ -453,6 +454,7 @@ fn pets_scan_plan() -> Plan {
         relispopulated: true,
         disabled: false,
         toast: None,
+        tablesample: None,
         desc: pets_relation_desc(),
     }
 }
@@ -1834,6 +1836,7 @@ fn seqscan_filter_projection_returns_expected_rows() {
                 relispopulated: true,
                 disabled: false,
                 toast: None,
+                tablesample: None,
                 desc: relation_desc(),
             }),
             predicate: Expr::op_auto(
@@ -1914,6 +1917,7 @@ fn seqscan_skips_superseded_versions() {
         relispopulated: true,
         disabled: false,
         toast: None,
+        tablesample: None,
         desc: relation_desc(),
     };
     let rows = run_plan(&base, &txns, plan).unwrap();

@@ -15,7 +15,7 @@ use crate::include::catalog::BTREE_AM_OID;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
-    JoinTreeNode, Query, RangeTblEntryKind, SetOperator, SqlType, SqlTypeKind,
+    JoinTreeNode, Query, RangeTblEntryKind, SetOperator, SqlType, SqlTypeKind, TableSampleClause,
 };
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerIndexExprCacheEntry, PlannerInfo,
@@ -23,8 +23,9 @@ use crate::include::nodes::pathnodes::{
 };
 use crate::include::nodes::plannodes::{AggregateStrategy, PlanEstimate, SetOpStrategy};
 use crate::include::nodes::primnodes::{
-    BoolExprType, Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc, SortGroupClause,
-    ToastRelationRef, Var, attrno_index, expr_contains_set_returning, is_system_attr, user_attrno,
+    BoolExprType, Expr, JoinType, OpExprKind, OrderByEntry, QueryColumn, RelationDesc,
+    SortGroupClause, ToastRelationRef, Var, attrno_index, expr_contains_set_returning,
+    is_system_attr, user_attrno,
 };
 
 use super::super::bestpath;
@@ -153,6 +154,110 @@ fn assign_base_restrictinfo(root: &mut PlannerInfo) {
             }
         }
     }
+    derive_base_equalities_from_inner_join_clauses(root);
+}
+
+fn derive_base_equalities_from_inner_join_clauses(root: &mut PlannerInfo) {
+    if has_outer_joins(root) {
+        return;
+    }
+    let join_clauses = collect_inner_join_clauses(root);
+    let mut derived = Vec::new();
+    for left_index in 0..join_clauses.len() {
+        for right_index in (left_index + 1)..join_clauses.len() {
+            let Some((left_a, left_b)) = equality_clause_args(&join_clauses[left_index].clause)
+            else {
+                continue;
+            };
+            let Some((right_a, right_b)) = equality_clause_args(&join_clauses[right_index].clause)
+            else {
+                continue;
+            };
+            for (left_expr, right_expr) in
+                implied_same_relation_equalities(left_a, left_b, right_a, right_b)
+            {
+                if left_expr == right_expr {
+                    continue;
+                }
+                let left_relids = expr_relids(left_expr);
+                let right_relids = expr_relids(right_expr);
+                if left_relids.len() == 1
+                    && left_relids == right_relids
+                    && is_pushable_base_clause(root, &left_relids)
+                {
+                    let clause = Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
+                        op: OpExprKind::Eq,
+                        opno: 0,
+                        opfuncid: 0,
+                        opresulttype: SqlType::new(SqlTypeKind::Bool),
+                        args: vec![left_expr.clone(), right_expr.clone()],
+                        collation_oid: None,
+                    }));
+                    derived.push((left_relids[0], joininfo::make_restrict_info(clause)));
+                }
+            }
+        }
+    }
+
+    for (relid, restrict) in derived {
+        let Some(rel) = root
+            .simple_rel_array
+            .get_mut(relid)
+            .and_then(Option::as_mut)
+        else {
+            continue;
+        };
+        if rel
+            .baserestrictinfo
+            .iter()
+            .any(|existing| equalities_match_commuted(&existing.clause, &restrict.clause))
+        {
+            continue;
+        }
+        rel.baserestrictinfo.push(restrict);
+    }
+}
+
+fn equality_clause_args(expr: &Expr) -> Option<(&Expr, &Expr)> {
+    let Expr::Op(op) = expr else {
+        return None;
+    };
+    if op.op != OpExprKind::Eq || op.args.len() != 2 {
+        return None;
+    }
+    Some((&op.args[0], &op.args[1]))
+}
+
+fn implied_same_relation_equalities<'a>(
+    left_a: &'a Expr,
+    left_b: &'a Expr,
+    right_a: &'a Expr,
+    right_b: &'a Expr,
+) -> Vec<(&'a Expr, &'a Expr)> {
+    let mut implied = Vec::new();
+    if left_a == right_a {
+        implied.push((left_b, right_b));
+    }
+    if left_a == right_b {
+        implied.push((left_b, right_a));
+    }
+    if left_b == right_a {
+        implied.push((left_a, right_b));
+    }
+    if left_b == right_b {
+        implied.push((left_a, right_a));
+    }
+    implied
+}
+
+fn equalities_match_commuted(left: &Expr, right: &Expr) -> bool {
+    let Some((left_a, left_b)) = equality_clause_args(left) else {
+        return false;
+    };
+    let Some((right_a, right_b)) = equality_clause_args(right) else {
+        return false;
+    };
+    (left_a == right_a && left_b == right_b) || (left_a == right_b && left_b == right_a)
 }
 
 fn base_filter_expr(rel: &RelOptInfo) -> Option<Expr> {
@@ -162,6 +267,61 @@ fn base_filter_expr(rel: &RelOptInfo) -> Option<Expr> {
             .map(|restrict| restrict.clause.clone())
             .collect(),
     )
+}
+
+fn base_restrictinfo_is_contradictory(rel: &RelOptInfo) -> bool {
+    let mut equalities = Vec::<(Expr, Value)>::new();
+    for clause in rel
+        .baserestrictinfo
+        .iter()
+        .flat_map(|restrict| flatten_and_conjuncts(&restrict.clause))
+    {
+        let Some((expr, value)) = equality_to_nonnull_const(&clause) else {
+            continue;
+        };
+        if equalities.iter().any(|(existing_expr, existing_value)| {
+            existing_expr == &expr && existing_value != &value
+        }) {
+            return true;
+        }
+        equalities.push((expr, value));
+    }
+    false
+}
+
+fn equality_to_nonnull_const(expr: &Expr) -> Option<(Expr, Value)> {
+    let Expr::Op(op) = expr else {
+        return None;
+    };
+    if op.op != OpExprKind::Eq || op.args.len() != 2 {
+        return None;
+    }
+    match (&op.args[0], &op.args[1]) {
+        (Expr::Const(value), other) | (other, Expr::Const(value))
+            if !matches!(value, Value::Null) =>
+        {
+            Some((other.clone(), value.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn const_false_relation_path(rtindex: usize, desc: &RelationDesc) -> Path {
+    let pathtarget = slot_output_target(rtindex, &desc.columns, |column| column.sql_type);
+    Path::Filter {
+        plan_info: PlanEstimate::default(),
+        pathtarget: pathtarget.clone(),
+        predicate: Expr::Const(Value::Bool(false)),
+        input: Box::new(Path::Append {
+            plan_info: PlanEstimate::default(),
+            pathtarget,
+            relids: vec![rtindex],
+            source_id: rtindex,
+            desc: desc.clone(),
+            child_roots: Vec::new(),
+            children: Vec::new(),
+        }),
+    }
 }
 
 fn relation_oid_for_rtindex(root: &PlannerInfo, rtindex: usize) -> Option<u32> {
@@ -795,6 +955,7 @@ fn collect_relation_access_paths(
     relkind: char,
     relispopulated: bool,
     toast: Option<ToastRelationRef>,
+    tablesample: Option<TableSampleClause>,
     desc: RelationDesc,
     filter: Option<Expr>,
     query_order_items: Option<Vec<OrderByEntry>>,
@@ -816,6 +977,7 @@ fn collect_relation_access_paths(
             relkind,
             relispopulated,
             toast,
+            tablesample.clone(),
             desc.clone(),
             &stats,
             filter.clone(),
@@ -834,6 +996,7 @@ fn collect_relation_access_paths(
                 relkind,
                 relispopulated,
                 toast,
+                tablesample.clone(),
                 desc.clone(),
                 &stats,
                 filter.clone(),
@@ -1083,6 +1246,7 @@ pub(super) fn relation_ordered_index_paths(
             relkind,
             relispopulated: _,
             toast,
+            ..
         } if *relkind == 'r' => {
             let filter = base_filter_expr(rel);
             let required_index_only_attrs = collect_required_index_only_attrs_for_root(
@@ -1204,6 +1368,7 @@ fn cheapest_relation_access_path(
     relkind: char,
     relispopulated: bool,
     toast: Option<ToastRelationRef>,
+    tablesample: Option<TableSampleClause>,
     desc: RelationDesc,
     filter: Option<Expr>,
     config: PlannerConfig,
@@ -1218,6 +1383,7 @@ fn cheapest_relation_access_path(
         relkind,
         relispopulated,
         toast,
+        tablesample,
         desc,
         filter,
         None,
@@ -2473,6 +2639,26 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
     {
         return;
     }
+    if root
+        .simple_rel_array
+        .get(rtindex)
+        .and_then(Option::as_ref)
+        .is_some_and(base_restrictinfo_is_contradictory)
+    {
+        if let Some(rel) = root
+            .simple_rel_array
+            .get_mut(rtindex)
+            .and_then(Option::as_mut)
+        {
+            rel.add_path(optimize_path_with_config(
+                const_false_relation_path(rtindex, &rte.desc),
+                catalog,
+                root.config,
+            ));
+            bestpath::set_cheapest(rel);
+        }
+        return;
+    }
     let child_rtindexes = sorted_append_child_rtindexes(root, catalog, rtindex);
     if let RangeTblEntryKind::Relation {
         rel: heap_rel,
@@ -2480,6 +2666,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         relkind,
         relispopulated,
         toast,
+        tablesample,
     } = rte.kind.clone()
         && (relkind == 'p' || !child_rtindexes.is_empty())
     {
@@ -2525,6 +2712,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     relkind,
                     relispopulated,
                     toast,
+                    tablesample.clone(),
                     rte.desc.clone(),
                     filter.clone(),
                     root.config,
@@ -2741,6 +2929,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             relkind,
             relispopulated,
             toast,
+            ref tablesample,
         } => rel.pathlist.extend(collect_relation_access_paths(
             rtindex,
             heap_rel,
@@ -2749,6 +2938,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             relkind,
             relispopulated,
             toast,
+            tablesample.clone(),
             rte.desc.clone(),
             base_filter,
             query_order_items,
@@ -2957,7 +3147,144 @@ fn build_join_restrict_clauses(
             }
         }
     }
+    if matches!(kind, JoinType::Inner | JoinType::Cross) && !has_outer_joins(root) {
+        remove_redundant_join_equalities_with_base_filters(
+            root,
+            left_relids,
+            right_relids,
+            &mut clauses,
+        );
+    }
     clauses
+}
+
+fn remove_redundant_join_equalities_with_base_filters(
+    root: &PlannerInfo,
+    left_relids: &[usize],
+    right_relids: &[usize],
+    clauses: &mut Vec<RestrictInfo>,
+) {
+    let mut remove = BTreeSet::new();
+    for left_index in 0..clauses.len() {
+        if remove.contains(&left_index) {
+            continue;
+        }
+        for right_index in (left_index + 1)..clauses.len() {
+            if remove.contains(&right_index) {
+                continue;
+            }
+            let Some((left_a, left_b)) = equality_clause_args(&clauses[left_index].clause) else {
+                continue;
+            };
+            let Some((right_a, right_b)) = equality_clause_args(&clauses[right_index].clause)
+            else {
+                continue;
+            };
+            if implied_same_relation_equalities(left_a, left_b, right_a, right_b)
+                .into_iter()
+                .any(|(left_expr, right_expr)| {
+                    base_restrictinfo_has_equality(root, left_expr, right_expr)
+                })
+            {
+                let remove_index = redundant_join_equality_to_remove(
+                    root,
+                    left_relids,
+                    right_relids,
+                    &clauses[left_index],
+                    &clauses[right_index],
+                    left_index,
+                    right_index,
+                );
+                remove.insert(remove_index);
+                if remove_index == left_index {
+                    break;
+                }
+            }
+        }
+    }
+    if remove.is_empty() {
+        return;
+    }
+    let mut index = 0usize;
+    clauses.retain(|_| {
+        let keep = !remove.contains(&index);
+        index += 1;
+        keep
+    });
+}
+
+fn redundant_join_equality_to_remove(
+    root: &PlannerInfo,
+    left_relids: &[usize],
+    right_relids: &[usize],
+    left_clause: &RestrictInfo,
+    right_clause: &RestrictInfo,
+    left_index: usize,
+    right_index: usize,
+) -> usize {
+    let left_is_partition_key =
+        restrict_is_partition_key_equality(root, left_relids, right_relids, left_clause);
+    let right_is_partition_key =
+        restrict_is_partition_key_equality(root, left_relids, right_relids, right_clause);
+    match (left_is_partition_key, right_is_partition_key) {
+        (true, false) => right_index,
+        (false, true) => left_index,
+        _ => right_index,
+    }
+}
+
+fn restrict_is_partition_key_equality(
+    root: &PlannerInfo,
+    left_relids: &[usize],
+    right_relids: &[usize],
+    restrict: &RestrictInfo,
+) -> bool {
+    let (Some(left_key), Some(right_key)) = (
+        single_relation_partition_key(root, left_relids),
+        single_relation_partition_key(root, right_relids),
+    ) else {
+        return false;
+    };
+    let Some((arg_a, arg_b)) = equality_clause_args(&restrict.clause) else {
+        return false;
+    };
+    (arg_a == left_key && arg_b == right_key) || (arg_a == right_key && arg_b == left_key)
+}
+
+fn single_relation_partition_key<'a>(root: &'a PlannerInfo, relids: &[usize]) -> Option<&'a Expr> {
+    if relids.len() != 1 {
+        return None;
+    }
+    root.simple_rel_array
+        .get(relids[0])
+        .and_then(Option::as_ref)
+        .and_then(|rel| rel.partition_info.as_ref())
+        .and_then(|info| info.key_exprs.first())
+}
+
+fn base_restrictinfo_has_equality(root: &PlannerInfo, left: &Expr, right: &Expr) -> bool {
+    let left_relids = expr_relids(left);
+    let right_relids = expr_relids(right);
+    if left_relids.len() != 1 || left_relids != right_relids {
+        return false;
+    }
+    let clause = Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
+        op: OpExprKind::Eq,
+        opno: 0,
+        opfuncid: 0,
+        opresulttype: SqlType::new(SqlTypeKind::Bool),
+        args: vec![left.clone(), right.clone()],
+        collation_oid: None,
+    }));
+    root.simple_rel_array
+        .get(left_relids[0])
+        .and_then(Option::as_ref)
+        .map(|rel| {
+            rel.baserestrictinfo
+                .iter()
+                .any(|restrict| equalities_match_commuted(&restrict.clause, &clause))
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Clone, Copy)]

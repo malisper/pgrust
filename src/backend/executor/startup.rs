@@ -438,6 +438,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             relispopulated,
             disabled,
             toast,
+            tablesample: _,
             desc,
         } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
@@ -905,6 +906,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 relispopulated,
                 disabled,
                 toast,
+                tablesample: _,
                 desc,
             } = *input
             else {

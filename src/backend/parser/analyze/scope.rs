@@ -642,6 +642,7 @@ fn from_item_is_lateral(item: &FromItem) -> bool {
         FromItem::JsonTable(_) => true,
         FromItem::XmlTable(_) => true,
         FromItem::Alias { source, .. } => from_item_is_lateral(source),
+        FromItem::TableSample { source, .. } => from_item_is_lateral(source),
         _ => false,
     }
 }
@@ -867,6 +868,54 @@ pub(super) fn bind_from_item_with_ctes(
             let scope = scope_with_output_exprs(scope.unwrap_or(raw_scope), &plan.output_exprs);
             Ok((plan, scope))
         }
+        FromItem::TableSample { source, sample } => {
+            let (mut plan, scope) = bind_from_item_with_ctes(
+                source,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+                expanded_views,
+            )?;
+            let call_scope = empty_scope();
+            let args = sample
+                .args
+                .iter()
+                .map(|expr| {
+                    bind_expr_with_outer_and_ctes(
+                        expr,
+                        &call_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let repeatable = sample
+                .repeatable
+                .as_ref()
+                .map(|expr| {
+                    bind_expr_with_outer_and_ctes(
+                        expr,
+                        &call_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                })
+                .transpose()?;
+            attach_table_sample(
+                &mut plan,
+                TableSampleClause {
+                    method: sample.method.clone(),
+                    args,
+                    repeatable,
+                },
+            )?;
+            Ok((plan, scope))
+        }
         FromItem::Alias {
             source,
             alias,
@@ -944,6 +993,32 @@ pub(super) fn bind_from_item_with_ctes(
             )
         }
     }
+}
+
+fn attach_table_sample(
+    plan: &mut AnalyzedFrom,
+    sample: TableSampleClause,
+) -> Result<(), ParseError> {
+    let relation_indexes = plan
+        .rtable
+        .iter()
+        .enumerate()
+        .filter_map(|(index, rte)| {
+            matches!(rte.kind, RangeTblEntryKind::Relation { .. }).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if relation_indexes.len() != 1 {
+        return Err(ParseError::FeatureNotSupported(
+            "TABLESAMPLE on non-table relation".into(),
+        ));
+    }
+    let RangeTblEntryKind::Relation { tablesample, .. } =
+        &mut plan.rtable[relation_indexes[0]].kind
+    else {
+        unreachable!();
+    };
+    *tablesample = Some(sample);
+    Ok(())
 }
 
 struct SqlJsonTableBindState {
@@ -4283,6 +4358,19 @@ fn join_using_source_columns(left: &ScopeColumn, right: &ScopeColumn) -> Vec<(u3
     sources
 }
 
+fn join_using_relation_names(left: &ScopeColumn, right: &ScopeColumn) -> Vec<String> {
+    let mut names = left.relation_names.clone();
+    for name in &right.relation_names {
+        if !names
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(name))
+        {
+            names.push(name.clone());
+        }
+    }
+    names
+}
+
 fn bind_join_using_projection(
     columns: &[String],
     left_scope: &BoundScope,
@@ -4342,7 +4430,10 @@ fn bind_join_using_projection(
             output_name: name.clone(),
             hidden: false,
             qualified_only: false,
-            relation_names: vec![],
+            relation_names: join_using_relation_names(
+                &left_scope.columns[*left_index],
+                &right_scope.columns[*right_index],
+            ),
             hidden_invalid_relation_names: vec![],
             hidden_missing_relation_names: vec![],
             source_relation_oid: None,

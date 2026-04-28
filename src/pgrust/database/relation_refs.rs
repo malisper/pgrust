@@ -697,7 +697,7 @@ fn collect_direct_relation_oids_from_from_item(
         FromItem::XmlTable(table) => {
             collect_direct_relation_oids_from_xml_table(table, catalog, visible_ctes, rels);
         }
-        FromItem::Lateral(source) => {
+        FromItem::Lateral(source) | FromItem::TableSample { source, .. } => {
             collect_direct_relation_oids_from_from_item(source, catalog, visible_ctes, rels);
         }
         FromItem::DerivedTable(select) => {

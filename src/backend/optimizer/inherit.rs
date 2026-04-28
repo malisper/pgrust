@@ -27,8 +27,9 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
         let RangeTblEntryKind::Relation {
             relation_oid,
             relkind,
+            tablesample,
             ..
-        } = parent_rte.kind
+        } = parent_rte.kind.clone()
         else {
             parent_rtindex += 1;
             continue;
@@ -110,6 +111,7 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
                     relkind: child.relkind,
                     relispopulated: child.relispopulated,
                     toast: child.toast,
+                    tablesample: tablesample.clone(),
                 },
             };
             let mut child_rte = child_rte;
