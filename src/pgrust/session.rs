@@ -81,7 +81,7 @@ use crate::pgrust::database::{
     alter_table_validate_constraint_lock_requests, delete_foreign_key_lock_requests,
     execute_set_constraints, insert_foreign_key_lock_requests, merge_pending_notifications,
     merge_table_lock_requests, prepared_insert_foreign_key_lock_requests,
-    queue_pending_notification, reject_relation_with_referencing_foreign_keys,
+    queue_pending_notification, reject_relation_with_referencing_foreign_keys_except,
     relation_foreign_key_lock_requests, update_foreign_key_lock_requests,
     validate_deferred_constraints, validate_immediate_constraints,
 };
@@ -8532,10 +8532,15 @@ impl Session {
                     }
                     relations
                 };
+                let target_relation_oids = relations
+                    .iter()
+                    .map(|relation| relation.relation_oid)
+                    .collect::<Vec<_>>();
                 for relation in &relations {
-                    reject_relation_with_referencing_foreign_keys(
+                    reject_relation_with_referencing_foreign_keys_except(
                         &catalog,
                         relation.relation_oid,
+                        &target_relation_oids,
                         "TRUNCATE on table without referencing foreign keys",
                     )?;
                 }

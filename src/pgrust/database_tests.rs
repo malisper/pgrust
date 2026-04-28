@@ -26750,6 +26750,52 @@ fn foreign_keys_block_parent_ddl_and_allow_child_drop() {
 }
 
 #[test]
+fn truncate_all_foreign_key_relations_together() {
+    let base = temp_dir("truncate_all_foreign_key_relations");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4 references parents)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1)").unwrap();
+    db.execute(1, "insert into children values (1, 1)").unwrap();
+
+    match db.execute(1, "truncate parents") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
+            if actual.contains("foreign key constraint") => {}
+        other => panic!("expected single-table truncate to be blocked, got {other:?}"),
+    }
+
+    db.execute(1, "truncate parents, children").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from parents")[0][0],
+        Value::Int64(0)
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from children")[0][0],
+        Value::Int64(0)
+    );
+
+    db.execute(1, "insert into parents values (2)").unwrap();
+    db.execute(1, "insert into children values (2, 2)").unwrap();
+
+    let mut session = Session::new(2);
+    session.execute(&db, "truncate parents, children").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from parents")[0][0],
+        Value::Int64(0)
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from children")[0][0],
+        Value::Int64(0)
+    );
+}
+
+#[test]
 fn foreign_key_locking_blocks_parent_delete_until_child_insert_finishes() {
     use std::sync::mpsc;
 

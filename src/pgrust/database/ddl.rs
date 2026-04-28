@@ -884,9 +884,19 @@ pub(crate) fn reject_relation_with_referencing_foreign_keys(
     relation_oid: u32,
     operation: &'static str,
 ) -> Result<(), ExecError> {
+    reject_relation_with_referencing_foreign_keys_except(catalog, relation_oid, &[], operation)
+}
+
+pub(crate) fn reject_relation_with_referencing_foreign_keys_except(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    ignored_relation_oids: &[u32],
+    operation: &'static str,
+) -> Result<(), ExecError> {
     let mut references = catalog
         .foreign_key_constraint_rows_referencing_relation(relation_oid)
         .into_iter()
+        .filter(|row| !ignored_relation_oids.contains(&row.conrelid))
         .map(|row| (row.conname, relation_name_for_oid(catalog, row.conrelid)))
         .collect::<Vec<_>>();
     references.sort();

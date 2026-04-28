@@ -144,7 +144,10 @@ pub(crate) use async_notify::{
     AsyncListenAction, AsyncListenOp, AsyncNotifyRuntime, PendingNotification,
     merge_pending_notifications, queue_pending_notification,
 };
-pub(crate) use ddl::reject_relation_with_referencing_foreign_keys;
+pub(crate) use ddl::{
+    reject_relation_with_referencing_foreign_keys,
+    reject_relation_with_referencing_foreign_keys_except,
+};
 pub(crate) use foreign_keys::{
     alter_table_add_constraint_lock_requests, alter_table_validate_constraint_lock_requests,
     delete_foreign_key_lock_requests, execute_set_constraints, insert_foreign_key_lock_requests,

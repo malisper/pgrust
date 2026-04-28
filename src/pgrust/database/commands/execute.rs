@@ -2404,15 +2404,41 @@ impl Database {
                 ),
             Statement::TruncateTable(ref truncate_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                let relations = truncate_stmt
-                    .table_names
+                let mut relations = Vec::new();
+                for name in &truncate_stmt.table_names {
+                    let Some(entry) = catalog.lookup_any_relation(name) else {
+                        continue;
+                    };
+                    if !relations
+                        .iter()
+                        .any(|existing: &crate::backend::parser::BoundRelation| {
+                            existing.relation_oid == entry.relation_oid
+                        })
+                    {
+                        relations.push(entry.clone());
+                    }
+                    if entry.relkind == 'p' {
+                        for target in partitioned_truncate_targets(&catalog, entry.relation_oid) {
+                            if relations.iter().any(
+                                |existing: &crate::backend::parser::BoundRelation| {
+                                    existing.relation_oid == target.relation_oid
+                                },
+                            ) {
+                                continue;
+                            }
+                            relations.push(target);
+                        }
+                    }
+                }
+                let target_relation_oids = relations
                     .iter()
-                    .filter_map(|name| catalog.lookup_any_relation(name))
+                    .map(|relation| relation.relation_oid)
                     .collect::<Vec<_>>();
                 for relation in &relations {
-                    reject_relation_with_referencing_foreign_keys(
+                    reject_relation_with_referencing_foreign_keys_except(
                         &catalog,
                         relation.relation_oid,
+                        &target_relation_oids,
                         "TRUNCATE on table without referencing foreign keys",
                     )?;
                 }

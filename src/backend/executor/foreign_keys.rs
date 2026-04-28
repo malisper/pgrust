@@ -27,8 +27,9 @@ use crate::include::nodes::execnodes::{SlotKind, ToastRelationRef, TupleSlot};
 use super::expr_multirange::{
     multirange_contains_multirange, multirange_contains_range, multirange_from_range,
     multirange_overlaps_multirange, multirange_overlaps_range, normalize_multirange,
+    render_multirange_with_config,
 };
-use super::expr_range::{range_contains_range, range_overlap};
+use super::expr_range::{range_contains_range, range_overlap, render_range_value_with_config};
 use super::permissions::relation_has_table_privilege;
 use super::relation_values_visible_for_error_detail;
 use super::{ConstraintTiming, ExecError, ExecutorContext, compare_order_values};
@@ -1338,8 +1339,8 @@ fn render_key_value(value: &Value, ctx: &ExecutorContext) -> String {
         Value::Array(v) => format!("{v:?}"),
         Value::PgArray(v) => format!("{v:?}"),
         Value::Record(v) => format!("{v:?}"),
-        Value::Range(v) => format!("{v:?}"),
-        Value::Multirange(v) => format!("{v:?}"),
+        Value::Range(v) => render_range_value_with_config(v, &ctx.datetime_config),
+        Value::Multirange(v) => render_multirange_with_config(v, &ctx.datetime_config),
     }
 }
 
