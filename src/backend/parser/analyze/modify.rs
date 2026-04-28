@@ -2480,11 +2480,16 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         targets
             .into_iter()
             .map(|mut target| {
+                let parent_visible_exprs = target.parent_visible_exprs.clone();
                 target
                     .rls_write_checks
                     .extend(resolved.view_check_options.iter().cloned().map(|check| {
                         RlsWriteCheck {
-                            expr: check.expr,
+                            expr: rewrite_local_vars_for_output_exprs(
+                                check.expr,
+                                1,
+                                &parent_visible_exprs,
+                            ),
                             policy_name: None,
                             source: crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(
                                 check.view_name,
@@ -3444,7 +3449,7 @@ fn bind_update_from(
         entry.relkind,
         entry.relispopulated,
         entry.toast,
-        !stmt.only && entry.relkind == 'r',
+        !stmt.only && matches!(entry.relkind, 'r' | 'p'),
         entry.desc.clone(),
     );
     target_base.output_exprs = generated_relation_output_exprs(&entry.desc, catalog)?;

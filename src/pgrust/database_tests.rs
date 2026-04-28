@@ -16280,6 +16280,54 @@ fn simple_view_auto_dml_routes_to_base_table() {
 }
 
 #[test]
+fn auto_view_dml_routes_to_partitioned_base_table() {
+    let base = temp_dir("auto_partitioned_view_dml");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table part_items (id int4, name text) partition by list (id)",
+    )
+    .unwrap();
+    db.execute(1, "create table part_items_1 (name text, id int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table part_items_2 partition of part_items for values in (2)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table part_items attach partition part_items_1 for values in (1)",
+    )
+    .unwrap();
+    db.execute(1, "insert into part_items values (1, 'old'), (2, 'two')")
+        .unwrap();
+    db.execute(
+        1,
+        "create view part_items_v as select * from part_items where name <> 'blocked' with check option",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "update part_items_v set name = 'new' where id = 1 returning id, name",
+        ),
+        vec![vec![Value::Int32(1), Value::Text("new".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "delete from part_items_v where id = 2 returning id",),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from part_items order by id"),
+        vec![vec![Value::Int32(1), Value::Text("new".into())]]
+    );
+}
+
+#[test]
 fn auto_view_dml_returning_uses_view_projection() {
     let base = temp_dir("auto_view_dml_returning");
     let db = Database::open(&base, 16).unwrap();

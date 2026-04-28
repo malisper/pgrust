@@ -9156,7 +9156,7 @@ pub fn execute_update_with_waiter(
                         waiter,
                     ) {
                         Ok(WriteUpdatedRowResult::Updated(
-                            _new_tid,
+                            new_tid,
                             write_info,
                             no_action_checks,
                             outbound_checks,
@@ -9174,13 +9174,25 @@ pub fn execute_update_with_waiter(
                                 .write()
                                 .note_relation_update(target.relation_oid);
                             if !stmt.returning.is_empty() {
+                                let visible_values = project_update_target_visible_values(
+                                    target,
+                                    &triggered_values,
+                                    new_tid,
+                                    ctx,
+                                )?;
+                                let old_visible_values = project_update_target_visible_values(
+                                    target,
+                                    &current_old_values,
+                                    current_tid,
+                                    ctx,
+                                )?;
                                 let row = project_returning_row_with_old_new(
                                     &stmt.returning,
-                                    &triggered_values,
-                                    None,
-                                    None,
-                                    Some(&current_old_values),
-                                    Some(&triggered_values),
+                                    &visible_values,
+                                    Some(new_tid),
+                                    Some(target.relation_oid),
+                                    Some(&old_visible_values),
+                                    Some(&visible_values),
                                     ctx,
                                 )?;
                                 capture_copy_to_dml_returning_row(row.clone());
