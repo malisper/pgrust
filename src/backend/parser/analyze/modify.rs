@@ -3452,8 +3452,12 @@ fn bind_insert_column_defaults(
             if let Some(value) = column.missing_default_value.clone() {
                 return Ok(Expr::Const(value));
             }
-            column
-                .default_expr
+            let default_expr = column.default_expr.clone().or_else(|| {
+                catalog
+                    .type_oid_for_sql_type(column.sql_type)
+                    .and_then(|type_oid| catalog.type_default_sql(type_oid))
+            });
+            default_expr
                 .as_ref()
                 .map(|sql| {
                     let expr = crate::backend::parser::parse_expr(sql)?;

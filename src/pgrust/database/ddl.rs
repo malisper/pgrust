@@ -1808,6 +1808,13 @@ pub(super) fn validate_alter_table_alter_column_default(
 
     let mut normalized_default_expr_sql = default_expr_sql.map(str::to_string);
     if let Some(expr) = default_expr {
+        if matches!(expr, SqlExpr::Const(Value::Null)) {
+            return Ok(AlterColumnDefaultPlan {
+                column_name: current_column.name.clone(),
+                default_expr_sql: normalized_default_expr_sql,
+                default_sequence_oid: None,
+            });
+        }
         let (_bound, default_type) =
             bind_scalar_expr_in_scope(expr, &[], catalog).map_err(ExecError::Parse)?;
         if !automatic_alter_type_cast_allowed(catalog, default_type, current_column.sql_type) {

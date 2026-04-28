@@ -59,6 +59,10 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
         (Value::Inet(a) | Value::Cidr(a), Value::Inet(b) | Value::Cidr(b)) => {
             compare_network_values(a, b)
         }
+        (Value::Record(_), Value::Record(_)) => {
+            compare_order_values(left, right, None, None, false)
+                .expect("btree record comparisons use implicit default collation")
+        }
         (a, b) if numeric_key_value(a).is_some() && numeric_key_value(b).is_some() => {
             numeric_key_value(a)
                 .unwrap()

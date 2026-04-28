@@ -1071,6 +1071,7 @@ pub fn default_opclass_oid_for_am(am_oid: u32, type_oid: u32, sql_type: SqlType)
             row.opcmethod == am_oid
                 && row.opcdefault
                 && (row.opcintype == type_oid
+                    || opclass_accepts_sql_type(row.opcintype, sql_type)
                     || (row.opcintype == ANYARRAYOID && sql_type.is_array)
                     || (row.opcintype == ANYRANGEOID && is_range)
                     || (row.opcintype == ANYMULTIRANGEOID && is_multirange)
@@ -1078,6 +1079,40 @@ pub fn default_opclass_oid_for_am(am_oid: u32, type_oid: u32, sql_type: SqlType)
                         && matches!(sql_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite)))
         })
         .map(|row| row.oid)
+}
+
+fn opclass_accepts_sql_type(opcintype: u32, sql_type: SqlType) -> bool {
+    if sql_type.is_array {
+        return opcintype == ANYARRAYOID;
+    }
+    match sql_type.kind {
+        SqlTypeKind::Bool => opcintype == BOOL_TYPE_OID,
+        SqlTypeKind::Int2 => opcintype == INT2_TYPE_OID,
+        SqlTypeKind::Int4 => opcintype == INT4_TYPE_OID,
+        SqlTypeKind::Int8 => opcintype == INT8_TYPE_OID,
+        SqlTypeKind::Oid => opcintype == OID_TYPE_OID,
+        SqlTypeKind::InternalChar => opcintype == INTERNAL_CHAR_TYPE_OID,
+        SqlTypeKind::Name => opcintype == NAME_TYPE_OID,
+        SqlTypeKind::Text => opcintype == TEXT_TYPE_OID,
+        SqlTypeKind::Varchar => opcintype == VARCHAR_TYPE_OID,
+        SqlTypeKind::Char => opcintype == BPCHAR_TYPE_OID,
+        SqlTypeKind::Float4 => opcintype == FLOAT4_TYPE_OID,
+        SqlTypeKind::Float8 => opcintype == FLOAT8_TYPE_OID,
+        SqlTypeKind::Numeric => opcintype == NUMERIC_TYPE_OID,
+        SqlTypeKind::Money => opcintype == MONEY_TYPE_OID,
+        SqlTypeKind::Interval => opcintype == INTERVAL_TYPE_OID,
+        SqlTypeKind::Date => opcintype == DATE_TYPE_OID,
+        SqlTypeKind::Timestamp => opcintype == TIMESTAMP_TYPE_OID,
+        SqlTypeKind::TimestampTz => opcintype == TIMESTAMPTZ_TYPE_OID,
+        SqlTypeKind::Bytea => opcintype == BYTEA_TYPE_OID,
+        SqlTypeKind::Uuid => opcintype == UUID_TYPE_OID,
+        SqlTypeKind::Bit => opcintype == BIT_TYPE_OID,
+        SqlTypeKind::VarBit => opcintype == VARBIT_TYPE_OID,
+        SqlTypeKind::Cidr => opcintype == CIDR_TYPE_OID,
+        SqlTypeKind::Inet => opcintype == INET_TYPE_OID,
+        SqlTypeKind::Composite | SqlTypeKind::Record => opcintype == RECORD_TYPE_OID,
+        _ => false,
+    }
 }
 
 pub fn index_opclass_is_implicit_for_definition(

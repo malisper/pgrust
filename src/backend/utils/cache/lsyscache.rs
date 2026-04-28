@@ -40,7 +40,7 @@ use crate::include::catalog::{
     PgTsTemplateRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::parsenodes::SqlType;
+use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
 use crate::include::nodes::pathnodes::PlannerIndexExprCacheEntry;
 use crate::pgrust::database::{
     Database, DatabaseStatsStore, TempNamespace, default_pg_stat_io_keys,
@@ -1222,6 +1222,24 @@ pub fn default_opclass_for_am_and_type(
         });
     }
     let input_type = type_row_by_oid(db, client_id, txn_ctx, input_type_oid)?;
+    if input_type.typtype == 'd'
+        && input_type.typbasetype != 0
+        && let Some(row) =
+            default_opclass_for_am_and_type(db, client_id, txn_ctx, am_oid, input_type.typbasetype)
+    {
+        return Some(row);
+    }
+    if am_oid == crate::include::catalog::BTREE_AM_OID
+        && !input_type.sql_type.is_array
+        && matches!(
+            input_type.sql_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
+        )
+    {
+        return opclasses
+            .into_iter()
+            .find(|row| row.oid == crate::include::catalog::RECORD_BTREE_OPCLASS_OID);
+    }
     if input_type.sql_type.is_range() {
         let opclass_oid = match am_oid {
             crate::include::catalog::BTREE_AM_OID => {

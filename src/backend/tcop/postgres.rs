@@ -9286,14 +9286,14 @@ fn format_psql_display_type(
     fallback_sql_type: SqlType,
     display_type_oid: Option<u32>,
 ) -> String {
+    let catalog = session.catalog_lookup(db);
     match display_type_oid {
         Some(CSTRING_TYPE_OID) => "cstring".into(),
-        Some(type_oid) => session
-            .catalog_lookup(db)
+        Some(type_oid) => catalog
             .type_by_oid(type_oid)
-            .map(|row| format_psql_type(row.sql_type))
-            .unwrap_or_else(|| format_psql_type(fallback_sql_type)),
-        None => format_psql_type(fallback_sql_type),
+            .map(|row| format_psql_type(&catalog, row.sql_type))
+            .unwrap_or_else(|| format_psql_type(&catalog, fallback_sql_type)),
+        None => format_psql_type(&catalog, fallback_sql_type),
     }
 }
 
@@ -9311,7 +9311,17 @@ fn resolve_psql_index_display_type_oid(
     }
 }
 
-fn format_psql_type(sql_type: SqlType) -> String {
+fn format_psql_type(catalog: &dyn CatalogLookup, sql_type: SqlType) -> String {
+    if sql_type.type_oid != 0
+        && let Some(row) = catalog.type_by_oid(sql_type.type_oid)
+    {
+        if row.typtype == 'd'
+            || (!sql_type.is_array
+                && crate::include::catalog::builtin_type_name_for_oid(row.oid).is_none())
+        {
+            return row.typname;
+        }
+    }
     match sql_type.kind {
         SqlTypeKind::Bit => format!("bit({})", sql_type.bit_len().unwrap_or(1)),
         SqlTypeKind::VarBit => match sql_type.bit_len() {
@@ -9326,6 +9336,9 @@ fn format_psql_type(sql_type: SqlType) -> String {
             Some(len) => format!("character({len})"),
             None => "bpchar".into(),
         },
+        _ if sql_type.is_array => {
+            format!("{}[]", format_psql_type(catalog, sql_type.element_type()))
+        }
         _ => format_sql_type_name(sql_type).into(),
     }
 }

@@ -81,9 +81,12 @@ use crate::include::access::hash::HashOptions;
 use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
-    ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID, BOX_TYPE_OID, BPCHAR_TYPE_OID,
-    BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID, HASH_AM_OID,
-    PG_AM_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_ATTRIBUTE_RELATION_OID,
+    ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID, BIT_TYPE_OID, BOOL_TYPE_OID,
+    BOX_TYPE_OID, BPCHAR_TYPE_OID, BRIN_AM_OID, BTREE_AM_OID, BYTEA_TYPE_OID, CIDR_TYPE_OID,
+    DATE_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID,
+    HASH_AM_OID, INET_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID,
+    INTERNAL_CHAR_TYPE_OID, INTERVAL_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID,
+    OID_TYPE_OID, PG_AM_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_ATTRIBUTE_RELATION_OID,
     PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
     PG_COLLATION_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_DESCRIPTION_RELATION_OID,
     PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID, PG_LANGUAGE_RELATION_OID, PG_MAINTAIN_OID,
@@ -93,7 +96,8 @@ use crate::include::catalog::{
     PG_PUBLICATION_RELATION_OID, PG_READ_ALL_DATA_OID, PG_REWRITE_RELATION_OID,
     PG_TOAST_NAMESPACE_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PG_WRITE_ALL_DATA_OID,
     PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow, PgPublicationRelRow, PgPublicationRow,
-    RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_am_rows,
+    RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
+    UUID_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_am_rows,
     builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
@@ -4395,9 +4399,6 @@ pub(crate) fn evaluate_default_value(
     column_index: usize,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let Some(default_sql) = desc.columns[column_index].default_expr.as_deref() else {
-        return Ok(Value::Null);
-    };
     let catalog = ctx
         .catalog
         .as_deref()
@@ -4407,7 +4408,15 @@ pub(crate) fn evaluate_default_value(
             hint: None,
             sqlstate: "XX000",
         })?;
-    let parsed = crate::backend::parser::parse_expr(default_sql).map_err(ExecError::Parse)?;
+    let column = &desc.columns[column_index];
+    let Some(default_sql) = column.default_expr.clone().or_else(|| {
+        catalog
+            .type_oid_for_sql_type(column.sql_type)
+            .and_then(|type_oid| catalog.type_default_sql(type_oid))
+    }) else {
+        return Ok(Value::Null);
+    };
+    let parsed = crate::backend::parser::parse_expr(&default_sql).map_err(ExecError::Parse)?;
     let (bound, _) = bind_scalar_expr_in_scope(&parsed, &[], catalog).map_err(ExecError::Parse)?;
     let mut slot = TupleSlot::virtual_row(vec![Value::Null; desc.columns.len()]);
     eval_expr(&bound, &mut slot, ctx)
@@ -5797,6 +5806,7 @@ fn index_column_type_oid(catalog: &Catalog, sql_type: SqlType) -> Option<u32> {
 
 fn opclass_accepts_type(opclass: &PgOpclassRow, type_oid: u32, sql_type: SqlType) -> bool {
     opclass.opcintype == type_oid
+        || opclass_accepts_sql_type(opclass.opcintype, sql_type)
         || (matches!(
             opclass.opcintype,
             TEXT_TYPE_OID | BPCHAR_TYPE_OID | VARCHAR_TYPE_OID
@@ -5814,6 +5824,40 @@ fn opclass_accepts_type(opclass: &PgOpclassRow, type_oid: u32, sql_type: SqlType
             && matches!(sql_type.element_type().kind, SqlTypeKind::Enum))
         || (opclass.opcintype == RECORD_TYPE_OID
             && matches!(sql_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite))
+}
+
+fn opclass_accepts_sql_type(opcintype: u32, sql_type: SqlType) -> bool {
+    if sql_type.is_array {
+        return opcintype == ANYARRAYOID;
+    }
+    match sql_type.kind {
+        SqlTypeKind::Bool => opcintype == BOOL_TYPE_OID,
+        SqlTypeKind::Int2 => opcintype == INT2_TYPE_OID,
+        SqlTypeKind::Int4 => opcintype == INT4_TYPE_OID,
+        SqlTypeKind::Int8 => opcintype == INT8_TYPE_OID,
+        SqlTypeKind::Oid => opcintype == OID_TYPE_OID,
+        SqlTypeKind::InternalChar => opcintype == INTERNAL_CHAR_TYPE_OID,
+        SqlTypeKind::Name => opcintype == NAME_TYPE_OID,
+        SqlTypeKind::Text => opcintype == TEXT_TYPE_OID,
+        SqlTypeKind::Varchar => opcintype == VARCHAR_TYPE_OID,
+        SqlTypeKind::Char => opcintype == BPCHAR_TYPE_OID,
+        SqlTypeKind::Float4 => opcintype == FLOAT4_TYPE_OID,
+        SqlTypeKind::Float8 => opcintype == FLOAT8_TYPE_OID,
+        SqlTypeKind::Numeric => opcintype == NUMERIC_TYPE_OID,
+        SqlTypeKind::Money => opcintype == MONEY_TYPE_OID,
+        SqlTypeKind::Interval => opcintype == INTERVAL_TYPE_OID,
+        SqlTypeKind::Date => opcintype == DATE_TYPE_OID,
+        SqlTypeKind::Timestamp => opcintype == TIMESTAMP_TYPE_OID,
+        SqlTypeKind::TimestampTz => opcintype == TIMESTAMPTZ_TYPE_OID,
+        SqlTypeKind::Bytea => opcintype == BYTEA_TYPE_OID,
+        SqlTypeKind::Uuid => opcintype == UUID_TYPE_OID,
+        SqlTypeKind::Bit => opcintype == BIT_TYPE_OID,
+        SqlTypeKind::VarBit => opcintype == VARBIT_TYPE_OID,
+        SqlTypeKind::Cidr => opcintype == CIDR_TYPE_OID,
+        SqlTypeKind::Inet => opcintype == INET_TYPE_OID,
+        SqlTypeKind::Composite | SqlTypeKind::Record => opcintype == RECORD_TYPE_OID,
+        _ => false,
+    }
 }
 
 fn default_opclass_for_catalog_type(

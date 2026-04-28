@@ -54607,6 +54607,322 @@ fn domain_constraints_are_enforced_for_casts_and_input_info() {
 }
 
 #[test]
+fn composite_domain_default_opclasses_cascade_to_base_types() {
+    let dir = temp_dir("composite_domain_default_opclasses");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create domain op_int as int4").unwrap();
+    db.execute(1, "create table op_int_table (id op_int primary key)")
+        .unwrap();
+    db.execute(1, "insert into op_int_table values (1)")
+        .unwrap();
+    match db.execute(1, "insert into op_int_table values (1)") {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
+            assert_eq!(constraint, "op_int_table_pkey");
+        }
+        other => panic!("expected primary-key duplicate rejection, got {other:?}"),
+    }
+
+    db.execute(1, "create type op_pair as (r float8, i float8)")
+        .unwrap();
+    db.execute(
+        1,
+        "create domain op_pair_domain as op_pair check ((value).r <= (value).i)",
+    )
+    .unwrap();
+    db.execute(1, "create table op_pair_table (d op_pair_domain unique)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into op_pair_table values (row(1,2)::op_pair_domain)",
+    )
+    .unwrap();
+    db.execute(1, "insert into op_pair_table values (row(3,4)::op_pair)")
+        .unwrap();
+    match db.execute(
+        1,
+        "insert into op_pair_table values (row(1,2)::op_pair_domain)",
+    ) {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
+            assert_eq!(constraint, "op_pair_table_d_key");
+        }
+        other => panic!("expected composite-domain unique rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn domain_defaults_apply_after_column_default_drop() {
+    let dir = temp_dir("domain_default_after_column_default_drop");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create domain default_domain as int4 default 3")
+        .unwrap();
+    db.execute(
+        1,
+        "create table domain_default_table (v default_domain not null default null)",
+    )
+    .unwrap();
+    match db.execute(1, "insert into domain_default_table default values") {
+        Err(ExecError::NotNullViolation { column, .. }) => {
+            assert_eq!(column, "v");
+        }
+        other => panic!("expected explicit NULL default not-null violation, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "alter table domain_default_table alter column v drop default",
+    )
+    .unwrap();
+    db.execute(1, "insert into domain_default_table default values")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table domain_default_table alter column v set default null",
+    )
+    .unwrap();
+    match db.execute(1, "insert into domain_default_table default values") {
+        Err(ExecError::NotNullViolation { column, .. }) => {
+            assert_eq!(column, "v");
+        }
+        other => panic!("expected explicit NULL default not-null violation, got {other:?}"),
+    }
+    db.execute(
+        1,
+        "alter table domain_default_table alter column v drop default",
+    )
+    .unwrap();
+    db.execute(1, "insert into domain_default_table default values")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select v from domain_default_table"),
+        vec![vec![Value::Int32(3)], vec![Value::Int32(3)]],
+    );
+}
+
+#[test]
+fn alter_domain_rejects_unsupported_derived_type_columns() {
+    let dir = temp_dir("alter_domain_derived_type_columns");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create domain derived_posint as int4")
+        .unwrap();
+    db.execute(1, "create type derived_pair as (f1 derived_posint)")
+        .unwrap();
+    db.execute(1, "create table derived_table (f1 derived_pair)")
+        .unwrap();
+    db.execute(1, "insert into derived_table values (row(-1))")
+        .unwrap();
+    match db.execute(
+        1,
+        "alter domain derived_posint add constraint c1 check (value >= 0)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "0A000");
+            assert_eq!(
+                message,
+                "cannot alter type \"derived_posint\" because column \"derived_table.f1\" uses it"
+            );
+        }
+        other => panic!("expected derived type dependency rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_domain_validates_domain_over_domain_columns() {
+    let dir = temp_dir("alter_domain_domain_chain_validation");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create domain chain_posint as int4").unwrap();
+    db.execute(
+        1,
+        "create domain chain_even as chain_posint check (value % 2 = 0)",
+    )
+    .unwrap();
+    db.execute(1, "create table chain_table (f1 chain_even)")
+        .unwrap();
+    db.execute(1, "insert into chain_table values (2)").unwrap();
+    match db.execute(
+        1,
+        "alter domain chain_posint add constraint c2 check (value >= 10)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "column \"f1\" of table \"chain_table\" contains values that violate the new constraint"
+            );
+        }
+        other => panic!("expected domain-chain validation rejection, got {other:?}"),
+    }
+    db.execute(
+        1,
+        "alter domain chain_posint add constraint c2 check (value > 0)",
+    )
+    .unwrap();
+    match db.execute(1, "insert into chain_table values (-2)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain chain_even violates check constraint \"c2\""
+            );
+        }
+        other => panic!("expected base domain check through domain chain, got {other:?}"),
+    }
+}
+
+#[test]
+fn composite_domain_array_navigation_rechecks_domain_constraints() {
+    let dir = temp_dir("composite_domain_array_navigation");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type nav_pair as (cf1 int, cf2 int)")
+        .unwrap();
+    db.execute(
+        1,
+        "create domain nav_pair_domain as nav_pair check ((value).cf1 > 0)",
+    )
+    .unwrap();
+    db.execute(1, "create table nav_pair_table (f1 nav_pair_domain[])")
+        .unwrap();
+    db.execute(1, "insert into nav_pair_table values (null)")
+        .unwrap();
+    db.execute(1, "update nav_pair_table set f1[1].cf2 = 5")
+        .unwrap();
+    match db.execute(1, "update nav_pair_table set f1[1].cf1 = -1") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain nav_pair_domain violates check constraint \"nav_pair_domain_check\""
+            );
+        }
+        other => panic!("expected composite-domain array check violation, got {other:?}"),
+    }
+    db.execute(1, "update nav_pair_table set f1[1].cf1 = 1")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select f1[1].cf1, f1[1].cf2 from nav_pair_table",),
+        vec![vec![Value::Int32(1), Value::Int32(5)]],
+    );
+}
+
+#[test]
+fn composite_array_domains_enforce_checks_and_support_unique_indexes() {
+    let dir = temp_dir("composite_array_domain_checks");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type arr_pair as (r int, i int)")
+        .unwrap();
+    db.execute(
+        1,
+        "create domain arr_pair_domain as arr_pair[] check (value[1].r <= value[1].i)",
+    )
+    .unwrap();
+    db.execute(1, "create table arr_pair_table (d arr_pair_domain unique)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into arr_pair_table values (array[row(1,2)]::arr_pair_domain)",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "insert into arr_pair_table values (array[row(1,2)]::arr_pair_domain)",
+    ) {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
+            assert_eq!(constraint, "arr_pair_table_d_key");
+        }
+        other => panic!("expected composite-array-domain unique rejection, got {other:?}"),
+    }
+    assert_eq!(
+        query_rows(&db, 1, "select d[1].r, d[1].i from arr_pair_table"),
+        vec![vec![Value::Int32(1), Value::Int32(2)]],
+    );
+    match db.execute(1, "select array[row(2,1)]::arr_pair_domain") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain arr_pair_domain violates check constraint \"arr_pair_domain_check\""
+            );
+        }
+        other => panic!("expected composite-array-domain check violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn sql_functions_recheck_composite_domain_results() {
+    let dir = temp_dir("sql_function_composite_domain_results");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type func_pair as (r float8, i float8)")
+        .unwrap();
+    db.execute(
+        1,
+        "create domain func_pair_domain as func_pair check ((value).r <= (value).i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function make_func_pair(r float8, i float8) returns func_pair_domain as \
+         'select row(r,i)' language sql",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select (make_func_pair(1,2)).r, (make_func_pair(1,2)).i",
+        ),
+        vec![vec![Value::Float64(1.0), Value::Float64(2.0)]],
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select * from make_func_pair(1,2) m"),
+        vec![vec![Value::Float64(1.0), Value::Float64(2.0)]],
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select m is not null from make_func_pair(1,2) m"),
+        vec![vec![Value::Bool(true)]],
+    );
+    match db.execute(1, "select make_func_pair(2,1)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain func_pair_domain violates check constraint \"func_pair_domain_check\""
+            );
+        }
+        Err(ExecError::WithContext { source, .. }) => match *source {
+            ExecError::DetailedError {
+                message, sqlstate, ..
+            } => {
+                assert_eq!(sqlstate, "23514");
+                assert_eq!(
+                    message,
+                    "value for domain func_pair_domain violates check constraint \"func_pair_domain_check\""
+                );
+            }
+            other => panic!("expected wrapped SQL function domain violation, got {other:?}"),
+        },
+        other => panic!("expected SQL function composite-domain result violation, got {other:?}"),
+    }
+}
+
+#[test]
 fn domain_constraints_are_rechecked_after_update_assignment() {
     let dir = temp_dir("domain_update_assignment_recheck");
     let db = Database::open(&dir, 64).unwrap();

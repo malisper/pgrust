@@ -8351,27 +8351,26 @@ pub fn eval_expr(
             elements,
             array_type,
         } => {
-            let element_type = array_type.element_type();
+            let array_cast_type = ctx
+                .catalog
+                .as_deref()
+                .and_then(|catalog| catalog.domain_by_type_oid(array_type.type_oid))
+                .filter(|domain| domain.sql_type.is_array)
+                .map(|domain| domain.sql_type)
+                .unwrap_or(*array_type);
+            let element_type = array_cast_type.element_type();
             let mut values = Vec::with_capacity(elements.len());
             let mut has_nested_arrays = false;
             for expr in elements {
                 let value = eval_expr(expr, slot, ctx)?;
                 if matches!(value, Value::Array(_) | Value::PgArray(_)) {
                     has_nested_arrays = true;
-                    values.push(cast_value_with_config(
-                        value,
-                        *array_type,
-                        &ctx.datetime_config,
-                    )?);
+                    values.push(cast_array_literal_value(value, array_cast_type, ctx)?);
                 } else {
-                    values.push(cast_value_with_config(
-                        value,
-                        element_type,
-                        &ctx.datetime_config,
-                    )?);
+                    values.push(cast_array_literal_value(value, element_type, ctx)?);
                 }
             }
-            if has_nested_arrays {
+            let result = if has_nested_arrays {
                 let array = ArrayValue::from_nested_values(values, vec![1]).map_err(|details| {
                     ExecError::DetailedError {
                         message: "malformed array literal".into(),
@@ -8380,10 +8379,11 @@ pub fn eval_expr(
                         sqlstate: "22P02",
                     }
                 })?;
-                Ok(Value::PgArray(array))
+                Value::PgArray(array)
             } else {
-                Ok(Value::PgArray(ArrayValue::from_1d(values)))
-            }
+                Value::PgArray(ArrayValue::from_1d(values))
+            };
+            enforce_domain_constraints_for_value(result, *array_type, ctx)
         }
         Expr::SubPlan(subplan) => match subplan.sublink_type {
             SubLinkType::ExprSubLink => eval_scalar_subquery(subplan, slot, ctx),
@@ -8852,7 +8852,26 @@ fn eval_record_field(value: Value, field: &str) -> Result<Value, ExecError> {
         })
 }
 
-fn cast_record_value_for_target(
+fn cast_array_literal_value(
+    value: Value,
+    target: SqlType,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let casted = if let Value::Record(record) = value {
+        cast_record_value_for_target(record, target, ctx)
+    } else {
+        cast_value_with_source_type_catalog_and_config(
+            value,
+            None,
+            target,
+            ctx.catalog.as_deref(),
+            &ctx.datetime_config,
+        )
+    }?;
+    enforce_domain_constraints_for_value(casted, target, ctx)
+}
+
+pub(crate) fn cast_record_value_for_target(
     record: crate::include::nodes::datum::RecordValue,
     target: SqlType,
     ctx: &ExecutorContext,
