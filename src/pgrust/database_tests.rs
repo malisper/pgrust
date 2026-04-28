@@ -35704,6 +35704,39 @@ fn create_operator_resolves_factorial_int8() {
 }
 
 #[test]
+fn create_operator_supports_regression_triple_less_than() {
+    let base = temp_dir("create_operator_triple_less_than");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function op_leak(int, int) returns bool language plpgsql as $$
+         begin
+           return $1 < $2;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator <<< (procedure = op_leak, leftarg = int, rightarg = int, restrict = scalarltsel)",
+    )
+    .unwrap();
+    db.execute(1, "create table custom_op_t (a int4)").unwrap();
+    db.execute(1, "insert into custom_op_t values (1), (12)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a from custom_op_t where a <<< 10 order by a",
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
 fn create_operator_validation_matches_postgres_order() {
     let base = temp_dir("create_operator_validation_order");
     let db = Database::open(&base, 16).unwrap();

@@ -25186,6 +25186,11 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             left: Box::new(left),
                             right: Box::new(right),
                         },
+                        "<<<" => SqlExpr::BinaryOperator {
+                            op: "<<<".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
                         "=" => SqlExpr::Eq(Box::new(left), Box::new(right)),
                         "<>" | "!=" => SqlExpr::NotEq(Box::new(left), Box::new(right)),
                         "<" => SqlExpr::Lt(Box::new(left), Box::new(right)),

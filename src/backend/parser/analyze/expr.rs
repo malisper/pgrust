@@ -2973,6 +2973,16 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 grouped_outer,
                 ctes,
             )?,
+            "<<<" => bind_catalog_binary_operator_expr(
+                "<<<",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
             _ => {
                 return Err(ParseError::UnexpectedToken {
                     expected: "bound builtin operator",

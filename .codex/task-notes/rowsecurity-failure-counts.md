@@ -353,3 +353,19 @@ DELETE USING bucket:
 - Latest rowsecurity regression result with a 300s file timeout:
   `689/774` matched, `85` mismatches, `1594` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+Custom operator/selectivity bucket:
+- Added the `scalarltsel(internal, oid, internal, int4)` pg_proc catalog row
+  needed by rowsecurity's custom `<<<` operator definition.
+- Parsed `<<<` as a comparison operator instead of letting `<<` consume the
+  first two characters as a shift operator, and bound it through catalog
+  operator lookup.
+- Added focused coverage for creating and executing the rowsecurity-style
+  `<<<` operator with a plpgsql implementation.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  create_operator_supports_regression_triple_less_than` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `689/774` matched, `85` mismatches, `1516` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.
