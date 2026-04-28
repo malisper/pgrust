@@ -1,6 +1,7 @@
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::catalog::{BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgConversionRow {
@@ -29,8 +30,17 @@ pub fn pg_conversion_desc() -> RelationDesc {
     }
 }
 
-pub fn bootstrap_pg_conversion_rows() -> [PgConversionRow; 0] {
-    []
+pub fn bootstrap_pg_conversion_rows() -> [PgConversionRow; 1] {
+    [PgConversionRow {
+        oid: 4402,
+        conname: "koi8_r_to_mic".into(),
+        connamespace: PG_CATALOG_NAMESPACE_OID,
+        conowner: BOOTSTRAP_SUPERUSER_OID,
+        conforencoding: 22,
+        contoencoding: 7,
+        conproc: 4302,
+        condefault: false,
+    }]
 }
 
 pub fn sort_pg_conversion_rows(rows: &mut [PgConversionRow]) {

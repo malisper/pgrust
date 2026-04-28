@@ -2723,8 +2723,11 @@ impl Database {
             Some(_) => None,
             None => None,
         };
-        let (normalized, object_name, namespace_oid) = self
-            .normalize_domain_name_for_create(&create_stmt.domain_name, configured_search_path)?;
+        let (normalized, object_name, namespace_oid) = self.normalize_domain_name_for_create(
+            client_id,
+            &create_stmt.domain_name,
+            configured_search_path,
+        )?;
         let domains = self.domains.write();
         if domains.contains_key(&normalized) {
             return Err(ExecError::Parse(ParseError::UnsupportedType(

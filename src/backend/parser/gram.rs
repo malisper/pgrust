@@ -5020,6 +5020,12 @@ fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
         Some("DELETE form")
     } else if lowered.starts_with("alter default privileges ") {
         Some("ALTER DEFAULT PRIVILEGES")
+    } else if lowered.starts_with("create transform ") {
+        Some("CREATE TRANSFORM")
+    } else if lowered.starts_with("create subscription ") {
+        Some("CREATE SUBSCRIPTION")
+    } else if lowered.starts_with("drop subscription ") {
+        Some("DROP SUBSCRIPTION")
     } else if lowered.starts_with("prepare ") {
         Some("PREPARE")
     } else if lowered.starts_with("execute ") {

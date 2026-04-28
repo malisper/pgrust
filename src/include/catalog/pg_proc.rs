@@ -2514,113 +2514,6 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             's',
         ),
         proc_row(
-            3537,
-            "pg_describe_object",
-            TEXT_TYPE_OID,
-            &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
-            "pg_describe_object",
-            3,
-            false,
-            true,
-            'f',
-            's',
-        ),
-        PgProcRow {
-            proallargtypes: Some(vec![
-                OID_TYPE_OID,
-                OID_TYPE_OID,
-                INT4_TYPE_OID,
-                TEXT_TYPE_OID,
-                TEXT_TYPE_OID,
-                TEXT_TYPE_OID,
-                TEXT_TYPE_OID,
-            ]),
-            proargmodes: Some(vec![b'i', b'i', b'i', b'o', b'o', b'o', b'o']),
-            proargnames: Some(vec![
-                "classid".into(),
-                "objid".into(),
-                "objsubid".into(),
-                "type".into(),
-                "schema".into(),
-                "name".into(),
-                "identity".into(),
-            ]),
-            ..proc_row(
-                3839,
-                "pg_identify_object",
-                RECORD_TYPE_OID,
-                &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
-                "pg_identify_object",
-                3,
-                false,
-                true,
-                'f',
-                's',
-            )
-        },
-        PgProcRow {
-            proallargtypes: Some(vec![
-                OID_TYPE_OID,
-                OID_TYPE_OID,
-                INT4_TYPE_OID,
-                TEXT_TYPE_OID,
-                TEXT_ARRAY_TYPE_OID,
-                TEXT_ARRAY_TYPE_OID,
-            ]),
-            proargmodes: Some(vec![b'i', b'i', b'i', b'o', b'o', b'o']),
-            proargnames: Some(vec![
-                "classid".into(),
-                "objid".into(),
-                "objsubid".into(),
-                "type".into(),
-                "object_names".into(),
-                "object_args".into(),
-            ]),
-            ..proc_row(
-                3382,
-                "pg_identify_object_as_address",
-                RECORD_TYPE_OID,
-                &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
-                "pg_identify_object_as_address",
-                3,
-                false,
-                true,
-                'f',
-                's',
-            )
-        },
-        PgProcRow {
-            proallargtypes: Some(vec![
-                TEXT_TYPE_OID,
-                TEXT_ARRAY_TYPE_OID,
-                TEXT_ARRAY_TYPE_OID,
-                OID_TYPE_OID,
-                OID_TYPE_OID,
-                INT4_TYPE_OID,
-            ]),
-            proargmodes: Some(vec![b'i', b'i', b'i', b'o', b'o', b'o']),
-            proargnames: Some(vec![
-                "type".into(),
-                "object_names".into(),
-                "object_args".into(),
-                "classid".into(),
-                "objid".into(),
-                "objsubid".into(),
-            ]),
-            ..proc_row(
-                3954,
-                "pg_get_object_address",
-                RECORD_TYPE_OID,
-                &oid_argtypes(&[TEXT_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_ARRAY_TYPE_OID]),
-                "pg_get_object_address",
-                3,
-                false,
-                true,
-                'f',
-                's',
-            )
-        },
-        proc_row(
             6385,
             "pg_get_acl",
             TEXT_ARRAY_TYPE_OID,
@@ -2632,6 +2525,99 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             's',
         ),
+        {
+            let mut row = proc_row(
+                3537,
+                "pg_describe_object",
+                TEXT_TYPE_OID,
+                &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
+                "pg_describe_object",
+                3,
+                false,
+                false,
+                'f',
+                's',
+            );
+            row.proargnames = Some(vec!["classid".into(), "objid".into(), "objsubid".into()]);
+            row
+        },
+        {
+            let mut row = scalar_record_out_proc_row(
+                3839,
+                "pg_identify_object",
+                &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
+                "pg_identify_object",
+                3,
+                &[
+                    ("type", TEXT_TYPE_OID),
+                    ("schema", TEXT_TYPE_OID),
+                    ("name", TEXT_TYPE_OID),
+                    ("identity", TEXT_TYPE_OID),
+                ],
+            );
+            row.proisstrict = false;
+            row.provolatile = 's';
+            row.proargnames = Some(vec![
+                "classid".into(),
+                "objid".into(),
+                "objsubid".into(),
+                "type".into(),
+                "schema".into(),
+                "name".into(),
+                "identity".into(),
+            ]);
+            row
+        },
+        {
+            let mut row = scalar_record_out_proc_row(
+                3382,
+                "pg_identify_object_as_address",
+                &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
+                "pg_identify_object_as_address",
+                3,
+                &[
+                    ("type", TEXT_TYPE_OID),
+                    ("object_names", TEXT_ARRAY_TYPE_OID),
+                    ("object_args", TEXT_ARRAY_TYPE_OID),
+                ],
+            );
+            row.proisstrict = false;
+            row.provolatile = 's';
+            row.proargnames = Some(vec![
+                "classid".into(),
+                "objid".into(),
+                "objsubid".into(),
+                "type".into(),
+                "object_names".into(),
+                "object_args".into(),
+            ]);
+            row
+        },
+        {
+            let mut row = scalar_record_out_proc_row(
+                3954,
+                "pg_get_object_address",
+                &oid_argtypes(&[TEXT_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_ARRAY_TYPE_OID]),
+                "pg_get_object_address",
+                3,
+                &[
+                    ("classid", OID_TYPE_OID),
+                    ("objid", OID_TYPE_OID),
+                    ("objsubid", INT4_TYPE_OID),
+                ],
+            );
+            row.proisstrict = false;
+            row.provolatile = 's';
+            row.proargnames = Some(vec![
+                "type".into(),
+                "object_names".into(),
+                "object_args".into(),
+                "classid".into(),
+                "objid".into(),
+                "objsubid".into(),
+            ]);
+            row
+        },
         proc_row(
             1215,
             "obj_description",
@@ -18869,6 +18855,9 @@ mod tests {
             BuiltinScalarFunction::RegRoleToText,
             BuiltinScalarFunction::PgGetUserById,
             BuiltinScalarFunction::PgDescribeObject,
+            BuiltinScalarFunction::PgIdentifyObject,
+            BuiltinScalarFunction::PgIdentifyObjectAsAddress,
+            BuiltinScalarFunction::PgGetObjectAddress,
             BuiltinScalarFunction::PgGetRuleDef,
             BuiltinScalarFunction::PgGetViewDef,
             BuiltinScalarFunction::PgGetPartKeyDef,
