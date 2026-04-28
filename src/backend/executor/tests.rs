@@ -20077,7 +20077,7 @@ fn jsonpath_arithmetic_recursive_and_subscripts_work() {
                 rows,
                 vec![vec![
                     Value::JsonPath("$.\"a\".**{2}.\"b\"".into()),
-                    Value::JsonPath("$ ? ((@ == 1) is unknown)".into()),
+                    Value::JsonPath("$?((@ == 1) is unknown)".into()),
                     Value::JsonPath("$[last]".into()),
                     Value::JsonPath("$[0.5]".into()),
                     Value::Bool(true),
@@ -20341,10 +20341,10 @@ fn jsonpath_extended_subscripts_parse() {
             assert_eq!(
                 rows,
                 vec![vec![
-                    Value::JsonPath("$[0, 1]".into()),
+                    Value::JsonPath("$[0,1]".into()),
                     Value::JsonPath("$[last - 1]".into()),
                     Value::JsonPath("$[2.5 - 1 to $.size() - 2]".into()),
-                    Value::JsonPath("$[last ? (@.type() == \"number\")]".into()),
+                    Value::JsonPath("$[last?(@.type() == \"number\")]".into()),
                 ]]
             );
         }
@@ -20463,8 +20463,8 @@ fn jsonpath_expression_method_calls_parse() {
             assert_eq!(
                 rows,
                 vec![vec![
-                    Value::JsonPath("($.\"a\" - 5).abs() + 10".into()),
-                    Value::JsonPath("-($.\"a\" * $.\"a\").floor() % 4.3".into()),
+                    Value::JsonPath("(($.\"a\" - 5).abs() + 10)".into()),
+                    Value::JsonPath("(-($.\"a\" * $.\"a\").floor() % 4.3)".into()),
                 ]]
             );
         }
@@ -20600,9 +20600,9 @@ fn jsonpath_string_predicates_parse() {
             assert_eq!(
                 rows,
                 vec![vec![
-                    Value::JsonPath("$ ? (@ starts with \"abc\")".into()),
-                    Value::JsonPath("$ ? (@ starts with $var)".into()),
-                    Value::JsonPath("$ ? (@ like_regex \"pattern\" flag \"iq\")".into()),
+                    Value::JsonPath("$?(@ starts with \"abc\")".into()),
+                    Value::JsonPath("$?(@ starts with $\"var\")".into()),
+                    Value::JsonPath("$?(@ like_regex \"pattern\" flag \"iq\")".into()),
                 ]]
             );
         }
@@ -21318,9 +21318,10 @@ fn jsonpath_string_predicates_errors() {
     assert!(
         matches!(
             &err,
-            ExecError::InvalidStorageValue { column, details }
-                if column == "jsonpath"
-                    && details == "invalid input syntax for type jsonpath: \"$ ? (@ like_regex \"pattern\" flag \"a\")\""
+            ExecError::DetailedError { message, detail, sqlstate, .. }
+                if message == "invalid input syntax for type jsonpath"
+                    && detail.as_deref() == Some("Unrecognized flag character \"a\" in LIKE_REGEX predicate.")
+                    && *sqlstate == "42601"
         ),
         "{err:?}"
     );
