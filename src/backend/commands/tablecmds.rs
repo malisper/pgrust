@@ -2443,6 +2443,7 @@ pub(crate) fn cleanup_toast_attempt(
 
 pub(crate) fn write_insert_heap_row(
     relation_name: &str,
+    rls_relation_name: &str,
     rel: crate::backend::storage::smgr::RelFileLocator,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
@@ -2455,7 +2456,7 @@ pub(crate) fn write_insert_heap_row(
     cid: CommandId,
 ) -> Result<ItemPointerData, ExecError> {
     crate::backend::executor::enforce_row_security_write_checks(
-        relation_name,
+        rls_relation_name,
         desc,
         rls_write_checks,
         values,
@@ -2675,6 +2676,7 @@ fn move_updated_row_to_partition(
 
     let destination = destination;
     let inserted_tid = write_insert_heap_row(
+        &destination.relation_info.relation_name,
         &destination.relation_info.relation_name,
         destination.relation_info.relation.rel,
         destination.relation_info.relation.toast,
@@ -6147,6 +6149,7 @@ fn execute_insert_rows_with_routing(
     let Some(target_relation) = catalog.relation_by_oid(relation_oid) else {
         return execute_insert_rows(
             relation_name,
+            relation_name,
             relation_oid,
             rel,
             toast,
@@ -6164,6 +6167,7 @@ fn execute_insert_rows_with_routing(
     };
     if target_relation.relkind != 'p' && !target_relation.relispartition {
         return execute_insert_rows(
+            relation_name,
             relation_name,
             relation_oid,
             rel,
@@ -6236,6 +6240,7 @@ fn execute_insert_rows_with_routing(
             {
                 let leaf_inserted_rows = execute_insert_rows(
                     &result_rel_info.relation_name,
+                    relation_name,
                     result_rel_info.relation.relation_oid,
                     result_rel_info.relation.rel,
                     result_rel_info.relation.toast,
@@ -9281,6 +9286,7 @@ fn build_returning_result(columns: Vec<QueryColumn>, rows: Vec<Vec<Value>>) -> S
 
 pub(crate) fn execute_insert_rows(
     relation_name: &str,
+    rls_relation_name: &str,
     relation_oid: u32,
     rel: crate::backend::storage::smgr::RelFileLocator,
     toast: Option<ToastRelationRef>,
@@ -9347,6 +9353,7 @@ pub(crate) fn execute_insert_rows(
             )?;
             let heap_tid = write_insert_heap_row(
                 relation_name,
+                rls_relation_name,
                 rel,
                 toast,
                 toast_index,
@@ -9521,6 +9528,7 @@ pub(crate) fn execute_insert_values(
     }
     Ok(execute_insert_rows(
         relation_name,
+        relation_name,
         relation_oid,
         rel,
         toast,
@@ -9593,6 +9601,7 @@ pub fn execute_prepared_insert_row(
     };
     materialize_generated_columns(&prepared.desc, &mut values, ctx)?;
     let heap_tid = write_insert_heap_row(
+        &prepared.relation_name,
         &prepared.relation_name,
         prepared.rel,
         prepared.toast,

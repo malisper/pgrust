@@ -43451,6 +43451,53 @@ fn auto_view_dml_enforces_base_rls_before_view_check() {
 }
 
 #[test]
+fn partitioned_insert_rls_reports_parent_table_name() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut writer = Session::new(2);
+
+    owner
+        .execute(&db, "create role part_writer nologin")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table part_parent (a int4) partition by range (a)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table part_parent_low partition of part_parent for values from (0) to (10)",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "grant insert on part_parent to part_writer")
+        .unwrap();
+    owner
+        .execute(&db, "alter table part_parent enable row level security")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy p1 on part_parent for insert to part_writer with check (a = 1)",
+        )
+        .unwrap();
+
+    writer
+        .execute(&db, "set session authorization part_writer")
+        .unwrap();
+    let err = writer
+        .execute(&db, "insert into part_parent values (2)")
+        .unwrap_err();
+    assert_sqlstate(
+        err,
+        "42501",
+        "new row violates row-level security policy for table \"part_parent\"",
+    );
+}
+
+#[test]
 fn rls_policy_subquery_privileges_are_checked_for_select_and_explain() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut owner = Session::new(1);

@@ -243,3 +243,14 @@ Policy aggregate-validation bucket:
 - Latest rowsecurity regression result with a 300s file timeout:
   `678/774` matched, `96` mismatches, `1808` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+Partitioned INSERT RLS error-name bucket:
+- Routed INSERTs now keep separate relation names for child storage/constraint
+  work and parent RLS error reporting, so parent-table policies rejected after
+  routing still name the parent table like PostgreSQL.
+- Added a focused partitioned-parent INSERT/RLS error test.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `682/774` matched, `92` mismatches, `1784` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.

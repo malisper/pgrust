@@ -585,6 +585,7 @@ pub(crate) fn execute_bound_insert_with_rules(
                     &stmt.returning,
                     &crate::backend::commands::tablecmds::execute_insert_rows(
                         &stmt.relation_name,
+                        &stmt.relation_name,
                         stmt.relation_oid,
                         stmt.rel,
                         stmt.toast,
