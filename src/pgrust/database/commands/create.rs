@@ -1,5 +1,6 @@
 use super::super::*;
 use super::privilege::{acl_grants_privilege, type_owner_default_acl};
+use super::reloptions::normalize_create_table_reloptions;
 use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::parser::analyze::{
     ResolvedFunctionCall, is_binary_coercible_type, resolve_function_call,
@@ -952,20 +953,6 @@ fn create_view_reloptions(options: &[RelOption]) -> Result<Option<Vec<String>>, 
             }
         };
         reloptions.push(format!("{name}={value}"));
-    }
-    Ok((!reloptions.is_empty()).then_some(reloptions))
-}
-
-fn create_table_reloptions(options: &[RelOption]) -> Result<Option<Vec<String>>, ExecError> {
-    let mut reloptions = Vec::new();
-    for option in options {
-        let name = option.name.to_ascii_lowercase();
-        if option.name != name {
-            return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
-                option.name.clone(),
-            )));
-        }
-        reloptions.push(format!("{name}={}", option.value.to_ascii_lowercase()));
     }
     Ok((!reloptions.is_empty()).then_some(reloptions))
 }
@@ -3891,6 +3878,41 @@ impl Database {
         result
     }
 
+    fn apply_created_toast_reloptions_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        toast: Option<&crate::backend::catalog::toasting::ToastCatalogChanges>,
+        reloptions: Option<&Vec<String>>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let (Some(toast), Some(reloptions)) = (toast, reloptions) else {
+            return Ok(());
+        };
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .alter_relation_reloptions_mvcc(
+                toast.toast_entry.relation_oid,
+                Some(reloptions.clone()),
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        Ok(())
+    }
+
     pub(crate) fn execute_create_view_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -4002,7 +4024,7 @@ impl Database {
         }
 
         let relation_relkind = created_relkind(&lowered);
-        let reloptions = create_table_reloptions(&create_stmt.options)?;
+        let reloptions = normalize_create_table_reloptions(&create_stmt.options)?;
         if relation_relkind == 'p' && persistence == TablePersistence::Unlogged {
             return Err(ExecError::Parse(ParseError::DetailedError {
                 message: "partitioned tables cannot be unlogged".into(),
@@ -4039,7 +4061,7 @@ impl Database {
                         crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
                         self.auth_state(client_id).current_user_oid(),
                         lowered.of_type_oid,
-                        reloptions.clone(),
+                        reloptions.heap.clone(),
                         &ctx,
                     )
                 } else {
@@ -4052,7 +4074,7 @@ impl Database {
                             relpersistence,
                             relation_relkind,
                             self.auth_state(client_id).current_user_oid(),
-                            reloptions.clone(),
+                            reloptions.heap.clone(),
                             &ctx,
                         )
                         .map(|(entry, effect)| {
@@ -4077,6 +4099,14 @@ impl Database {
                         drop(catalog_guard);
                         self.apply_catalog_mutation_effect_immediate(&effect)?;
                         catalog_effects.push(effect);
+                        self.apply_created_toast_reloptions_in_transaction(
+                            client_id,
+                            xid,
+                            table_cid.saturating_add(1),
+                            created.toast.as_ref(),
+                            reloptions.toast.as_ref(),
+                            catalog_effects,
+                        )?;
                         if !lowered.parent_oids.is_empty() {
                             let inherit_ctx = CatalogWriteContext {
                                 pool: self.pool.clone(),
@@ -4255,9 +4285,17 @@ impl Database {
                     table_cid,
                     relation_relkind,
                     lowered.of_type_oid,
-                    reloptions.clone(),
+                    reloptions.heap.clone(),
                     catalog_effects,
                     temp_effects,
+                )?;
+                self.apply_created_toast_reloptions_in_transaction(
+                    client_id,
+                    xid,
+                    table_cid.saturating_add(1),
+                    created.toast.as_ref(),
+                    reloptions.toast.as_ref(),
+                    catalog_effects,
                 )?;
                 if !lowered.parent_oids.is_empty() {
                     let inherit_ctx = CatalogWriteContext {

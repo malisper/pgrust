@@ -3937,6 +3937,35 @@ fn parse_alter_table_set_statement() {
         })
     );
 
+    let stmt = parse_statement(
+        "alter table reloptions_test set \
+         (autovacuum_enabled, toast.autovacuum_vacuum_cost_delay = 23, \
+          autovacuum_analyze_scale_factor = 0.3)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableSet(AlterTableSetStatement {
+            if_exists: false,
+            only: false,
+            table_name: "reloptions_test".into(),
+            options: vec![
+                RelOption {
+                    name: "autovacuum_enabled".into(),
+                    value: "true".into(),
+                },
+                RelOption {
+                    name: "toast.autovacuum_vacuum_cost_delay".into(),
+                    value: "23".into(),
+                },
+                RelOption {
+                    name: "autovacuum_analyze_scale_factor".into(),
+                    value: "0.3".into(),
+                },
+            ],
+        })
+    );
+
     let stmt = parse_statement("alter view rw_view1 set (security_invoker = true)").unwrap();
     assert_eq!(
         stmt,
@@ -3960,6 +3989,13 @@ fn parse_alter_table_set_statement() {
             table_name: "vac_truncate_test".into(),
             options: vec!["vacuum_truncate".into()],
         })
+    );
+
+    let err =
+        parse_statement("alter table vac_truncate_test reset (vacuum_truncate=12)").unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "RESET must not include values for parameters"
     );
 
     let stmt = parse_statement(
@@ -10289,6 +10325,43 @@ fn parse_insert_update_delete() {
     );
     assert!(
         matches!(parse_statement("create table pgbench_tellers(tid int not null,bid int,tbalance int,filler char(84)) with (fillfactor=100)").unwrap(), Statement::CreateTable(ct) if ct.table_name == "pgbench_tellers" && ct.columns().count() == 4)
+    );
+    let Statement::CreateTable(ct) = parse_statement(
+        "create table reloptions_test(i int) with \
+         (FiLLFaCToR=30, autovacuum_enabled, autovacuum_analyze_scale_factor = 0.2, \
+          toast.vacuum_truncate=false, fillfactor_text='string', signed_real=-30.1)",
+    )
+    .unwrap() else {
+        panic!("expected create table");
+    };
+    assert_eq!(
+        ct.options,
+        vec![
+            RelOption {
+                name: "fillfactor".into(),
+                value: "30".into(),
+            },
+            RelOption {
+                name: "autovacuum_enabled".into(),
+                value: "true".into(),
+            },
+            RelOption {
+                name: "autovacuum_analyze_scale_factor".into(),
+                value: "0.2".into(),
+            },
+            RelOption {
+                name: "toast.vacuum_truncate".into(),
+                value: "false".into(),
+            },
+            RelOption {
+                name: "fillfactor_text".into(),
+                value: "string".into(),
+            },
+            RelOption {
+                name: "signed_real".into(),
+                value: "-30.1".into(),
+            },
+        ]
     );
     assert!(
         matches!(parse_statement("create temp table tempy ()").unwrap(), Statement::CreateTable(ct) if ct.persistence == TablePersistence::Temporary && ct.table_name == "tempy" && ct.columns().count() == 0)
