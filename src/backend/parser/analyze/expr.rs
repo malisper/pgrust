@@ -4998,16 +4998,31 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                                 ctes,
                             );
                         }
-                        let normalized = resolve_function_call_with_arg_defaults(
-                            catalog,
-                            name,
-                            args_list,
-                            &actual_types,
-                            *func_variadic,
-                        )?;
+                        if args_list.iter().any(|arg| arg.name.is_some()) {
+                            let normalized = resolve_function_call_with_arg_defaults(
+                                catalog,
+                                name,
+                                args_list,
+                                &actual_types,
+                                *func_variadic,
+                            )?;
+                            return bind_resolved_user_defined_scalar_function_call(
+                                &normalized.resolved,
+                                &normalized.args,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            );
+                        }
+                        let positional_args = args_list
+                            .iter()
+                            .map(|arg| arg.value.clone())
+                            .collect::<Vec<_>>();
                         return bind_resolved_user_defined_scalar_function_call(
-                            &normalized.resolved,
-                            &normalized.args,
+                            &resolved,
+                            &positional_args,
                             scope,
                             catalog,
                             outer_scopes,
@@ -5045,9 +5060,10 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     },
                 ) => return Err(err),
                 Err(
-                    err @ ParseError::DetailedError { .. }
-                    | err @ ParseError::UnexpectedToken { .. },
-                ) if args_list.iter().any(|arg| arg.name.is_some()) => return Err(err),
+                    err @ ParseError::DetailedError {
+                        sqlstate: "42701", ..
+                    },
+                ) => return Err(err),
                 _ => {}
             }
             if name.eq_ignore_ascii_case("xmlconcat") {

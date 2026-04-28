@@ -100,6 +100,7 @@ struct NormalizedFunctionCallArgs {
     args: Vec<SqlExpr>,
     actual_types: Vec<SqlType>,
     func_variadic: bool,
+    used_defaults: bool,
 }
 
 pub(crate) fn resolve_function_call(
@@ -150,7 +151,10 @@ pub(crate) fn resolve_function_call(
     }
 
     if ambiguous {
-        return Err(ambiguous_function_error(catalog, name, actual_types));
+        return Err(ParseError::UnexpectedToken {
+            expected: "unambiguous function call",
+            actual: format!("{name}({} args)", actual_types.len()),
+        });
     }
 
     best.map(|(resolved, _, _, _)| resolved)
@@ -226,6 +230,9 @@ pub(crate) fn resolve_function_call_with_arg_defaults(
         else {
             continue;
         };
+        if !args.iter().any(|arg| arg.name.is_some()) && !normalized.used_defaults {
+            continue;
+        }
         let Some(candidate) = match_proc_signature(
             catalog,
             &row,
@@ -322,6 +329,7 @@ fn normalize_function_call_args(
             args: args.iter().map(|arg| arg.value.clone()).collect(),
             actual_types: actual_types.to_vec(),
             func_variadic,
+            used_defaults: false,
         }));
     }
 
@@ -356,6 +364,7 @@ fn normalize_function_call_args(
     let default_outer_scopes = [];
     let variadic_input_index = (row.provariadic != 0).then_some(input_count.saturating_sub(1));
     let mut effective_func_variadic = func_variadic;
+    let mut used_defaults = false;
     for (index, slot) in assigned.iter_mut().enumerate() {
         if slot.is_some() {
             continue;
@@ -375,6 +384,7 @@ fn normalize_function_call_args(
         if Some(index) == variadic_input_index {
             effective_func_variadic = true;
         }
+        used_defaults = true;
     }
 
     let (args, actual_types): (Vec<_>, Vec<_>) = assigned.into_iter().flatten().unzip();
@@ -382,6 +392,7 @@ fn normalize_function_call_args(
         args,
         actual_types,
         func_variadic: effective_func_variadic,
+        used_defaults,
     }))
 }
 
