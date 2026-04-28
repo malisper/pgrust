@@ -18254,20 +18254,21 @@ fn build_table_sample_clause(pair: Pair<'_, Rule>) -> Result<RawTableSampleClaus
     let mut method = None;
     let mut args = Vec::new();
     let mut repeatable = None;
+    let mut seen_method = false;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier => {
+            Rule::identifier if !seen_method => {
                 method = Some(build_identifier(part));
+                seen_method = true;
             }
             Rule::expr_list => {
                 args = part
                     .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::expr)
                     .map(build_expr)
                     .collect::<Result<Vec<_>, _>>()?;
             }
-            Rule::expr => {
-                repeatable = Some(build_expr(part)?);
-            }
+            Rule::expr => repeatable = Some(build_expr(part)?),
             _ => {}
         }
     }

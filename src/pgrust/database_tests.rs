@@ -43467,6 +43467,39 @@ fn rls_policy_subquery_privileges_are_checked_for_select_and_explain() {
 }
 
 #[test]
+fn tablesample_bernoulli_repeatable_filters_heap_offsets() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table sampled_docs (id int4, title text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into sampled_docs values
+             (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four'), (5, 'five'),
+             (6, 'six'), (7, 'seven'), (8, 'eight'), (9, 'nine'), (10, 'ten')",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id from sampled_docs tablesample bernoulli(50) repeatable(0) order by id",
+        ),
+        vec![
+            vec![Value::Int32(4)],
+            vec![Value::Int32(5)],
+            vec![Value::Int32(6)],
+            vec![Value::Int32(8)],
+            vec![Value::Int32(9)],
+        ]
+    );
+}
+
+#[test]
 fn explain_insert_select_shows_rewritten_source_plan() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut owner = Session::new(1);

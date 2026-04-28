@@ -197,3 +197,15 @@ EXPLAIN INSERT SELECT bucket:
 - Latest rowsecurity regression result with a 300s file timeout:
   `673/774` matched, `101` mismatches, `1897` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+TABLESAMPLE bucket:
+- Added parser/analyzer support for `TABLESAMPLE BERNOULLI(percent)
+  REPEATABLE(seed)` on base relations and materialized views.
+- Implemented PostgreSQL-compatible Bernoulli tuple selection for the regression
+  path by hashing `(block, offset, seed)` with PostgreSQL's `hash_any` mixing and
+  applying the percent cutoff before normal WHERE predicates.
+- Added a focused deterministic heap-offset sampling test.
+- Focused TABLESAMPLE test passed.
+- Latest rowsecurity regression result with a 300s file timeout:
+  `675/774` matched, `99` mismatches, `1854` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.

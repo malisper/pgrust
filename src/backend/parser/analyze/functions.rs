@@ -2257,6 +2257,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
             BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
             BuiltinScalarFunction::PgRustDomainCheckUpperLessThan => args.len() == 3,
+            BuiltinScalarFunction::PgRustTablesampleBernoulli => args.len() == 3,
             BuiltinScalarFunction::PgRustTestOpclassOptionsFunc => args.len() == 1,
             BuiltinScalarFunction::PgRustTestFdwHandler => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncSetup => args.is_empty(),

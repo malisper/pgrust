@@ -701,13 +701,22 @@ fn collect_direct_relation_oids_from_from_item(
                 collect_direct_relation_oids_from_sql_expr(&arg.value, catalog, visible_ctes, rels);
             }
         }
+        FromItem::TableSample { source, sample } => {
+            collect_direct_relation_oids_from_from_item(source, catalog, visible_ctes, rels);
+            for arg in &sample.args {
+                collect_direct_relation_oids_from_sql_expr(arg, catalog, visible_ctes, rels);
+            }
+            if let Some(repeatable) = &sample.repeatable {
+                collect_direct_relation_oids_from_sql_expr(repeatable, catalog, visible_ctes, rels);
+            }
+        }
         FromItem::JsonTable(table) => {
             collect_direct_relation_oids_from_json_table(table, catalog, visible_ctes, rels);
         }
         FromItem::XmlTable(table) => {
             collect_direct_relation_oids_from_xml_table(table, catalog, visible_ctes, rels);
         }
-        FromItem::Lateral(source) | FromItem::TableSample { source, .. } => {
+        FromItem::Lateral(source) => {
             collect_direct_relation_oids_from_from_item(source, catalog, visible_ctes, rels);
         }
         FromItem::DerivedTable(select) => {

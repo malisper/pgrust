@@ -2034,6 +2034,166 @@ fn ctid_value(tid: crate::include::access::htup::ItemPointerData) -> Value {
     Value::Tid(tid)
 }
 
+fn eval_tablesample_bernoulli(values: &[Value]) -> Result<Value, ExecError> {
+    let [ctid, Value::Float64(percent), Value::Float64(repeatable)] = values else {
+        return Err(malformed_expr_error("TABLESAMPLE BERNOULLI"));
+    };
+    if matches!(ctid, Value::Null) {
+        return Ok(Value::Bool(false));
+    }
+    if !(0.0..=100.0).contains(percent) || percent.is_nan() {
+        return Err(ExecError::DetailedError {
+            message: "sample percentage must be between 0 and 100".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "2202H",
+        });
+    }
+    let Some((block, offset)) = ctid.as_text().and_then(parse_ctid_text) else {
+        return Err(malformed_expr_error("TABLESAMPLE BERNOULLI ctid"));
+    };
+    let cutoff = ((u64::from(u32::MAX) + 1) as f64 * *percent / 100.0).round() as u64;
+    let seed = hashfloat8_for_tablesample(*repeatable);
+    Ok(Value::Bool(
+        u64::from(pg_hash_three_u32(block, offset, seed)) < cutoff,
+    ))
+}
+
+fn parse_ctid_text(text: &str) -> Option<(u32, u32)> {
+    let inner = text.strip_prefix('(')?.strip_suffix(')')?;
+    let (block, offset) = inner.split_once(',')?;
+    Some((block.parse().ok()?, offset.parse().ok()?))
+}
+
+fn hashfloat8_for_tablesample(value: f64) -> u32 {
+    if value == 0.0 {
+        return 0;
+    }
+    pg_hash_bytes(&value.to_le_bytes())
+}
+
+fn pg_hash_three_u32(first: u32, second: u32, third: u32) -> u32 {
+    let mut bytes = Vec::with_capacity(12);
+    bytes.extend_from_slice(&first.to_le_bytes());
+    bytes.extend_from_slice(&second.to_le_bytes());
+    bytes.extend_from_slice(&third.to_le_bytes());
+    pg_hash_bytes(&bytes)
+}
+
+fn pg_hash_bytes(bytes: &[u8]) -> u32 {
+    let mut len = bytes.len() as u32;
+    let mut a = 0x9e37_79b9u32.wrapping_add(len).wrapping_add(3_923_095);
+    let mut b = a;
+    let mut c = a;
+    let mut offset = 0usize;
+
+    while len >= 12 {
+        a = a.wrapping_add(u32::from_le_bytes(
+            bytes[offset..offset + 4].try_into().expect("slice len"),
+        ));
+        b = b.wrapping_add(u32::from_le_bytes(
+            bytes[offset + 4..offset + 8].try_into().expect("slice len"),
+        ));
+        c = c.wrapping_add(u32::from_le_bytes(
+            bytes[offset + 8..offset + 12]
+                .try_into()
+                .expect("slice len"),
+        ));
+        (a, b, c) = pg_hash_mix(a, b, c);
+        offset += 12;
+        len -= 12;
+    }
+
+    let tail = &bytes[offset..];
+    match tail.len() {
+        11 => c = c.wrapping_add((tail[10] as u32) << 24),
+        _ => {}
+    }
+    match tail.len() {
+        10 | 11 => c = c.wrapping_add((tail[9] as u32) << 16),
+        _ => {}
+    }
+    match tail.len() {
+        9..=11 => c = c.wrapping_add((tail[8] as u32) << 8),
+        _ => {}
+    }
+    match tail.len() {
+        8..=11 => b = b.wrapping_add((tail[7] as u32) << 24),
+        _ => {}
+    }
+    match tail.len() {
+        7..=11 => b = b.wrapping_add((tail[6] as u32) << 16),
+        _ => {}
+    }
+    match tail.len() {
+        6..=11 => b = b.wrapping_add((tail[5] as u32) << 8),
+        _ => {}
+    }
+    match tail.len() {
+        5..=11 => b = b.wrapping_add(tail[4] as u32),
+        _ => {}
+    }
+    match tail.len() {
+        4..=11 => a = a.wrapping_add((tail[3] as u32) << 24),
+        _ => {}
+    }
+    match tail.len() {
+        3..=11 => a = a.wrapping_add((tail[2] as u32) << 16),
+        _ => {}
+    }
+    match tail.len() {
+        2..=11 => a = a.wrapping_add((tail[1] as u32) << 8),
+        _ => {}
+    }
+    match tail.len() {
+        1..=11 => a = a.wrapping_add(tail[0] as u32),
+        _ => {}
+    }
+
+    let (_, _, c) = pg_hash_final(a, b, c);
+    c
+}
+
+fn pg_hash_mix(mut a: u32, mut b: u32, mut c: u32) -> (u32, u32, u32) {
+    a = a.wrapping_sub(c);
+    a ^= c.rotate_left(4);
+    c = c.wrapping_add(b);
+    b = b.wrapping_sub(a);
+    b ^= a.rotate_left(6);
+    a = a.wrapping_add(c);
+    c = c.wrapping_sub(b);
+    c ^= b.rotate_left(8);
+    b = b.wrapping_add(a);
+    a = a.wrapping_sub(c);
+    a ^= c.rotate_left(16);
+    c = c.wrapping_add(b);
+    b = b.wrapping_sub(a);
+    b ^= a.rotate_left(19);
+    a = a.wrapping_add(c);
+    c = c.wrapping_sub(b);
+    c ^= b.rotate_left(4);
+    b = b.wrapping_add(a);
+    (a, b, c)
+}
+
+fn pg_hash_final(mut a: u32, mut b: u32, mut c: u32) -> (u32, u32, u32) {
+    c ^= b;
+    c = c.wrapping_sub(b.rotate_left(14));
+    a ^= c;
+    a = a.wrapping_sub(c.rotate_left(11));
+    b ^= a;
+    b = b.wrapping_sub(a.rotate_left(25));
+    c ^= b;
+    c = c.wrapping_sub(b.rotate_left(16));
+    a ^= c;
+    a = a.wrapping_sub(c.rotate_left(4));
+    b ^= a;
+    b = b.wrapping_sub(a.rotate_left(14));
+    c ^= b;
+    c = c.wrapping_sub(b.rotate_left(24));
+    (a, b, c)
+}
+
 fn lookup_ctid_binding(
     bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
     varno: usize,
@@ -10656,6 +10816,9 @@ pub(crate) fn eval_builtin_function(
     }
     if matches!(func, BuiltinScalarFunction::PgRustDomainCheckUpperLessThan) {
         return eval_domain_check_upper_less_than(&values);
+    }
+    if matches!(func, BuiltinScalarFunction::PgRustTablesampleBernoulli) {
+        return eval_tablesample_bernoulli(&values);
     }
     if let Some(result) = eval_geometry_function(func, &values) {
         return result;

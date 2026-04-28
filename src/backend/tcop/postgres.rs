@@ -9336,6 +9336,14 @@ fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem
         crate::backend::parser::FromItem::FunctionCall { args, .. } => args
             .iter()
             .any(|arg| raw_expr_contains_pg_notify(&arg.value)),
+        crate::backend::parser::FromItem::TableSample { source, sample } => {
+            raw_from_item_contains_pg_notify(source)
+                || sample.args.iter().any(raw_expr_contains_pg_notify)
+                || sample
+                    .repeatable
+                    .as_ref()
+                    .is_some_and(raw_expr_contains_pg_notify)
+        }
         crate::backend::parser::FromItem::JsonTable(table) => {
             raw_expr_contains_pg_notify(&table.context)
                 || table
@@ -9365,8 +9373,7 @@ fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem
                     .any(raw_xml_table_column_contains_pg_notify)
         }
         crate::backend::parser::FromItem::Lateral(inner)
-        | crate::backend::parser::FromItem::Alias { source: inner, .. }
-        | crate::backend::parser::FromItem::TableSample { source: inner, .. } => {
+        | crate::backend::parser::FromItem::Alias { source: inner, .. } => {
             raw_from_item_contains_pg_notify(inner)
         }
         crate::backend::parser::FromItem::DerivedTable(select_stmt) => {

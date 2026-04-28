@@ -4148,6 +4148,16 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
+            FromItem::TableSample { source, sample } => {
+                self.visit_from(source, context)?;
+                for arg in &sample.args {
+                    self.visit_expr(arg, context)?;
+                }
+                if let Some(repeatable) = &sample.repeatable {
+                    self.visit_expr(repeatable, context)?;
+                }
+                Ok(())
+            }
             FromItem::JsonTable(table) => {
                 self.visit_expr(&table.context, context)?;
                 for arg in &table.passing {
@@ -4172,9 +4182,9 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
-            FromItem::Lateral(source)
-            | FromItem::Alias { source, .. }
-            | FromItem::TableSample { source, .. } => self.visit_from(source, context),
+            FromItem::Lateral(source) | FromItem::Alias { source, .. } => {
+                self.visit_from(source, context)
+            }
             FromItem::DerivedTable(select) => self.visit_select(select, context),
             FromItem::Join {
                 left,

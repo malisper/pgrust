@@ -5,11 +5,11 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::{ANYOID, PG_CATALOG_NAMESPACE_OID, PgPartitionedTableRow};
 use crate::include::nodes::primnodes::{
-    AttrNumber, ColumnDesc, JoinType, JsonRecordFunction, SELF_ITEM_POINTER_ATTR_NO, SqlJsonTable,
-    SqlJsonTableBehavior, SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePassingArg,
-    SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn,
-    SqlXmlTableColumnKind, SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, expr_sql_type_hint,
-    user_attrno,
+    AttrNumber, BuiltinScalarFunction, ColumnDesc, FuncExpr, JoinType, JsonRecordFunction,
+    SELF_ITEM_POINTER_ATTR_NO, ScalarFunctionImpl, SqlJsonTable, SqlJsonTableBehavior,
+    SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePassingArg, SqlJsonTablePlan,
+    SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn, SqlXmlTableColumnKind,
+    SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, expr_sql_type_hint, user_attrno,
 };
 
 #[derive(Debug, Clone)]
@@ -962,6 +962,8 @@ pub(super) fn bind_from_item_with_ctes(
                 ctes,
                 expanded_views,
             )?;
+            let sample_qual =
+                table_sample_qual(&sample.method, &sample.args, sample.repeatable.as_ref())?;
             let call_scope = empty_scope();
             let args = sample
                 .args
@@ -998,6 +1000,7 @@ pub(super) fn bind_from_item_with_ctes(
                     args,
                     repeatable,
                 },
+                sample_qual,
             )?;
             Ok((plan, scope))
         }
@@ -1092,6 +1095,7 @@ pub(super) fn bind_from_item_with_ctes(
 fn attach_table_sample(
     plan: &mut AnalyzedFrom,
     sample: TableSampleClause,
+    sample_qual: Expr,
 ) -> Result<(), ParseError> {
     let relation_indexes = plan
         .rtable
@@ -1106,13 +1110,97 @@ fn attach_table_sample(
             "TABLESAMPLE on non-table relation".into(),
         ));
     }
-    let RangeTblEntryKind::Relation { tablesample, .. } =
-        &mut plan.rtable[relation_indexes[0]].kind
+    let rte = &mut plan.rtable[relation_indexes[0]];
+    let RangeTblEntryKind::Relation {
+        relkind,
+        tablesample,
+        ..
+    } = &mut rte.kind
     else {
         unreachable!();
     };
+    if !matches!(*relkind, 'r' | 'm') {
+        return Err(ParseError::DetailedError {
+            message: "TABLESAMPLE clause can only be applied to tables and materialized views"
+                .into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
     *tablesample = Some(sample);
+    // :HACK: Store TABLESAMPLE as a relation security qual so it is evaluated
+    // before normal WHERE predicates, matching the rowsecurity regression path
+    // without introducing a full SampleScan plan node yet.
+    rte.security_quals.insert(0, sample_qual);
     Ok(())
+}
+
+fn table_sample_qual(
+    method: &str,
+    args: &[SqlExpr],
+    repeatable: Option<&SqlExpr>,
+) -> Result<Expr, ParseError> {
+    if !method.eq_ignore_ascii_case("bernoulli") {
+        return Err(ParseError::FeatureNotSupported(format!(
+            "TABLESAMPLE method {method}"
+        )));
+    }
+    let [percent_arg] = args else {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "tablesample method bernoulli requires 1 argument, not {}",
+                args.len()
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    };
+    let percent = table_sample_const_f64(percent_arg, "TABLESAMPLE")?;
+    let seed = repeatable
+        .map(|expr| table_sample_const_f64(expr, "TABLESAMPLE REPEATABLE"))
+        .transpose()?
+        .unwrap_or(0.0);
+    Ok(Expr::Func(Box::new(FuncExpr {
+        funcid: 0,
+        funcname: Some("pgrust_tablesample_bernoulli".into()),
+        funcresulttype: Some(SqlType::new(SqlTypeKind::Bool)),
+        funcvariadic: false,
+        implementation: ScalarFunctionImpl::Builtin(
+            BuiltinScalarFunction::PgRustTablesampleBernoulli,
+        ),
+        args: vec![
+            Expr::Var(Var {
+                varno: 1,
+                varattno: SELF_ITEM_POINTER_ATTR_NO,
+                varlevelsup: 0,
+                vartype: SqlType::new(SqlTypeKind::Tid),
+            }),
+            Expr::Const(Value::Float64(percent)),
+            Expr::Const(Value::Float64(seed)),
+        ],
+    })))
+}
+
+fn table_sample_const_f64(expr: &SqlExpr, context: &'static str) -> Result<f64, ParseError> {
+    match expr {
+        SqlExpr::IntegerLiteral(value) | SqlExpr::NumericLiteral(value) => value
+            .parse::<f64>()
+            .map_err(|_| ParseError::UnexpectedToken {
+                expected: context,
+                actual: value.clone(),
+            }),
+        SqlExpr::Const(Value::Int16(value)) => Ok(f64::from(*value)),
+        SqlExpr::Const(Value::Int32(value)) => Ok(f64::from(*value)),
+        SqlExpr::Const(Value::Int64(value)) => Ok(*value as f64),
+        SqlExpr::Const(Value::Float64(value)) => Ok(*value),
+        SqlExpr::UnaryPlus(inner) => table_sample_const_f64(inner, context),
+        SqlExpr::Negate(inner) => Ok(-table_sample_const_f64(inner, context)?),
+        _ => Err(ParseError::FeatureNotSupported(format!(
+            "{context} expression"
+        ))),
+    }
 }
 
 struct SqlJsonTableBindState {
