@@ -81,6 +81,7 @@ use super::expr_ops::{
     values_are_distinct,
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
+use super::expr_partition::eval_satisfies_hash_partition;
 use super::expr_range::eval_range_function;
 use super::expr_reg;
 use super::expr_string::{
@@ -9579,6 +9580,9 @@ pub(crate) fn eval_builtin_function(
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     ensure_builtin_side_effects_allowed(func, ctx)?;
+    if matches!(func, BuiltinScalarFunction::SatisfiesHashPartition) {
+        return eval_satisfies_hash_partition(args, func_variadic, slot, ctx);
+    }
     if let Some(result) = eval_json_record_builtin_function(func, result_type, args, slot, ctx) {
         return result;
     }
