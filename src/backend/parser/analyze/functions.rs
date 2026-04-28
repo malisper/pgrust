@@ -2294,6 +2294,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::HasAnyColumnPrivilege
             | BuiltinScalarFunction::HasLargeObjectPrivilege
             | BuiltinScalarFunction::PgHasRole => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::RowSecurityActive => args.len() == 1,
             BuiltinScalarFunction::HasColumnPrivilege => matches!(args.len(), 3 | 4),
             BuiltinScalarFunction::PgCurrentLogfile => matches!(args.len(), 0 | 1),
             BuiltinScalarFunction::PgReadFile | BuiltinScalarFunction::PgReadBinaryFile => {
@@ -3776,6 +3777,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::HasTablePrivilege,
         ),
         (
+            "row_security_active",
+            BuiltinScalarFunction::RowSecurityActive,
+        ),
+        (
             "has_sequence_privilege",
             BuiltinScalarFunction::HasSequencePrivilege,
         ),
@@ -5251,6 +5256,15 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
         }
         if by_func
             .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::RowSecurityActive)
+        {
+            by_func.push((
+                BuiltinScalarFunction::RowSecurityActive,
+                SqlType::new(SqlTypeKind::Bool),
+            ));
+        }
+        if by_func
+            .iter()
             .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgGetUserById)
         {
             by_func.push((
@@ -5472,6 +5486,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
             | BuiltinScalarFunction::PgStatisticsObjIsVisible
             | BuiltinScalarFunction::PgFunctionIsVisible
+            | BuiltinScalarFunction::RowSecurityActive
             | BuiltinScalarFunction::PgColumnSize
             | BuiltinScalarFunction::PgRelationSize
             | BuiltinScalarFunction::PgTableSize

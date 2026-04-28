@@ -110,6 +110,19 @@ pub(crate) fn enforce_row_security_write_checks(
                         sqlstate: "44000",
                     });
                 }
+                if matches!(
+                    check.source,
+                    crate::backend::rewrite::RlsWriteCheckSource::ConflictUpdateVisibility
+                ) {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "new row violates row-level security policy (USING expression) for table \"{relation_name}\""
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42501",
+                    });
+                }
                 return Err(ExecError::DetailedError {
                     message: check
                         .policy_name

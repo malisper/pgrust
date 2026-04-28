@@ -79,9 +79,11 @@ use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
     ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID, BOX_TYPE_OID, BPCHAR_TYPE_OID,
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID, HASH_AM_OID,
-    PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PUBLISH_GENCOLS_STORED, PgAmRow,
-    PgOpclassRow, PgPublicationRelRow, PgPublicationRow, RECORD_TYPE_OID, SPGIST_AM_OID,
-    TEXT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_am_rows, builtin_range_name_for_sql_type,
+    PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_POLICY_RELATION_OID,
+    PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
+    PG_PUBLICATION_RELATION_OID, PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow,
+    PgPublicationRelRow, PgPublicationRow, RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_TYPE_OID,
+    VARCHAR_TYPE_OID, bootstrap_pg_am_rows, builtin_range_name_for_sql_type,
     multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
@@ -199,6 +201,8 @@ fn finalize_bound_insert(
                     BoundOnConflictAction::Update {
                         assignments,
                         predicate,
+                        conflict_visibility_checks,
+                        update_write_checks,
                     } => BoundOnConflictAction::Update {
                         assignments: assignments
                             .into_iter()
@@ -233,6 +237,20 @@ fn finalize_bound_insert(
                             .collect(),
                         predicate: predicate
                             .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
+                        conflict_visibility_checks: conflict_visibility_checks
+                            .into_iter()
+                            .map(|check| RlsWriteCheck {
+                                expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
+                                ..check
+                            })
+                            .collect(),
+                        update_write_checks: update_write_checks
+                            .into_iter()
+                            .map(|check| RlsWriteCheck {
+                                expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
+                                ..check
+                            })
+                            .collect(),
                     },
                 },
             });
@@ -6391,10 +6409,7 @@ fn relation_acl_allows_as(
     {
         return Ok(true);
     }
-    if relation_oid == PG_AUTH_MEMBERS_RELATION_OID && privilege == 'r' {
-        // PostgreSQL exposes role membership rows through pg_auth_members to
-        // ordinary users while still protecting writes through system catalog
-        // update checks.
+    if catalog_relation_readable_by_public(relation_oid, privilege) {
         return Ok(true);
     }
     let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
@@ -6465,10 +6480,7 @@ fn relation_or_all_column_acls_allow_as(
     {
         return Ok(true);
     }
-    if relation_oid == PG_AUTH_MEMBERS_RELATION_OID && privilege == 'r' {
-        // PostgreSQL exposes role membership rows through pg_auth_members to
-        // ordinary users while still protecting writes through system catalog
-        // update checks.
+    if catalog_relation_readable_by_public(relation_oid, privilege) {
         return Ok(true);
     }
     let effective_names = effective_acl_grantee_names(&auth, &auth_catalog);
@@ -6495,6 +6507,18 @@ fn relation_or_all_column_acls_allow_as(
         }
     }
     Ok(true)
+}
+
+fn catalog_relation_readable_by_public(relation_oid: u32, privilege: char) -> bool {
+    privilege == 'r'
+        && matches!(
+            relation_oid,
+            PG_AUTH_MEMBERS_RELATION_OID
+                | PG_POLICY_RELATION_OID
+                | PG_PUBLICATION_RELATION_OID
+                | PG_PUBLICATION_REL_RELATION_OID
+                | PG_PUBLICATION_NAMESPACE_RELATION_OID
+        )
 }
 
 pub(crate) fn relation_permission_denied(ctx: &ExecutorContext, relation_oid: u32) -> ExecError {

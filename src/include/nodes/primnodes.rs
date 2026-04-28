@@ -530,6 +530,7 @@ pub enum BuiltinScalarFunction {
     HasColumnPrivilege,
     HasLargeObjectPrivilege,
     PgHasRole,
+    RowSecurityActive,
     PgCurrentLogfile,
     PgReadFile,
     PgReadBinaryFile,

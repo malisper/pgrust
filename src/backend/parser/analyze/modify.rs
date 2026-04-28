@@ -339,6 +339,28 @@ fn update_privilege_requirement(
     requirement
 }
 
+fn on_conflict_update_privilege_requirement(
+    relation: &BoundRelation,
+    relation_name: impl Into<String>,
+    assignments: &[BoundAssignment],
+) -> RelationPrivilegeRequirement {
+    let mut requirement = relation_privilege_requirement(
+        relation,
+        relation_name,
+        RelationPrivilegeMask {
+            select: true,
+            update: true,
+            ..RelationPrivilegeMask::default()
+        },
+    );
+    requirement.selected_columns = relation.desc.visible_column_indexes();
+    requirement.updated_columns = assignments
+        .iter()
+        .map(|assignment| assignment.column_index)
+        .collect();
+    requirement
+}
+
 fn delete_privilege_requirement(
     relation: &BoundRelation,
     relation_name: impl Into<String>,
@@ -1219,6 +1241,17 @@ fn prepend_visibility_quals(
     }
     let first = visibility_quals.first().cloned()?;
     Some(visibility_quals.into_iter().skip(1).fold(first, Expr::and))
+}
+
+fn build_conflict_visibility_checks(visibility_quals: Vec<Expr>) -> Vec<RlsWriteCheck> {
+    visibility_quals
+        .into_iter()
+        .map(|expr| RlsWriteCheck {
+            expr,
+            policy_name: None,
+            source: crate::backend::rewrite::RlsWriteCheckSource::ConflictUpdateVisibility,
+        })
+        .collect()
 }
 
 fn merge_mutating_event(stmt: &MergeStatement) -> Option<ViewDmlEvent> {
@@ -2771,6 +2804,8 @@ fn bind_auto_view_on_conflict_clause(
             BoundOnConflictAction::Update {
                 assignments,
                 predicate,
+                conflict_visibility_checks: Vec::new(),
+                update_write_checks: Vec::new(),
             }
         }
     };
@@ -3578,12 +3613,9 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
     let mut visible_ctes = local_ctes.clone();
     visible_ctes.extend_from_slice(outer_ctes);
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
-    if stmt.on_conflict.as_ref().is_some_and(|clause| {
-        clause.action == crate::include::nodes::parsenodes::OnConflictAction::Update
-    }) && relation_has_row_security(entry.relation_oid, catalog)
-    {
-        return Err(unsupported_with_row_security(
-            "INSERT ... ON CONFLICT DO UPDATE",
+    if entry.relkind == 'p' && stmt.on_conflict.is_some() {
+        return Err(ParseError::FeatureNotSupported(
+            "INSERT ... ON CONFLICT on partitioned tables".into(),
         ));
     }
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &visible_ctes)?;
@@ -3753,11 +3785,74 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
         }
     };
     let (target_columns, source) = source;
-    let required_privileges = vec![insert_privilege_requirement(
+    let mut on_conflict = stmt
+        .on_conflict
+        .as_ref()
+        .filter(|_| entry.relkind != 'v')
+        .map(|clause| {
+            super::on_conflict::bind_on_conflict_clause(
+                clause,
+                visible_target_name,
+                entry.relation_oid,
+                &entry.desc,
+                catalog,
+                &visible_ctes,
+            )
+        })
+        .transpose()?;
+    if let Some(BoundOnConflictClause {
+        action:
+            BoundOnConflictAction::Update {
+                conflict_visibility_checks,
+                update_write_checks,
+                ..
+            },
+        ..
+    }) = &mut on_conflict
+    {
+        let update_rls = build_target_relation_row_security(
+            &stmt.table_name,
+            entry.relation_oid,
+            &entry.desc,
+            PolicyCommand::Update,
+            false,
+            true,
+            catalog,
+        )?;
+        let conflict_quals = update_rls
+            .visibility_quals
+            .into_iter()
+            .filter(|qual| {
+                !update_rls.write_checks.iter().any(|check| {
+                    matches!(
+                        check.source,
+                        crate::backend::rewrite::RlsWriteCheckSource::Update
+                    ) && check.expr == *qual
+                })
+            })
+            .collect();
+        *conflict_visibility_checks = build_conflict_visibility_checks(conflict_quals);
+        *update_write_checks = update_rls.write_checks;
+    }
+    let raw_on_conflict = (entry.relkind == 'v')
+        .then(|| stmt.on_conflict.clone())
+        .flatten();
+    let mut required_privileges = vec![insert_privilege_requirement(
         &entry,
         &stmt.table_name,
         &target_columns,
     )];
+    if let Some(BoundOnConflictClause {
+        action: BoundOnConflictAction::Update { assignments, .. },
+        ..
+    }) = &on_conflict
+    {
+        required_privileges.push(on_conflict_update_privilege_requirement(
+            &entry,
+            &stmt.table_name,
+            assignments,
+        ));
+    }
 
     Ok(BoundInsertStatement {
         relation_name: stmt.table_name.clone(),
@@ -3783,24 +3878,8 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
             &entry.desc,
             catalog,
         )?,
-        on_conflict: stmt
-            .on_conflict
-            .as_ref()
-            .filter(|_| entry.relkind != 'v')
-            .map(|clause| {
-                super::on_conflict::bind_on_conflict_clause(
-                    clause,
-                    visible_target_name,
-                    entry.relation_oid,
-                    &entry.desc,
-                    catalog,
-                    &visible_ctes,
-                )
-            })
-            .transpose()?,
-        raw_on_conflict: (entry.relkind == 'v')
-            .then(|| stmt.on_conflict.clone())
-            .flatten(),
+        on_conflict,
+        raw_on_conflict,
         returning,
         rls_write_checks: target_rls.write_checks,
         required_privileges,

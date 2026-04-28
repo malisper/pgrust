@@ -18,6 +18,8 @@ pub enum BoundOnConflictAction {
     Update {
         assignments: Vec<BoundAssignment>,
         predicate: Option<Expr>,
+        conflict_visibility_checks: Vec<crate::backend::rewrite::RlsWriteCheck>,
+        update_write_checks: Vec<crate::backend::rewrite::RlsWriteCheck>,
     },
 }
 
@@ -119,6 +121,8 @@ pub(super) fn bind_on_conflict_clause(
             BoundOnConflictAction::Update {
                 assignments,
                 predicate,
+                conflict_visibility_checks: Vec::new(),
+                update_write_checks: Vec::new(),
             }
         }
     };

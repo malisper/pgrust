@@ -40,7 +40,7 @@ use crate::backend::parser::{
     bind_insert_with_outer_scopes_and_ctes, bind_update, bound_cte_from_query_rows,
     pg_plan_query_with_config, pg_plan_query_with_outer_scopes_and_ctes, plan_merge,
 };
-use crate::backend::rewrite::relation_has_row_security;
+use crate::backend::rewrite::relation_row_security_is_enabled_for_user;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
 use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
@@ -1086,6 +1086,7 @@ const COPY_TEXT_NULL_SENTINEL: &str = "\0pgrust_copy_text_null";
 pub(crate) struct CopyOptions {
     pub format: CopyFormat,
     pub encoding: Option<String>,
+    pub delimiter: char,
     pub header: CopyHeader,
     pub quote: char,
     pub escape: char,
@@ -1103,6 +1104,7 @@ impl Default for CopyOptions {
         Self {
             format: CopyFormat::Text,
             encoding: None,
+            delimiter: '\t',
             header: CopyHeader::None,
             quote: '"',
             escape: '"',
@@ -4604,23 +4606,7 @@ impl Session {
                 CopyExecutionResult::Output { rows, .. } => Ok(StatementResult::AffectedRows(rows)),
             };
         }
-        let stmt = if self.standard_conforming_strings() {
-            db.plan_cache.get_statement_with_options(
-                sql,
-                ParseOptions {
-                    max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
-                    ..ParseOptions::default()
-                },
-            )?
-        } else {
-            crate::backend::parser::parse_statement_with_options(
-                sql,
-                ParseOptions {
-                    standard_conforming_strings: false,
-                    max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
-                },
-            )?
-        };
+        let mut stmt = self.parse_session_statement(db, sql)?;
 
         if let Statement::AlterTableMulti(ref statements) = stmt {
             validate_multi_alter_table_temporal_fk_actions(
@@ -4661,6 +4647,7 @@ impl Session {
             {
                 return Err(ExecError::Parse(ParseError::ActiveSqlTransaction(command)));
             }
+            stmt = self.resolve_prepared_explain_statement(db, stmt)?;
             if matches!(
                 stmt,
                 Statement::DeclareCursor(_)
@@ -4682,6 +4669,9 @@ impl Session {
                 }
                 return result;
             }
+        }
+        if self.active_txn.is_none() {
+            stmt = self.resolve_prepared_explain_statement(db, stmt)?;
         }
 
         if self.active_txn.is_none()
@@ -7087,6 +7077,26 @@ impl Session {
         })
     }
 
+    fn parse_session_statement(&self, db: &Database, sql: &str) -> Result<Statement, ExecError> {
+        if self.standard_conforming_strings() {
+            db.plan_cache.get_statement_with_options(
+                sql,
+                ParseOptions {
+                    max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
+                    ..ParseOptions::default()
+                },
+            )
+        } else {
+            Ok(crate::backend::parser::parse_statement_with_options(
+                sql,
+                ParseOptions {
+                    standard_conforming_strings: false,
+                    max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
+                },
+            )?)
+        }
+    }
+
     fn apply_prepare_statement(
         &mut self,
         prepare_stmt: &PrepareStatement,
@@ -7384,6 +7394,22 @@ impl Session {
             }));
         };
         Ok((select, rewritten_sql))
+    }
+
+    fn resolve_prepared_explain_statement(
+        &self,
+        _db: &Database,
+        stmt: Statement,
+    ) -> Result<Statement, ExecError> {
+        let Statement::Explain(mut explain_stmt) = stmt else {
+            return Ok(stmt);
+        };
+        let Statement::Execute(execute_stmt) = explain_stmt.statement.as_ref() else {
+            return Ok(Statement::Explain(explain_stmt));
+        };
+        let (select, _) = self.prepared_select_for_execute(execute_stmt)?;
+        explain_stmt.statement = Box::new(Statement::Select(select));
+        Ok(Statement::Explain(explain_stmt))
     }
 
     fn resolve_create_table_as_statement(
@@ -12566,11 +12592,17 @@ impl Session {
                                 format!("cannot change materialized view \"{table_name}\""),
                             )));
                         }
-                        if relation_has_row_security(entry.relation_oid, &catalog) {
-                            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
-                                "COPY FROM is not yet supported on tables with row-level security"
-                                    .into(),
-                            )));
+                        if relation_row_security_is_enabled_for_user(
+                            entry.relation_oid,
+                            catalog.current_user_oid(),
+                            &catalog,
+                        )? {
+                            return Err(ExecError::DetailedError {
+                                message: "COPY FROM not supported with row-level security".into(),
+                                detail: None,
+                                hint: Some("Use INSERT statements instead.".into()),
+                                sqlstate: "0A000",
+                            });
                         }
                         let toast_index = entry.toast.and_then(|toast| {
                             catalog
@@ -14428,6 +14460,23 @@ fn parse_copy_options(input: &str) -> Result<CopyOptions, ExecError> {
             rest = after;
             continue;
         }
+        if lower.starts_with("delimiter") && copy_keyword_boundary(rest, 9) {
+            let mut after_delimiter = rest[9..].trim_start();
+            if after_delimiter.to_ascii_lowercase().starts_with("as")
+                && copy_keyword_boundary(after_delimiter, 2)
+            {
+                after_delimiter = after_delimiter[2..].trim_start();
+            }
+            let (value, after) = parse_copy_string_token(after_delimiter).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "COPY delimiter string",
+                    actual: rest.into(),
+                })
+            })?;
+            options.delimiter = parse_copy_single_char("COPY delimiter", &value)?;
+            rest = after;
+            continue;
+        }
         if lower.starts_with("escape") && copy_keyword_boundary(rest, 6) {
             let (value, after) =
                 parse_copy_string_token(rest[6..].trim_start()).ok_or_else(|| {
@@ -14532,6 +14581,9 @@ fn merge_copy_options(options: &mut CopyOptions, nested: CopyOptions) {
     if nested.encoding.is_some() {
         options.encoding = nested.encoding;
     }
+    if nested.delimiter != '\t' {
+        options.delimiter = nested.delimiter;
+    }
     if nested.header != CopyHeader::None {
         options.header = nested.header;
     }
@@ -14569,24 +14621,51 @@ fn read_copy_text_file(
     decode_copy_file_bytes(&bytes, encoding_name, table_name.unwrap_or(""))
 }
 
+fn parse_copy_single_char(name: &'static str, value: &str) -> Result<char, ExecError> {
+    let mut chars = value.chars();
+    let Some(ch) = chars.next() else {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: name,
+            actual: format!("{name} must be a single one-byte character"),
+        }));
+    };
+    if chars.next().is_some() || ch.len_utf8() != 1 {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: name,
+            actual: format!("{name} must be a single one-byte character"),
+        }));
+    }
+    Ok(ch)
+}
+
 pub(crate) fn parse_copy_input_rows(
     text: &str,
     options: &CopyOptions,
     table_name: Option<&str>,
     stop_on_copy_marker: bool,
 ) -> Result<Vec<Vec<String>>, ExecError> {
+    let delimiter = effective_copy_delimiter(options);
     match options.format {
-        CopyFormat::Text => {
-            parse_copy_text_rows(text, &options.null_marker, table_name, stop_on_copy_marker)
-        }
-        CopyFormat::Csv => {
-            parse_copy_csv_rows(text, options.quote, options.escape, stop_on_copy_marker)
-        }
+        CopyFormat::Text => parse_copy_text_rows(
+            text,
+            delimiter,
+            &options.null_marker,
+            table_name,
+            stop_on_copy_marker,
+        ),
+        CopyFormat::Csv => parse_copy_csv_rows(
+            text,
+            delimiter,
+            options.quote,
+            options.escape,
+            stop_on_copy_marker,
+        ),
     }
 }
 
 fn parse_copy_text_rows(
     text: &str,
+    delimiter: char,
     null_marker: &str,
     table_name: Option<&str>,
     stop_on_copy_marker: bool,
@@ -14616,7 +14695,7 @@ fn parse_copy_text_rows(
             });
         }
         let row = line
-            .split('\t')
+            .split(delimiter)
             .map(|field| {
                 if field == null_marker {
                     COPY_TEXT_NULL_SENTINEL.to_string()
@@ -14656,6 +14735,7 @@ fn is_parsed_copy_null(field: &str, options: &CopyOptions) -> bool {
 
 fn parse_copy_csv_rows(
     text: &str,
+    delimiter: char,
     quote: char,
     escape: char,
     stop_on_copy_marker: bool,
@@ -14691,7 +14771,7 @@ fn parse_copy_csv_rows(
 
         match ch {
             c if c == quote && field.is_empty() => in_quotes = true,
-            ',' => {
+            c if c == delimiter => {
                 row.push(mem::take(&mut field));
             }
             '\n' => {
@@ -14731,23 +14811,23 @@ pub(crate) fn render_copy_output(
     enum_labels: Option<&HashMap<(u32, u32), String>>,
 ) -> Vec<u8> {
     let mut out = Vec::new();
+    let delimiter = effective_copy_delimiter(options);
     if !matches!(options.header, CopyHeader::None) {
+        let delimiter_text = delimiter.to_string();
         let header = columns
             .iter()
             .map(|column| match options.format {
-                CopyFormat::Text => escape_copy_text_field(&column.name),
+                CopyFormat::Text => escape_copy_text_field(&column.name, delimiter),
                 CopyFormat::Csv => {
                     escape_copy_csv_field(&column.name, options.quote, options.escape, false)
                 }
             })
             .collect::<Vec<_>>()
-            .join(match options.format {
-                CopyFormat::Text => "\t",
-                CopyFormat::Csv => ",",
-            });
+            .join(&delimiter_text);
         out.extend_from_slice(header.as_bytes());
         out.push(b'\n');
     }
+    let delimiter_text = delimiter.to_string();
     for row in rows {
         let fields = row
             .iter()
@@ -14762,10 +14842,7 @@ pub(crate) fn render_copy_output(
                 )
             })
             .collect::<Vec<_>>();
-        let line = fields.join(match options.format {
-            CopyFormat::Text => "\t",
-            CopyFormat::Csv => ",",
-        });
+        let line = fields.join(&delimiter_text);
         out.extend_from_slice(line.as_bytes());
         out.push(b'\n');
     }
@@ -14887,8 +14964,16 @@ fn copy_value_to_field(
         Value::Null => options.null_marker.clone(),
     };
     match options.format {
-        CopyFormat::Text => escape_copy_text_field(&raw),
+        CopyFormat::Text => escape_copy_text_field(&raw, effective_copy_delimiter(options)),
         CopyFormat::Csv => escape_copy_csv_field(&raw, options.quote, options.escape, force_quote),
+    }
+}
+
+fn effective_copy_delimiter(options: &CopyOptions) -> char {
+    if matches!(options.format, CopyFormat::Csv) && options.delimiter == '\t' {
+        ','
+    } else {
+        options.delimiter
     }
 }
 
@@ -14911,7 +14996,7 @@ fn copy_enum_label_map(catalog: &dyn CatalogLookup) -> HashMap<(u32, u32), Strin
         .collect()
 }
 
-fn escape_copy_text_field(value: &str) -> String {
+fn escape_copy_text_field(value: &str, delimiter: char) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
@@ -14919,6 +15004,10 @@ fn escape_copy_text_field(value: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            ch if ch == delimiter => {
+                out.push('\\');
+                out.push(ch);
+            }
             _ => out.push(ch),
         }
     }
@@ -15206,6 +15295,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_copy_to_delimiter_option() {
+        let copy = super::parse_copy_command("copy (select 1, 'x') to stdout with delimiter ','")
+            .expect("copy statement")
+            .unwrap();
+        assert_eq!(copy.options.delimiter, ',');
+    }
+
+    #[test]
     fn default_text_search_config_guc_drives_one_arg_tsearch() {
         let db = Database::open_ephemeral(32).expect("open ephemeral database");
         let mut session = Session::new(1);
@@ -15259,6 +15356,28 @@ mod tests {
         match session.execute(&db, "execute q").unwrap() {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+
+        session
+            .execute(&db, "prepare qp(int) as select $1::int as x")
+            .unwrap();
+        match session.execute(&db, "execute qp(7)").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(7)]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
+        match session
+            .execute(&db, "explain (costs off) execute qp(7)")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                let Value::Text(line) = &rows[0][0] else {
+                    panic!("expected explain text");
+                };
+                assert_eq!(line.to_string(), "Result");
             }
             other => panic!("expected query result, got {other:?}"),
         }

@@ -17,6 +17,7 @@ pub(crate) enum RlsWriteCheckSource {
     Insert,
     Update,
     SelectVisibility,
+    ConflictUpdateVisibility,
     ViewCheckOption(String),
 }
 
@@ -45,6 +46,18 @@ pub(crate) fn relation_has_row_security(relation_oid: u32, catalog: &dyn Catalog
     catalog
         .class_row_by_oid(relation_oid)
         .is_some_and(|row| row.relrowsecurity)
+}
+
+pub(crate) fn relation_row_security_is_enabled_for_user(
+    relation_oid: u32,
+    effective_user_oid: u32,
+    catalog: &dyn CatalogLookup,
+) -> Result<bool, ParseError> {
+    let Some(class_row) = catalog.class_row_by_oid(relation_oid) else {
+        return Ok(false);
+    };
+    check_enable_rls(&class_row, effective_user_oid, catalog)
+        .map(|status| matches!(status, RlsStatus::Enabled))
 }
 
 pub(crate) fn apply_query_row_security(
@@ -282,13 +295,23 @@ fn check_enable_rls(
     }
 
     if !catalog.row_security_enabled() {
+        let forced_owner = class_row.relforcerowsecurity
+            && has_effective_membership(
+                effective_user_oid,
+                class_row.relowner,
+                &authid_rows,
+                &auth_members_rows,
+            );
         return Err(ParseError::DetailedError {
             message: format!(
                 "query would be affected by row-level security policy for table \"{}\"",
                 class_row.relname
             ),
             detail: None,
-            hint: None,
+            hint: forced_owner.then(|| {
+                "To disable the policy for the table's owner, use ALTER TABLE NO FORCE ROW LEVEL SECURITY."
+                    .into()
+            }),
             sqlstate: "42501",
         });
     }
@@ -313,7 +336,7 @@ fn visibility_policy_clauses(
         relation_name,
         desc,
         scope_rtindex,
-        false,
+        true,
         catalog,
         active_policy_relations,
     )?

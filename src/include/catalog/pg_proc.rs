@@ -11987,6 +11987,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::HasTablePrivilege,
         ),
         (
+            "row_security_active",
+            BuiltinScalarFunction::RowSecurityActive,
+        ),
+        (
             "has_sequence_privilege",
             BuiltinScalarFunction::HasSequencePrivilege,
         ),

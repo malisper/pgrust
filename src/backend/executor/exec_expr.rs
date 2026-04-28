@@ -2396,6 +2396,54 @@ fn eval_text_to_regclass_function(
     Ok(Value::Int64(i64::from(relation.relation_oid)))
 }
 
+fn eval_row_security_active(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let relation_oid = if value.as_text().is_some()
+        && !value
+            .as_text()
+            .expect("guarded above")
+            .trim()
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '+' | '-'))
+    {
+        match eval_text_to_regclass_function(values, Some(ctx))? {
+            Value::Int64(oid) => u32::try_from(oid).map_err(|_| ExecError::OidOutOfRange)?,
+            Value::Int32(oid) => u32::try_from(oid).map_err(|_| ExecError::OidOutOfRange)?,
+            Value::Null => return Ok(Value::Null),
+            other => {
+                return Err(ExecError::TypeMismatch {
+                    op: "row_security_active",
+                    left: other,
+                    right: Value::Int64(i64::from(crate::include::catalog::REGCLASS_TYPE_OID)),
+                });
+            }
+        }
+    } else {
+        oid_arg_to_u32(value, "row_security_active")?
+    };
+    let catalog = ctx
+        .catalog
+        .as_deref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "row_security_active requires a visible catalog".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    let active = crate::backend::rewrite::relation_row_security_is_enabled_for_user(
+        relation_oid,
+        ctx.current_user_oid,
+        catalog,
+    )
+    .map_err(ExecError::Parse)?;
+    Ok(Value::Bool(active))
+}
+
 fn eval_to_reg_object_function(
     values: &[Value],
     kind: SqlTypeKind,
@@ -10449,6 +10497,7 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
             eval_has_largeobject_privilege(values, ctx)
         }
         BuiltinScalarFunction::PgHasRole => eval_pg_has_role(values, ctx),
+        BuiltinScalarFunction::RowSecurityActive => eval_row_security_active(values, ctx),
         BuiltinScalarFunction::PgCurrentLogfile => eval_pg_current_logfile(values),
         BuiltinScalarFunction::PgReadFile => eval_pg_read_file(values, ctx, false),
         BuiltinScalarFunction::PgReadBinaryFile => eval_pg_read_file(values, ctx, true),
@@ -11283,6 +11332,7 @@ pub(crate) fn eval_builtin_function(
             eval_has_largeobject_privilege(&values, ctx)
         }
         BuiltinScalarFunction::PgHasRole => eval_pg_has_role(&values, ctx),
+        BuiltinScalarFunction::RowSecurityActive => eval_row_security_active(&values, ctx),
         BuiltinScalarFunction::PgCurrentLogfile => eval_pg_current_logfile(&values),
         BuiltinScalarFunction::PgReadFile => eval_pg_read_file(&values, ctx, false),
         BuiltinScalarFunction::PgReadBinaryFile => eval_pg_read_file(&values, ctx, true),

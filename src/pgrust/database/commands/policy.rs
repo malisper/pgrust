@@ -4,7 +4,9 @@ use crate::backend::parser::{
     DropPolicyStatement, ParseError, SqlTypeKind, bind_scalar_expr_in_named_relation_scope,
 };
 use crate::include::catalog::PgPolicyRow;
-use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_heap_relation_for_ddl};
+use crate::pgrust::database::ddl::{
+    ensure_relation_owner, lookup_table_or_partitioned_table_for_alter_table,
+};
 
 const PUBLIC_ROLE_OID: u32 = 0;
 
@@ -41,7 +43,11 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &stmt.table_name)?;
+        let Some(relation) =
+            lookup_table_or_partitioned_table_for_alter_table(&catalog, &stmt.table_name, false)?
+        else {
+            unreachable!("if_exists is false");
+        };
         ensure_relation_owner(self, client_id, &relation, &stmt.table_name)?;
         validate_policy_stmt(
             &catalog,
@@ -129,7 +135,11 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &stmt.table_name)?;
+        let Some(relation) =
+            lookup_table_or_partitioned_table_for_alter_table(&catalog, &stmt.table_name, false)?
+        else {
+            unreachable!("if_exists is false");
+        };
         ensure_relation_owner(self, client_id, &relation, &stmt.table_name)?;
         let existing = catalog
             .policy_rows_for_relation(relation.relation_oid)
@@ -230,7 +240,11 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &stmt.table_name)?;
+        let Some(relation) =
+            lookup_table_or_partitioned_table_for_alter_table(&catalog, &stmt.table_name, false)?
+        else {
+            unreachable!("if_exists is false");
+        };
         ensure_drop_policy_relation_owner(self, client_id, &relation, &stmt.table_name)?;
         let Some(_existing) = catalog
             .policy_rows_for_relation(relation.relation_oid)

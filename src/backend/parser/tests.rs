@@ -16102,6 +16102,39 @@ fn parse_prepare_and_execute_statements() {
 }
 
 #[test]
+fn parse_prepare_execute_with_parameters() {
+    let stmt = parse_statement("prepare foo(int) as select id from people where id <= $1").unwrap();
+    match stmt {
+        Statement::Prepare(PrepareStatement {
+            name,
+            parameter_types,
+            query_sql,
+            ..
+        }) => {
+            assert_eq!(name, "foo");
+            assert_eq!(
+                parameter_types,
+                vec![RawTypeName::builtin(SqlTypeKind::Int4)]
+            );
+            assert_eq!(query_sql, "select id from people where id <= $1");
+        }
+        other => panic!("expected PREPARE statement, got {other:?}"),
+    }
+
+    let stmt = parse_statement("explain (costs off) execute foo(2)").unwrap();
+    match stmt {
+        Statement::Explain(explain) => match *explain.statement {
+            Statement::Execute(ExecuteStatement { name, args_sql }) => {
+                assert_eq!(name, "foo");
+                assert_eq!(args_sql, vec!["2"]);
+            }
+            other => panic!("expected EXECUTE inside EXPLAIN, got {other:?}"),
+        },
+        other => panic!("expected EXPLAIN statement, got {other:?}"),
+    }
+}
+
+#[test]
 fn analyze_grouped_query_matches_bound_equivalent_group_exprs() {
     for sql in [
         "select id % 2, count(name) from people group by people.id % 2 order by people.id % 2",

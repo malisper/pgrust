@@ -43189,6 +43189,43 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
 }
 
 #[test]
+fn create_policy_with_exists_subquery_on_rls_table_returns() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table ref_tbl (a int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into ref_tbl values (1)")
+        .unwrap();
+    session
+        .execute(&db, "create table rls_tbl (a int4)")
+        .unwrap();
+    session
+        .execute(&db, "alter table rls_tbl enable row level security")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p1 on rls_tbl using (exists (select 1 from ref_tbl))",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select polname, polqual from pg_policy where polname = 'p1'",
+        ),
+        vec![vec![
+            Value::Text("p1".into()),
+            Value::Text("exists (select 1 from ref_tbl)".into()),
+        ]]
+    );
+}
+
+#[test]
 fn drop_policy_non_owner_uses_relation_wording() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut owner = Session::new(1);
@@ -43301,6 +43338,159 @@ fn rls_key_errors_hide_values_when_relation_rows_are_not_visible() {
         }
         other => panic!("expected redacted unique violation, got {other:?}"),
     }
+}
+
+#[test]
+fn on_conflict_do_update_enforces_rls_update_path_checks() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut bob = Session::new(2);
+
+    owner.execute(&db, "create role rls_owner nologin").unwrap();
+    owner.execute(&db, "create role rls_bob nologin").unwrap();
+    owner
+        .execute(&db, "set session authorization rls_owner")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create table conflict_docs (id int4 primary key, kind int4, author name, title text)",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "grant all on conflict_docs to public")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "insert into conflict_docs values (1, 1, 'rls_bob', 'old'), (2, 2, 'rls_bob', 'hidden')",
+        )
+        .unwrap();
+    owner
+        .execute(&db, "alter table conflict_docs enable row level security")
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy conflict_select on conflict_docs for select using (true)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy conflict_insert on conflict_docs for insert with check (author = current_user)",
+        )
+        .unwrap();
+    owner
+        .execute(
+            &db,
+            "create policy conflict_update on conflict_docs for update using (kind = 1) with check (author = current_user)",
+        )
+        .unwrap();
+
+    bob.execute(&db, "set session authorization rls_bob")
+        .unwrap();
+    let parsed = crate::backend::parser::parse_statement(
+        "insert into conflict_docs values (2, 2, 'rls_bob', 'blocked')
+         on conflict (id) do update set title = excluded.title",
+    )
+    .unwrap();
+    let crate::backend::parser::Statement::Insert(parsed_insert) = parsed else {
+        panic!("expected insert statement");
+    };
+    let catalog = bob.catalog_lookup(&db);
+    let bound_insert = crate::backend::parser::bind_insert(&parsed_insert, &catalog).unwrap();
+    let conflict_checks = match bound_insert
+        .on_conflict
+        .as_ref()
+        .map(|clause| &clause.action)
+    {
+        Some(crate::backend::parser::BoundOnConflictAction::Update {
+            conflict_visibility_checks,
+            ..
+        }) => conflict_visibility_checks,
+        other => panic!("expected bound ON CONFLICT DO UPDATE, got {other:?}"),
+    };
+    assert!(
+        !conflict_checks.is_empty(),
+        "ON CONFLICT UPDATE should bind RLS conflict checks"
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut bob,
+            &db,
+            "insert into conflict_docs values (1, 1, 'rls_bob', 'new')
+             on conflict (id) do update set title = excluded.title returning id, title",
+        ),
+        vec![vec![Value::Int32(1), Value::Text("new".into())]]
+    );
+
+    let err = bob
+        .execute(
+            &db,
+            "insert into conflict_docs values (2, 2, 'rls_bob', 'blocked')
+             on conflict (id) do update set title = excluded.title",
+        )
+        .unwrap_err();
+    assert_sqlstate(err, "42501", "USING expression");
+
+    let err = bob
+        .execute(
+            &db,
+            "insert into conflict_docs values (1, 1, 'rls_owner', 'bad author')
+             on conflict (id) do update set author = excluded.author",
+        )
+        .unwrap_err();
+    assert_sqlstate(
+        err,
+        "42501",
+        "new row violates row-level security policy for table \"conflict_docs\"",
+    );
+}
+
+#[test]
+fn row_security_active_reports_current_user_policy_state() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut owner = Session::new(1);
+    let mut tenant = Session::new(2);
+
+    owner.execute(&db, "create role rls_owner nologin").unwrap();
+    owner
+        .execute(&db, "create role rls_tenant nologin")
+        .unwrap();
+    owner
+        .execute(&db, "set session authorization rls_owner")
+        .unwrap();
+    owner
+        .execute(&db, "create table active_docs (id int4)")
+        .unwrap();
+    owner
+        .execute(&db, "grant select on active_docs to public")
+        .unwrap();
+    owner
+        .execute(&db, "create policy p on active_docs using (true)")
+        .unwrap();
+    owner
+        .execute(&db, "alter table active_docs enable row level security")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut owner, &db, "select row_security_active('active_docs')",),
+        vec![vec![Value::Bool(false)]]
+    );
+
+    tenant
+        .execute(&db, "set session authorization rls_tenant")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut tenant,
+            &db,
+            "select row_security_active('active_docs')",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
 }
 
 #[test]

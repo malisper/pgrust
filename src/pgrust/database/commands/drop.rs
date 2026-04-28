@@ -1837,14 +1837,6 @@ impl Database {
             if dropped_relation_oids.contains(&relation.oid) {
                 continue;
             }
-            if self
-                .backend_catcache(client_id, Some((xid, next_cid)))
-                .map_err(map_catalog_error)?
-                .class_by_oid(relation.oid)
-                .is_none()
-            {
-                continue;
-            }
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),

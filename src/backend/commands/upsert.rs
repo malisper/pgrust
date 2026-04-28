@@ -213,6 +213,8 @@ fn run_conflict_update(
     stmt: &BoundInsertStatement,
     assignments: &[crate::backend::parser::BoundAssignment],
     predicate: Option<&Expr>,
+    conflict_visibility_checks: &[crate::backend::rewrite::RlsWriteCheck],
+    update_write_checks: &[crate::backend::rewrite::RlsWriteCheck],
     excluded_values: &[Value],
     conflict_tid: ItemPointerData,
     conflict_tuple: HeapTuple,
@@ -231,9 +233,11 @@ fn run_conflict_update(
     let current_old_values =
         decode_tuple_values(stmt, desc, attr_descs, conflict_tid, conflict_tuple, ctx)?;
     let mut new_values = match eval_conflict_update_values(
+        &stmt.relation_name,
         &stmt.desc,
         assignments,
         predicate,
+        conflict_visibility_checks,
         &current_old_values,
         excluded_values,
         ctx,
@@ -261,7 +265,7 @@ fn run_conflict_update(
         stmt.toast_index.as_ref(),
         &stmt.desc,
         &stmt.relation_constraints,
-        &[],
+        update_write_checks,
         &stmt.referenced_by_foreign_keys,
         &stmt.indexes,
         conflict_tid,
@@ -298,9 +302,11 @@ fn run_conflict_update(
 }
 
 fn eval_conflict_update_values(
+    relation_name: &str,
     desc: &crate::backend::executor::RelationDesc,
     assignments: &[crate::backend::parser::BoundAssignment],
     predicate: Option<&Expr>,
+    conflict_visibility_checks: &[crate::backend::rewrite::RlsWriteCheck],
     current_values: &[Value],
     excluded_values: &[Value],
     ctx: &mut ExecutorContext,
@@ -313,6 +319,13 @@ fn eval_conflict_update_values(
                 return Ok(EvaluatedConflictAction::Skipped);
             }
         }
+        crate::backend::executor::enforce_row_security_write_checks(
+            relation_name,
+            desc,
+            conflict_visibility_checks,
+            current_values,
+            ctx,
+        )?;
         for assignment in assignments {
             let value = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
             apply_assignment_target(
@@ -369,6 +382,8 @@ fn preflight_on_conflict_updates(
     arbiter_indexes: &[&BoundIndexRelation],
     assignments: &[crate::backend::parser::BoundAssignment],
     predicate: Option<&Expr>,
+    conflict_visibility_checks: &[crate::backend::rewrite::RlsWriteCheck],
+    update_write_checks: &[crate::backend::rewrite::RlsWriteCheck],
     rows: &[Vec<Value>],
     desc: &Rc<crate::backend::executor::RelationDesc>,
     attr_descs: &Rc<[crate::include::access::htup::AttributeDesc]>,
@@ -416,14 +431,23 @@ fn preflight_on_conflict_updates(
             let current_values =
                 decode_tuple_values(stmt, desc, attr_descs, conflict.tid, conflict.tuple, ctx)?;
             match eval_conflict_update_values(
+                &stmt.relation_name,
                 &stmt.desc,
                 assignments,
                 predicate,
+                conflict_visibility_checks,
                 &current_values,
                 values,
                 ctx,
             )? {
                 EvaluatedConflictAction::Updated(updated_values) => {
+                    crate::backend::executor::enforce_row_security_write_checks(
+                        &stmt.relation_name,
+                        &stmt.desc,
+                        update_write_checks,
+                        &updated_values,
+                        ctx,
+                    )?;
                     let updated_arbiter_keys =
                         arbiter_keys_for_row(arbiter_indexes, &stmt.desc, &updated_values, ctx)?;
                     record_simulated_row_state(
@@ -536,6 +560,8 @@ pub(crate) fn execute_insert_on_conflict_rows(
     if let BoundOnConflictAction::Update {
         assignments,
         predicate,
+        conflict_visibility_checks,
+        update_write_checks,
     } = &on_conflict.action
     {
         let mut rows_with_generated = Vec::with_capacity(rows.len());
@@ -549,6 +575,8 @@ pub(crate) fn execute_insert_on_conflict_rows(
             &arbiter_indexes,
             assignments,
             predicate.as_ref(),
+            conflict_visibility_checks,
+            update_write_checks,
             &rows_with_generated,
             &desc,
             &attr_descs,
@@ -577,10 +605,14 @@ pub(crate) fn execute_insert_on_conflict_rows(
                     BoundOnConflictAction::Update {
                         assignments,
                         predicate,
+                        conflict_visibility_checks,
+                        update_write_checks,
                     } => match run_conflict_update(
                         stmt,
                         assignments,
                         predicate.as_ref(),
+                        conflict_visibility_checks,
+                        update_write_checks,
                         &values,
                         conflict.tid,
                         conflict.tuple,
