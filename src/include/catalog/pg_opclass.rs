@@ -1049,7 +1049,9 @@ pub fn default_opclass_oid_for_am(am_oid: u32, type_oid: u32, sql_type: SqlType)
                 && (row.opcintype == type_oid
                     || (row.opcintype == ANYARRAYOID && sql_type.is_array)
                     || (row.opcintype == ANYRANGEOID && is_range)
-                    || (row.opcintype == ANYMULTIRANGEOID && is_multirange))
+                    || (row.opcintype == ANYMULTIRANGEOID && is_multirange)
+                    || (row.opcintype == RECORD_TYPE_OID
+                        && matches!(sql_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite)))
         })
         .map(|row| row.oid)
 }
@@ -1247,6 +1249,14 @@ mod tests {
         assert_eq!(
             default_hash_opclass_oid(MACADDR8_TYPE_OID),
             Some(MACADDR8_HASH_OPCLASS_OID)
+        );
+    }
+
+    #[test]
+    fn named_composite_uses_record_btree_opclass() {
+        assert_eq!(
+            default_opclass_oid_for_am(BTREE_AM_OID, 76000, SqlType::named_composite(76000, 76001)),
+            Some(RECORD_BTREE_OPCLASS_OID)
         );
     }
 }

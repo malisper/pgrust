@@ -71,6 +71,7 @@ pub use driver::{
     exec_next, execute_plan, execute_planned_stmt, execute_readonly_statement,
     execute_readonly_statement_with_config, execute_sql, execute_statement,
 };
+pub(crate) use exec_expr::clear_subquery_eval_cache;
 pub use exec_expr::{eval_expr, eval_plpgsql_expr};
 pub(crate) use expr_agg_support::build_aggregate_runtime;
 pub(crate) use expr_agg_support::execute_scalar_function_value_call;

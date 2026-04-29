@@ -627,7 +627,10 @@ direct_test_dependencies() {
         aggregates)
             echo "create_aggregate"
             ;;
-        join|select_parallel|with)
+        join)
+            echo "create_index create_misc"
+            ;;
+        select_parallel|with)
             echo "create_misc"
             ;;
         psql|event_trigger)

@@ -60,6 +60,73 @@ query_repl.rs still has the existing unreachable-pattern warning during check.
 ---
 
 Goal:
+Fix merge-queue cargo-test failures on the join-regression PR.
+
+Key decisions:
+Let non-lateral derived tables see ancestor query scopes again without exposing sibling FROM items.
+Normalize EXISTS subquery target lists to a dummy constant so SELECT-list expressions are not evaluated for existence checks.
+Bind the EXISTS membership fast path's input row as the active outer tuple when evaluating filter-local special Vars.
+Update stale whole-row and hash bucket order assertions to match current null-preserving row and bucket traversal behavior.
+
+Files touched:
+src/backend/executor/exec_expr/subquery.rs
+src/backend/executor/tests.rs
+src/backend/parser/analyze/agg_output_special.rs
+src/backend/parser/analyze/expr.rs
+src/backend/parser/analyze/expr/subquery.rs
+src/backend/parser/analyze/scope.rs
+src/backend/parser/tests.rs
+
+Tests run:
+cargo fmt
+scripts/cargo_isolated.sh test --lib --quiet derived_table_in_correlated_subquery_can_reference_outer_query -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet grouped_query_having -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet nested_exists_not_exists_inside_derived_table_keeps_outer_levels_correct -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet create_table_as_values_and_matview_unknown_outputs_work -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet security_barrier_inheritance_view_filters_through_subquery_scan -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet bind_insert_returning -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet manual_hash_join_ -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet lateral_right_join_placeholder_uses_outer_binding_at_join_level -- --nocapture
+scripts/cargo_isolated.sh check
+
+Remaining:
+No local failures in the attached CI repro set.
+
+---
+
+Goal:
+Fix CI failures from cargo-test-run__1_2__73490903903.log on the join-regression branch.
+
+Key decisions:
+Only expand single-record SQL SRF rows when the function declares a record/composite result.
+Sort expanded array equality scan keys after dedupe so residual index-only scans emit deterministic btree order.
+Use a pseudo varno for PL/pgSQL named-slot scopes so correlated subquery params cannot collide with real range-table indexes during setrefs.
+Treat executor tuple Vars as row-dependent in EXISTS runtime-empty analysis so correlated EXISTS subplans are not folded to false.
+
+Files touched:
+src/backend/executor/exec_expr/subquery.rs
+src/backend/executor/nodes.rs
+src/backend/executor/sqlfunc.rs
+src/backend/optimizer/setrefs.rs
+src/backend/parser/analyze/mod.rs
+
+Tests run:
+scripts/cargo_isolated.sh test --lib --quiet sql_set_returning_function_accepts_values_body -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet index_only_scan_applies_residual_filter -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet plpgsql_assignment_query_expr_from_clause_uses_sql_scope -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet enum_pg_enum_cleanup_query_keeps_select_star_width -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet planned_rangefuncs_lateral_full_join_has_no_root_ext_params -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet planned_correlated_cte_subquery_rebases_hidden_cte_boundary_params -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet planner_uses_runtime_index_key_for_correlated_limit_subplan -- --nocapture
+scripts/cargo_isolated.sh test --lib --quiet planner_uses_runtime_scalar_array_index_for_or_join_clause -- --nocapture
+scripts/cargo_isolated.sh check
+
+Remaining:
+No local failures in the attached CI repro set.
+
+---
+
+Goal:
 Fix cargo-test CI failures from the targeted relcache/fmgr PR.
 
 Key decisions:

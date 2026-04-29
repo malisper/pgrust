@@ -16,7 +16,7 @@ use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::catalog::PgProcRow;
 use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID,
-    ANYRANGEOID, PG_LANGUAGE_SQL_OID, builtin_multirange_name_for_sql_type,
+    ANYRANGEOID, PG_LANGUAGE_SQL_OID, RECORD_TYPE_OID, builtin_multirange_name_for_sql_type,
     builtin_range_name_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{ArrayValue, RecordDescriptor, RecordValue};
@@ -183,6 +183,7 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
                 "0A000",
             )
         })?;
+        let expand_single_record = sql_function_declares_record_result(row, catalog.as_ref());
         let arg_type_oids = sql_function_call_arg_type_oids(args, ctx);
         let result = execute_sql_function_query(
             row,
@@ -195,6 +196,12 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
             StatementResult::Query { rows, .. } => rows
                 .into_iter()
                 .map(|mut row| {
+                    if expand_single_record
+                        && row.len() == 1
+                        && let Some(Value::Record(record)) = row.pop()
+                    {
+                        row = record.fields;
+                    }
                     if row.len() < output_columns.len() {
                         row.resize(output_columns.len(), Value::Null);
                     }
@@ -210,6 +217,18 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
         }
     })
     .map_err(|err| sql_function_context_error(row, err))
+}
+
+fn sql_function_declares_record_result(row: &PgProcRow, catalog: &dyn CatalogLookup) -> bool {
+    if row.prorettype == RECORD_TYPE_OID {
+        return true;
+    }
+    catalog.type_by_oid(row.prorettype).is_some_and(|ty| {
+        matches!(
+            ty.sql_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
+        )
+    })
 }
 
 fn execute_sql_function_query(

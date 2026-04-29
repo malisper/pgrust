@@ -914,6 +914,11 @@ pub(crate) fn execute_bound_delete_with_rules(
                 &crate::backend::parser::BoundDeleteStatement {
                     targets: vec![target.clone()],
                     returning: Vec::new(),
+                    input_plan: None,
+                    target_visible_count: target.desc.columns.len(),
+                    visible_column_count: target.desc.columns.len(),
+                    target_ctid_index: target.desc.columns.len(),
+                    target_tableoid_index: target.desc.columns.len() + 1,
                     required_privileges: Vec::new(),
                     subplans: Vec::new(),
                 },
@@ -1427,6 +1432,7 @@ fn materialize_view_rows(
         limit: None,
         offset: None,
         locking_clause: None,
+        locking_targets: Vec::new(),
         set_operation: None,
     };
     let planned = crate::backend::parser::pg_plan_query(&select, catalog)?;
