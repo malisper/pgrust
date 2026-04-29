@@ -7,9 +7,17 @@ do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~
 do_body = { quoted_string_literal }
 do_language_clause = { kw_language ~ identifier }
 call_stmt = { kw_call ~ identifier ~ ("." ~ identifier)? ~ "(" ~ function_arg_list? ~ ")" }
-prepare_stmt = { kw_prepare ~ identifier ~ prepare_arg_types? ~ kw_as ~ (select_stmt | update_stmt) }
-prepare_arg_types = { "(" ~ type_name ~ ("," ~ type_name)* ~ ")" }
-execute_prepared_stmt = { kw_execute ~ identifier ~ ("(" ~ expr_list? ~ ")")? }
+prepare_stmt = { kw_prepare ~ identifier ~ prepare_type_list? ~ kw_as ~ prepare_query_sql }
+prepare_type_list = { "(" ~ type_name ~ ("," ~ type_name)* ~ ")" }
+prepare_query_sql = @{ (!EOI ~ ANY)+ }
+execute_prepared_stmt = { kw_execute ~ identifier ~ ("(" ~ execute_arg_list? ~ ")")? }
+execute_arg_list = { execute_arg ~ ("," ~ execute_arg)* }
+execute_arg = @{ execute_arg_chunk+ }
+execute_arg_chunk = _{
+    quoted_string_literal
+    | "(" ~ execute_arg? ~ ")"
+    | !("," | ")") ~ ANY
+}
 deallocate_stmt = { kw_deallocate ~ (kw_prepare? ~ identifier | kw_all) }
 
 analyze_stmt = { kw_analyze ~ analyze_option_block? ~ maintenance_target_list? }

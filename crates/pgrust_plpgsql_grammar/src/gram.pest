@@ -27,11 +27,9 @@ nested_block_stmt = { block ~ semi }
 null_stmt = { kw_null ~ semi }
 continue_stmt = { kw_continue ~ semi }
 assign_stmt = { assign_target ~ assign_op ~ expr_until_semi ~ semi }
-assign_target = { positional_param | ident ~ assign_indirection* }
-assign_indirection = { field_indirection | subscript_indirection }
-field_indirection = { "." ~ ident }
-subscript_indirection = { "[" ~ subscript_expr ~ "]" }
-subscript_expr = @{ subscript_chunk+ }
+assign_target = { positional_param | ident ~ ("." ~ ident)? ~ assign_target_subscript* }
+assign_target_subscript = { "[" ~ assign_subscript_expr ~ "]" }
+assign_subscript_expr = @{ assign_subscript_chunk* }
 if_stmt = { kw_if ~ expr_until_then ~ kw_then ~ stmt* ~ elsif_clause* ~ else_clause? ~ kw_end ~ kw_if ~ semi }
 while_stmt = { kw_while ~ expr_until_loop ~ kw_loop ~ stmt* ~ kw_end ~ kw_loop ~ semi }
 loop_stmt = { kw_loop ~ stmt* ~ kw_end ~ kw_loop ~ semi }
@@ -168,11 +166,11 @@ expr_raise_param_chunk = _{
     | !comma ~ !semi ~ !kw_using ~ ANY
 }
 
-subscript_chunk = _{
+assign_subscript_chunk = _{
     sql_string
     | quoted_ident
-    | "(" ~ subscript_expr? ~ ")"
-    | "[" ~ subscript_expr? ~ "]"
+    | "(" ~ assign_subscript_expr? ~ ")"
+    | "[" ~ assign_subscript_expr? ~ "]"
     | !"]" ~ ANY
 }
 

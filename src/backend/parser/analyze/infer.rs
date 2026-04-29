@@ -14,7 +14,10 @@ use crate::include::catalog::{UNKNOWN_TYPE_OID, range_type_ref_for_sql_type};
 use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 
-fn array_subscript_element_type(array_type: SqlType) -> SqlType {
+fn array_subscript_element_type(array_type: SqlType, catalog: &dyn CatalogLookup) -> SqlType {
+    if let Some(domain_element) = domain_over_array_element_type(array_type, catalog) {
+        return domain_element;
+    }
     if array_type.is_array {
         return array_type.element_type();
     }
@@ -29,6 +32,9 @@ fn array_subscript_element_type(array_type: SqlType) -> SqlType {
 }
 
 fn navigation_sql_type(sql_type: SqlType, catalog: &dyn CatalogLookup) -> SqlType {
+    if is_array_of_domain_over_array_type(sql_type, catalog) {
+        return sql_type;
+    }
     let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid) else {
         return sql_type;
     };
@@ -533,12 +539,12 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     current_type = match current_type.kind {
                         SqlTypeKind::Box => SqlType::new(SqlTypeKind::Point),
                         SqlTypeKind::Point => SqlType::new(SqlTypeKind::Float8),
-                        _ => current_type.element_type(),
+                        _ => array_subscript_element_type(current_type, catalog),
                     };
                 }
                 return current_type;
             }
-            let element_type = array_subscript_element_type(array_type);
+            let element_type = array_subscript_element_type(array_type, catalog);
             if subscripts.iter().any(|subscript| subscript.upper.is_some()) {
                 SqlType::array_of(element_type)
             } else {
@@ -1903,12 +1909,13 @@ pub(super) fn infer_array_literal_type_with_ctes(
             grouped_outer,
             ctes,
         );
+        let element_type = array_literal_element_type(ty, catalog);
         common = Some(match common {
-            None => ty.element_type(),
-            Some(existing) => resolve_common_scalar_type(existing, ty.element_type())?,
+            None => element_type,
+            Some(existing) => resolve_common_scalar_type(existing, element_type)?,
         });
     }
-    common.map(SqlType::array_of)
+    common.map(|ty| array_of_resolved_type(ty, catalog))
 }
 
 pub(super) fn infer_array_literal_type(
@@ -1923,8 +1930,10 @@ pub(super) fn infer_array_literal_type(
         if matches!(element, SqlExpr::Const(Value::Null)) {
             continue;
         }
-        let ty = infer_sql_expr_type(element, scope, catalog, outer_scopes, grouped_outer)
-            .element_type();
+        let ty = array_literal_element_type(
+            infer_sql_expr_type(element, scope, catalog, outer_scopes, grouped_outer),
+            catalog,
+        );
         common = Some(match common {
             None => ty,
             Some(current) => resolve_common_scalar_type(current, ty).ok_or_else(|| {
@@ -1945,5 +1954,19 @@ pub(super) fn infer_array_literal_type(
             sqlstate: "42P18",
         });
     };
-    Ok(SqlType::array_of(common))
+    Ok(array_of_resolved_type(common, catalog))
+}
+
+fn array_literal_element_type(sql_type: SqlType, catalog: &dyn CatalogLookup) -> SqlType {
+    if sql_type.is_array
+        && let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid)
+        && domain.sql_type.is_array
+        && catalog
+            .domain_by_type_oid(domain.sql_type.type_oid)
+            .is_some()
+        && sql_type.typrelid != domain.array_oid
+    {
+        return sql_type;
+    }
+    sql_type.element_type()
 }

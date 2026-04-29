@@ -2593,6 +2593,16 @@ pub(crate) fn parse_text_array_literal_with_catalog_and_op(
     parse_text_array_literal_with_options_and_catalog(raw, element_type, op, true, catalog)
 }
 
+pub(crate) fn parse_text_array_literal_with_catalog_op_and_explicit(
+    raw: &str,
+    element_type: SqlType,
+    op: &'static str,
+    explicit: bool,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    parse_text_array_literal_with_options_and_catalog(raw, element_type, op, explicit, catalog)
+}
+
 pub(crate) fn parse_text_array_literal_with_options(
     raw: &str,
     element_type: SqlType,
@@ -2898,7 +2908,13 @@ impl<'a> ArrayTextParser<'a> {
         )? {
             return Ok(result);
         }
-        cast_text_value(text, self.element_type, self.explicit)
+        cast_text_value_with_catalog_and_config(
+            text,
+            self.element_type,
+            self.explicit,
+            self.catalog,
+            &DateTimeConfig::default(),
+        )
     }
 
     fn parse_quoted_string(&mut self) -> Result<String, ExecError> {
@@ -3174,27 +3190,18 @@ fn proc_name_matches(names: &[&str], candidates: &[&str]) -> bool {
     })
 }
 
-fn validate_composite_text_input(
+fn parse_composite_text_input(
     text: &str,
     ty: SqlType,
-    catalog: Option<&dyn CatalogLookup>,
+    catalog: &dyn CatalogLookup,
     config: &DateTimeConfig,
-) -> Result<(), ExecError> {
-    cast_text_to_composite(text, ty, catalog, config).map(|_| ())
-}
-
-fn cast_text_to_composite(
-    text: &str,
-    ty: SqlType,
-    catalog: Option<&dyn CatalogLookup>,
-    config: &DateTimeConfig,
-) -> Result<RecordValue, ExecError> {
-    let Some(catalog) = catalog else {
-        return Err(unsupported_record_input());
+) -> Result<Option<Value>, ExecError> {
+    let Some(composite_type) = composite_input_base_type(ty, catalog) else {
+        return Ok(None);
     };
     let relation = catalog
-        .relation_by_oid(ty.typrelid)
-        .or_else(|| catalog.lookup_relation_by_oid(ty.typrelid))
+        .relation_by_oid(composite_type.typrelid)
+        .or_else(|| catalog.lookup_relation_by_oid(composite_type.typrelid))
         .ok_or_else(unsupported_record_input)?;
     let fields = parse_composite_literal_fields(text)?;
     let columns = relation
@@ -3216,30 +3223,80 @@ fn cast_text_to_composite(
         });
     }
     let descriptor = RecordDescriptor::named(
-        ty.type_oid,
-        ty.typrelid,
-        ty.typmod,
+        composite_type.type_oid,
+        composite_type.typrelid,
+        composite_type.typmod,
         columns
             .iter()
             .map(|column| (column.name.clone(), column.sql_type))
             .collect(),
     );
-    let mut values = Vec::with_capacity(fields.len());
-    for (column, raw) in columns.into_iter().zip(fields) {
-        let value = if let Some(raw) = raw {
+    let values = columns
+        .into_iter()
+        .zip(fields)
+        .map(|(column, raw)| {
+            let Some(raw) = raw else {
+                return Ok(Value::Null);
+            };
             cast_value_with_source_type_catalog_and_config(
                 Value::Text(raw.into()),
                 Some(SqlType::new(SqlTypeKind::Text)),
                 column.sql_type,
                 Some(catalog),
                 config,
-            )?
-        } else {
-            Value::Null
-        };
-        values.push(value);
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(Value::Record(RecordValue::from_descriptor(
+        descriptor, values,
+    ))))
+}
+
+fn validate_composite_text_input(
+    text: &str,
+    ty: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
+    config: &DateTimeConfig,
+) -> Result<(), ExecError> {
+    let Some(catalog) = catalog else {
+        return Err(unsupported_record_input());
+    };
+    if parse_composite_text_input(text, ty, catalog, config)?.is_some() {
+        Ok(())
+    } else {
+        Err(unsupported_record_input())
     }
-    Ok(RecordValue::from_descriptor(descriptor, values))
+}
+
+fn composite_input_base_type(ty: SqlType, catalog: &dyn CatalogLookup) -> Option<SqlType> {
+    if ty.is_array {
+        return None;
+    }
+    let mut current = ty;
+    let mut visited = BTreeSet::new();
+    while current.type_oid != 0 && visited.insert(current.type_oid) {
+        if let Some(domain) = catalog.domain_by_type_oid(current.type_oid) {
+            current = domain.sql_type;
+            continue;
+        }
+        break;
+    }
+    if current.type_oid != 0
+        && let Some(row) = catalog.type_by_oid(current.type_oid)
+        && row.typtype == 'c'
+        && row.typrelid != 0
+    {
+        return Some(SqlType::named_composite(row.oid, row.typrelid).with_typmod(current.typmod));
+    }
+    if !matches!(current.kind, SqlTypeKind::Composite) {
+        return None;
+    }
+    let typrelid = if current.typrelid != 0 {
+        current.typrelid
+    } else {
+        catalog.type_by_oid(current.type_oid)?.typrelid
+    };
+    (typrelid != 0).then(|| current.with_identity(current.type_oid, typrelid))
 }
 
 fn cast_text_to_composite_value(
@@ -3664,7 +3721,7 @@ fn date_parse_error(text: &str, err: DateParseError) -> ExecError {
     }
 }
 
-fn input_error_info(err: ExecError, text: &str) -> InputErrorInfo {
+pub(crate) fn input_error_info(err: ExecError, text: &str) -> InputErrorInfo {
     match err {
         ExecError::JsonInput {
             message,
@@ -4460,11 +4517,6 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             return cast_text_to_enum(text, ty, catalog);
         }
     }
-    if matches!(ty.kind, SqlTypeKind::Composite) && !ty.is_array {
-        if let Some(text) = value.as_text() {
-            return cast_text_to_composite(text, ty, catalog, config).map(Value::Record);
-        }
-    }
     if let Some(text) = value.as_text()
         && let Some(result) = eval_user_defined_type_input(text, ty, catalog, config)?
     {
@@ -5146,6 +5198,10 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 cast_text_to_enum(text, ty, catalog)
             } else if matches!(ty.kind, SqlTypeKind::RegType) {
                 cast_text_to_regtype(text, catalog)
+            } else if let Some(catalog) = catalog
+                && let Some(value) = parse_composite_text_input(text, ty, catalog, config)?
+            {
+                Ok(value)
             } else {
                 cast_text_value_with_config(text, ty, true, config)
             }
@@ -5159,6 +5215,10 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 cast_text_to_enum(text, ty, catalog)
             } else if matches!(ty.kind, SqlTypeKind::RegType) {
                 cast_text_to_regtype(text, catalog)
+            } else if let Some(catalog) = catalog
+                && let Some(value) = parse_composite_text_input(text, ty, catalog, config)?
+            {
+                Ok(value)
             } else {
                 cast_text_value_with_config(text, ty, true, config)
             }
@@ -6286,6 +6346,11 @@ pub(crate) fn cast_text_value_with_catalog_and_config(
     catalog: Option<&dyn CatalogLookup>,
     config: &DateTimeConfig,
 ) -> Result<Value, ExecError> {
+    if let Some(catalog) = catalog
+        && let Some(value) = parse_composite_text_input(text, ty, catalog, config)?
+    {
+        return enforce_domain_check(value, ty, Some(catalog));
+    }
     let value = cast_text_value_with_config(text, ty, explicit, config)?;
     enforce_domain_check(value, ty, catalog)
 }

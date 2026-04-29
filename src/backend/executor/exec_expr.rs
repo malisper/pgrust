@@ -16,6 +16,7 @@ use crate::include::nodes::primnodes::expr_sql_type_hint;
 use rand::RngCore;
 use std::sync::Mutex;
 
+use super::domain::{cast_domain_text_input, enforce_domain_constraints_for_value};
 use super::expr_agg_support::{
     execute_builtin_scalar_function_value_call, execute_scalar_function_value_call,
 };
@@ -138,8 +139,8 @@ use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, LoweredPartitionSpec, ParseError, PartitionBoundSpec, PartitionRangeDatumValue,
     PartitionStrategy, SerializedPartitionValue, SqlType, SqlTypeKind, SubqueryComparisonOp,
-    bind_relation_expr, deserialize_partition_bound, partition_value_to_value,
-    relation_partition_spec,
+    bind_relation_expr, deserialize_partition_bound, parse_type_name, partition_value_to_value,
+    relation_partition_spec, resolve_raw_type_name,
 };
 use crate::backend::rewrite::{
     format_stored_rule_definition_with_catalog, format_view_definition, render_relation_expr_sql,
@@ -847,6 +848,44 @@ fn eval_pg_index_column_has_property(
 
 fn catalog_lookup(ctx: Option<&ExecutorContext>) -> Option<&dyn CatalogLookup> {
     ctx.and_then(|ctx| ctx.catalog.as_deref())
+}
+
+fn soft_input_error_info_with_context(
+    input: &str,
+    type_name: &str,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<super::expr_casts::InputErrorInfo>, ExecError> {
+    let info = soft_input_error_info_with_catalog_and_config(
+        input,
+        type_name,
+        catalog_lookup(Some(ctx)),
+        &ctx.datetime_config,
+    )?;
+    if info.is_some() {
+        return Ok(info);
+    }
+
+    let Some(sql_type) = (|| {
+        let catalog = ctx.catalog.as_deref()?;
+        let raw_type = parse_type_name(type_name.trim()).ok()?;
+        let sql_type = resolve_raw_type_name(&raw_type, catalog).ok()?;
+        catalog
+            .domain_by_type_oid(sql_type.type_oid)
+            .is_some()
+            .then_some(sql_type)
+    })() else {
+        return Ok(None);
+    };
+
+    match cast_domain_text_input(input, sql_type, ctx) {
+        Ok(_) => Ok(None),
+        Err(err @ ExecError::DetailedError { sqlstate, .. })
+            if matches!(sqlstate, "23502" | "23514") =>
+        {
+            Ok(Some(super::expr_casts::input_error_info(err, input)))
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn eval_reg_object_to_text(
@@ -2626,6 +2665,48 @@ fn eval_regtype_to_text_function(
         Value::Text(text) if text.as_str() != "???" => Ok(Value::Text(text)),
         _ => Ok(Value::Text(oid.to_string().into())),
     }
+}
+
+fn eval_pg_basetype_function(
+    values: &[Value],
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let oid = match value {
+        Value::Int32(oid) if *oid >= 0 => *oid as u32,
+        Value::Int64(oid) if *oid >= 0 && *oid <= i64::from(u32::MAX) => *oid as u32,
+        _ => return Ok(Value::Null),
+    };
+    let Some(catalog) = catalog_lookup(ctx) else {
+        return Err(ExecError::DetailedError {
+            message: "catalog helper requires executor context".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    let mut current_oid = oid;
+    let mut saw_domain = false;
+    for _ in 0..64 {
+        let Some(row) = catalog.type_by_oid(current_oid) else {
+            return Ok(Value::Null);
+        };
+        if row.typtype != 'd' || row.typbasetype == 0 {
+            return if saw_domain {
+                Ok(Value::Int64(i64::from(current_oid)))
+            } else {
+                Ok(Value::Null)
+            };
+        }
+        saw_domain = true;
+        current_oid = row.typbasetype;
+    }
+    Ok(Value::Null)
 }
 
 fn eval_text_to_regclass_function(
@@ -5344,6 +5425,7 @@ fn eval_pg_get_ruledef(values: &[Value], ctx: &ExecutorContext) -> Result<Value,
     if pretty {
         definition = definition
             .replace(" AS ON ", " AS\n    ON ")
+            .replace(" DO INSTEAD UPDATE ", " DO INSTEAD  UPDATE ")
             .replace(" DO ALSO ", " DO  ");
     }
     Ok(Value::Text(definition.into()))
@@ -8230,7 +8312,7 @@ pub fn eval_expr(
         }
         Expr::Cast(inner, ty) => {
             let value = eval_expr(inner, slot, ctx)?;
-            if let Value::Record(record) = value {
+            let casted = if let Value::Record(record) = value {
                 cast_record_value_for_target(record, *ty, ctx)
             } else {
                 cast_value_with_source_type_catalog_and_config(
@@ -8240,7 +8322,8 @@ pub fn eval_expr(
                     ctx.catalog.as_deref(),
                     &ctx.datetime_config,
                 )
-            }
+            }?;
+            enforce_domain_constraints_for_value(casted, *ty, ctx)
         }
         Expr::Collate { expr, .. } => eval_expr(expr, slot, ctx),
         Expr::Coalesce(left, right) => {
@@ -8311,27 +8394,26 @@ pub fn eval_expr(
             elements,
             array_type,
         } => {
-            let element_type = array_type.element_type();
+            let array_cast_type = ctx
+                .catalog
+                .as_deref()
+                .and_then(|catalog| catalog.domain_by_type_oid(array_type.type_oid))
+                .filter(|domain| domain.sql_type.is_array)
+                .map(|domain| domain.sql_type)
+                .unwrap_or(*array_type);
+            let element_type = array_cast_type.element_type();
             let mut values = Vec::with_capacity(elements.len());
             let mut has_nested_arrays = false;
             for expr in elements {
                 let value = eval_expr(expr, slot, ctx)?;
                 if matches!(value, Value::Array(_) | Value::PgArray(_)) {
                     has_nested_arrays = true;
-                    values.push(cast_value_with_config(
-                        value,
-                        *array_type,
-                        &ctx.datetime_config,
-                    )?);
+                    values.push(cast_array_literal_value(value, array_cast_type, ctx)?);
                 } else {
-                    values.push(cast_value_with_config(
-                        value,
-                        element_type,
-                        &ctx.datetime_config,
-                    )?);
+                    values.push(cast_array_literal_value(value, element_type, ctx)?);
                 }
             }
-            if has_nested_arrays {
+            let result = if has_nested_arrays {
                 let array = ArrayValue::from_nested_values(values, vec![1]).map_err(|details| {
                     ExecError::DetailedError {
                         message: "malformed array literal".into(),
@@ -8340,10 +8422,11 @@ pub fn eval_expr(
                         sqlstate: "22P02",
                     }
                 })?;
-                Ok(Value::PgArray(array))
+                Value::PgArray(array)
             } else {
-                Ok(Value::PgArray(ArrayValue::from_1d(values)))
-            }
+                Value::PgArray(ArrayValue::from_1d(values))
+            };
+            enforce_domain_constraints_for_value(result, *array_type, ctx)
         }
         Expr::SubPlan(subplan) => match subplan.sublink_type {
             SubLinkType::ExprSubLink => eval_scalar_subquery(subplan, slot, ctx),
@@ -8400,8 +8483,9 @@ pub fn eval_expr(
             }
         },
         Expr::ArraySubscript { array, subscripts } => {
+            let array_type = expr_sql_type_hint(array);
             let value = eval_expr(array, slot, ctx)?;
-            eval_array_subscript(value, subscripts, slot, ctx)
+            eval_array_subscript(value, array_type, subscripts, slot, ctx)
         }
         Expr::Random => Ok(Value::Float64(ctx.random_state.lock().double())),
         Expr::CurrentDate => Ok(current_date_value_from_timestamp_with_config(
@@ -8812,7 +8896,26 @@ fn eval_record_field(value: Value, field: &str) -> Result<Value, ExecError> {
         })
 }
 
-fn cast_record_value_for_target(
+fn cast_array_literal_value(
+    value: Value,
+    target: SqlType,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let casted = if let Value::Record(record) = value {
+        cast_record_value_for_target(record, target, ctx)
+    } else {
+        cast_value_with_source_type_catalog_and_config(
+            value,
+            None,
+            target,
+            ctx.catalog.as_deref(),
+            &ctx.datetime_config,
+        )
+    }?;
+    enforce_domain_constraints_for_value(casted, target, ctx)
+}
+
+pub(crate) fn cast_record_value_for_target(
     record: crate::include::nodes::datum::RecordValue,
     target: SqlType,
     ctx: &ExecutorContext,
@@ -9367,6 +9470,7 @@ fn eval_plpgsql_builtin_function(
             eval_to_reg_object_function(&values, SqlTypeKind::RegType, None)
         }
         BuiltinScalarFunction::ToRegTypeMod => eval_to_regtypemod_function(&values, None),
+        BuiltinScalarFunction::PgBaseType => eval_pg_basetype_function(&values, None),
         BuiltinScalarFunction::ToRegRole => {
             eval_to_reg_object_function(&values, SqlTypeKind::RegRole, None)
         }
@@ -10926,6 +11030,25 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
     }
 }
 
+fn pg_typeof_type_name(ty: SqlType, ctx: &ExecutorContext) -> String {
+    let Some(catalog) = ctx.catalog.as_deref() else {
+        return sql_type_name(ty);
+    };
+    if ty.type_oid != 0
+        && let Some(domain) = catalog.domain_by_type_oid(ty.type_oid)
+    {
+        return if ty.is_array && (!domain.sql_type.is_array || ty.typrelid == domain.array_oid) {
+            format!("{}[]", domain.name)
+        } else {
+            domain.name
+        };
+    }
+    if ty.type_oid != 0 && !ty.is_array {
+        return expr_reg::format_type_text(ty.type_oid, None, catalog);
+    }
+    sql_type_name(ty)
+}
+
 pub(crate) fn eval_builtin_function(
     func: BuiltinScalarFunction,
     result_type: Option<SqlType>,
@@ -11030,7 +11153,7 @@ pub(crate) fn eval_builtin_function(
                 .and_then(expr_sql_type_hint)
                 .unwrap_or(SqlType::new(SqlTypeKind::Text)),
         };
-        return Ok(Value::Text(sql_type_name(ty).into()));
+        return Ok(Value::Text(pg_typeof_type_name(ty, ctx).into()));
     }
     let values = args
         .iter()
@@ -11617,13 +11740,7 @@ pub(crate) fn eval_builtin_function(
                 right: Value::Text("".into()),
             })?;
             Ok(Value::Bool(
-                soft_input_error_info_with_catalog_and_config(
-                    input,
-                    ty,
-                    catalog_lookup(Some(ctx)),
-                    &ctx.datetime_config,
-                )?
-                .is_none(),
+                soft_input_error_info_with_context(input, ty, ctx)?.is_none(),
             ))
         }
         BuiltinScalarFunction::PgInputErrorMessage
@@ -11640,12 +11757,7 @@ pub(crate) fn eval_builtin_function(
                 left: values[1].clone(),
                 right: Value::Text("".into()),
             })?;
-            let info = soft_input_error_info_with_catalog_and_config(
-                input,
-                ty,
-                catalog_lookup(Some(ctx)),
-                &ctx.datetime_config,
-            )?;
+            let info = soft_input_error_info_with_context(input, ty, ctx)?;
             Ok(match (func, info) {
                 (_, None) => Value::Null,
                 (BuiltinScalarFunction::PgInputErrorMessage, Some(info)) => {
@@ -12015,6 +12127,7 @@ pub(crate) fn eval_builtin_function(
             eval_to_reg_object_function(&values, SqlTypeKind::RegType, Some(ctx))
         }
         BuiltinScalarFunction::ToRegTypeMod => eval_to_regtypemod_function(&values, Some(ctx)),
+        BuiltinScalarFunction::PgBaseType => eval_pg_basetype_function(&values, Some(ctx)),
         BuiltinScalarFunction::ToRegRole => {
             eval_to_reg_object_function(&values, SqlTypeKind::RegRole, Some(ctx))
         }

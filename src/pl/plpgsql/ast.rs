@@ -16,6 +16,7 @@ pub struct VarDecl {
     pub default_expr: Option<String>,
     pub constant: bool,
     pub strict: bool,
+    pub line: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,16 +83,15 @@ pub enum AssignTarget {
         relation: String,
         field: String,
     },
-    Indirect {
-        base: Box<AssignTarget>,
-        indirection: Vec<AssignIndirection>,
+    Subscript {
+        name: String,
+        subscripts: Vec<String>,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AssignIndirection {
-    Field(String),
-    Subscript(String),
+    FieldSubscript {
+        relation: String,
+        field: String,
+        subscripts: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +168,7 @@ pub enum Stmt {
     Assign {
         target: AssignTarget,
         expr: String,
+        line: usize,
     },
     Null,
     If {
@@ -215,6 +216,7 @@ pub enum Stmt {
     Continue,
     Return {
         expr: Option<String>,
+        line: usize,
     },
     ReturnNext {
         expr: Option<String>,

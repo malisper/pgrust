@@ -13,10 +13,14 @@ use super::operator::{
 };
 use super::typed_table::reject_typed_table_ddl;
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
-use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_indexes_for_row};
+use crate::backend::commands::tablecmds::{
+    collect_matching_rows_heap, evaluate_default_value, maintain_indexes_for_row,
+};
 use crate::backend::executor::expr_reg::format_type_text;
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
-use crate::backend::executor::{ExecutorContext, RelationDesc};
+use crate::backend::executor::{
+    ExecutorContext, RelationDesc, enforce_domain_constraints_for_value_ref,
+};
 use crate::backend::parser::{
     AlterTableSetPersistenceStatement, AlterTableSetTablespaceStatement, BoundRelation,
     CatalogLookup, TablePersistence, parse_type_name, resolve_raw_type_name,
@@ -453,6 +457,113 @@ fn rewrite_heap_rows_for_added_serial_column(
             None,
         )?;
         maintain_indexes_for_row(relation.rel, new_desc, indexes, &values, new_tid, ctx)?;
+    }
+    Ok(())
+}
+
+fn add_column_validation_executor_context<C>(
+    db: &Database,
+    catalog: C,
+    client_id: ClientId,
+    xid: TransactionId,
+    cid: CommandId,
+    interrupts: Arc<crate::backend::utils::misc::interrupts::InterruptState>,
+) -> Result<ExecutorContext, ExecError>
+where
+    C: CatalogLookup + 'static,
+{
+    let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+    Ok(ExecutorContext {
+        pool: Arc::clone(&db.pool),
+        data_dir: None,
+        txns: db.txns.clone(),
+        txn_waiter: Some(db.txn_waiter.clone()),
+        lock_status_provider: Some(Arc::new(db.clone())),
+        sequences: Some(db.sequences.clone()),
+        large_objects: Some(db.large_objects.clone()),
+        stats_import_runtime: None,
+        async_notify_runtime: Some(db.async_notify_runtime.clone()),
+        advisory_locks: Arc::clone(&db.advisory_locks),
+        row_locks: Arc::clone(&db.row_locks),
+        checkpoint_stats: db.checkpoint_stats_snapshot(),
+        datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        statement_timestamp_usecs:
+            crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
+        gucs: std::collections::HashMap::new(),
+        interrupts,
+        stats: Arc::clone(&db.stats),
+        session_stats: db.session_stats_state(client_id),
+        snapshot,
+        transaction_state: None,
+        client_id,
+        current_database_name: db.current_database_name(),
+        session_user_oid: db.auth_state(client_id).session_user_oid(),
+        current_user_oid: db.auth_state(client_id).current_user_oid(),
+        active_role_oid: db.auth_state(client_id).active_role_oid(),
+        session_replication_role: db.session_replication_role(client_id),
+        statement_lock_scope_id: None,
+        transaction_lock_scope_id: None,
+        next_command_id: cid,
+        default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+        random_state: crate::backend::executor::PgPrngState::shared(),
+        timed: false,
+        allow_side_effects: false,
+        expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
+        case_test_values: Vec::new(),
+        system_bindings: Vec::new(),
+        subplans: Vec::new(),
+        pending_async_notifications: Vec::new(),
+        pending_portals: Vec::new(),
+        catalog_effects: Vec::new(),
+        temp_effects: Vec::new(),
+        database: Some(db.clone()),
+        pending_catalog_effects: Vec::new(),
+        pending_table_locks: Vec::new(),
+        catalog: Some(crate::backend::executor::executor_catalog(catalog)),
+        scalar_function_cache: std::collections::HashMap::new(),
+        srf_rows_cache: std::collections::HashMap::new(),
+        plpgsql_function_cache: db.plpgsql_function_cache(client_id),
+        pinned_cte_tables: std::collections::HashMap::new(),
+        cte_tables: std::collections::HashMap::new(),
+        cte_producers: std::collections::HashMap::new(),
+        recursive_worktables: std::collections::HashMap::new(),
+        deferred_foreign_keys: None,
+        trigger_depth: 0,
+    })
+}
+
+fn validate_added_column_domain_constraints<C>(
+    db: &Database,
+    relation: &crate::backend::parser::BoundRelation,
+    column_index: usize,
+    catalog: C,
+    client_id: ClientId,
+    xid: TransactionId,
+    cid: CommandId,
+    interrupts: Arc<crate::backend::utils::misc::interrupts::InterruptState>,
+) -> Result<(), ExecError>
+where
+    C: CatalogLookup + 'static,
+{
+    if matches!(relation.relkind, 'f' | 'p') {
+        return Ok(());
+    }
+    let mut ctx =
+        add_column_validation_executor_context(db, catalog, client_id, xid, cid, interrupts)?;
+    let rows =
+        collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
+    let Some(column) = relation.desc.columns.get(column_index).cloned() else {
+        return Ok(());
+    };
+    for (_, values) in rows {
+        ctx.check_for_interrupts()?;
+        let value = match values.get(column_index) {
+            Some(value) if !matches!(value, Value::Null) || column.default_expr.is_none() => {
+                value.clone()
+            }
+            _ => evaluate_default_value(&relation.desc, column_index, &mut ctx)?,
+        };
+        enforce_domain_constraints_for_value_ref(&value, column.sql_type, &mut ctx)?;
     }
     Ok(())
 }
@@ -1963,17 +2074,24 @@ impl Database {
         comment_stmt: &CommentOnConstraintStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
-        let interrupts = self.interrupt_state(client_id);
-        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation =
-            lookup_table_or_partitioned_relation_for_comment(&catalog, &comment_stmt.table_name)?;
-        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
-        self.table_locks.lock_table_interruptible(
-            lock_tag,
-            TableLockMode::AccessExclusive,
-            client_id,
-            interrupts.as_ref(),
-        )?;
+        let lock_tag = if comment_stmt.domain_name.is_none() {
+            let interrupts = self.interrupt_state(client_id);
+            let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+            let relation = lookup_table_or_partitioned_relation_for_comment(
+                &catalog,
+                &comment_stmt.table_name,
+            )?;
+            let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
+            self.table_locks.lock_table_interruptible(
+                lock_tag,
+                TableLockMode::AccessExclusive,
+                client_id,
+                interrupts.as_ref(),
+            )?;
+            Some(lock_tag)
+        } else {
+            None
+        };
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
@@ -1987,7 +2105,9 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(lock_tag, client_id);
+        if let Some(lock_tag) = lock_tag {
+            self.table_locks.unlock_table(lock_tag, client_id);
+        }
         result
     }
 
@@ -2753,6 +2873,55 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
+        if let Some(domain_name) = &comment_stmt.domain_name {
+            let (normalized, _, _) = self.normalize_domain_name_for_create(
+                client_id,
+                domain_name,
+                configured_search_path,
+            )?;
+            let domain = self
+                .domains
+                .read()
+                .get(&normalized)
+                .cloned()
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnsupportedType(domain_name.clone()))
+                })?;
+            let constraint_oid = domain
+                .constraints
+                .iter()
+                .find(|constraint| {
+                    constraint
+                        .name
+                        .eq_ignore_ascii_case(&comment_stmt.constraint_name)
+                })
+                .map(|constraint| constraint.oid)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!(
+                        "constraint \"{}\" for domain \"{}\" does not exist",
+                        comment_stmt.constraint_name, domain.name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                })?;
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid,
+                client_id,
+                waiter: None,
+                interrupts: Arc::clone(&interrupts),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .comment_constraint_mvcc(constraint_oid, comment_stmt.comment.as_deref(), &ctx)
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(effect);
+            return Ok(StatementResult::AffectedRows(0));
+        }
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation =
             lookup_table_or_partitioned_relation_for_comment(&catalog, &comment_stmt.table_name)?;
@@ -3222,6 +3391,17 @@ impl Database {
                     target_relation.desc = target_desc.clone();
                 }
             }
+
+            validate_added_column_domain_constraints(
+                self,
+                &target_relation,
+                new_column_index,
+                catalog.clone(),
+                client_id,
+                xid,
+                cid,
+                std::sync::Arc::clone(&interrupts),
+            )?;
 
             for action in &check_actions {
                 crate::backend::parser::bind_check_constraint_expr(

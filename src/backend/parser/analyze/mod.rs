@@ -2858,6 +2858,7 @@ pub(crate) struct LiteralDefaultCatalog;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainLookup {
     pub oid: u32,
+    pub array_oid: u32,
     pub name: String,
     pub sql_type: SqlType,
     pub default: Option<String>,
@@ -3229,7 +3230,7 @@ pub(crate) fn resolve_raw_type_name(
                 ty = ty.with_typmod(resolve_named_type_typmod(base_name, args)?);
             }
             for _ in 0..*array_bounds {
-                ty = SqlType::array_of(ty);
+                ty = array_of_resolved_type(ty, catalog);
             }
             Ok(ty)
         }
@@ -3278,6 +3279,68 @@ fn relation_row_type(relation: &BoundRelation, catalog: &dyn CatalogLookup) -> S
         .find(|row| row.typrelid == relation.relation_oid)
         .map(|row| SqlType::named_composite(row.oid, relation.relation_oid))
         .unwrap_or_else(|| SqlType::record(RECORD_TYPE_OID))
+}
+
+pub(super) fn domain_lookup_sql_type(domain: &DomainLookup) -> SqlType {
+    let identity_arg =
+        if domain.sql_type.type_oid != 0 && matches!(domain.sql_type.kind, SqlTypeKind::Enum) {
+            domain.sql_type.type_oid
+        } else {
+            domain.sql_type.typrelid
+        };
+    domain.sql_type.with_identity(domain.oid, identity_arg)
+}
+
+pub(super) fn is_array_of_domain_over_array_type(
+    sql_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    if !sql_type.is_array || sql_type.typrelid == 0 {
+        return false;
+    }
+    catalog
+        .domain_by_type_oid(sql_type.type_oid)
+        .is_some_and(|domain| {
+            domain.sql_type.is_array
+                && sql_type.typrelid == domain.array_oid
+                && catalog
+                    .domain_by_type_oid(domain.sql_type.type_oid)
+                    .is_some()
+        })
+}
+
+pub(super) fn domain_over_array_element_type(
+    sql_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Option<SqlType> {
+    if !sql_type.is_array || sql_type.typrelid == 0 {
+        return None;
+    }
+    let domain = catalog.domain_by_type_oid(sql_type.type_oid)?;
+    (domain.sql_type.is_array
+        && sql_type.typrelid == domain.array_oid
+        && catalog
+            .domain_by_type_oid(domain.sql_type.type_oid)
+            .is_some())
+    .then(|| domain_lookup_sql_type(&domain))
+}
+
+pub(super) fn array_of_resolved_type(sql_type: SqlType, catalog: &dyn CatalogLookup) -> SqlType {
+    if sql_type.is_array
+        && let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid)
+        && domain.sql_type.is_array
+        && catalog
+            .domain_by_type_oid(domain.sql_type.type_oid)
+            .is_some()
+    {
+        // :HACK: SqlType only has one is_array bit, so an array of a domain
+        // whose base type is itself an array is otherwise indistinguishable
+        // from the scalar domain. Use typrelid as a local marker for the
+        // domain's array type OID until array dimensions are represented
+        // explicitly in type metadata.
+        return SqlType::array_of(sql_type).with_identity(sql_type.type_oid, domain.array_oid);
+    }
+    SqlType::array_of(sql_type)
 }
 
 pub(crate) fn split_named_type_typmod(name: &str) -> (&str, Option<Vec<i32>>) {

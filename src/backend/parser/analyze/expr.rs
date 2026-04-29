@@ -949,6 +949,9 @@ fn supports_array_subscripts(array_type: SqlType) -> bool {
 }
 
 fn expression_navigation_sql_type(sql_type: SqlType, catalog: &dyn CatalogLookup) -> SqlType {
+    if is_array_of_domain_over_array_type(sql_type, catalog) {
+        return sql_type;
+    }
     let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid) else {
         return sql_type;
     };
@@ -3728,7 +3731,11 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 )?
             {
-                return Ok(bound_row);
+                return Ok(if domain.is_some() {
+                    Expr::Cast(Box::new(bound_row), target_type)
+                } else {
+                    bound_row
+                });
             }
             if !matches!(inner.as_ref(), SqlExpr::Const(Value::Null)) {
                 validate_catalog_backed_explicit_cast(
@@ -5331,6 +5338,11 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 })
                 .collect::<Vec<_>>();
             let mut resolution_types = actual_types.clone();
+            for (arg, resolution_type) in args_list.iter().zip(resolution_types.iter_mut()) {
+                if matches!(arg.value, SqlExpr::Const(Value::Null)) {
+                    *resolution_type = SqlType::new(SqlTypeKind::AnyElement);
+                }
+            }
             if matches!(args_list.len(), 3)
                 && !*func_variadic
                 && (name.eq_ignore_ascii_case("lag") || name.eq_ignore_ascii_case("lead"))

@@ -39,7 +39,7 @@ use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
 use crate::backend::executor::value_io::decode_value;
 use crate::backend::executor::value_io::missing_column_value;
-use crate::backend::parser::SqlType;
+use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{
     BLCKSZ, ForkNumber, MdStorageManager, RelFileLocator, StorageManager,
@@ -354,8 +354,10 @@ pub(crate) fn catalog_from_physical_rows_scoped(
         let columns = attrs
             .iter()
             .map(|attr| {
-                let sql_type = *type_sql_by_oid
+                let sql_type = type_sql_by_oid
                     .get(&attr.atttypid)
+                    .copied()
+                    .or_else(|| attr.attisdropped.then_some(SqlType::new(SqlTypeKind::Int4)))
                     .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
                 let mut desc = column_desc(
                     attr.attname.clone(),

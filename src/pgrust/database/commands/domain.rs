@@ -463,19 +463,36 @@ impl Database {
                 continue;
             };
             for (column_index, column) in relation.desc.columns.iter().enumerate() {
-                if column.dropped || !sql_type_uses_domain(column.sql_type, domain.oid) {
+                if column.dropped {
                     continue;
                 }
-                validate_domain_constraint_for_relation_column(
-                    self,
-                    client_id,
+                if sql_type_uses_domain(&catalog, column.sql_type, domain.oid) {
+                    validate_domain_constraint_for_relation_column(
+                        self,
+                        client_id,
+                        &catalog,
+                        &relation,
+                        &class.relname,
+                        column_index,
+                        domain,
+                        constraint,
+                    )?;
+                } else if sql_type_has_unsupported_domain_dependency(
                     &catalog,
-                    &relation,
-                    &class.relname,
-                    column_index,
-                    domain,
-                    constraint,
-                )?;
+                    column.sql_type,
+                    domain.oid,
+                    &mut Vec::new(),
+                ) {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot alter type \"{}\" because column \"{}.{}\" uses it",
+                            domain.name, class.relname, column.name
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "0A000",
+                    });
+                }
             }
         }
         Ok(())
@@ -562,9 +579,6 @@ fn validate_domain_constraint_for_relation_column(
                 .map_err(ExecError::Parse)?;
             for (_, values) in rows {
                 let value = values.get(column_index).cloned().unwrap_or(Value::Null);
-                if matches!(value, Value::Null) {
-                    continue;
-                }
                 let mut slot = TupleSlot::virtual_row(vec![value]);
                 match eval_expr(&bound, &mut slot, &mut ctx)? {
                     Value::Null | Value::Bool(true) => {}
@@ -664,9 +678,100 @@ fn ddl_executor_context_for_domain(
     })
 }
 
-fn sql_type_uses_domain(sql_type: SqlType, domain_oid: u32) -> bool {
-    sql_type.type_oid == domain_oid
-        || (sql_type.is_array && sql_type_uses_domain(sql_type.element_type(), domain_oid))
+fn sql_type_uses_domain(catalog: &dyn CatalogLookup, sql_type: SqlType, domain_oid: u32) -> bool {
+    if sql_type.type_oid == domain_oid {
+        return true;
+    }
+    if sql_type.is_array && sql_type_uses_domain(catalog, sql_type.element_type(), domain_oid) {
+        return true;
+    }
+    catalog
+        .domain_by_type_oid(sql_type.type_oid)
+        .is_some_and(|domain| sql_type_uses_domain(catalog, domain.sql_type, domain_oid))
+}
+
+fn sql_type_has_unsupported_domain_dependency(
+    catalog: &dyn CatalogLookup,
+    sql_type: SqlType,
+    domain_oid: u32,
+    visited_type_oids: &mut Vec<u32>,
+) -> bool {
+    if sql_type.is_array {
+        return sql_type_has_unsupported_domain_dependency(
+            catalog,
+            sql_type.element_type(),
+            domain_oid,
+            visited_type_oids,
+        );
+    }
+    if sql_type.type_oid != 0 {
+        if visited_type_oids.contains(&sql_type.type_oid) {
+            return false;
+        }
+        visited_type_oids.push(sql_type.type_oid);
+    }
+    if let Some(domain) = catalog.domain_by_type_oid(sql_type.type_oid) {
+        if sql_type_uses_domain(catalog, domain.sql_type, domain_oid) {
+            return false;
+        }
+        return sql_type_has_unsupported_domain_dependency(
+            catalog,
+            domain.sql_type,
+            domain_oid,
+            visited_type_oids,
+        );
+    }
+    if sql_type.range_subtype_oid == domain_oid
+        || sql_type.range_multitype_oid == domain_oid
+        || sql_type.multirange_range_oid == domain_oid
+    {
+        return true;
+    }
+    if let Some(range_row) = catalog.range_row_by_type_oid(sql_type.type_oid) {
+        if range_row.rngsubtype == domain_oid || range_row.rngmultitypid == domain_oid {
+            return true;
+        }
+        if range_row.rngsubtype != 0
+            && catalog
+                .type_by_oid(range_row.rngsubtype)
+                .is_some_and(|row| sql_type_uses_domain(catalog, row.sql_type, domain_oid))
+        {
+            return true;
+        }
+    }
+    if sql_type.range_subtype_oid != 0
+        && catalog
+            .type_by_oid(sql_type.range_subtype_oid)
+            .is_some_and(|row| sql_type_uses_domain(catalog, row.sql_type, domain_oid))
+    {
+        return true;
+    }
+    if !matches!(sql_type.kind, SqlTypeKind::Composite | SqlTypeKind::Record) {
+        return false;
+    }
+    let typrelid = if sql_type.typrelid != 0 {
+        sql_type.typrelid
+    } else {
+        catalog
+            .type_by_oid(sql_type.type_oid)
+            .map(|row| row.typrelid)
+            .unwrap_or(0)
+    };
+    if typrelid == 0 {
+        return false;
+    }
+    catalog.relation_by_oid(typrelid).is_some_and(|relation| {
+        relation.desc.columns.iter().any(|column| {
+            !column.dropped
+                && (sql_type_uses_domain(catalog, column.sql_type, domain_oid)
+                    || sql_type_has_unsupported_domain_dependency(
+                        catalog,
+                        column.sql_type,
+                        domain_oid,
+                        visited_type_oids,
+                    ))
+        })
+    })
 }
 
 fn choose_domain_constraint_name(domain: &DomainEntry, base_name: &str) -> String {

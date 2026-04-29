@@ -1,3 +1,5 @@
+use super::domain::enforce_domain_constraints_for_value;
+use super::exec_expr::cast_record_value_for_target;
 use super::value_io::{coerce_assignment_value_with_config, format_array_value_text_with_config};
 use crate::backend::executor::exec_expr::append_array_value;
 use crate::backend::executor::execute_readonly_statement;
@@ -17,9 +19,10 @@ use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::catalog::PgProcRow;
 use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
-    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYRANGEOID, PG_LANGUAGE_SQL_OID,
-    RECORD_TYPE_OID, builtin_multirange_name_for_sql_type, builtin_range_name_for_sql_type,
-    range_type_ref_for_multirange_sql_type, range_type_ref_for_sql_type,
+    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
+    PG_LANGUAGE_SQL_OID, RECORD_TYPE_OID, builtin_multirange_name_for_sql_type,
+    builtin_range_name_for_sql_type, range_type_ref_for_multirange_sql_type,
+    range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{ArrayValue, RecordDescriptor, RecordValue};
 use crate::include::nodes::primnodes::{Expr, expr_sql_type_hint};
@@ -100,7 +103,7 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values_with_arg_type_oids
                 &columns,
                 rows,
                 runtime_result_type,
-                &ctx.datetime_config,
+                ctx,
             ),
             other => Err(sql_function_runtime_error(
                 "LANGUAGE sql function did not produce a query result",
@@ -110,6 +113,20 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values_with_arg_type_oids
         }
     })
     .map_err(|err| sql_function_context_error(row, err))
+}
+
+fn coerce_sql_function_value_to_type(
+    value: Value,
+    target_type: SqlType,
+    _catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let coerced = if let Value::Record(record) = value {
+        cast_record_value_for_target(record, target_type, ctx)
+    } else {
+        coerce_assignment_value_with_config(&value, target_type, &ctx.datetime_config)
+    }?;
+    enforce_domain_constraints_for_value(coerced, target_type, ctx)
 }
 
 fn out_parameter_record_value(
@@ -187,6 +204,9 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
             catalog.as_ref(),
             ctx,
         )?;
+        let runtime_result_type =
+            sql_function_runtime_result_type(row, &arg_values, catalog.as_ref())?;
+        let expand_single_record = sql_function_declares_record_result(row, catalog.as_ref());
         match result {
             StatementResult::Query { columns, rows, .. } => {
                 validate_sql_function_query_columns(catalog.as_ref(), &columns, output_columns)?;
@@ -196,17 +216,28 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
                     Box::new(rows.into_iter().take(1))
                 };
                 rows.map(|row| {
+                    if should_pack_sql_set_returning_record_row(output_columns, row.as_slice()) {
+                        let coerced = vec![pack_sql_function_record_row(row, &columns)];
+                        return Ok(TupleSlot::virtual_row(coerced));
+                    }
+                    if row.len() == 1
+                        && sql_function_single_value_is_whole_result(
+                            runtime_result_type,
+                            output_columns,
+                            row.as_slice(),
+                        )
+                    {
+                        return sql_function_result_row_for_output(
+                            row,
+                            runtime_result_type,
+                            output_columns,
+                            catalog.as_ref(),
+                            ctx,
+                            expand_single_record,
+                        );
+                    }
                     let coerced =
-                        if should_pack_sql_set_returning_record_row(output_columns, row.as_slice())
-                        {
-                            vec![pack_sql_function_record_row(row, &columns)]
-                        } else {
-                            coerce_sql_function_row_values(
-                                row,
-                                output_columns,
-                                &ctx.datetime_config,
-                            )?
-                        };
+                        coerce_sql_function_row_values(row, output_columns, catalog.as_ref(), ctx)?;
                     Ok(TupleSlot::virtual_row(coerced))
                 })
                 .collect()
@@ -221,6 +252,30 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
     .map_err(|err| sql_function_context_error(row, err))
 }
 
+fn sql_function_single_value_is_whole_result(
+    runtime_result_type: Option<SqlType>,
+    output_columns: &[QueryColumn],
+    values: &[Value],
+) -> bool {
+    if matches!(values, [Value::Record(_)]) {
+        return true;
+    }
+    let Some(return_type) = runtime_result_type else {
+        return true;
+    };
+    if !matches!(
+        return_type.kind,
+        SqlTypeKind::Composite | SqlTypeKind::Record
+    ) {
+        return true;
+    }
+    output_columns.len() == 1
+        && matches!(
+            output_columns[0].sql_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
+        )
+}
+
 fn should_pack_sql_set_returning_record_row(
     output_columns: &[QueryColumn],
     values: &[Value],
@@ -228,6 +283,49 @@ fn should_pack_sql_set_returning_record_row(
     output_columns.len() == 1
         && matches!(output_columns[0].sql_type.kind, SqlTypeKind::Record)
         && !matches!(values, [Value::Record(_)])
+}
+
+fn sql_function_result_row_for_output(
+    result_row: Vec<Value>,
+    runtime_result_type: Option<SqlType>,
+    output_columns: &[QueryColumn],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    expand_single_record: bool,
+) -> Result<TupleSlot, ExecError> {
+    let mut value = result_row.into_iter().next().unwrap_or(Value::Null);
+    if let Some(return_type) = runtime_result_type {
+        value = coerce_sql_function_value_to_type(value, return_type, catalog, ctx)?;
+    }
+    if (expand_single_record || output_columns.len() > 1)
+        && let Value::Record(record) = value
+    {
+        let mut fields = record.fields;
+        if fields.len() < output_columns.len() {
+            fields.resize(output_columns.len(), Value::Null);
+        }
+        fields.truncate(output_columns.len());
+        return Ok(TupleSlot::virtual_row(fields));
+    }
+
+    let mut row = vec![value];
+    if row.len() < output_columns.len() {
+        row.resize(output_columns.len(), Value::Null);
+    }
+    row.truncate(output_columns.len());
+    Ok(TupleSlot::virtual_row(row))
+}
+
+fn sql_function_declares_record_result(row: &PgProcRow, catalog: &dyn CatalogLookup) -> bool {
+    if row.prorettype == RECORD_TYPE_OID {
+        return true;
+    }
+    catalog.type_by_oid(row.prorettype).is_some_and(|ty| {
+        matches!(
+            ty.sql_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
+        )
+    })
 }
 
 fn pack_sql_function_record_row(values: Vec<Value>, columns: &[QueryColumn]) -> Value {
@@ -428,29 +526,36 @@ fn sql_scalar_function_result_value(
     columns: &[QueryColumn],
     rows: Vec<Vec<Value>>,
     runtime_result_type: Option<SqlType>,
-    datetime_config: &DateTimeConfig,
+    ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     let Some(first_row) = rows.into_iter().next() else {
         return Ok(Value::Null);
     };
+    let return_type =
+        runtime_result_type.or_else(|| catalog.type_by_oid(row.prorettype).map(|row| row.sql_type));
+    if first_row.len() == 1
+        && let Some(return_type) = return_type
+        && (catalog.domain_by_type_oid(return_type.type_oid).is_some()
+            || !matches!(
+                return_type.kind,
+                SqlTypeKind::Record | SqlTypeKind::Composite
+            ))
+    {
+        let value = first_row.into_iter().next().unwrap_or(Value::Null);
+        return coerce_sql_function_value_to_type(value, return_type, catalog, ctx);
+    }
     if let Some(output) = sql_scalar_function_record_output(row, catalog, columns) {
-        let fields = sql_scalar_function_record_fields(&output, first_row, datetime_config)?;
-        return Ok(Value::Record(RecordValue::from_descriptor(
-            output.descriptor,
-            fields,
-        )));
+        let fields = sql_scalar_function_record_fields(&output, first_row, catalog, ctx)?;
+        let value = Value::Record(RecordValue::from_descriptor(output.descriptor, fields));
+        if let Some(return_type) = return_type
+            && catalog.domain_by_type_oid(return_type.type_oid).is_some()
+        {
+            return enforce_domain_constraints_for_value(value, return_type, ctx);
+        }
+        return Ok(value);
     }
     if first_row.len() == 1 {
         let value = first_row.into_iter().next().unwrap_or(Value::Null);
-        if let Some(return_type) = runtime_result_type
-            .or_else(|| catalog.type_by_oid(row.prorettype).map(|row| row.sql_type))
-            && !matches!(
-                return_type.kind,
-                SqlTypeKind::Record | SqlTypeKind::Composite
-            )
-        {
-            return coerce_assignment_value_with_config(&value, return_type, datetime_config);
-        }
         return Ok(value);
     }
     Err(sql_function_runtime_error(
@@ -479,7 +584,7 @@ fn sql_function_runtime_result_type(
             continue;
         };
         match declared_oid {
-            ANYELEMENTOID => merge_runtime_type(&mut anyelement, actual_type),
+            ANYOID | ANYELEMENTOID => merge_runtime_type(&mut anyelement, actual_type),
             ANYARRAYOID if actual_type.is_array => {
                 merge_runtime_type(&mut anyarray, actual_type);
                 merge_runtime_type(&mut anyelement, actual_type.element_type());
@@ -519,7 +624,7 @@ fn sql_function_runtime_result_type(
     }
 
     let resolved = match row.prorettype {
-        ANYELEMENTOID => anyelement,
+        ANYOID | ANYELEMENTOID => anyelement,
         ANYARRAYOID => anyarray.or_else(|| anyelement.map(SqlType::array_of)),
         ANYRANGEOID => anyrange,
         ANYMULTIRANGEOID => anymultirange,
@@ -541,7 +646,8 @@ fn merge_runtime_type(slot: &mut Option<SqlType>, ty: SqlType) {
 fn coerce_sql_function_row_values(
     mut values: Vec<Value>,
     expected_columns: &[QueryColumn],
-    datetime_config: &DateTimeConfig,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
     if let [Value::Record(record)] = values.as_slice()
         && expected_columns.len() != 1
@@ -559,7 +665,7 @@ fn coerce_sql_function_row_values(
         .into_iter()
         .zip(expected_columns.iter())
         .map(|(value, column)| {
-            coerce_assignment_value_with_config(&value, column.sql_type, datetime_config)
+            coerce_sql_function_value_to_type(value, column.sql_type, catalog, ctx)
                 .map_err(|err| sql_function_return_type_error(&column.name, column.sql_type, err))
         })
         .collect()
@@ -769,7 +875,8 @@ fn is_sql_function_polymorphic_type_oid(type_oid: u32) -> bool {
 fn sql_scalar_function_record_fields(
     output: &SqlScalarFunctionRecordOutput,
     mut values: Vec<Value>,
-    datetime_config: &DateTimeConfig,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
     if let [Value::Record(record)] = values.as_slice() {
         values = record.fields.clone();
@@ -796,7 +903,7 @@ fn sql_scalar_function_record_fields(
     if output.strict_field_types {
         validate_sql_function_value_types(&values, &expected_columns)?;
     }
-    coerce_sql_function_row_values(values, &expected_columns, datetime_config)
+    coerce_sql_function_row_values(values, &expected_columns, catalog, ctx)
 }
 
 fn validate_sql_function_value_types(
@@ -1012,6 +1119,11 @@ fn validate_sql_polymorphic_runtime_args(
             continue;
         };
         match declared_oid {
+            ANYOID | ANYELEMENTOID => {
+                if !merge_polymorphic_runtime_subtype(&mut exact_subtype, actual_type) {
+                    return Err(sql_function_undefined_runtime_error(row, arg_values));
+                }
+            }
             ANYARRAYOID if actual_type.is_array => {
                 let inferred = actual_type.element_type();
                 if !merge_polymorphic_runtime_subtype(&mut exact_subtype, inferred) {

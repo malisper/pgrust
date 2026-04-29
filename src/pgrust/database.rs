@@ -91,7 +91,7 @@ use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CURRENT_DATABASE_NAME,
     PUBLIC_NAMESPACE_OID, PgConstraintRow, PgEnumRow, PgRangeRow, PgTypeRow, RangeCanonicalization,
-    annotate_catalog_type_io_procs, builtin_type_row_by_oid, builtin_type_rows,
+    UNKNOWN_TYPE_OID, annotate_catalog_type_io_procs, builtin_type_row_by_oid, builtin_type_rows,
     synthetic_type_output_proc_oid, system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
@@ -949,7 +949,8 @@ impl Database {
                 let base_catalog =
                     builtin_type_row_by_oid(domain.sql_type.type_oid).or_else(|| {
                         builtin_type_rows().into_iter().find(|row| {
-                            row.sql_type.kind == domain.sql_type.kind
+                            row.oid != UNKNOWN_TYPE_OID
+                                && row.sql_type.kind == domain.sql_type.kind
                                 && row.sql_type.is_array == domain.sql_type.is_array
                         })
                     });
@@ -1051,7 +1052,16 @@ impl Database {
                         typanalyze: ARRAY_TYPANALYZE_PROC_OID,
                         typbasetype: 0,
                         typcollation: 0,
-                        sql_type: SqlType::array_of(domain_type),
+                        sql_type: if domain.sql_type.is_array
+                            && domains
+                                .values()
+                                .any(|candidate| candidate.oid == domain.sql_type.type_oid)
+                        {
+                            SqlType::array_of(domain_type)
+                                .with_identity(domain.oid, domain.array_oid)
+                        } else {
+                            SqlType::array_of(domain_type)
+                        },
                     },
                 ]
             })
@@ -1231,6 +1241,7 @@ impl Database {
             .find(|domain| domain.oid == domain_oid || domain.array_oid == domain_oid)
             .map(|domain| crate::backend::parser::DomainLookup {
                 oid: domain.oid,
+                array_oid: domain.array_oid,
                 name: domain.name.clone(),
                 sql_type: domain.sql_type,
                 default: domain.default.clone(),
@@ -1264,6 +1275,7 @@ impl Database {
             .flat_map(|domain| {
                 let lookup = crate::backend::parser::DomainLookup {
                     oid: domain.oid,
+                    array_oid: domain.array_oid,
                     name: domain.name.clone(),
                     sql_type: domain.sql_type,
                     default: domain.default.clone(),
@@ -1605,7 +1617,9 @@ impl Database {
             .values()
             .map(|entry| PgRangeRow {
                 rngtypid: entry.oid,
-                rngsubtype: entry.subtype.type_oid,
+                rngsubtype: entry
+                    .subtype_dependency_oid
+                    .unwrap_or(entry.subtype.type_oid),
                 rngmultitypid: entry.multirange_oid,
                 rngcollation: crate::backend::catalog::catalog::default_column_collation_oid(
                     entry.subtype,

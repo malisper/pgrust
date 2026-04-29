@@ -1,4 +1,6 @@
-use crate::backend::executor::{ExecError, Value, parse_text_array_literal_with_catalog_and_op};
+use crate::backend::executor::{
+    ExecError, Value, parse_text_array_literal_with_catalog_op_and_explicit,
+};
 use crate::backend::parser::{CatalogLookup, SqlType};
 
 pub fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Value, ExecError> {
@@ -10,5 +12,11 @@ pub fn parse_text_array_literal_with_catalog(
     element_type: SqlType,
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<Value, ExecError> {
-    parse_text_array_literal_with_catalog_and_op(raw, element_type, "copy assignment", catalog)
+    parse_text_array_literal_with_catalog_op_and_explicit(
+        raw,
+        element_type,
+        "copy assignment",
+        false,
+        catalog,
+    )
 }

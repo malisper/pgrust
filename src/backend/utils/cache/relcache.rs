@@ -509,6 +509,7 @@ impl RelCache {
                         .get(&attr.atttypid)
                         .copied()
                         .or_else(|| catcache.type_by_oid(attr.atttypid).map(|ty| ty.sql_type))
+                        .or_else(|| attr.attisdropped.then_some(SqlType::new(SqlTypeKind::Int4)))
                         .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
                     let mut desc = column_desc(
                         attr.attname.clone(),

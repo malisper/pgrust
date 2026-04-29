@@ -3865,6 +3865,12 @@ fn render_explain_expr_inner_with_qualifier(
                 .join(", ");
             format!("ROW({fields})")
         }
+        Expr::FieldSelect {
+            expr: inner, field, ..
+        } => render_explain_field_select(inner, field, qualifier, column_names),
+        Expr::ArraySubscript { array, subscripts } => {
+            render_explain_array_subscript(array, subscripts, qualifier, column_names)
+        }
         Expr::SubPlan(subplan) => {
             if subplan.par_param.is_empty() {
                 format!("(InitPlan {}).col1", subplan.plan_id + 1)
@@ -3924,6 +3930,51 @@ fn render_explain_sql_datetime_keyword(keyword: &str, precision: Option<i32>) ->
         Some(precision) => format!("{keyword}({precision})"),
         None => keyword.into(),
     }
+}
+
+fn render_explain_field_select(
+    inner: &Expr,
+    field: &str,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    let rendered = render_explain_expr_inner_with_qualifier(inner, qualifier, column_names);
+    if matches!(inner, Expr::ArraySubscript { .. }) {
+        format!("{rendered}.{field}")
+    } else {
+        format!("({rendered}).{field}")
+    }
+}
+
+fn render_explain_array_subscript(
+    array: &Expr,
+    subscripts: &[crate::include::nodes::primnodes::ExprArraySubscript],
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    let mut out = render_explain_expr_inner_with_qualifier(array, qualifier, column_names);
+    for subscript in subscripts {
+        out.push('[');
+        if let Some(lower) = &subscript.lower {
+            out.push_str(&render_explain_expr_inner_with_qualifier(
+                lower,
+                qualifier,
+                column_names,
+            ));
+        }
+        if subscript.is_slice {
+            out.push(':');
+            if let Some(upper) = &subscript.upper {
+                out.push_str(&render_explain_expr_inner_with_qualifier(
+                    upper,
+                    qualifier,
+                    column_names,
+                ));
+            }
+        }
+        out.push(']');
+    }
+    out
 }
 
 fn render_explain_func_expr_is_infix(func: &FuncExpr) -> bool {
@@ -5679,6 +5730,13 @@ fn render_explain_cast(
     if let Expr::Const(value) = expr {
         if matches!(ty.kind, SqlTypeKind::Oid) {
             return format!("'{}'::oid", render_explain_literal(value));
+        }
+        if matches!(ty.kind, SqlTypeKind::Float4 | SqlTypeKind::Float8) {
+            return format!(
+                "'{}'::{}",
+                render_explain_literal(value),
+                render_explain_sql_type_name(ty)
+            );
         }
         return format!(
             "{}::{}",

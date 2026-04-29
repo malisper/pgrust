@@ -235,13 +235,17 @@ pub fn lower_create_table(
                     desc.identity = Some(identity.kind);
                 } else {
                     desc.default_expr = column.default_expr.clone();
-                    if desc.default_expr.is_none()
+                    let inherited_type_default = if desc.default_expr.is_none()
                         && let Some(type_oid) = catalog.type_oid_for_sql_type(sql_type)
                         && let Some(type_default) = catalog.type_default_sql(type_oid)
                     {
-                        desc.default_expr = Some(type_default);
-                    }
-                    if let Some(default_sql) = desc.default_expr.as_deref() {
+                        Some(type_default)
+                    } else {
+                        None
+                    };
+                    if let Some(default_sql) =
+                        desc.default_expr.as_deref().or(inherited_type_default.as_deref())
+                    {
                         validate_column_default_expr(default_sql, catalog)?;
                     }
                     desc.missing_default_value = desc

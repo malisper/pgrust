@@ -39,6 +39,9 @@ pub enum SyntheticSystemViewKind {
     InformationSchemaViews,
     InformationSchemaColumns,
     InformationSchemaColumnColumnUsage,
+    InformationSchemaColumnDomainUsage,
+    InformationSchemaDomainConstraints,
+    InformationSchemaDomains,
     InformationSchemaCheckConstraints,
     InformationSchemaTriggers,
     InformationSchemaForeignDataWrappers,
@@ -170,6 +173,11 @@ const INFORMATION_SCHEMA_VIEWS_ALIASES: &[&str] = &["information_schema.views"];
 const INFORMATION_SCHEMA_COLUMNS_ALIASES: &[&str] = &["information_schema.columns"];
 const INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_ALIASES: &[&str] =
     &["information_schema.column_column_usage"];
+const INFORMATION_SCHEMA_COLUMN_DOMAIN_USAGE_ALIASES: &[&str] =
+    &["information_schema.column_domain_usage"];
+const INFORMATION_SCHEMA_DOMAIN_CONSTRAINTS_ALIASES: &[&str] =
+    &["information_schema.domain_constraints"];
+const INFORMATION_SCHEMA_DOMAINS_ALIASES: &[&str] = &["information_schema.domains"];
 const INFORMATION_SCHEMA_CHECK_CONSTRAINTS_ALIASES: &[&str] =
     &["information_schema.check_constraints"];
 const INFORMATION_SCHEMA_TRIGGERS_ALIASES: &[&str] = &["information_schema.triggers"];
@@ -847,6 +855,57 @@ const INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_COLUMNS: &[SyntheticSystemViewColum
     SyntheticSystemViewColumn::text("dependent_column"),
 ];
 
+const INFORMATION_SCHEMA_COLUMN_DOMAIN_USAGE_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("domain_catalog"),
+    SyntheticSystemViewColumn::text("domain_schema"),
+    SyntheticSystemViewColumn::text("domain_name"),
+    SyntheticSystemViewColumn::text("table_catalog"),
+    SyntheticSystemViewColumn::text("table_schema"),
+    SyntheticSystemViewColumn::text("table_name"),
+    SyntheticSystemViewColumn::text("column_name"),
+];
+
+const INFORMATION_SCHEMA_DOMAIN_CONSTRAINTS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("constraint_catalog"),
+    SyntheticSystemViewColumn::text("constraint_schema"),
+    SyntheticSystemViewColumn::text("constraint_name"),
+    SyntheticSystemViewColumn::text("domain_catalog"),
+    SyntheticSystemViewColumn::text("domain_schema"),
+    SyntheticSystemViewColumn::text("domain_name"),
+    SyntheticSystemViewColumn::text("is_deferrable"),
+    SyntheticSystemViewColumn::text("initially_deferred"),
+];
+
+const INFORMATION_SCHEMA_DOMAINS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("domain_catalog"),
+    SyntheticSystemViewColumn::text("domain_schema"),
+    SyntheticSystemViewColumn::text("domain_name"),
+    SyntheticSystemViewColumn::text("data_type"),
+    SyntheticSystemViewColumn::new("character_maximum_length", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("character_octet_length", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("character_set_catalog"),
+    SyntheticSystemViewColumn::text("character_set_schema"),
+    SyntheticSystemViewColumn::text("character_set_name"),
+    SyntheticSystemViewColumn::text("collation_catalog"),
+    SyntheticSystemViewColumn::text("collation_schema"),
+    SyntheticSystemViewColumn::text("collation_name"),
+    SyntheticSystemViewColumn::new("numeric_precision", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("numeric_precision_radix", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("numeric_scale", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("datetime_precision", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("interval_type"),
+    SyntheticSystemViewColumn::new("interval_precision", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("domain_default"),
+    SyntheticSystemViewColumn::text("udt_catalog"),
+    SyntheticSystemViewColumn::text("udt_schema"),
+    SyntheticSystemViewColumn::text("udt_name"),
+    SyntheticSystemViewColumn::text("scope_catalog"),
+    SyntheticSystemViewColumn::text("scope_schema"),
+    SyntheticSystemViewColumn::text("scope_name"),
+    SyntheticSystemViewColumn::new("maximum_cardinality", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("dtd_identifier"),
+];
+
 const INFORMATION_SCHEMA_CHECK_CONSTRAINTS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("constraint_catalog"),
     SyntheticSystemViewColumn::text("constraint_schema"),
@@ -927,7 +986,7 @@ const INFORMATION_SCHEMA_FOREIGN_TABLE_OPTIONS_COLUMNS: &[SyntheticSystemViewCol
     SyntheticSystemViewColumn::text("option_value"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 48] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 51] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgEnum,
         canonical_name: "pg_catalog.pg_enum",
@@ -1178,6 +1237,27 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 48] = [
         canonical_name: "information_schema.column_column_usage",
         aliases: INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_ALIASES,
         columns: INFORMATION_SCHEMA_COLUMN_COLUMN_USAGE_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::InformationSchemaColumnDomainUsage,
+        canonical_name: "information_schema.column_domain_usage",
+        aliases: INFORMATION_SCHEMA_COLUMN_DOMAIN_USAGE_ALIASES,
+        columns: INFORMATION_SCHEMA_COLUMN_DOMAIN_USAGE_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::InformationSchemaDomainConstraints,
+        canonical_name: "information_schema.domain_constraints",
+        aliases: INFORMATION_SCHEMA_DOMAIN_CONSTRAINTS_ALIASES,
+        columns: INFORMATION_SCHEMA_DOMAIN_CONSTRAINTS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::InformationSchemaDomains,
+        canonical_name: "information_schema.domains",
+        aliases: INFORMATION_SCHEMA_DOMAINS_ALIASES,
+        columns: INFORMATION_SCHEMA_DOMAINS_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

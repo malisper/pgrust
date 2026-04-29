@@ -4,7 +4,7 @@ use super::create::{
 };
 use super::dependency_drop::{CatalogDependencyGraph, DropBehavior, ObjectAddress};
 use crate::backend::executor::expr_reg::{format_regprocedure_oid_optional, format_type_text};
-use crate::backend::parser::{parse_type_name, resolve_raw_type_name};
+use crate::backend::parser::{SqlType, parse_type_name, resolve_raw_type_name};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::syscache::{
     SearchSysCache1, SearchSysCacheList1, SearchSysCacheList2, SysCacheId, SysCacheTuple,
@@ -23,7 +23,7 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::pgrust::auth::AuthCatalog;
 use crate::pgrust::database::ddl::format_sql_type_name;
-use crate::pgrust::database::save_range_type_entries;
+use crate::pgrust::database::{DomainEntry, save_range_type_entries};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
@@ -45,6 +45,24 @@ struct DropPolicyPlan {
     policy_name: String,
 }
 
+#[derive(Debug, Clone)]
+struct DropDomainColumnDependency {
+    relation_oid: u32,
+    relation_name: String,
+    column_name: String,
+    attnum: i16,
+}
+
+#[derive(Debug, Default)]
+struct DropDomainPlan {
+    explicit_domain_names: BTreeSet<String>,
+    domain_keys: BTreeSet<String>,
+    domain_oids: BTreeSet<u32>,
+    dependent_domains: Vec<(String, String)>,
+    dependent_ranges: Vec<(String, String)>,
+    dependent_columns: Vec<DropDomainColumnDependency>,
+}
+
 fn domain_has_range_dependents_error(type_name: &str, dependent_name: &str) -> ExecError {
     ExecError::DetailedError {
         message: format!("cannot drop type {type_name} because other objects depend on it"),
@@ -52,6 +70,46 @@ fn domain_has_range_dependents_error(type_name: &str, dependent_name: &str) -> E
         hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
         sqlstate: "2BP01",
     }
+}
+
+fn domain_type_dependency_error(type_name: &str, detail: String) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("cannot drop type {type_name} because other objects depend on it"),
+        detail: Some(detail),
+        hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+        sqlstate: "2BP01",
+    }
+}
+
+fn drop_domain_sql_type_depends_on_type(sql_type: SqlType, type_oid: u32) -> bool {
+    sql_type.type_oid == type_oid
+        || sql_type.typrelid == type_oid
+        || sql_type.range_subtype_oid == type_oid
+        || sql_type.range_multitype_oid == type_oid
+        || sql_type.multirange_range_oid == type_oid
+}
+
+fn drop_domain_sql_type_depends_on_any(sql_type: SqlType, type_oids: &BTreeSet<u32>) -> bool {
+    type_oids
+        .iter()
+        .any(|type_oid| drop_domain_sql_type_depends_on_type(sql_type, *type_oid))
+}
+
+fn drop_domain_cascade_notices(plan: &DropDomainPlan) -> Vec<String> {
+    let mut notices = Vec::new();
+    for (_, name) in &plan.dependent_domains {
+        notices.push(format!("drop cascades to type {name}"));
+    }
+    for (_, name) in &plan.dependent_ranges {
+        notices.push(format!("drop cascades to type {name}"));
+    }
+    for column in &plan.dependent_columns {
+        notices.push(format!(
+            "drop cascades to column {} of table {}",
+            column.column_name, column.relation_name
+        ));
+    }
+    notices
 }
 
 fn drop_proc_rows_depending_on_type(
@@ -2100,14 +2158,40 @@ impl Database {
         drop_stmt: &DropDomainStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_drop_domain_stmt_in_transaction_with_search_path(
+            client_id,
+            drop_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_drop_domain_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        drop_stmt: &DropDomainStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
         let domain_names = if drop_stmt.domain_names.is_empty() {
             vec![drop_stmt.domain_name.clone()]
         } else {
             drop_stmt.domain_names.clone()
         };
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let search_path = self.effective_search_path(client_id, configured_search_path);
         let domains_guard = self.domains.read();
-        let range_types_guard = self.range_types.read();
-        let mut drops = Vec::new();
+        let mut explicit_domains = Vec::new();
         for domain_name in &domain_names {
             let (normalized, _, _) = self.normalize_domain_name_for_create(
                 client_id,
@@ -2122,43 +2206,110 @@ impl Database {
                     domain_name.clone(),
                 )));
             };
-            let default_range_name = format!("{}range", domain.name);
-            let dependent_ranges = range_types_guard
-                .iter()
-                .filter(|(_, entry)| {
-                    entry.subtype_dependency_oid == Some(domain.oid)
-                        || entry.subtype.type_oid == domain.oid
-                        || entry.name.eq_ignore_ascii_case(&default_range_name)
-                })
-                .map(|(key, entry)| (key.clone(), entry.name.clone()))
-                .collect::<Vec<_>>();
-            if !drop_stmt.cascade
-                && let Some((_, dependent_name)) = dependent_ranges.first()
-            {
+            explicit_domains.push((normalized, domain));
+        }
+        drop(domains_guard);
+        if explicit_domains.is_empty() {
+            return Ok(StatementResult::AffectedRows(0));
+        }
+
+        let plan = self.plan_drop_domain_dependencies(&catalog, &search_path, &explicit_domains);
+        let source_name = plan
+            .explicit_domain_names
+            .iter()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| drop_stmt.domain_name.clone());
+        if !drop_stmt.cascade {
+            if let Some((_, dependent_name)) = plan.dependent_domains.first() {
+                return Err(domain_type_dependency_error(
+                    &source_name,
+                    format!("type {dependent_name} depends on type {source_name}"),
+                ));
+            }
+            if let Some((_, dependent_name)) = plan.dependent_ranges.first() {
                 return Err(domain_has_range_dependents_error(
-                    &domain.name,
+                    &source_name,
                     dependent_name,
                 ));
             }
-            drops.push((normalized, dependent_ranges));
+            if let Some(dependent_column) = plan.dependent_columns.first() {
+                return Err(domain_type_dependency_error(
+                    &source_name,
+                    format!(
+                        "column {} of table {} depends on type {}",
+                        dependent_column.column_name, dependent_column.relation_name, source_name
+                    ),
+                ));
+            }
         }
-        drop(range_types_guard);
-        drop(domains_guard);
 
-        let mut domains = self.domains.write();
-        for (normalized, _) in &drops {
-            domains.remove(normalized);
+        if drop_stmt.cascade && !plan.dependent_columns.is_empty() {
+            let mut rels = Vec::new();
+            let mut seen_relation_oids = BTreeSet::new();
+            for column in &plan.dependent_columns {
+                if seen_relation_oids.insert(column.relation_oid)
+                    && let Some(relation) = catalog.lookup_relation_by_oid(column.relation_oid)
+                {
+                    rels.push(relation.rel);
+                }
+            }
+            lock_tables_interruptible(
+                &self.table_locks,
+                client_id,
+                &rels,
+                TableLockMode::AccessExclusive,
+                self.interrupt_state(client_id).as_ref(),
+            )?;
         }
-        drop(domains);
 
         if drop_stmt.cascade {
+            let notices = drop_domain_cascade_notices(&plan);
+            match notices.as_slice() {
+                [] => {}
+                [notice] => push_notice(notice.clone()),
+                notices => push_notice_with_detail(
+                    format!("drop cascades to {} other objects", notices.len()),
+                    notices.join("\n"),
+                ),
+            }
+        }
+
+        if drop_stmt.cascade {
+            let interrupts = self.interrupt_state(client_id);
+            let mut next_cid = cid;
+            for column in &plan.dependent_columns {
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: Arc::clone(&interrupts),
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .alter_table_drop_column_mvcc(column.relation_oid, &column.column_name, &ctx)
+                    .map_err(map_catalog_error)?;
+                catalog_effects.push(effect);
+                next_cid = next_cid.saturating_add(1);
+            }
+        }
+
+        {
+            let mut domains = self.domains.write();
+            for key in &plan.domain_keys {
+                domains.remove(key);
+            }
+        }
+
+        if drop_stmt.cascade && !plan.dependent_ranges.is_empty() {
             let mut range_types = self.range_types.write();
             let mut removed_range = false;
-            for (_, dependent_ranges) in drops {
-                for (key, name) in dependent_ranges {
-                    push_notice(format!("drop cascades to type {name}"));
-                    removed_range |= range_types.remove(&key).is_some();
-                }
+            for (key, _) in &plan.dependent_ranges {
+                removed_range |= range_types.remove(key).is_some();
             }
             if removed_range {
                 save_range_type_entries(&self.cluster.base_dir, self.database_oid, &range_types)?;
@@ -2169,6 +2320,103 @@ impl Database {
         self.invalidate_backend_cache_state(client_id);
         self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn plan_drop_domain_dependencies(
+        &self,
+        catalog: &dyn CatalogLookup,
+        search_path: &[String],
+        explicit_domains: &[(String, DomainEntry)],
+    ) -> DropDomainPlan {
+        let mut plan = DropDomainPlan::default();
+        for (key, domain) in explicit_domains {
+            plan.explicit_domain_names.insert(domain.name.clone());
+            plan.domain_keys.insert(key.clone());
+            plan.domain_oids.insert(domain.oid);
+        }
+
+        {
+            let domains = self.domains.read();
+            let mut changed = true;
+            while changed {
+                changed = false;
+                for (key, domain) in domains.iter() {
+                    if plan.domain_keys.contains(key) {
+                        continue;
+                    }
+                    if drop_domain_sql_type_depends_on_any(domain.sql_type, &plan.domain_oids) {
+                        plan.domain_keys.insert(key.clone());
+                        plan.domain_oids.insert(domain.oid);
+                        plan.dependent_domains
+                            .push((key.clone(), domain.name.clone()));
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        let dropped_domain_names = {
+            let domains = self.domains.read();
+            plan.domain_keys
+                .iter()
+                .filter_map(|key| domains.get(key))
+                .map(|domain| domain.name.to_lowercase())
+                .collect::<BTreeSet<_>>()
+        };
+        {
+            let range_types = self.range_types.read();
+            plan.dependent_ranges = range_types
+                .iter()
+                .filter(|(_, entry)| {
+                    plan.domain_oids
+                        .contains(&entry.subtype_dependency_oid.unwrap_or(0))
+                        || plan.domain_oids.contains(&entry.subtype.type_oid)
+                        || dropped_domain_names.contains(&entry.name.to_lowercase())
+                        || dropped_domain_names.contains(
+                            &entry
+                                .name
+                                .strip_suffix("range")
+                                .unwrap_or(&entry.name)
+                                .to_lowercase(),
+                        )
+                })
+                .map(|(key, entry)| (key.clone(), entry.name.clone()))
+                .collect::<Vec<_>>();
+        }
+        plan.dependent_ranges
+            .sort_by(|left, right| left.1.cmp(&right.1));
+
+        for class in catalog.class_rows() {
+            if !matches!(class.relkind, 'r' | 'p' | 'f' | 'm') {
+                continue;
+            }
+            let Some(relation) = catalog.lookup_relation_by_oid(class.oid) else {
+                continue;
+            };
+            let relation_name =
+                drop_table_display_relation_name(catalog, relation.relation_oid, search_path);
+            for (index, column) in relation.desc.columns.iter().enumerate() {
+                if column.dropped
+                    || !drop_domain_sql_type_depends_on_any(column.sql_type, &plan.domain_oids)
+                {
+                    continue;
+                }
+                plan.dependent_columns.push(DropDomainColumnDependency {
+                    relation_oid: relation.relation_oid,
+                    relation_name: relation_name.clone(),
+                    column_name: column.name.clone(),
+                    attnum: (index + 1) as i16,
+                });
+            }
+        }
+        plan.dependent_columns.sort_by(|left, right| {
+            left.relation_name
+                .cmp(&right.relation_name)
+                .then_with(|| right.attnum.cmp(&left.attnum))
+                .then_with(|| left.column_name.cmp(&right.column_name))
+        });
+
+        plan
     }
 
     pub(crate) fn execute_drop_table_stmt_in_transaction_with_search_path(

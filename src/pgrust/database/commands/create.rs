@@ -3,7 +3,8 @@ use super::privilege::{acl_grants_privilege, type_owner_default_acl};
 use super::reloptions::normalize_create_table_reloptions;
 use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::parser::analyze::{
-    ResolvedFunctionCall, is_binary_coercible_type, resolve_function_call,
+    ResolvedFunctionCall, bind_scalar_expr_in_scope, is_binary_coercible_type, is_collatable_type,
+    resolve_function_call,
 };
 use crate::backend::parser::{
     AggregateArgType, AggregateSignature, AggregateSignatureArg, AggregateSignatureKind,
@@ -3123,6 +3124,11 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let sql_type = crate::backend::parser::resolve_raw_type_name(&create_stmt.ty, &catalog)
             .map_err(ExecError::Parse)?;
+        Self::validate_create_domain_base_type(sql_type)?;
+        Self::validate_create_domain_collation(create_stmt.collation.as_deref(), sql_type)?;
+        if let Some(default_sql) = create_stmt.default.as_deref() {
+            Self::validate_create_domain_default_expr(default_sql, &catalog)?;
+        }
         let enum_check = match &create_stmt.enum_check {
             Some(check) if matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::Enum) => {
                 let mut allowed_enum_label_oids = Vec::with_capacity(check.allowed_values.len());
@@ -3237,6 +3243,144 @@ impl Database {
         self.invalidate_backend_cache_state(client_id);
         self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn validate_create_domain_base_type(sql_type: SqlType) -> Result<(), ExecError> {
+        if sql_type.is_array {
+            return Ok(());
+        }
+        let invalid = matches!(
+            sql_type.kind,
+            SqlTypeKind::AnyArray
+                | SqlTypeKind::AnyElement
+                | SqlTypeKind::AnyRange
+                | SqlTypeKind::AnyMultirange
+                | SqlTypeKind::AnyCompatible
+                | SqlTypeKind::AnyCompatibleArray
+                | SqlTypeKind::AnyCompatibleRange
+                | SqlTypeKind::AnyCompatibleMultirange
+                | SqlTypeKind::AnyEnum
+                | SqlTypeKind::Record
+                | SqlTypeKind::Shell
+                | SqlTypeKind::Void
+                | SqlTypeKind::Trigger
+                | SqlTypeKind::FdwHandler
+                | SqlTypeKind::Internal
+                | SqlTypeKind::Cstring
+        );
+        if invalid {
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: format!(
+                    "\"{}\" is not a valid base type for a domain",
+                    format_sql_type_name(sql_type)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P17",
+            }));
+        }
+        Ok(())
+    }
+
+    fn validate_create_domain_collation(
+        collation: Option<&str>,
+        sql_type: SqlType,
+    ) -> Result<(), ExecError> {
+        if collation.is_some() && !is_collatable_type(sql_type) {
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: format!(
+                    "collations are not supported by type {}",
+                    format_sql_type_name(sql_type)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            }));
+        }
+        Ok(())
+    }
+
+    fn validate_create_domain_default_expr(
+        default_sql: &str,
+        catalog: &dyn CatalogLookup,
+    ) -> Result<(), ExecError> {
+        let parsed = crate::backend::parser::parse_expr(default_sql).map_err(ExecError::Parse)?;
+        let (bound, _) =
+            bind_scalar_expr_in_scope(&parsed, &[], catalog).map_err(ExecError::Parse)?;
+        Self::validate_create_domain_default_const_casts(&bound)
+    }
+
+    fn validate_create_domain_default_const_casts(expr: &Expr) -> Result<(), ExecError> {
+        match expr {
+            Expr::Cast(inner, target) => {
+                if let Expr::Const(value) = inner.as_ref() {
+                    crate::backend::executor::cast_value(value.to_owned_value(), *target)?;
+                }
+                Self::validate_create_domain_default_const_casts(inner)
+            }
+            Expr::Op(op) => {
+                for arg in &op.args {
+                    Self::validate_create_domain_default_const_casts(arg)?;
+                }
+                Ok(())
+            }
+            Expr::Func(func) => {
+                for arg in &func.args {
+                    Self::validate_create_domain_default_const_casts(arg)?;
+                }
+                Ok(())
+            }
+            Expr::Bool(bool_expr) => {
+                for arg in &bool_expr.args {
+                    Self::validate_create_domain_default_const_casts(arg)?;
+                }
+                Ok(())
+            }
+            Expr::Coalesce(left, right)
+            | Expr::IsDistinctFrom(left, right)
+            | Expr::IsNotDistinctFrom(left, right) => {
+                Self::validate_create_domain_default_const_casts(left)?;
+                Self::validate_create_domain_default_const_casts(right)
+            }
+            Expr::Collate { expr, .. }
+            | Expr::IsNull(expr)
+            | Expr::IsNotNull(expr)
+            | Expr::FieldSelect { expr, .. } => {
+                Self::validate_create_domain_default_const_casts(expr)
+            }
+            Expr::ArrayLiteral { elements, .. } => {
+                for element in elements {
+                    Self::validate_create_domain_default_const_casts(element)?;
+                }
+                Ok(())
+            }
+            Expr::Row { fields, .. } => {
+                for (_, field) in fields {
+                    Self::validate_create_domain_default_const_casts(field)?;
+                }
+                Ok(())
+            }
+            Expr::Like {
+                expr,
+                pattern,
+                escape,
+                ..
+            }
+            | Expr::Similar {
+                expr,
+                pattern,
+                escape,
+                ..
+            } => {
+                Self::validate_create_domain_default_const_casts(expr)?;
+                Self::validate_create_domain_default_const_casts(pattern)?;
+                if let Some(escape) = escape {
+                    Self::validate_create_domain_default_const_casts(escape)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     pub(crate) fn execute_create_function_stmt_with_search_path(
@@ -5741,6 +5885,7 @@ impl Database {
             &[],
             &[],
             &rows,
+            None,
             &mut insert_ctx,
             xid,
             cid,

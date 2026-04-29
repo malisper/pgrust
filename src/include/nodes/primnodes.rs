@@ -514,6 +514,7 @@ pub enum BuiltinScalarFunction {
     PgNotify,
     PgNotificationQueueUsage,
     PgTypeof,
+    PgBaseType,
     PgColumnCompression,
     PgColumnToastChunkId,
     PgColumnSize,

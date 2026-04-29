@@ -12,11 +12,13 @@ use crate::backend::parser::{
     AlterTypeRenameTypeStatement, AlterTypeSetOptionsStatement, AlterTypeStatement, CatalogLookup,
     CreateBaseTypeOption, CreateBaseTypeStatement, CreateCompositeTypeStatement,
     CreateEnumTypeStatement, CreateRangeTypeStatement, CreateShellTypeStatement,
-    CreateTypeStatement, DropTypeStatement, ParseError, SqlType, SqlTypeKind, parse_type_name,
-    resolve_raw_type_name,
+    CreateTypeStatement, DropDomainStatement, DropTypeStatement, ParseError, SqlType, SqlTypeKind,
+    bind_expr_with_outer_and_ctes, parse_expr, parse_type_name, resolve_raw_type_name,
+    scope_for_relation, sql_type_name,
 };
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail, push_warning};
+use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     CSTRING_TYPE_OID, DEPENDENCY_INTERNAL, FLOAT8_TYPE_OID, PG_CLASS_RELATION_OID,
@@ -27,7 +29,8 @@ use crate::pgrust::database::ddl::{
     reject_type_with_dependents,
 };
 use crate::pgrust::database::{
-    BaseTypeEntry, EnumLabelEntry, EnumTypeEntry, RangeTypeEntry, save_range_type_entries,
+    BaseTypeEntry, DomainConstraintKind, DomainEntry, EnumLabelEntry, EnumTypeEntry,
+    RangeTypeEntry, save_range_type_entries,
 };
 
 enum ResolvedDropTypeTarget {
@@ -46,6 +49,7 @@ enum ResolvedDropTypeTarget {
         normalized_name: String,
         display_name: String,
     },
+    Domain,
     Shell {
         type_oid: u32,
         display_name: String,
@@ -408,6 +412,23 @@ impl Database {
                         name: type_name.clone(),
                         expected: "type",
                     }));
+                }
+                Some(ResolvedDropTypeTarget::Domain) => {
+                    let domain_drop = DropDomainStatement {
+                        if_exists: drop_stmt.if_exists,
+                        domain_name: type_name.clone(),
+                        domain_names: vec![type_name.clone()],
+                        cascade: drop_stmt.cascade,
+                    };
+                    self.execute_drop_domain_stmt_in_transaction_with_search_path(
+                        client_id,
+                        &domain_drop,
+                        xid,
+                        cid,
+                        configured_search_path,
+                        catalog_effects,
+                    )?;
+                    dropped += 1;
                 }
                 Some(ResolvedDropTypeTarget::Shell {
                     type_oid,
@@ -850,7 +871,8 @@ impl Database {
             )?;
         }
 
-        let mut type_desc = type_relation.desc.clone();
+        let original_type_desc = type_relation.desc.clone();
+        let mut type_desc = original_type_desc.clone();
         for action in &stmt.actions {
             apply_composite_attribute_action(
                 &mut type_desc,
@@ -861,6 +883,15 @@ impl Database {
                 true,
             )?;
         }
+        validate_dependent_domain_checks_for_composite_type(
+            self,
+            &catalog,
+            type_row.oid,
+            &type_row.typname,
+            &original_type_desc,
+            &type_desc,
+            &stmt.actions,
+        )?;
 
         let mut table_updates = Vec::new();
         for relation_oid in typed_table_oids {
@@ -1209,6 +1240,14 @@ impl Database {
                     display_name: normalized_name,
                 }));
             }
+            if self
+                .domains
+                .read()
+                .values()
+                .any(|entry| entry.oid == type_row.oid)
+            {
+                return Ok(Some(ResolvedDropTypeTarget::Domain));
+            }
         }
         if matches!(type_row.sql_type.kind, SqlTypeKind::Shell) {
             return Ok(Some(ResolvedDropTypeTarget::Shell {
@@ -1427,6 +1466,144 @@ fn typed_table_relation_oids_for_type(
     out.sort_unstable();
     out.dedup();
     Ok(out)
+}
+
+fn validate_dependent_domain_checks_for_composite_type(
+    db: &Database,
+    catalog: &dyn CatalogLookup,
+    composite_type_oid: u32,
+    composite_type_name: &str,
+    original_desc: &RelationDesc,
+    desc: &RelationDesc,
+    actions: &[AlterCompositeTypeAction],
+) -> Result<(), ExecError> {
+    let record_type = assign_anonymous_record_descriptor(
+        desc.columns
+            .iter()
+            .filter(|column| !column.dropped)
+            .map(|column| (column.name.clone(), column.sql_type))
+            .collect(),
+    )
+    .sql_type();
+    let dependent_domains = db
+        .domains
+        .read()
+        .values()
+        .filter(|domain| domain_sql_type_depends_on_type(domain.sql_type, composite_type_oid))
+        .cloned()
+        .collect::<Vec<_>>();
+    for domain in dependent_domains {
+        let value_type = if domain.sql_type.is_array {
+            SqlType::array_of(record_type)
+        } else {
+            record_type
+        };
+        validate_dependent_domain_check_for_composite_type(
+            catalog,
+            composite_type_name,
+            value_type,
+            original_desc,
+            actions,
+            &domain,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_dependent_domain_check_for_composite_type(
+    catalog: &dyn CatalogLookup,
+    composite_type_name: &str,
+    value_type: SqlType,
+    original_desc: &RelationDesc,
+    actions: &[AlterCompositeTypeAction],
+    domain: &DomainEntry,
+) -> Result<(), ExecError> {
+    let dropped_field = actions.iter().find_map(|action| match action {
+        AlterCompositeTypeAction::DropAttribute { name, .. } => Some(name.as_str()),
+        _ => None,
+    });
+    let desc = RelationDesc {
+        columns: vec![column_desc("value", value_type, true)],
+    };
+    let scope = scope_for_relation(None, &desc);
+    for constraint in &domain.constraints {
+        if !matches!(constraint.kind, DomainConstraintKind::Check) {
+            continue;
+        }
+        let Some(expr_sql) = constraint.expr.as_deref() else {
+            continue;
+        };
+        let raw = parse_expr(expr_sql).map_err(ExecError::Parse)?;
+        if let Err(err) = bind_expr_with_outer_and_ctes(&raw, &scope, catalog, &[], None, &[]) {
+            if let Some(field) = dropped_field {
+                return Err(composite_domain_field_dependency_error(
+                    composite_type_name,
+                    field,
+                    &constraint.name,
+                ));
+            }
+            let mapped =
+                remap_composite_domain_check_error(&err, actions, original_desc).unwrap_or(err);
+            return Err(ExecError::Parse(mapped));
+        }
+    }
+    Ok(())
+}
+
+fn remap_composite_domain_check_error(
+    err: &ParseError,
+    actions: &[AlterCompositeTypeAction],
+    original_desc: &RelationDesc,
+) -> Option<ParseError> {
+    let ParseError::UndefinedOperator {
+        op,
+        left_type,
+        right_type,
+    } = &err
+    else {
+        return None;
+    };
+    if right_type != "integer" {
+        return None;
+    }
+    let original_type = actions.iter().find_map(|action| {
+        let AlterCompositeTypeAction::AlterAttributeType { name, .. } = action else {
+            return None;
+        };
+        original_desc
+            .columns
+            .iter()
+            .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(name))
+            .map(|column| column.sql_type)
+    })?;
+    if !matches!(
+        original_type.kind,
+        SqlTypeKind::Float4 | SqlTypeKind::Float8
+    ) {
+        return None;
+    }
+    Some(ParseError::UndefinedOperator {
+        op: *op,
+        left_type: left_type.clone(),
+        right_type: sql_type_name(original_type),
+    })
+}
+
+fn composite_domain_field_dependency_error(
+    composite_type_name: &str,
+    field: &str,
+    constraint_name: &str,
+) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "cannot drop column {field} of composite type {composite_type_name} because other objects depend on it"
+        ),
+        detail: Some(format!(
+            "constraint {constraint_name} depends on column {field} of composite type {composite_type_name}"
+        )),
+        hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+        sqlstate: "2BP01",
+    }
 }
 
 fn apply_composite_attribute_action(
@@ -2444,6 +2621,41 @@ impl Database {
                 stmt.new_type_name.clone(),
             )));
         }
+        let lookup_name = qualified_type_lookup_name(stmt.schema_name.as_deref(), &stmt.type_name);
+        let (domain_key, _, _) =
+            self.normalize_domain_name_for_create(client_id, &lookup_name, configured_search_path)?;
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let visible_type_rows = catalog.type_rows();
+        {
+            let mut domains = self.domains.write();
+            if let Some(mut domain) = domains.remove(&domain_key) {
+                let new_name = stmt.new_type_name.to_ascii_lowercase();
+                let schema_key = domain_key
+                    .rsplit_once('.')
+                    .map(|(schema, _)| schema.to_string())
+                    .unwrap_or_else(|| "public".to_string());
+                let new_key = format!("{schema_key}.{new_name}");
+                if visible_type_rows.iter().any(|row| {
+                    row.oid != domain.oid
+                        && row.typelem == 0
+                        && row.typnamespace == domain.namespace_oid
+                        && row.typname.eq_ignore_ascii_case(&new_name)
+                }) || domains.values().any(|existing| {
+                    existing.namespace_oid == domain.namespace_oid
+                        && existing.name.eq_ignore_ascii_case(&new_name)
+                }) {
+                    domains.insert(domain_key, domain);
+                    return Err(type_already_exists_error(&new_name));
+                }
+                domain.name = new_name;
+                domains.insert(new_key, domain);
+                drop(domains);
+                self.refresh_catalog_store_dynamic_type_rows(client_id, configured_search_path);
+                self.invalidate_backend_cache_state(client_id);
+                self.plan_cache.invalidate_all();
+                return Ok(StatementResult::AffectedRows(0));
+            }
+        }
         let type_oid = self.resolve_enum_type_oid(
             client_id,
             Some((xid, cid)),
@@ -2451,8 +2663,6 @@ impl Database {
             &stmt.type_name,
             configured_search_path,
         )?;
-        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let visible_type_rows = catalog.type_rows();
         let mut enum_types = self.enum_types.write();
         let old_key = enum_types
             .iter()
