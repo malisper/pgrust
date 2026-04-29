@@ -529,6 +529,7 @@ pub enum Statement {
     ResetSessionAuthorization(ResetSessionAuthorizationStatement),
     DropOwned(DropOwnedStatement),
     ReassignOwned(ReassignOwnedStatement),
+    LockTable(LockTableStatement),
     TruncateTable(TruncateTableStatement),
     Vacuum(VacuumStatement),
     Notify(NotifyStatement),
@@ -3954,6 +3955,25 @@ pub struct AlterUserMappingStatement {
     pub user: UserMappingUser,
     pub server_name: String,
     pub options: Vec<AlterGenericOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockTableStatement {
+    pub table_names: Vec<String>,
+    pub mode: LockTableMode,
+    pub nowait: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockTableMode {
+    AccessShare,
+    RowShare,
+    RowExclusive,
+    ShareUpdateExclusive,
+    Share,
+    ShareRowExclusive,
+    Exclusive,
+    AccessExclusive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

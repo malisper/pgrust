@@ -13,8 +13,12 @@ use crate::{ClientId, RelFileLocator};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TableLockMode {
     AccessShare,
+    RowShare,
     RowExclusive,
     ShareUpdateExclusive,
+    Share,
+    ShareRowExclusive,
+    Exclusive,
     AccessExclusive,
 }
 
@@ -30,39 +34,92 @@ impl TableLockMode {
     pub(crate) fn pg_mode_name(self) -> &'static str {
         match self {
             TableLockMode::AccessShare => "AccessShareLock",
+            TableLockMode::RowShare => "RowShareLock",
             TableLockMode::RowExclusive => "RowExclusiveLock",
             TableLockMode::ShareUpdateExclusive => "ShareUpdateExclusiveLock",
+            TableLockMode::Share => "ShareLock",
+            TableLockMode::ShareRowExclusive => "ShareRowExclusiveLock",
+            TableLockMode::Exclusive => "ExclusiveLock",
             TableLockMode::AccessExclusive => "AccessExclusiveLock",
         }
     }
 
     fn rank(self) -> u8 {
         match self {
-            TableLockMode::AccessShare => 0,
-            TableLockMode::ShareUpdateExclusive => 1,
-            TableLockMode::RowExclusive => 2,
-            TableLockMode::AccessExclusive => 3,
+            TableLockMode::AccessShare => 1,
+            TableLockMode::RowShare => 2,
+            TableLockMode::RowExclusive => 3,
+            TableLockMode::ShareUpdateExclusive => 4,
+            TableLockMode::Share => 5,
+            TableLockMode::ShareRowExclusive => 6,
+            TableLockMode::Exclusive => 7,
+            TableLockMode::AccessExclusive => 8,
         }
     }
 
     fn conflicts_with(self, other: TableLockMode) -> bool {
-        matches!(
-            (self, other),
-            (TableLockMode::AccessExclusive, _)
-                | (_, TableLockMode::AccessExclusive)
-                | (
-                    TableLockMode::ShareUpdateExclusive,
-                    TableLockMode::ShareUpdateExclusive
+        match self {
+            TableLockMode::AccessShare => matches!(other, TableLockMode::AccessExclusive),
+            TableLockMode::RowShare => {
+                matches!(
+                    other,
+                    TableLockMode::Exclusive | TableLockMode::AccessExclusive
                 )
-                | (
-                    TableLockMode::ShareUpdateExclusive,
+            }
+            TableLockMode::RowExclusive => {
+                matches!(
+                    other,
+                    TableLockMode::Share
+                        | TableLockMode::ShareRowExclusive
+                        | TableLockMode::Exclusive
+                        | TableLockMode::AccessExclusive
+                )
+            }
+            TableLockMode::ShareUpdateExclusive => {
+                matches!(
+                    other,
+                    TableLockMode::ShareUpdateExclusive
+                        | TableLockMode::Share
+                        | TableLockMode::ShareRowExclusive
+                        | TableLockMode::Exclusive
+                        | TableLockMode::AccessExclusive
+                )
+            }
+            TableLockMode::Share => {
+                matches!(
+                    other,
                     TableLockMode::RowExclusive
+                        | TableLockMode::ShareUpdateExclusive
+                        | TableLockMode::ShareRowExclusive
+                        | TableLockMode::Exclusive
+                        | TableLockMode::AccessExclusive
                 )
-                | (
-                    TableLockMode::RowExclusive,
-                    TableLockMode::ShareUpdateExclusive
+            }
+            TableLockMode::ShareRowExclusive => {
+                matches!(
+                    other,
+                    TableLockMode::RowExclusive
+                        | TableLockMode::ShareUpdateExclusive
+                        | TableLockMode::Share
+                        | TableLockMode::ShareRowExclusive
+                        | TableLockMode::Exclusive
+                        | TableLockMode::AccessExclusive
                 )
-        )
+            }
+            TableLockMode::Exclusive => {
+                matches!(
+                    other,
+                    TableLockMode::RowShare
+                        | TableLockMode::RowExclusive
+                        | TableLockMode::ShareUpdateExclusive
+                        | TableLockMode::Share
+                        | TableLockMode::ShareRowExclusive
+                        | TableLockMode::Exclusive
+                        | TableLockMode::AccessExclusive
+                )
+            }
+            TableLockMode::AccessExclusive => true,
+        }
     }
 }
 
@@ -363,5 +420,90 @@ fn mode_for_holder(
         entry.mode.strongest(requested)
     } else {
         requested
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TableLockMode;
+    use super::TableLockMode::*;
+
+    const MODES: [TableLockMode; 8] = [
+        AccessShare,
+        RowShare,
+        RowExclusive,
+        ShareUpdateExclusive,
+        Share,
+        ShareRowExclusive,
+        Exclusive,
+        AccessExclusive,
+    ];
+
+    fn expected_conflicts(mode: TableLockMode) -> &'static [TableLockMode] {
+        match mode {
+            AccessShare => &[AccessExclusive],
+            RowShare => &[Exclusive, AccessExclusive],
+            RowExclusive => &[Share, ShareRowExclusive, Exclusive, AccessExclusive],
+            ShareUpdateExclusive => &[
+                ShareUpdateExclusive,
+                Share,
+                ShareRowExclusive,
+                Exclusive,
+                AccessExclusive,
+            ],
+            Share => &[
+                RowExclusive,
+                ShareUpdateExclusive,
+                ShareRowExclusive,
+                Exclusive,
+                AccessExclusive,
+            ],
+            ShareRowExclusive => &[
+                RowExclusive,
+                ShareUpdateExclusive,
+                Share,
+                ShareRowExclusive,
+                Exclusive,
+                AccessExclusive,
+            ],
+            Exclusive => &[
+                RowShare,
+                RowExclusive,
+                ShareUpdateExclusive,
+                Share,
+                ShareRowExclusive,
+                Exclusive,
+                AccessExclusive,
+            ],
+            AccessExclusive => &MODES,
+        }
+    }
+
+    #[test]
+    fn table_lock_conflicts_match_postgres_matrix() {
+        for mode in MODES {
+            for other in MODES {
+                assert_eq!(
+                    mode.conflicts_with(other),
+                    expected_conflicts(mode).contains(&other),
+                    "{mode:?} versus {other:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn table_lock_mode_names_match_postgres() {
+        assert_eq!(AccessShare.pg_mode_name(), "AccessShareLock");
+        assert_eq!(RowShare.pg_mode_name(), "RowShareLock");
+        assert_eq!(RowExclusive.pg_mode_name(), "RowExclusiveLock");
+        assert_eq!(
+            ShareUpdateExclusive.pg_mode_name(),
+            "ShareUpdateExclusiveLock"
+        );
+        assert_eq!(Share.pg_mode_name(), "ShareLock");
+        assert_eq!(ShareRowExclusive.pg_mode_name(), "ShareRowExclusiveLock");
+        assert_eq!(Exclusive.pg_mode_name(), "ExclusiveLock");
+        assert_eq!(AccessExclusive.pg_mode_name(), "AccessExclusiveLock");
     }
 }

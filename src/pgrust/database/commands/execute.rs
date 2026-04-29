@@ -1093,6 +1093,12 @@ impl Database {
                 )?;
                 Ok(StatementResult::AffectedRows(0))
             }
+            Statement::LockTable(_) => Err(ExecError::DetailedError {
+                message: "LOCK TABLE can only be used in transaction blocks".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "25P01",
+            }),
             Statement::Notify(ref notify_stmt) => self.execute_notify_stmt(client_id, notify_stmt),
             Statement::Listen(ref listen_stmt) => {
                 Ok(self.execute_listen_stmt(client_id, listen_stmt))
