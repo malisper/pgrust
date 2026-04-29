@@ -12,25 +12,34 @@
   runs multiple isolated `pgrust_server` processes and staged database-cluster
   copies, which can starve standard private-repo runners.
 - Manual dispatch inputs:
-  - `command_timeout`: wall-clock timeout for the whole regression command.
-    Normal runs use `210m`; short values are useful for abort-path smoke tests.
-  - `jobs`: number of concurrent isolated regression workers. Normal runs use
-    `4`.
+  - `command_timeout`: wall-clock watchdog for each shard command. Normal runs
+    use `75m`; short values are useful for abort-path smoke tests.
+  - `jobs`: number of concurrent isolated regression workers per shard. Normal
+    runs use `4`.
+  - `shard_deadline_secs`: self-owned per-shard scheduling deadline. Normal runs
+    use `3000` seconds, leaving time for summary/artifact upload before any
+    GitHub job timeout can kill the process tree.
 - Timeouts: CI runs use a `15s` SQL `statement_timeout` and a `300s`
   per-file wall-clock timeout. Base-cluster dependency setup also has its own
   longer setup timeout in `scripts/run_regression.sh`.
-- PostgreSQL source is checked out at the pinned PG18 SHA in `POSTGRES_REF`.
-  Bump this only when the team decides to track a newer upstream corpus.
+- PostgreSQL source is checked out at the pinned stable PG18 release tag in
+  `POSTGRES_REF` (`REL_18_3` as of this writing). Bump this only when the team
+  decides to move to a newer stable PG18 release corpus.
 
-The workflow builds `pgrust_server`, runs `scripts/run_regression.sh`, uploads a
-compact artifact bundle, publishes full text results to the `regression-history`
-orphan branch, posts a Slack summary, then fails or passes from the recorded
-regression exit code.
+The workflow builds `pgrust_server` once, uploads it as a short-lived artifact,
+runs four schedule-group shards, uploads one compact artifact bundle per shard,
+aggregates all available shard artifacts, publishes full text results to the
+`regression-history` orphan branch, and posts a Slack summary.
 
-The regression step is intentionally `continue-on-error`. It records
-`exit_code.txt` and `summary.json`, then exits cleanly so artifact upload,
-history publishing, Slack notification, and the final gate still run after
-regression failures, timeouts, or catchable termination signals.
+Each shard step is intentionally `continue-on-error`. The runner also owns a
+deadline inside `scripts/run_regression.sh`: after the deadline, it stops
+scheduling new files, marks unstarted files as timed out, writes a partial
+`summary.json`, and exits cleanly. This is more reliable than depending on
+GitHub to run later `always()` steps after a hard job cancellation.
+
+The aggregate job uses whatever shard artifacts are present. Missing or
+deadline-limited shards produce a `partial` run instead of producing no history
+or Slack notification.
 
 ## Results
 
@@ -51,6 +60,10 @@ The Actions artifact intentionally uploads only the compact text/debug bundle:
 summary files, exit code, `output/`, `diff/`, `status/`, and `fixtures/`.
 It excludes `base/`, `workers/`, and `tablespaces/` because those are large
 database directories used only to isolate in-run workers.
+
+Shard artifacts are named `regression-shard-0` through `regression-shard-3`.
+The aggregate artifact is named `regression-results` and has the same compact
+layout expected by `regression-history`.
 
 `regression-history` stores the text results under:
 
@@ -115,7 +128,7 @@ The denominator can change if:
 - the SQL corpus changes; or
 - the statement-block parser changes.
 
-For the current pinned PG18 corpus, the first full isolated CI baseline was:
+For the previous pinned PG18 corpus, the first full isolated CI baseline was:
 
 - `22/249` tests passed.
 - `25,932/55,333` query blocks matched (`46.87%`).

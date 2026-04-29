@@ -109,6 +109,7 @@ pub(super) fn optimize_path_with_config(
             }
             Path::Append {
                 pathtarget,
+                pathkeys,
                 relids,
                 source_id,
                 desc,
@@ -143,6 +144,7 @@ pub(super) fn optimize_path_with_config(
                 Path::Append {
                     plan_info: PlanEstimate::new(startup_cost, total_cost, rows, width),
                     pathtarget,
+                    pathkeys,
                     relids,
                     source_id,
                     desc,
@@ -5913,6 +5915,12 @@ fn index_expression_matches_qual(index_expr: &Expr, qual_expr: &Expr) -> bool {
         return true;
     }
     match (index_expr, qual_expr) {
+        (Expr::Var(left), Expr::Var(right)) => {
+            left.varlevelsup == 0
+                && right.varlevelsup == 0
+                && left.varattno == right.varattno
+                && left.vartype == right.vartype
+        }
         (Expr::Op(left), Expr::Op(right)) => {
             left.op == right.op
                 && left.args.len() == right.args.len()

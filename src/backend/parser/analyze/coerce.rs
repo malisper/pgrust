@@ -589,6 +589,11 @@ pub(super) fn coerce_unknown_string_literal_type(
     expr_type: SqlType,
     peer_type: SqlType,
 ) -> SqlType {
+    if matches!(expr, SqlExpr::Const(Value::Null)) {
+        if !matches!(peer_type.kind, SqlTypeKind::Text) || peer_type.type_oid != 0 {
+            return peer_type;
+        }
+    }
     if is_string_literal_expr(expr) {
         if let Some(coerced) = unknown_string_literal_peer_type(peer_type) {
             return coerced;

@@ -5345,6 +5345,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            3060,
+            "left",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, INT4_TYPE_OID]),
+            "text_left",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
             6202,
             "lower",
             TEXT_TYPE_OID,
@@ -5422,6 +5434,42 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             INT4_TYPE_OID,
             &oid_argtypes(&[BPCHAR_TYPE_OID]),
             "length",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1810,
+            "bit_length",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[BYTEA_TYPE_OID]),
+            "bit_length",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1811,
+            "bit_length",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "bit_length",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1812,
+            "bit_length",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[BIT_TYPE_OID]),
+            "bit_length",
             1,
             false,
             true,
@@ -12477,6 +12525,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("rpad", BuiltinScalarFunction::RPad),
         ("repeat", BuiltinScalarFunction::Repeat),
         ("length", BuiltinScalarFunction::Length),
+        ("bit_length", BuiltinScalarFunction::BitLength),
         ("array_ndims", BuiltinScalarFunction::ArrayNdims),
         ("array_dims", BuiltinScalarFunction::ArrayDims),
         ("array_lower", BuiltinScalarFunction::ArrayLower),
@@ -18749,6 +18798,24 @@ mod tests {
                     .expect("synthetic oid")
             ),
             Some(BuiltinScalarFunction::RegRoleToText)
+        );
+    }
+
+    #[test]
+    fn bootstrap_left_proc_row_matches_postgres_volatility() {
+        let row = bootstrap_pg_proc_rows()
+            .into_iter()
+            .find(|row| row.oid == 3060)
+            .expect("left(text, int4) row");
+        assert_eq!(row.proname, "left");
+        assert_eq!(
+            row.proargtypes,
+            oid_argtypes(&[TEXT_TYPE_OID, INT4_TYPE_OID])
+        );
+        assert_eq!(row.provolatile, 'i');
+        assert_eq!(
+            builtin_scalar_function_for_proc_oid(row.oid),
+            Some(BuiltinScalarFunction::Left)
         );
     }
 

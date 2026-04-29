@@ -4970,7 +4970,7 @@ impl CatalogStore {
             0,
             true,
             0,
-            false,
+            true,
             conperiod,
             conexclop,
             deferrable,
@@ -5003,7 +5003,7 @@ impl CatalogStore {
             0,
             true,
             0,
-            false,
+            true,
             conperiod,
             conexclop,
             deferrable,
@@ -5515,6 +5515,68 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_check_constraint_state_mvcc(
+        &mut self,
+        relation_oid: u32,
+        constraint_oid: u32,
+        conenforced: Option<bool>,
+        convalidated: Option<bool>,
+        conparentid: Option<u32>,
+        conislocal: Option<bool>,
+        coninhcount: Option<i16>,
+        connoinherit: Option<bool>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let old_row = relation_constraint_row_by_oid_mvcc(self, ctx, constraint_oid)?
+            .filter(|row| row.conrelid == relation_oid && row.contype == CONSTRAINT_CHECK)
+            .ok_or_else(|| CatalogError::UnknownTable(constraint_oid.to_string()))?;
+        let mut new_row = old_row.clone();
+        if let Some(conenforced) = conenforced {
+            new_row.conenforced = conenforced;
+        }
+        if let Some(convalidated) = convalidated {
+            new_row.convalidated = convalidated;
+        }
+        if let Some(conparentid) = conparentid {
+            new_row.conparentid = conparentid;
+        }
+        if let Some(conislocal) = conislocal {
+            new_row.conislocal = conislocal;
+        }
+        if let Some(coninhcount) = coninhcount {
+            new_row.coninhcount = coninhcount;
+        }
+        if let Some(connoinherit) = connoinherit {
+            new_row.connoinherit = connoinherit;
+        }
+
+        let kinds = vec![BootstrapCatalogKind::PgConstraint];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![old_row],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![new_row],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn update_foreign_key_constraint_inheritance_mvcc(
         &mut self,
         relation_oid: u32,
@@ -5966,6 +6028,134 @@ impl CatalogStore {
                     not_null_constraint_column_index_visible(&entry.desc, constraint_name)?;
                 let column = &mut entry.desc.columns[column_index];
                 column.storage.nullable = false;
+                if let Some(validated) = validated {
+                    column.not_null_constraint_validated = validated;
+                }
+                if let Some(no_inherit) = no_inherit {
+                    column.not_null_constraint_no_inherit = no_inherit;
+                }
+                if let Some(is_local) = is_local {
+                    column.not_null_constraint_is_local = is_local;
+                }
+                if let Some(inhcount) = inhcount {
+                    column.not_null_constraint_inhcount = inhcount;
+                }
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgAttribute,
+                        BootstrapCatalogKind::PgConstraint,
+                        BootstrapCatalogKind::PgDepend,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
+    pub fn alter_not_null_constraint_state_by_oid_mvcc(
+        &mut self,
+        relation_oid: u32,
+        constraint_oid: u32,
+        validated: Option<bool>,
+        no_inherit: Option<bool>,
+        is_local: Option<bool>,
+        inhcount: Option<i16>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) = mutate_visible_relation_entry_mvcc(
+            self,
+            relation_oid,
+            ctx,
+            |entry, _control| {
+                if !matches!(entry.relkind, 'r' | 'p') {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let column_index = entry
+                    .desc
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, column)| {
+                        if column.dropped {
+                            return None;
+                        }
+                        let attnum = index.saturating_add(1) as i16;
+                        let visible_oid = column.not_null_constraint_oid.unwrap_or_else(|| {
+                            crate::backend::catalog::pg_constraint::synthetic_not_null_constraint_oid(
+                                relation_oid,
+                                attnum,
+                            )
+                        });
+                        (visible_oid == constraint_oid).then_some(index)
+                    })
+                    .ok_or_else(|| CatalogError::UnknownTable(constraint_oid.to_string()))?;
+                let column = &mut entry.desc.columns[column_index];
+                column.storage.nullable = false;
+                if column.not_null_constraint_oid.is_none() {
+                    column.not_null_constraint_oid = Some(constraint_oid);
+                }
+                if let Some(validated) = validated {
+                    column.not_null_constraint_validated = validated;
+                }
+                if let Some(no_inherit) = no_inherit {
+                    column.not_null_constraint_no_inherit = no_inherit;
+                }
+                if let Some(is_local) = is_local {
+                    column.not_null_constraint_is_local = is_local;
+                }
+                if let Some(inhcount) = inhcount {
+                    column.not_null_constraint_inhcount = inhcount;
+                }
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgAttribute,
+                        BootstrapCatalogKind::PgConstraint,
+                        BootstrapCatalogKind::PgDepend,
+                    ],
+                ))
+            },
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn alter_not_null_constraint_state_by_attnum_mvcc(
+        &mut self,
+        relation_oid: u32,
+        attnum: i16,
+        constraint_oid: u32,
+        constraint_name: &str,
+        validated: Option<bool>,
+        no_inherit: Option<bool>,
+        is_local: Option<bool>,
+        inhcount: Option<i16>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if !matches!(entry.relkind, 'r' | 'p') {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let column_index = usize::try_from(attnum.saturating_sub(1))
+                    .map_err(|_| CatalogError::UnknownColumn(attnum.to_string()))?;
+                let column = entry
+                    .desc
+                    .columns
+                    .get_mut(column_index)
+                    .filter(|column| !column.dropped)
+                    .ok_or_else(|| CatalogError::UnknownColumn(attnum.to_string()))?;
+                column.storage.nullable = false;
+                column.not_null_constraint_oid = Some(constraint_oid);
+                column.not_null_constraint_name = Some(constraint_name.to_ascii_lowercase());
                 if let Some(validated) = validated {
                     column.not_null_constraint_validated = validated;
                 }
