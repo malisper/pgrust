@@ -25,14 +25,15 @@ use crate::backend::parser::{
     BoundInsertStatement, BoundMergeAction, BoundMergeStatement, BoundMergeWhenClause,
     BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey, BoundRelation,
     BoundRelationConstraints, BoundRuleAction, BoundTemporalConstraint, BoundUpdateStatement,
-    BoundUpdateTarget, Catalog, CatalogLookup, CreateTableAsStatement, DeleteStatement,
+    BoundUpdateTarget, Catalog, CatalogLookup, CreateTableAsStatement, CteBody, DeleteStatement,
     DropTableStatement, ExplainFormat, ExplainStatement, ForeignKeyAction, InsertStatement,
     MaintenanceTarget, MergeStatement, OverridingKind, ParseError, RuleEvent, SelectStatement,
     SqlType, SqlTypeKind, Statement, TableAsObjectType, TruncateTableStatement, UpdateStatement,
     VacuumStatement, bind_create_table, bind_delete, bind_generated_expr, bind_insert,
     bind_referenced_by_foreign_keys, bind_relation_constraints, bind_rule_action_statement,
     bind_scalar_expr_in_scope, bind_update, parse_expr, rewrite_bound_delete_auto_view_target,
-    rewrite_bound_insert_auto_view_target, rewrite_local_vars_for_output_exprs,
+    rewrite_bound_insert_auto_view_target, rewrite_bound_update_auto_view_target,
+    rewrite_local_vars_for_output_exprs,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -255,17 +256,11 @@ fn finalize_bound_insert(
                             .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
                         conflict_visibility_checks: conflict_visibility_checks
                             .into_iter()
-                            .map(|check| RlsWriteCheck {
-                                expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
-                                ..check
-                            })
+                            .map(|check| finalize_rls_write_check(check, catalog, &mut subplans))
                             .collect(),
                         update_write_checks: update_write_checks
                             .into_iter()
-                            .map(|check| RlsWriteCheck {
-                                expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
-                                ..check
-                            })
+                            .map(|check| finalize_rls_write_check(check, catalog, &mut subplans))
                             .collect(),
                     },
                 },
@@ -281,10 +276,7 @@ fn finalize_bound_insert(
     stmt.rls_write_checks = stmt
         .rls_write_checks
         .into_iter()
-        .map(|check| RlsWriteCheck {
-            expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
-            ..check
-        })
+        .map(|check| finalize_rls_write_check(check, catalog, &mut subplans))
         .collect();
     stmt.subplans = subplans;
     stmt
@@ -295,6 +287,28 @@ pub(crate) fn finalize_bound_insert_stmt(
     catalog: &dyn CatalogLookup,
 ) -> BoundInsertStatement {
     finalize_bound_insert(stmt, catalog)
+}
+
+fn finalize_rls_write_check(
+    check: RlsWriteCheck,
+    catalog: &dyn CatalogLookup,
+    subplans: &mut Vec<Plan>,
+) -> RlsWriteCheck {
+    let RlsWriteCheck {
+        expr,
+        display_exprs,
+        policy_name,
+        source,
+    } = check;
+    RlsWriteCheck {
+        expr: finalize_expr_subqueries(expr, catalog, subplans),
+        display_exprs: display_exprs
+            .into_iter()
+            .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+            .collect(),
+        policy_name,
+        source,
+    }
 }
 
 fn finalize_bound_update(
@@ -344,10 +358,7 @@ fn finalize_bound_update(
             rls_write_checks: target
                 .rls_write_checks
                 .into_iter()
-                .map(|check| RlsWriteCheck {
-                    expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
-                    ..check
-                })
+                .map(|check| finalize_rls_write_check(check, catalog, &mut subplans))
                 .collect(),
             ..target
         })
@@ -472,34 +483,22 @@ fn finalize_bound_merge(
     stmt.merge_update_visibility_checks = stmt
         .merge_update_visibility_checks
         .into_iter()
-        .map(|check| RlsWriteCheck {
-            expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
-            ..check
-        })
+        .map(|check| finalize_rls_write_check(check, catalog, &mut subplans))
         .collect();
     stmt.merge_delete_visibility_checks = stmt
         .merge_delete_visibility_checks
         .into_iter()
-        .map(|check| RlsWriteCheck {
-            expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
-            ..check
-        })
+        .map(|check| finalize_rls_write_check(check, catalog, &mut subplans))
         .collect();
     stmt.merge_update_write_checks = stmt
         .merge_update_write_checks
         .into_iter()
-        .map(|check| RlsWriteCheck {
-            expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
-            ..check
-        })
+        .map(|check| finalize_rls_write_check(check, catalog, &mut subplans))
         .collect();
     stmt.merge_insert_write_checks = stmt
         .merge_insert_write_checks
         .into_iter()
-        .map(|check| RlsWriteCheck {
-            expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
-            ..check
-        })
+        .map(|check| finalize_rls_write_check(check, catalog, &mut subplans))
         .collect();
     stmt.input_plan.subplans = subplans;
     stmt
@@ -814,7 +813,10 @@ fn execute_explain_update(
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
-    let bound = finalize_bound_update_stmt(bind_update(&stmt, catalog)?, catalog);
+    let bound = bind_update(&stmt, catalog)?;
+    let bound = rewrite_bound_update_auto_view_target(bound, catalog)
+        .map_err(|err| ExecError::Parse(ParseError::FeatureNotSupported(format!("{err:?}"))))?;
+    let bound = finalize_bound_update_stmt(bound, catalog);
     if analyze {
         let xid = ctx.ensure_write_xid()?;
         let cid = ctx.next_command_id;
@@ -874,6 +876,13 @@ fn execute_explain_insert(
         return Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "EXPLAIN ANALYZE INSERT".into(),
         )));
+    }
+    if stmt
+        .with
+        .iter()
+        .any(|cte| matches!(cte.body, CteBody::Merge(_)))
+    {
+        return execute_explain_insert_with_merge_ctes(stmt, costs, catalog);
     }
 
     let raw_target_name = stmt.table_name.clone();
@@ -1136,6 +1145,57 @@ fn explain_insert_json(
         "]".into(),
     ]);
     lines.join("\n")
+}
+
+fn execute_explain_insert_with_merge_ctes(
+    stmt: InsertStatement,
+    costs: bool,
+    catalog: &dyn CatalogLookup,
+) -> Result<StatementResult, ExecError> {
+    let mut lines = Vec::new();
+    push_explain_line(
+        &format!("Insert on {}", stmt.table_name),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        costs,
+        &mut lines,
+    );
+    for cte in &stmt.with {
+        if let CteBody::Merge(merge) = &cte.body {
+            lines.push(format!("  CTE {}", cte.name));
+            let bound = crate::backend::parser::plan_merge(merge, catalog)?;
+            let state = executor_start(bound.input_plan.plan_tree);
+            push_explain_line(
+                &format!("->  Merge on {}", bound.explain_target_name),
+                state.plan_info(),
+                costs,
+                &mut lines,
+            );
+            if let Some(line) = lines.last_mut() {
+                *line = format!("    {line}");
+            }
+            let mut merge_lines = Vec::new();
+            format_explain_lines_with_costs(
+                state.as_ref(),
+                3,
+                false,
+                costs,
+                true,
+                &mut merge_lines,
+            );
+            lines.extend(merge_lines);
+        }
+    }
+    if let Some(first_cte) = stmt.with.first() {
+        lines.push(format!("  ->  CTE Scan on {}", first_cte.name));
+    }
+    Ok(StatementResult::Query {
+        columns: vec![QueryColumn::text("QUERY PLAN")],
+        column_names: vec!["QUERY PLAN".into()],
+        rows: lines
+            .into_iter()
+            .map(|line| vec![Value::Text(line.into())])
+            .collect(),
+    })
 }
 
 #[derive(Clone)]
@@ -3448,7 +3508,31 @@ fn move_updated_row_to_partition(
     )?;
 
     let old_tuple = if toast.is_some() {
-        Some(heap_fetch(&*ctx.pool, ctx.client_id, rel, current_tid)?)
+        match heap_fetch(&*ctx.pool, ctx.client_id, rel, current_tid) {
+            Ok(tuple) => Some(tuple),
+            Err(HeapError::TupleNotVisible(_) | HeapError::TupleAlreadyModified(_)) => {
+                let _ = rollback_inserted_row(
+                    destination.relation_info.relation.rel,
+                    destination.relation_info.relation.toast,
+                    &destination.relation_info.relation.desc,
+                    inserted_tid,
+                    ctx,
+                    xid,
+                );
+                return Ok(WriteUpdatedRowResult::AlreadyModified);
+            }
+            Err(err) => {
+                let _ = rollback_inserted_row(
+                    destination.relation_info.relation.rel,
+                    destination.relation_info.relation.toast,
+                    &destination.relation_info.relation.desc,
+                    inserted_tid,
+                    ctx,
+                    xid,
+                );
+                return Err(err.into());
+            }
+        }
     } else {
         None
     };
@@ -3478,7 +3562,7 @@ fn move_updated_row_to_partition(
             }
             return Ok(WriteUpdatedRowResult::TupleUpdated(new_ctid));
         }
-        Err(HeapError::TupleAlreadyModified(_)) => {
+        Err(HeapError::TupleNotVisible(_) | HeapError::TupleAlreadyModified(_)) => {
             let _ = rollback_inserted_row(
                 destination.relation_info.relation.rel,
                 destination.relation_info.relation.toast,
@@ -3584,7 +3668,13 @@ pub(crate) fn write_updated_row(
         )?;
     }
     let old_tuple = if toast.is_some() {
-        Some(heap_fetch(&*ctx.pool, ctx.client_id, rel, current_tid)?)
+        match heap_fetch(&*ctx.pool, ctx.client_id, rel, current_tid) {
+            Ok(tuple) => Some(tuple),
+            Err(HeapError::TupleNotVisible(_) | HeapError::TupleAlreadyModified(_)) => {
+                return Ok(WriteUpdatedRowResult::AlreadyModified);
+            }
+            Err(err) => return Err(err.into()),
+        }
     } else {
         None
     };
@@ -3771,7 +3861,7 @@ pub(crate) fn write_updated_row(
             }
             Ok(WriteUpdatedRowResult::TupleUpdated(new_ctid))
         }
-        Err(HeapError::TupleAlreadyModified(_)) => {
+        Err(HeapError::TupleNotVisible(_) | HeapError::TupleAlreadyModified(_)) => {
             cleanup_toast_attempt(toast, &toasted, ctx, xid)?;
             if ctx.uses_transaction_snapshot() {
                 return Err(serialization_failure_due_to_concurrent_update());
@@ -7643,7 +7733,13 @@ fn execute_insert_rows_with_routing(
                         inserted_rows.push(row);
                     }
                 } else {
-                    inserted_rows.extend(leaf_inserted_rows);
+                    for leaf_row in leaf_inserted_rows {
+                        inserted_rows.push(remap_partition_row_to_parent_layout(
+                            &leaf_row,
+                            &result_rel_info.relation.desc,
+                            desc,
+                        )?);
+                    }
                 }
             }
         }
@@ -8579,18 +8675,37 @@ fn execute_merge_update_row(
 fn execute_merge_delete_row(
     stmt: &BoundMergeStatement,
     target_tid: ItemPointerData,
+    target_tableoid: Option<u32>,
     original_values: &[Value],
     ctx: &mut ExecutorContext,
     xid: TransactionId,
 ) -> Result<bool, ExecError> {
+    let target_relation = target_tableoid.and_then(|oid| {
+        ctx.catalog
+            .as_deref()
+            .and_then(|catalog| catalog.relation_by_oid(oid))
+    });
+    let target_rel = target_relation
+        .as_ref()
+        .map(|relation| relation.rel)
+        .unwrap_or(stmt.rel);
+    let target_desc = target_relation
+        .as_ref()
+        .map(|relation| &relation.desc)
+        .unwrap_or(&stmt.desc);
+    let target_toast = target_relation
+        .as_ref()
+        .and_then(|relation| relation.toast)
+        .or(stmt.toast);
+    let target_relation_oid = target_tableoid.unwrap_or(stmt.relation_oid);
     if let Some(catalog) = ctx.catalog.as_deref() {
         let namespace_oid = catalog
-            .class_row_by_oid(stmt.relation_oid)
+            .class_row_by_oid(target_relation_oid)
             .map(|row| row.relnamespace)
             .unwrap_or(0);
         enforce_publication_replica_identity(
             &stmt.relation_name,
-            stmt.relation_oid,
+            target_relation_oid,
             namespace_oid,
             &stmt.desc,
             &stmt.indexes,
@@ -8616,15 +8731,20 @@ fn execute_merge_delete_row(
         xid,
         None,
     )?;
-    let old_tuple = if stmt.toast.is_some() {
-        Some(heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, target_tid)?)
+    let old_tuple = if target_toast.is_some() {
+        Some(heap_fetch(
+            &*ctx.pool,
+            ctx.client_id,
+            target_rel,
+            target_tid,
+        )?)
     } else {
         None
     };
     match heap_delete_with_waiter(
         &*ctx.pool,
         ctx.client_id,
-        stmt.rel,
+        target_rel,
         &ctx.txns,
         xid,
         target_tid,
@@ -8632,8 +8752,8 @@ fn execute_merge_delete_row(
         None,
     ) {
         Ok(()) => {
-            if let (Some(toast), Some(old_tuple)) = (stmt.toast, old_tuple.as_ref()) {
-                delete_external_from_tuple(ctx, toast, &stmt.desc, old_tuple, xid)?;
+            if let (Some(toast), Some(old_tuple)) = (target_toast, old_tuple.as_ref()) {
+                delete_external_from_tuple(ctx, toast, target_desc, old_tuple, xid)?;
             }
             let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_delete(
                 &stmt.relation_name,
@@ -8654,7 +8774,7 @@ fn execute_merge_delete_row(
             validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
             ctx.session_stats
                 .write()
-                .note_relation_delete(stmt.relation_oid);
+                .note_relation_delete(target_relation_oid);
             Ok(true)
         }
         Err(HeapError::TupleUpdated(_, _)) => {
@@ -8732,10 +8852,16 @@ pub(crate) fn execute_merge(
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
         let mut matched_target_rows = HashSet::new();
+        let mut input_rows = Vec::new();
         while let Some(slot) = state.exec_proc_node(ctx)? {
             ctx.check_for_interrupts()?;
             let mut row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
             Value::materialize_all(&mut row_values);
+            input_rows.push(row_values);
+        }
+
+        for row_values in input_rows {
+            ctx.check_for_interrupts()?;
             let target_tid = row_values
                 .get(stmt.target_ctid_index)
                 .ok_or(ExecError::DetailedError {
@@ -8745,6 +8871,21 @@ pub(crate) fn execute_merge(
                     sqlstate: "XX000",
                 })
                 .and_then(parse_tid_text)?;
+            let target_tableoid = if target_tid.is_some() {
+                Some(
+                    row_values
+                        .get(stmt.target_tableoid_index)
+                        .ok_or(ExecError::DetailedError {
+                            message: "merge input row is missing target tableoid marker".into(),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "XX000",
+                        })
+                        .and_then(parse_update_tableoid)?,
+                )
+            } else {
+                None
+            };
             let source_present = row_values
                 .get(stmt.source_present_index)
                 .ok_or(ExecError::DetailedError {
@@ -8756,7 +8897,8 @@ pub(crate) fn execute_merge(
                 .and_then(merge_source_present)?;
             if source_present
                 && let Some(target_tid) = target_tid
-                && !matched_target_rows.insert(target_tid)
+                && !matched_target_rows
+                    .insert((target_tableoid.unwrap_or(stmt.relation_oid), target_tid))
             {
                 return Err(ExecError::DetailedError {
                     message: "MERGE command cannot affect row a second time".into(),
@@ -8799,6 +8941,7 @@ pub(crate) fn execute_merge(
                             && execute_merge_delete_row(
                                 &stmt,
                                 target_tid,
+                                target_tableoid,
                                 &target_values,
                                 ctx,
                                 xid,
@@ -11559,7 +11702,14 @@ fn execute_update_from_joined_input(
             let source_values =
                 row_values[stmt.target_visible_count..stmt.visible_column_count].to_vec();
             let mut current_tid = target_tid;
-            let mut current_old_values = fetch_update_target_values(target, current_tid, ctx)?;
+            let mut current_old_values = match fetch_update_target_values(target, current_tid, ctx)
+            {
+                Ok(values) => values,
+                Err(ExecError::Heap(
+                    HeapError::TupleNotVisible(_) | HeapError::TupleAlreadyModified(_),
+                )) => continue,
+                Err(err) => return Err(err),
+            };
             let mut current_values = evaluate_update_from_assignments(
                 target,
                 &current_old_values,

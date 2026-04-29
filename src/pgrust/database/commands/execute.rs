@@ -61,6 +61,7 @@ fn direct_guc_default(name: &str) -> Option<&'static str> {
         | "enable_mergejoin"
         | "enable_memoize"
         | "enable_material"
+        | "enable_partition_pruning"
         | "enable_hashagg"
         | "enable_sort" => Some("on"),
         "debug_parallel_query" => Some("off"),
@@ -106,6 +107,7 @@ fn direct_planner_config(gucs: &std::collections::HashMap<String, String>) -> Pl
         enable_mergejoin: direct_bool_config(gucs, "enable_mergejoin", true),
         enable_memoize: direct_bool_config(gucs, "enable_memoize", true),
         enable_material: direct_bool_config(gucs, "enable_material", true),
+        enable_partition_pruning: direct_bool_config(gucs, "enable_partition_pruning", true),
         retain_partial_index_filters: false,
         enable_hashagg: direct_bool_config(gucs, "enable_hashagg", true),
         enable_sort: direct_bool_config(gucs, "enable_sort", true),
@@ -276,6 +278,13 @@ fn reject_restricted_views_in_cte_body(
         CteBody::Values(_) => Ok(()),
         CteBody::Insert(insert) => reject_restricted_views_in_insert(insert, catalog),
         CteBody::Update(update) => reject_restricted_views_in_update(update, catalog),
+        CteBody::Merge(merge) => {
+            for cte in &merge.with {
+                reject_restricted_views_in_cte_body(&cte.body, catalog)?;
+            }
+            reject_restricted_view_access(&merge.target_table, catalog)?;
+            reject_restricted_views_in_from_item(&merge.source, catalog)
+        }
         CteBody::RecursiveUnion {
             anchor, recursive, ..
         } => {

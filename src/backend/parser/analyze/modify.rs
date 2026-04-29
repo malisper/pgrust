@@ -151,6 +151,7 @@ pub struct BoundMergeStatement {
     pub explain_target_name: String,
     pub visible_column_count: usize,
     pub target_ctid_index: usize,
+    pub target_tableoid_index: usize,
     pub source_present_index: usize,
     pub merge_update_visibility_checks: Vec<RlsWriteCheck>,
     pub merge_delete_visibility_checks: Vec<RlsWriteCheck>,
@@ -641,6 +642,10 @@ fn merge_hidden_ctid_name() -> String {
     "__merge_target_ctid".into()
 }
 
+fn merge_hidden_tableoid_name() -> String {
+    "__merge_target_tableoid".into()
+}
+
 fn update_hidden_ctid_name() -> String {
     "__update_target_ctid".into()
 }
@@ -1095,7 +1100,10 @@ fn scope_with_output_exprs(mut scope: BoundScope, output_exprs: Vec<Expr>) -> Bo
     scope
 }
 
-fn with_merge_target_ctid(from: AnalyzedFrom, target_desc: &RelationDesc) -> (AnalyzedFrom, usize) {
+fn with_merge_target_identity(
+    from: AnalyzedFrom,
+    target_desc: &RelationDesc,
+) -> (AnalyzedFrom, usize, usize) {
     let mut targets = merge_projection_targets(&from.output_columns, &from.output_exprs);
     let ctid_resno = targets.len() + 1;
     targets.push(
@@ -1112,8 +1120,27 @@ fn with_merge_target_ctid(from: AnalyzedFrom, target_desc: &RelationDesc) -> (An
         )
         .with_input_resno(ctid_resno),
     );
+    let tableoid_resno = targets.len() + 1;
+    targets.push(
+        TargetEntry::new(
+            merge_hidden_tableoid_name(),
+            Expr::Var(Var {
+                varno: 1,
+                varattno: TABLE_OID_ATTR_NO,
+                varlevelsup: 0,
+                vartype: SqlType::new(SqlTypeKind::Oid),
+            }),
+            SqlType::new(SqlTypeKind::Oid),
+            tableoid_resno,
+        )
+        .with_input_resno(tableoid_resno),
+    );
     let projected = from.with_projection(targets);
-    (projected, target_desc.columns.len())
+    (
+        projected,
+        target_desc.columns.len(),
+        target_desc.columns.len() + 1,
+    )
 }
 
 fn with_update_target_identity(
@@ -1307,6 +1334,7 @@ fn build_visibility_write_checks(
         .into_iter()
         .map(|expr| RlsWriteCheck {
             expr,
+            display_exprs: Vec::new(),
             policy_name: None,
             source: source.clone(),
         })
@@ -1572,18 +1600,27 @@ pub fn plan_merge(
         .as_ref()
         .map(|target| target.base_relation.clone())
         .unwrap_or_else(|| entry.clone());
+    let execution_relation_name = auto_view_target
+        .as_ref()
+        .map(|_| {
+            relation_display_name(catalog, execution_relation.relation_oid, &stmt.target_table)
+        })
+        .unwrap_or_else(|| stmt.target_table.clone());
     let column_defaults =
         bind_insert_column_defaults(&execution_relation.desc, catalog, &local_ctes)?;
     let target_relation_name = merge_target_relation_name(stmt);
-    let explain_target_name = merge_explain_target_name(stmt);
+    let explain_target_name = auto_view_target
+        .as_ref()
+        .map(|_| execution_relation_name.clone())
+        .unwrap_or_else(|| merge_explain_target_name(stmt));
     let mut target_base = AnalyzedFrom::relation(
-        target_relation_name.clone(),
+        execution_relation_name.clone(),
         execution_relation.rel,
         execution_relation.relation_oid,
         execution_relation.relkind,
         execution_relation.relispopulated,
         execution_relation.toast,
-        !stmt.target_only && execution_relation.relkind == 'r',
+        !stmt.target_only && matches!(execution_relation.relkind, 'r' | 'p'),
         execution_relation.desc.clone(),
     );
     if auto_view_target.is_some()
@@ -1595,8 +1632,8 @@ pub fn plan_merge(
         permission.check_as_user_oid = view_check_as_user_oid(entry.relation_oid, catalog);
     }
     target_base.output_exprs = generated_relation_output_exprs(&execution_relation.desc, catalog)?;
-    let (target_from, target_visible_count) =
-        with_merge_target_ctid(target_base, &execution_relation.desc);
+    let (target_from, target_visible_count, target_tableoid_input_index) =
+        with_merge_target_identity(target_base, &execution_relation.desc);
     let mut target_scope = scope_for_base_relation_with_generated(
         &target_relation_name,
         &entry.desc,
@@ -1780,7 +1817,8 @@ pub fn plan_merge(
     );
     let visible_column_count = returning_visible_column_count;
     let target_ctid_index = visible_column_count;
-    let source_present_index = visible_column_count + 1;
+    let target_tableoid_index = visible_column_count + 1;
+    let source_present_index = visible_column_count + 2;
     let joined_target_columns = joined.output_columns.clone();
     let joined_output_exprs = joined.output_exprs.clone();
     let mut projection_targets = Vec::with_capacity(visible_column_count + 2);
@@ -1795,7 +1833,7 @@ pub fn plan_merge(
             .with_input_resno(index + 1),
         );
     }
-    let source_start = target_visible_count + 2;
+    let source_start = target_visible_count + 3;
     for source_index in 0..source_visible_count {
         let input_index = source_start + source_index;
         projection_targets.push(
@@ -1817,7 +1855,16 @@ pub fn plan_merge(
         )
         .with_input_resno(target_visible_count + 1),
     );
-    let source_marker_input = target_visible_count + 2 + source_visible_count;
+    projection_targets.push(
+        TargetEntry::new(
+            merge_hidden_tableoid_name(),
+            joined_output_exprs[target_tableoid_input_index].clone(),
+            SqlType::new(SqlTypeKind::Oid),
+            projection_targets.len() + 1,
+        )
+        .with_input_resno(target_tableoid_input_index + 1),
+    );
+    let source_marker_input = target_visible_count + 3 + source_visible_count;
     projection_targets.push(
         TargetEntry::new(
             merge_hidden_source_present_name(),
@@ -1856,6 +1903,7 @@ pub fn plan_merge(
         explain_target_name,
         visible_column_count,
         target_ctid_index,
+        target_tableoid_index,
         source_present_index,
         merge_update_visibility_checks: build_visibility_write_checks(
             merge_update_rls.visibility_quals,
@@ -2045,6 +2093,12 @@ fn build_update_target(
         .iter()
         .map(|check| RlsWriteCheck {
             expr: rewrite_local_vars_for_output_exprs(check.expr.clone(), 1, &translation_exprs),
+            display_exprs: check
+                .display_exprs
+                .iter()
+                .cloned()
+                .map(|expr| rewrite_local_vars_for_output_exprs(expr, 1, &translation_exprs))
+                .collect(),
             policy_name: check.policy_name.clone(),
             source: check.source.clone(),
         })
@@ -2117,6 +2171,12 @@ fn build_update_target_from_joined_input(
         .iter()
         .map(|check| RlsWriteCheck {
             expr: rewrite_local_vars_for_output_exprs(check.expr.clone(), 1, &parent_visible_exprs),
+            display_exprs: check
+                .display_exprs
+                .iter()
+                .cloned()
+                .map(|expr| rewrite_local_vars_for_output_exprs(expr, 1, &parent_visible_exprs))
+                .collect(),
             policy_name: check.policy_name.clone(),
             source: check.source.clone(),
         })
@@ -3102,6 +3162,7 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
                     .cloned()
                     .map(|check| RlsWriteCheck {
                         expr: check.expr,
+                        display_exprs: Vec::new(),
                         policy_name: None,
                         source: crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(
                             check.view_name,
@@ -3262,6 +3323,7 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
                                 1,
                                 &parent_visible_exprs,
                             ),
+                            display_exprs: parent_visible_exprs.clone(),
                             policy_name: None,
                             source: crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(
                                 check.view_name,
@@ -3274,6 +3336,8 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
 
     Ok(BoundUpdateStatement {
         targets,
+        target_relation_name: relation_name.clone(),
+        explain_target_name: relation_name.clone(),
         returning: rewrite_auto_view_returning_targets(
             stmt.returning,
             &input_output_exprs,

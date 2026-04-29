@@ -3587,6 +3587,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 None
             };
             if relkind == 'p'
+                && root.config.enable_partition_pruning
                 && !partition_may_satisfy_filter_for_relation(
                     partition_spec.as_ref(),
                     child_bound.as_ref(),
@@ -3594,7 +3595,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     ancestor_bound.as_ref(),
                     filter.as_ref(),
                     catalog,
-                    relation_oid,
+                    child_relation_oid.unwrap_or(relation_oid),
                 )
             {
                 continue;
@@ -3679,12 +3680,18 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         }
         let append_target =
             slot_output_target(rtindex, &rte.desc.columns, |column| column.sql_type);
-        let partition_prune = append_partition_prune_plan(
-            partition_spec.clone(),
-            &sibling_bounds,
-            filter.as_ref(),
-            &child_prune_bounds,
-        );
+        let partition_prune = root
+            .config
+            .enable_partition_pruning
+            .then(|| {
+                append_partition_prune_plan(
+                    partition_spec.clone(),
+                    &sibling_bounds,
+                    filter.as_ref(),
+                    &child_prune_bounds,
+                )
+            })
+            .flatten();
         let append = if children.is_empty() {
             optimize_path_with_config(
                 Path::Filter {
@@ -3725,12 +3732,18 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         };
         let ordered_path = if ordered_ok {
             query_order_items.map(|items| {
-                let partition_prune = append_partition_prune_plan(
-                    partition_spec.clone(),
-                    &sibling_bounds,
-                    filter.as_ref(),
-                    &ordered_child_prune_bounds,
-                );
+                let partition_prune = root
+                    .config
+                    .enable_partition_pruning
+                    .then(|| {
+                        append_partition_prune_plan(
+                            partition_spec.clone(),
+                            &sibling_bounds,
+                            filter.as_ref(),
+                            &ordered_child_prune_bounds,
+                        )
+                    })
+                    .flatten();
                 if relkind == 'p'
                     && let Some(proof) = ordered_partition_append_proof(
                         root,

@@ -5,9 +5,8 @@ use crate::backend::executor::expr_ops::{
     concat_values, div_values, mod_values, mul_values, negate_value, not_equal_values,
     order_values, shift_left_values, shift_right_values, sub_values, values_are_distinct,
 };
-use crate::backend::executor::{ExecError, Value, cast_value, eval_to_char_function};
+use crate::backend::executor::{ExecError, Value, cast_value};
 use crate::backend::parser::{ParseError, is_binary_coercible_type};
-use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::catalog::builtin_type_row_by_oid;
 use crate::include::catalog::pg_proc::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::parsenodes::{
@@ -969,9 +968,6 @@ fn evaluate_const_func(
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Power) => {
             eval_power_function(args).map(Some)
         }
-        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::ToChar) => {
-            eval_to_char_function(args, &DateTimeConfig::default()).map(Some)
-        }
         _ => Ok(None),
     }
 }
@@ -1537,6 +1533,28 @@ mod tests {
         assert!(matches!(
             simplify_where_qual(expr).unwrap(),
             Expr::ScalarArrayOp(_)
+        ));
+    }
+
+    #[test]
+    fn stable_to_char_is_not_constant_folded() {
+        let expr = Expr::builtin_func(
+            BuiltinScalarFunction::ToChar,
+            Some(SqlType::new(SqlTypeKind::Text)),
+            false,
+            vec![
+                Expr::Const(Value::Int32(125)),
+                Expr::Const(Value::Text("999".into())),
+            ],
+        );
+
+        assert!(matches!(
+            simplify_expr(expr, None).unwrap(),
+            Expr::Func(func)
+                if matches!(
+                    func.implementation,
+                    ScalarFunctionImpl::Builtin(BuiltinScalarFunction::ToChar)
+                )
         ));
     }
 }

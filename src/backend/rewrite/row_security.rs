@@ -26,6 +26,7 @@ pub(crate) enum RlsWriteCheckSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RlsWriteCheck {
     pub expr: Expr,
+    pub display_exprs: Vec<Expr>,
     pub policy_name: Option<String>,
     pub source: RlsWriteCheckSource,
 }
@@ -415,6 +416,7 @@ fn write_policy_checks(
     if !expr_is_true(&permissive_expr) {
         checks.push(RlsWriteCheck {
             expr: permissive_expr,
+            display_exprs: Vec::new(),
             policy_name: None,
             source: source.clone(),
         });
@@ -447,6 +449,7 @@ fn write_policy_checks(
         }
         checks.push(RlsWriteCheck {
             expr,
+            display_exprs: Vec::new(),
             policy_name: Some(policy.polname.clone()),
             source: source.clone(),
         });

@@ -235,6 +235,14 @@ pub(crate) fn relation_may_satisfy_own_partition_bound(
     let Some(filter) = filter else {
         return true;
     };
+    if let Expr::Bool(bool_expr) = filter
+        && bool_expr.boolop == BoolExprType::Or
+    {
+        return bool_expr
+            .args
+            .iter()
+            .any(|arg| relation_may_satisfy_own_partition_bound(catalog, relation_oid, Some(arg)));
+    }
     let Some(relation) = catalog.relation_by_oid(relation_oid) else {
         return true;
     };
@@ -279,7 +287,7 @@ pub(crate) fn relation_may_satisfy_own_partition_bound(
                 None,
                 Some(catalog),
                 None,
-            )
+            ) && relation_may_satisfy_own_partition_bound(catalog, row.inhparent, Some(filter))
         })
 }
 
@@ -2655,6 +2663,19 @@ mod tests {
         }
     }
 
+    fn list_spec_on_b() -> LoweredPartitionSpec {
+        LoweredPartitionSpec {
+            strategy: PartitionStrategy::List,
+            key_columns: vec!["b".into()],
+            key_exprs: vec![text_key_att_expr(1, 2)],
+            key_types: vec![SqlType::new(SqlTypeKind::Text)],
+            key_sqls: vec!["b".into()],
+            partattrs: vec![2],
+            partclass: vec![0],
+            partcollation: vec![0],
+        }
+    }
+
     fn bool_spec() -> LoweredPartitionSpec {
         LoweredPartitionSpec {
             strategy: PartitionStrategy::List,
@@ -2901,6 +2922,23 @@ mod tests {
                 .as_ref()
                 .map(|spec| pg_partitioned_table_row(relation_oid, spec, 0)),
             partition_spec,
+        }
+    }
+
+    fn int_text_desc() -> RelationDesc {
+        RelationDesc {
+            columns: vec![
+                crate::backend::catalog::catalog::column_desc(
+                    "a",
+                    SqlType::new(SqlTypeKind::Int4),
+                    true,
+                ),
+                crate::backend::catalog::catalog::column_desc(
+                    "b",
+                    SqlType::new(SqlTypeKind::Text),
+                    true,
+                ),
+            ],
         }
     }
 
@@ -3202,6 +3240,50 @@ mod tests {
             &catalog,
             child_oid,
             Some(&child_a_eq_16)
+        ));
+    }
+
+    #[test]
+    fn own_partition_bound_checks_or_arms_against_all_ancestors() {
+        let root_oid = 10;
+        let range_child_oid = 20;
+        let list_leaf_oid = 30;
+        let desc = int_text_desc();
+        let catalog = MockCatalog {
+            relations: vec![
+                relation_with_desc(root_oid, 'p', Some(range_spec()), None, desc.clone()),
+                relation_with_desc(
+                    range_child_oid,
+                    'p',
+                    Some(list_spec_on_b()),
+                    Some(int_range_bound(int_value(10), int_value(20))),
+                    desc.clone(),
+                ),
+                relation_with_desc(list_leaf_oid, 'r', None, Some(text_bound(&["efgh"])), desc),
+            ],
+            inherits: vec![
+                inherit(root_oid, range_child_oid, 1),
+                inherit(range_child_oid, list_leaf_oid, 1),
+            ],
+        };
+        let expr = Expr::or(
+            Expr::op_auto(
+                OpExprKind::Eq,
+                vec![int_key_att_expr(42, 1), Expr::Const(Value::Int32(1))],
+            ),
+            Expr::op_auto(
+                OpExprKind::Eq,
+                vec![
+                    text_key_att_expr(42, 2),
+                    Expr::Const(Value::Text("ab".into())),
+                ],
+            ),
+        );
+
+        assert!(!relation_may_satisfy_own_partition_bound(
+            &catalog,
+            list_leaf_oid,
+            Some(&expr)
         ));
     }
 
