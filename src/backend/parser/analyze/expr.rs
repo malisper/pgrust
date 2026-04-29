@@ -522,6 +522,7 @@ fn raw_sql_expr_any(expr: &SqlExpr, predicate: &impl Fn(&SqlExpr) -> bool) -> bo
     match expr {
         SqlExpr::Column(_)
         | SqlExpr::Parameter(_)
+        | SqlExpr::ParamRef(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)
@@ -820,6 +821,24 @@ pub(super) fn bind_legacy_scalar_function_call(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Option<TypedExpr>, ParseError> {
+    if name.eq_ignore_ascii_case("coalesce") {
+        let args = args
+            .iter()
+            .cloned()
+            .map(|value| SqlFunctionArg { name: None, value })
+            .collect::<Vec<_>>();
+        let expr = bind_coalesce_call(&args, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+        let sql_type = expr_sql_type_hint(&expr).ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "COALESCE with a known result type",
+            actual: name.to_string(),
+        })?;
+        return Ok(Some(TypedExpr {
+            expr,
+            sql_type,
+            contains_srf: false,
+        }));
+    }
+
     let Some(legacy_func) = resolve_scalar_function(name).or_else(|| {
         resolve_function_cast_type(catalog, name)
             .filter(|ty| range_type_ref_for_sql_type(*ty).is_some())
@@ -1124,6 +1143,26 @@ fn relation_row_type_identity(
                 .map(|row| row.oid)
         })?;
     (type_oid != 0).then_some((type_oid, relation_oid))
+}
+
+fn bind_sql_function_inline_named_field(
+    name: &str,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    let Some((arg_name, field)) = name.split_once('.') else {
+        return Ok(None);
+    };
+    let Some(arg) = current_sql_function_inline_named_arg(arg_name)
+        .or_else(current_sql_function_inline_single_arg)
+    else {
+        return Ok(None);
+    };
+    let field_type = resolve_bound_field_select_type(&arg.expr, field, catalog)?;
+    Ok(Some(Expr::FieldSelect {
+        expr: Box::new(arg.expr),
+        field: field.to_string(),
+        field_type,
+    }))
 }
 
 fn bind_row_expr_fields(
@@ -2822,16 +2861,52 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                         let named_row_type = relation_row_type_identity(catalog, resolved.relation_oid);
                         build_whole_row_expr(resolved.fields, named_row_type)
                     }
+                    Err(ParseError::UnknownColumn(_))
+                        if current_sql_function_inline_named_arg(name).is_some() =>
+                    {
+                        current_sql_function_inline_named_arg(name)
+                            .expect("checked above")
+                            .expr
+                    }
+                    Err(ParseError::UnknownColumn(_))
+                        if !name.contains('.')
+                            && current_sql_function_inline_single_arg().is_some() =>
+                    {
+                        current_sql_function_inline_single_arg()
+                            .expect("checked above")
+                            .expr
+                    }
+                    Err(ParseError::UnknownColumn(_)) => {
+                        if let Some(expr) =
+                            bind_sql_function_inline_named_field(name, catalog)?
+                        {
+                            expr
+                        } else {
+                            return Err(ParseError::UnknownColumn(name.clone()));
+                        }
+                    }
                     Err(err) => return Err(err),
                 }
             }
         }
-        SqlExpr::Parameter(index) => Expr::Param(Param {
-            paramkind: ParamKind::External,
-            paramid: *index,
-            paramtype: external_param_type(*index)
-                .unwrap_or_else(|| SqlType::new(SqlTypeKind::Text)),
-        }),
+        SqlExpr::Parameter(index) => current_sql_function_inline_arg(*index)
+            .map(|arg| arg.expr)
+            .unwrap_or_else(|| {
+                Expr::Param(Param {
+                    paramkind: ParamKind::External,
+                    paramid: *index,
+                    paramtype: external_param_type(*index)
+                        .unwrap_or_else(|| SqlType::new(SqlTypeKind::Text)),
+                })
+            }),
+        SqlExpr::ParamRef(index) => current_sql_function_inline_arg(*index)
+            .map(|arg| arg.expr)
+            .ok_or_else(|| ParseError::DetailedError {
+                message: format!("there is no parameter ${index}"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P02",
+            })?,
         SqlExpr::Default => {
             return Err(ParseError::UnexpectedToken {
                 expected: "expression",

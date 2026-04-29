@@ -12,7 +12,8 @@ use crate::include::nodes::execnodes::{
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{
-    Expr, OpExprKind, SetReturningCall, expr_sql_type_hint, set_returning_call_exprs,
+    Expr, OpExprKind, RowsFromSource, SetReturningCall, expr_sql_type_hint,
+    set_returning_call_exprs,
 };
 
 use std::collections::{HashMap, VecDeque};
@@ -163,6 +164,12 @@ fn recursive_union_distinct_hashable(sql_type: SqlType) -> bool {
 
 fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
     match call {
+        SetReturningCall::RowsFrom { items, .. } => items.iter().any(|item| match &item.source {
+            RowsFromSource::Function(call) => set_returning_call_uses_outer_columns(call),
+            RowsFromSource::Project { output_exprs, .. } => {
+                output_exprs.iter().any(expr_uses_outer_columns)
+            }
+        }),
         SetReturningCall::GenerateSeries {
             start,
             stop,

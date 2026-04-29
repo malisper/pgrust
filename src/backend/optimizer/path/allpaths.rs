@@ -1874,8 +1874,11 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
             wire_type_oid: None,
         })
         .collect::<Vec<_>>();
-    let sorted_children =
-        set_operation_needs_ordered_children(set_operation.op, &output_columns, root.config);
+    let force_sorted_union = matches!(set_operation.op, SetOperator::Union { all: false })
+        && !root.parse.sort_clause.is_empty()
+        && set_op_columns_sortable(&output_columns);
+    let sorted_children = force_sorted_union
+        || set_operation_needs_ordered_children(set_operation.op, &output_columns, root.config);
     let (child_roots, children) = set_operation
         .inputs
         .into_iter()
@@ -1903,6 +1906,7 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
         children,
         catalog,
         root.config,
+        force_sorted_union,
     );
     let mut rel = RelOptInfo::new(
         Vec::new(),
@@ -1962,6 +1966,7 @@ fn build_set_operation_path(
     children: Vec<Path>,
     catalog: &dyn CatalogLookup,
     config: PlannerConfig,
+    force_sorted_union: bool,
 ) -> Path {
     match op {
         SetOperator::Union { all: true } => optimize_path_with_config(
@@ -1972,7 +1977,7 @@ fn build_set_operation_path(
         SetOperator::Union { all: false } => {
             let can_hash = set_op_columns_hashable(&output_columns);
             let can_sort = set_op_columns_sortable(&output_columns);
-            if can_hash && (config.enable_hashagg || !can_sort) {
+            if !force_sorted_union && can_hash && (config.enable_hashagg || !can_sort) {
                 let append =
                     set_op_append_path(source_id, desc, &output_columns, child_roots, children);
                 optimize_path_with_config(

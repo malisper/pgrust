@@ -71,6 +71,23 @@ impl Database {
         )
     }
 
+    pub(super) fn create_foreign_key_action_triggers_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        constraint: &PgConstraintRow,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        self.create_foreign_key_trigger_rows_in_transaction(
+            client_id,
+            xid,
+            cid,
+            foreign_key_action_trigger_rows(constraint),
+            catalog_effects,
+        )
+    }
+
     fn create_foreign_key_trigger_rows_in_transaction(
         &self,
         client_id: ClientId,
@@ -1094,7 +1111,12 @@ fn internal_constraint_trigger_row(row: &PgTriggerRow) -> bool {
 
 fn foreign_key_trigger_rows(constraint: &PgConstraintRow) -> Vec<PgTriggerRow> {
     let mut rows = foreign_key_check_trigger_rows(constraint);
-    rows.extend([
+    rows.extend(foreign_key_action_trigger_rows(constraint));
+    rows
+}
+
+fn foreign_key_action_trigger_rows(constraint: &PgConstraintRow) -> Vec<PgTriggerRow> {
+    vec![
         foreign_key_trigger_row(
             constraint,
             constraint.confrelid,
@@ -1113,8 +1135,7 @@ fn foreign_key_trigger_rows(constraint: &PgConstraintRow) -> Vec<PgTriggerRow> {
             "a",
             4,
         ),
-    ]);
-    rows
+    ]
 }
 
 fn foreign_key_check_trigger_rows(constraint: &PgConstraintRow) -> Vec<PgTriggerRow> {
@@ -1844,6 +1865,7 @@ fn rewrite_trigger_system_column_refs(expr: &mut SqlExpr) {
         }
         SqlExpr::Const(_)
         | SqlExpr::Default
+        | SqlExpr::ParamRef(_)
         | SqlExpr::IntegerLiteral(_)
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::ScalarSubquery(_)

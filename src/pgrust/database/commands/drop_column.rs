@@ -132,6 +132,33 @@ fn visible_column_index(relation: &BoundRelation, column_name: &str) -> Option<u
         })
 }
 
+fn mark_column_dropped_in_desc(
+    desc: &mut crate::backend::executor::RelationDesc,
+    column_name: &str,
+) {
+    if let Some((index, column)) = desc
+        .columns
+        .iter_mut()
+        .enumerate()
+        .find(|(_, column)| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+    {
+        let dropped_name = format!("........pg.dropped.{}........", index + 1);
+        column.name = dropped_name.clone();
+        column.storage.name = dropped_name;
+        column.storage.nullable = true;
+        column.dropped = true;
+        column.attstattarget = -1;
+        column.not_null_constraint_oid = None;
+        column.not_null_constraint_name = None;
+        column.not_null_constraint_validated = false;
+        column.not_null_primary_key_owned = false;
+        column.attrdef_oid = None;
+        column.default_expr = None;
+        column.generated = None;
+        column.missing_default_value = None;
+    }
+}
+
 fn cannot_drop_inherited_column_error(column_name: &str) -> ExecError {
     ExecError::DetailedError {
         message: format!("cannot drop inherited column \"{column_name}\""),
@@ -410,12 +437,6 @@ impl Database {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "user table for ALTER TABLE DROP COLUMN",
                 actual: "system catalog".into(),
-            }));
-        }
-        if relation.relpersistence == 't' {
-            return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "permanent table for ALTER TABLE DROP COLUMN",
-                actual: "temporary table".into(),
             }));
         }
         reject_typed_table_ddl(&relation, "drop column from")?;
@@ -746,6 +767,11 @@ impl Database {
             .alter_table_drop_column_mvcc(relation.relation_oid, &drop_stmt.column_name, &ctx)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
+        if relation.relpersistence == 't' {
+            let mut temp_desc = relation.desc.clone();
+            mark_column_dropped_in_desc(&mut temp_desc, &drop_stmt.column_name);
+            self.replace_temp_entry_desc(client_id, relation.relation_oid, temp_desc)?;
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 }

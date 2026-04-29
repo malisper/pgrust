@@ -1300,9 +1300,12 @@ fn type_drop_display_name(
         .namespace_by_oid(namespace_oid)
         .map(|row| row.nspname.clone())
         .unwrap_or_else(|| "public".to_string());
-    match schema_name.as_str() {
-        "public" | "pg_catalog" => object_name.to_string(),
-        _ => format!("{schema_name}.{object_name}"),
+    if matches!(schema_name.as_str(), "public" | "pg_catalog")
+        || schema_name.starts_with("pg_temp_")
+    {
+        object_name.to_string()
+    } else {
+        format!("{schema_name}.{object_name}")
     }
 }
 

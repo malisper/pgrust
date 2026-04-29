@@ -368,13 +368,6 @@ fn collect_alter_column_type_targets(
             }));
         }
         reject_typed_table_ddl(&target_relation, "alter column type of")?;
-        reject_relation_with_dependent_views(
-            db,
-            client_id,
-            Some((xid, cid)),
-            target_relation.relation_oid,
-            "ALTER TABLE ALTER COLUMN TYPE on relation without dependent views",
-        )?;
         if let Some(column_index) =
             target_relation
                 .desc
@@ -588,6 +581,7 @@ impl Database {
             pending_table_locks: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: self.plpgsql_function_cache(client_id),
             pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),

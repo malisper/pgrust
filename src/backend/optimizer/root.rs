@@ -8,8 +8,9 @@ use crate::include::nodes::pathnodes::{
     AggregateLayout, PathTarget, PlannerConfig, PlannerInfo, RelOptInfo,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, AggFunc, Aggref, Expr, SetReturningCall, SortGroupClause, SubLink, SubLinkType,
-    TargetEntry, Var, expr_contains_set_returning, is_system_attr, set_returning_call_exprs,
+    AggAccum, AggFunc, Aggref, Expr, RowsFromItem, RowsFromSource, SetReturningCall,
+    SortGroupClause, SubLink, SubLinkType, TargetEntry, Var, expr_contains_set_returning,
+    is_system_attr, set_returning_call_exprs,
 };
 
 use super::path::flatten_and_conjuncts;
@@ -521,6 +522,37 @@ fn prepare_set_returning_call_for_locking(
     call: SetReturningCall,
 ) -> Result<SetReturningCall, ParseError> {
     Ok(match call {
+        SetReturningCall::RowsFrom {
+            items,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::RowsFrom {
+            items: items
+                .into_iter()
+                .map(|item| {
+                    Ok(RowsFromItem {
+                        source: match item.source {
+                            RowsFromSource::Function(call) => RowsFromSource::Function(
+                                prepare_set_returning_call_for_locking(call)?,
+                            ),
+                            RowsFromSource::Project {
+                                output_exprs,
+                                output_columns,
+                            } => RowsFromSource::Project {
+                                output_exprs: output_exprs
+                                    .into_iter()
+                                    .map(prepare_expr_for_locking)
+                                    .collect::<Result<Vec<_>, ParseError>>()?,
+                                output_columns,
+                            },
+                        },
+                        column_definitions: item.column_definitions,
+                    })
+                })
+                .collect::<Result<Vec<_>, ParseError>>()?,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
@@ -716,6 +748,7 @@ fn prepare_set_returning_call_for_locking(
             function_name,
             func_variadic,
             args,
+            inlined_expr,
             output_columns,
             with_ordinality,
         } => SetReturningCall::UserDefined {
@@ -726,6 +759,9 @@ fn prepare_set_returning_call_for_locking(
                 .into_iter()
                 .map(prepare_expr_for_locking)
                 .collect::<Result<Vec<_>, _>>()?,
+            inlined_expr: inlined_expr
+                .map(|expr| prepare_expr_for_locking(*expr).map(Box::new))
+                .transpose()?,
             output_columns,
             with_ordinality,
         },
@@ -2794,6 +2830,20 @@ fn collect_set_returning_call_outer_refs(
     exprs: &mut Vec<Expr>,
 ) {
     match call {
+        SetReturningCall::RowsFrom { items, .. } => {
+            for item in items {
+                match &item.source {
+                    RowsFromSource::Function(call) => {
+                        collect_set_returning_call_outer_refs(call, levelsup, exprs);
+                    }
+                    RowsFromSource::Project { output_exprs, .. } => {
+                        for expr in output_exprs {
+                            collect_query_outer_refs_expr(expr, levelsup, exprs);
+                        }
+                    }
+                }
+            }
+        }
         SetReturningCall::GenerateSeries {
             start,
             stop,

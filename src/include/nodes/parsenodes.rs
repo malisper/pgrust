@@ -22,6 +22,10 @@ pub enum ParseError {
         source: Box<ParseError>,
         position: usize,
     },
+    WithContext {
+        source: Box<ParseError>,
+        context: String,
+    },
     UnexpectedEof,
     UnexpectedToken {
         expected: &'static str,
@@ -113,16 +117,26 @@ impl ParseError {
         }
     }
 
+    pub fn with_context(self, context: impl Into<String>) -> Self {
+        ParseError::WithContext {
+            source: Box::new(self),
+            context: context.into(),
+        }
+    }
+
     pub fn position(&self) -> Option<usize> {
         match self {
             ParseError::Positioned { position, .. } => Some(*position),
+            ParseError::WithContext { source, .. } => source.position(),
             _ => None,
         }
     }
 
     pub fn unpositioned(&self) -> &ParseError {
         match self {
-            ParseError::Positioned { source, .. } => source.unpositioned(),
+            ParseError::Positioned { source, .. } | ParseError::WithContext { source, .. } => {
+                source.unpositioned()
+            }
             other => other,
         }
     }
@@ -280,6 +294,9 @@ impl fmt::Display for ParseError {
             }
             ParseError::Positioned { .. } => {
                 unreachable!("positioned parse errors unwrap before display")
+            }
+            ParseError::WithContext { .. } => {
+                unreachable!("context parse errors unwrap before display")
             }
         }
     }
@@ -1690,6 +1707,10 @@ pub enum FromItem {
         func_variadic: bool,
         with_ordinality: bool,
     },
+    RowsFrom {
+        functions: Vec<RowsFromFunction>,
+        with_ordinality: bool,
+    },
     JsonTable(JsonTableExpr),
     XmlTable(XmlTableExpr),
     TableSample {
@@ -1740,6 +1761,14 @@ impl AliasColumnSpec {
 pub struct AliasColumnDef {
     pub name: String,
     pub ty: RawTypeName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowsFromFunction {
+    pub name: String,
+    pub args: Vec<SqlFunctionArg>,
+    pub func_variadic: bool,
+    pub column_definitions: Vec<AliasColumnDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4881,6 +4910,7 @@ pub enum SubqueryComparisonOp {
 pub enum SqlExpr {
     Column(String),
     Parameter(usize),
+    ParamRef(usize),
     Default,
     Const(Value),
     IntegerLiteral(String),

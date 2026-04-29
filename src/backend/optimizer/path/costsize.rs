@@ -43,11 +43,11 @@ use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, PlannerSubroot, RestrictInfo,
 };
 use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument, PlanEstimate};
-use crate::include::nodes::primnodes::SetReturningCall;
 use crate::include::nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, Expr, FuncExpr, JoinType, OpExprKind, OrderByEntry,
-    ProjectSetTarget, QueryColumn, RelationDesc, ScalarFunctionImpl, TargetEntry, ToastRelationRef,
-    Var, attrno_index, set_returning_call_exprs, user_attrno,
+    ProjectSetTarget, QueryColumn, RelationDesc, RowsFromSource, ScalarFunctionImpl,
+    SetReturningCall, TargetEntry, ToastRelationRef, Var, attrno_index, set_returning_call_exprs,
+    user_attrno,
 };
 
 use super::super::joininfo;
@@ -4796,6 +4796,12 @@ fn path_uses_outer_relids(path: &Path, relids: &[usize]) -> bool {
 
 fn set_returning_call_uses_immediate_outer_columns(call: &SetReturningCall) -> bool {
     match call {
+        SetReturningCall::RowsFrom { items, .. } => items.iter().any(|item| match &item.source {
+            RowsFromSource::Function(call) => set_returning_call_uses_immediate_outer_columns(call),
+            RowsFromSource::Project { output_exprs, .. } => {
+                output_exprs.iter().any(expr_uses_immediate_outer_columns)
+            }
+        }),
         SetReturningCall::GenerateSeries {
             start,
             stop,
@@ -8196,6 +8202,13 @@ fn const_argument(expr: &Expr) -> Option<Value> {
 
 fn estimate_function_scan_rows(call: &SetReturningCall, catalog: &dyn CatalogLookup) -> f64 {
     match call {
+        SetReturningCall::RowsFrom { items, .. } => items
+            .iter()
+            .map(|item| match &item.source {
+                RowsFromSource::Function(call) => estimate_function_scan_rows(call, catalog),
+                RowsFromSource::Project { .. } => 1.0,
+            })
+            .fold(0.0, f64::max),
         SetReturningCall::GenerateSeries {
             start, stop, step, ..
         } => estimate_generate_series_rows(start, stop, step).unwrap_or(1000.0),
@@ -8724,6 +8737,8 @@ fn const_gist_argument_value(expr: &Expr) -> Option<Value> {
         &values,
         func.funcresulttype,
         func.funcvariadic,
+        None,
+        &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
     ) {
         return result.ok();
     }

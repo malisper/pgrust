@@ -4385,7 +4385,10 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind: SqlTypeKind::Numeric,
                 ..
-            } => Ok(Value::Numeric(NumericValue::from_i64(v as i64))),
+            } => Ok(Value::Numeric(coerce_numeric_value(
+                NumericValue::from_i64(v as i64),
+                ty,
+            )?)),
             SqlType {
                 kind: SqlTypeKind::Money,
                 ..
@@ -4537,7 +4540,10 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind: SqlTypeKind::Numeric,
                 ..
-            } => Ok(Value::Numeric(NumericValue::from_i64(v as i64))),
+            } => Ok(Value::Numeric(coerce_numeric_value(
+                NumericValue::from_i64(v as i64),
+                ty,
+            )?)),
             SqlType {
                 kind: SqlTypeKind::Money,
                 ..
@@ -5364,7 +5370,10 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind: SqlTypeKind::Numeric,
                 ..
-            } => Ok(Value::Numeric(NumericValue::from_i64(v))),
+            } => Ok(Value::Numeric(coerce_numeric_value(
+                NumericValue::from_i64(v),
+                ty,
+            )?)),
             SqlType {
                 kind: SqlTypeKind::Money,
                 ..

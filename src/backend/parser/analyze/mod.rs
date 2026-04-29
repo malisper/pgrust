@@ -22,6 +22,7 @@ mod query;
 mod ranges;
 mod rules;
 mod scope;
+mod sqlfunc_inline;
 mod system_views;
 mod window;
 
@@ -31,7 +32,7 @@ use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{Value, cast_value};
 use crate::backend::optimizer::planner_with_config;
-use crate::backend::rewrite::pg_rewrite_query;
+use crate::backend::rewrite::{format_view_definition, pg_rewrite_query};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
@@ -76,8 +77,8 @@ use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
     build_pg_rules_rows, build_pg_stats_ext_exprs_rows, build_pg_stats_ext_rows,
-    build_pg_stats_rows, build_pg_tables_rows, build_pg_user_mappings_rows, build_pg_views_rows,
-    current_pg_stat_progress_copy_rows,
+    build_pg_stats_rows, build_pg_tables_rows, build_pg_user_mappings_rows,
+    build_pg_views_rows_with_definition_formatter, current_pg_stat_progress_copy_rows,
 };
 use agg::*;
 use agg_output::*;
@@ -138,6 +139,7 @@ pub(crate) use rules::{
 pub use scope::BoundRelation;
 use scope::*;
 pub(crate) use scope::{BoundCte, BoundScope, scope_for_relation, shift_scope_rtindexes};
+use sqlfunc_inline::*;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -2542,11 +2544,18 @@ impl CatalogLookup for Catalog {
 
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {
         let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
-        build_pg_views_rows(
+        build_pg_views_rows_with_definition_formatter(
             catcache.namespace_rows(),
             catcache.authid_rows(),
             catcache.class_rows(),
             catcache.rewrite_rows(),
+            |class, definition| {
+                self.relation_by_oid(class.oid)
+                    .and_then(|relation| {
+                        format_view_definition(class.oid, &relation.desc, self).ok()
+                    })
+                    .unwrap_or_else(|| definition.to_string())
+            },
         )
     }
 
@@ -2931,6 +2940,7 @@ fn literal_sql_expr_value(expr: &SqlExpr) -> Option<Value> {
 fn group_by_target_ordinal_expr(
     expr: &SqlExpr,
     targets: &[SelectItem],
+    input_scope: &BoundScope,
 ) -> Result<Option<SqlExpr>, ParseError> {
     let SqlExpr::IntegerLiteral(value) = expr else {
         return Ok(None);
@@ -2944,7 +2954,38 @@ fn group_by_target_ordinal_expr(
             actual: format!("GROUP BY position {value} is not in select list"),
         });
     }
-    Ok(Some(targets[ordinal - 1].expr.clone()))
+    let target_expr = &targets[ordinal - 1].expr;
+    if let SqlExpr::Column(name) = target_expr {
+        if name == "*" {
+            return Ok(first_visible_scope_column_expr(input_scope, None));
+        }
+        if let Some(relation_name) = name.strip_suffix(".*") {
+            return Ok(first_visible_scope_column_expr(
+                input_scope,
+                Some(relation_name),
+            ));
+        }
+    }
+    Ok(Some(target_expr.clone()))
+}
+
+fn first_visible_scope_column_expr(
+    input_scope: &BoundScope,
+    relation_name: Option<&str>,
+) -> Option<SqlExpr> {
+    input_scope
+        .columns
+        .iter()
+        .find(|column| {
+            !column.hidden
+                && relation_name.is_none_or(|relation_name| {
+                    column
+                        .relation_names
+                        .iter()
+                        .any(|visible| visible.eq_ignore_ascii_case(relation_name))
+                })
+        })
+        .map(|column| SqlExpr::Column(column.output_name.clone()))
 }
 
 fn group_by_target_alias_expr(
@@ -2977,7 +3018,7 @@ fn normalize_group_by_exprs(
     stmt.group_by
         .iter()
         .map(|expr| {
-            group_by_target_ordinal_expr(expr, &stmt.targets).map(|resolved| {
+            group_by_target_ordinal_expr(expr, &stmt.targets, input_scope).map(|resolved| {
                 resolved
                     .or_else(|| group_by_target_alias_expr(expr, &stmt.targets, input_scope))
                     .unwrap_or_else(|| expr.clone())
@@ -4175,6 +4216,14 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
+            FromItem::RowsFrom { functions, .. } => {
+                for function in functions {
+                    for arg in &function.args {
+                        self.visit_expr(&arg.value, context)?;
+                    }
+                }
+                Ok(())
+            }
             FromItem::JsonTable(table) => {
                 self.visit_expr(&table.context, context)?;
                 for arg in &table.passing {
@@ -4288,6 +4337,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
         match expr {
             SqlExpr::Column(_)
             | SqlExpr::Parameter(_)
+            | SqlExpr::ParamRef(_)
             | SqlExpr::Default
             | SqlExpr::Const(_)
             | SqlExpr::IntegerLiteral(_)
@@ -4604,7 +4654,9 @@ fn from_item_references_table(item: &FromItem, table_name: &str) -> bool {
         }
         FromItem::JsonTable(table) => json_table_expr_references_table(table, table_name),
         FromItem::XmlTable(table) => xml_table_expr_references_table(table, table_name),
-        FromItem::Values { .. } | FromItem::FunctionCall { .. } => false,
+        FromItem::Values { .. } | FromItem::FunctionCall { .. } | FromItem::RowsFrom { .. } => {
+            false
+        }
     }
 }
 
@@ -4674,6 +4726,7 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
     match expr {
         SqlExpr::Column(_)
         | SqlExpr::Parameter(_)
+        | SqlExpr::ParamRef(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)

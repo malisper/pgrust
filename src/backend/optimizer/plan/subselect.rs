@@ -3,8 +3,9 @@
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, ExprArraySubscript, ProjectSetTarget, SetReturningCall, SqlJsonQueryFunction,
-    SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink, SubPlan,
+    AggAccum, Expr, ExprArraySubscript, ProjectSetTarget, RowsFromItem, RowsFromSource,
+    SetReturningCall, SqlJsonQueryFunction, SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink,
+    SubPlan,
 };
 
 use super::planner::planner;
@@ -350,6 +351,35 @@ fn finalize_set_returning_call(
     subplans: &mut Vec<Plan>,
 ) -> SetReturningCall {
     match call {
+        SetReturningCall::RowsFrom {
+            items,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::RowsFrom {
+            items: items
+                .into_iter()
+                .map(|item| RowsFromItem {
+                    source: match item.source {
+                        RowsFromSource::Function(call) => RowsFromSource::Function(
+                            finalize_set_returning_call(call, catalog, subplans),
+                        ),
+                        RowsFromSource::Project {
+                            output_exprs,
+                            output_columns,
+                        } => RowsFromSource::Project {
+                            output_exprs: output_exprs
+                                .into_iter()
+                                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                                .collect(),
+                            output_columns,
+                        },
+                    },
+                    column_definitions: item.column_definitions,
+                })
+                .collect(),
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
@@ -546,6 +576,7 @@ fn finalize_set_returning_call(
             function_name,
             func_variadic,
             args,
+            inlined_expr,
             output_columns,
             with_ordinality,
         } => SetReturningCall::UserDefined {
@@ -556,6 +587,8 @@ fn finalize_set_returning_call(
                 .into_iter()
                 .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
                 .collect(),
+            inlined_expr: inlined_expr
+                .map(|expr| Box::new(finalize_expr_subqueries(*expr, catalog, subplans))),
             output_columns,
             with_ordinality,
         },
@@ -873,6 +906,35 @@ fn rebase_sql_json_behavior(behavior: SqlJsonTableBehavior, base: usize) -> SqlJ
 
 fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) -> SetReturningCall {
     match call {
+        SetReturningCall::RowsFrom {
+            items,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::RowsFrom {
+            items: items
+                .into_iter()
+                .map(|item| RowsFromItem {
+                    source: match item.source {
+                        RowsFromSource::Function(call) => RowsFromSource::Function(
+                            rebase_set_returning_call_subplan_ids(call, base),
+                        ),
+                        RowsFromSource::Project {
+                            output_exprs,
+                            output_columns,
+                        } => RowsFromSource::Project {
+                            output_exprs: output_exprs
+                                .into_iter()
+                                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                                .collect(),
+                            output_columns,
+                        },
+                    },
+                    column_definitions: item.column_definitions,
+                })
+                .collect(),
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
@@ -1068,6 +1130,7 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
             function_name,
             func_variadic,
             args,
+            inlined_expr,
             output_columns,
             with_ordinality,
         } => SetReturningCall::UserDefined {
@@ -1078,6 +1141,7 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
                 .into_iter()
                 .map(|arg| rebase_expr_subplan_ids(arg, base))
                 .collect(),
+            inlined_expr: inlined_expr.map(|expr| Box::new(rebase_expr_subplan_ids(*expr, base))),
             output_columns,
             with_ordinality,
         },
