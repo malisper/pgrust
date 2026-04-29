@@ -486,6 +486,26 @@ impl Portal {
     pub fn current_positioned_row(&self) -> Option<PositionedCursorRow> {
         self.current_row
     }
+
+    pub fn replace_current_positioned_row(
+        &mut self,
+        old: PositionedCursorRow,
+        new: PositionedCursorRow,
+    ) {
+        if self.current_row == Some(old) {
+            self.current_row = Some(new);
+        }
+        if let PortalExecution::Materialized {
+            row_positions, pos, ..
+        } = &mut self.execution
+            && *pos > 0
+        {
+            let index = *pos - 1;
+            if row_positions.get(index).copied().flatten() == Some(old) {
+                row_positions[index] = Some(new);
+            }
+        }
+    }
 }
 
 fn fetch_streaming_forward(

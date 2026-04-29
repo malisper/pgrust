@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use crate::backend::access::heap::heapam::heap_fetch;
 use crate::backend::access::transam::xact::{
     CommandId, INVALID_TRANSACTION_ID, Snapshot, TransactionId,
 };
@@ -2135,6 +2136,20 @@ fn locate_current_of_clause(sql: &str) -> Option<(usize, usize, String)> {
         cursor_end += 1;
     }
     Some((start, cursor_end, sql[cursor_start..cursor_end].to_string()))
+}
+
+#[derive(Debug, Clone)]
+struct CurrentOfRewrite {
+    sql: String,
+    cursor_name: String,
+    row: PositionedCursorRow,
+}
+
+fn statement_result_processed_rows(result: &StatementResult) -> usize {
+    match result {
+        StatementResult::AffectedRows(rows) => *rows,
+        StatementResult::Query { rows, .. } => rows.len(),
+    }
 }
 
 fn cursor_options_from_declare(
@@ -4642,8 +4657,11 @@ impl Session {
                 CopyExecutionResult::Output { rows, .. } => Ok(StatementResult::AffectedRows(rows)),
             };
         }
-        let rewritten_current_of_sql = self.rewrite_current_of_sql(sql)?;
-        let sql = rewritten_current_of_sql.as_deref().unwrap_or(sql);
+        let current_of_rewrite = self.rewrite_current_of_sql(sql)?;
+        let sql = current_of_rewrite
+            .as_ref()
+            .map(|rewrite| rewrite.sql.as_str())
+            .unwrap_or(sql);
         let mut stmt = self.parse_session_statement(db, sql)?;
 
         if let Statement::AlterTableMulti(ref statements) = stmt {
@@ -4699,7 +4717,19 @@ impl Session {
                 // Portal commands are session-level operations that may own executor state
                 // across statements, so route them through the outer session command match.
             } else {
-                let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                let current_of_update = current_of_rewrite
+                    .as_ref()
+                    .filter(|_| matches!(stmt, Statement::Update(_)))
+                    .map(|rewrite| (rewrite.cursor_name.clone(), rewrite.row));
+                let mut result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                if let (Some((cursor_name, old_row)), Ok(statement_result)) =
+                    (&current_of_update, &result)
+                    && statement_result_processed_rows(statement_result) > 0
+                    && let Err(err) =
+                        self.refresh_positioned_cursor_after_update(db, cursor_name, *old_row)
+                {
+                    result = Err(err);
+                }
                 if result.is_err() {
                     if let Some(ref mut txn) = self.active_txn {
                         txn.failed = true;
@@ -7135,7 +7165,7 @@ impl Session {
         }
     }
 
-    fn rewrite_current_of_sql(&self, sql: &str) -> Result<Option<String>, ExecError> {
+    fn rewrite_current_of_sql(&self, sql: &str) -> Result<Option<CurrentOfRewrite>, ExecError> {
         let Some((start, end, cursor_name)) = locate_current_of_clause(sql) else {
             return Ok(None);
         };
@@ -7151,7 +7181,41 @@ impl Session {
         rewritten.push_str(&sql[..start]);
         rewritten.push_str(&predicate);
         rewritten.push_str(&sql[end..]);
-        Ok(Some(rewritten))
+        Ok(Some(CurrentOfRewrite {
+            sql: rewritten,
+            cursor_name,
+            row,
+        }))
+    }
+
+    fn refresh_positioned_cursor_after_update(
+        &mut self,
+        db: &Database,
+        cursor_name: &str,
+        old_row: PositionedCursorRow,
+    ) -> Result<(), ExecError> {
+        let catalog = self.catalog_lookup(db);
+        let Some(relation) = catalog.relation_by_oid(old_row.table_oid) else {
+            return Ok(());
+        };
+        let old_tuple = heap_fetch(&*db.pool, self.client_id, relation.rel, old_row.tid)?;
+        let new_row = PositionedCursorRow {
+            table_oid: old_row.table_oid,
+            tid: old_tuple.header.ctid,
+        };
+        if new_row == old_row {
+            return Ok(());
+        }
+        let portal = if self.portals.contains(cursor_name) {
+            self.portals.get_mut(cursor_name)
+        } else {
+            let lower_name = cursor_name.to_ascii_lowercase();
+            self.portals.get_mut(&lower_name)
+        };
+        if let Some(portal) = portal {
+            portal.replace_current_positioned_row(old_row, new_row);
+        }
+        Ok(())
     }
 
     fn positioned_cursor_row(&self, name: &str) -> Result<PositionedCursorRow, ExecError> {

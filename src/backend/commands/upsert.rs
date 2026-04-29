@@ -238,6 +238,7 @@ fn run_conflict_update(
         assignments,
         predicate,
         conflict_visibility_checks,
+        conflict_tid,
         &current_old_values,
         excluded_values,
         ctx,
@@ -307,6 +308,7 @@ fn eval_conflict_update_values(
     assignments: &[crate::backend::parser::BoundAssignment],
     predicate: Option<&Expr>,
     conflict_visibility_checks: &[crate::backend::rewrite::RlsWriteCheck],
+    conflict_tid: ItemPointerData,
     current_values: &[Value],
     excluded_values: &[Value],
     ctx: &mut ExecutorContext,
@@ -319,11 +321,12 @@ fn eval_conflict_update_values(
                 return Ok(EvaluatedConflictAction::Skipped);
             }
         }
-        crate::backend::executor::enforce_row_security_write_checks(
+        crate::backend::executor::enforce_row_security_write_checks_with_tid(
             relation_name,
             desc,
             conflict_visibility_checks,
             current_values,
+            Some(conflict_tid),
             ctx,
         )?;
         for assignment in assignments {
@@ -436,6 +439,7 @@ fn preflight_on_conflict_updates(
                 assignments,
                 predicate,
                 conflict_visibility_checks,
+                conflict.tid,
                 &current_values,
                 values,
                 ctx,

@@ -3547,6 +3547,58 @@ fn delete_where_current_of_uses_cursor_tuple() {
 }
 
 #[test]
+fn update_current_of_refreshes_scroll_cursor_tuple() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table current_of_refresh_items (id int4, label text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into current_of_refresh_items values (1, 'one'), (2, 'two')",
+        )
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "declare c scroll cursor for select * from current_of_refresh_items order by id",
+        )
+        .unwrap();
+    session.execute(&db, "fetch next from c").unwrap();
+    session
+        .execute(
+            &db,
+            "update current_of_refresh_items set label = 'uno' where current of c",
+        )
+        .unwrap();
+    session.execute(&db, "fetch absolute 1 from c").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "delete from current_of_refresh_items where current of c returning id",
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id, label from current_of_refresh_items order by id",
+        ),
+        vec![vec![Value::Int32(2), Value::Text("two".into())]]
+    );
+}
+
+#[test]
 fn holdable_cursor_survives_commit_but_normal_cursor_does_not() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -43934,6 +43986,56 @@ fn policy_expressions_can_reference_ctid() {
             "select ctid, a from ctid_policy_items order by a",
         ),
         vec![vec![Value::Text("(0,1)".into()), Value::Int32(10)]]
+    );
+}
+
+#[test]
+fn update_rls_write_check_uses_invalid_new_ctid() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table ctid_update_items (a int4, b text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into ctid_update_items values (1, 'Apple')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table ctid_update_items enable row level security",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table ctid_update_items force row level security",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p1 on ctid_update_items using (ctid in ('(0,1)'::tid, '(0,2)'::tid, '(4294967295,0)'::tid))",
+        )
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "update ctid_update_items set b = 'Manzana' where ctid = '(0,1)'::tid",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select ctid, a, b from ctid_update_items"
+        ),
+        vec![vec![
+            Value::Text("(0,2)".into()),
+            Value::Int32(1),
+            Value::Text("Manzana".into())
+        ]]
     );
 }
 

@@ -7088,11 +7088,12 @@ fn execute_merge_update_row(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<Option<Vec<Value>>, ExecError> {
-    crate::backend::executor::enforce_row_security_write_checks(
+    crate::backend::executor::enforce_row_security_write_checks_with_tid(
         &stmt.relation_name,
         &stmt.desc,
         &stmt.merge_update_visibility_checks,
         original_values,
+        Some(target_tid),
         ctx,
     )?;
     let mut updated_values = original_values.to_vec();
@@ -7285,11 +7286,12 @@ fn execute_merge_delete_row(
             true,
         )?;
     }
-    crate::backend::executor::enforce_row_security_write_checks(
+    crate::backend::executor::enforce_row_security_write_checks_with_tid(
         &stmt.relation_name,
         &stmt.desc,
         &stmt.merge_delete_visibility_checks,
         original_values,
+        Some(target_tid),
         ctx,
     )?;
     apply_inbound_foreign_key_actions_on_delete(

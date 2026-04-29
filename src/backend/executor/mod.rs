@@ -189,7 +189,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub(crate) use constraints::{enforce_relation_constraints, enforce_row_security_write_checks};
+pub(crate) use constraints::{
+    enforce_relation_constraints, enforce_row_security_write_checks,
+    enforce_row_security_write_checks_with_tid,
+};
 pub(crate) use expr_ops::compare_order_values;
 use expr_ops::parse_numeric_text;
 pub(crate) use foreign_keys::{

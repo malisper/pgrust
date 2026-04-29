@@ -550,3 +550,22 @@ Policy cascade notice-order bucket:
 - Latest rowsecurity regression result with the requested 120s timeout:
   `721/774` matched, `53` mismatches, `1031` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
+
+Positioned DML ctid bucket:
+- RLS write-check evaluation now supplies PostgreSQL's pre-assignment new-row
+  `ctid` value `(4294967295,0)` to policy expressions, while target-row
+  visibility checks for ON CONFLICT and MERGE keep using the existing tuple id.
+- Positioned UPDATE refreshes the current cursor tuple identity after a
+  successful update, so later `WHERE CURRENT OF` operations on the same scroll
+  cursor follow the updated tuple version.
+- Added focused tests for invalid-new-ctid RLS write checks and refreshing a
+  scroll cursor after `UPDATE ... WHERE CURRENT OF`.
+- Focused positioned-DML/ctid tests passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `721/774` matched, `53` mismatches, `1001` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.
+- Remaining positioned-DML gap is EXPLAIN-only: pgrust still renders the
+  lowered `ctid = ...` seq scan instead of PostgreSQL's `Tid Scan` with
+  `TID Cond: CURRENT OF ...`.
