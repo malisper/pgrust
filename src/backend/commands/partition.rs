@@ -1343,7 +1343,9 @@ pub(crate) fn validate_relation_rows_for_partition_bound(
         for (_, row) in
             collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, ctx)?
         {
-            if !candidate_row_matches_partition(catalog, parent, bound, &row, None, ctx)? {
+            let parent_row =
+                remap_partition_row_to_parent_layout(&row, &relation.desc, &parent.desc)?;
+            if !candidate_row_matches_partition(catalog, parent, bound, &parent_row, None, ctx)? {
                 return Err(partition_constraint_violation(
                     &relation_name_for_oid(catalog, child.relation_oid),
                     &row,

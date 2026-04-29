@@ -1,6 +1,9 @@
 use super::*;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
-use crate::include::catalog::{ANYOID, range_type_ref_for_sql_type};
+use crate::include::catalog::{
+    ANYCOMPATIBLEOID, ANYELEMENTOID, ANYENUMOID, ANYOID, UNKNOWN_TYPE_OID,
+    range_type_ref_for_sql_type,
+};
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 
 fn signed_integer_literal_type(expr: &SqlExpr) -> Option<SqlTypeKind> {
@@ -395,6 +398,7 @@ pub(super) fn bind_user_defined_scalar_function_call_from_resolved_typed_args(
     let rewritten_args = rewrite_variadic_bound_args(
         bound_args,
         &arg_types,
+        &resolved.declared_arg_types,
         resolved.func_variadic,
         resolved.nvargs,
         resolved.vatype_oid,
@@ -424,6 +428,7 @@ pub(super) fn bind_user_defined_scalar_function_call_from_resolved_typed_args(
 pub(super) fn bind_resolved_user_defined_scalar_function_call(
     resolved: &ResolvedFunctionCall,
     args: &[SqlExpr],
+    display_args: Option<&[SqlFunctionArg]>,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
@@ -443,9 +448,33 @@ pub(super) fn bind_resolved_user_defined_scalar_function_call(
             )
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
-    bind_user_defined_scalar_function_call_from_resolved_typed_args(
+    let mut expr = bind_user_defined_scalar_function_call_from_resolved_typed_args(
         resolved, args, bound_args, catalog,
-    )
+    )?;
+    if let Some(display_args) = display_args
+        && display_args.iter().any(|arg| arg.name.is_some())
+    {
+        let bound_display_args = display_args
+            .iter()
+            .map(|arg| {
+                Ok(crate::include::nodes::primnodes::FuncCallDisplayArg {
+                    name: arg.name.clone(),
+                    expr: bind_expr_with_outer_and_ctes(
+                        &arg.value,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>, ParseError>>()?;
+        if let Expr::Func(func) = &mut expr {
+            func.display_args = Some(bound_display_args);
+        }
+    }
+    Ok(expr)
 }
 
 pub(super) fn bind_resolved_scalar_function_call(
@@ -478,6 +507,7 @@ pub(super) fn bind_resolved_scalar_function_call(
     bind_resolved_user_defined_scalar_function_call(
         resolved,
         args,
+        None,
         scope,
         catalog,
         outer_scopes,
@@ -623,6 +653,7 @@ fn bind_scalar_function_call_from_bound_args(
     let rewritten_bound_args = rewrite_variadic_bound_args(
         bound_args.clone(),
         &arg_types,
+        declared_arg_types,
         func_variadic,
         nvargs,
         vatype_oid,
@@ -3415,15 +3446,33 @@ fn bind_scalar_function_call_from_bound_args(
             if expr_contains_set_returning(&bound_args[0]) {
                 return Ok(build_func(func_variadic, bound_args));
             }
-            let arg_type = infer_sql_expr_type_with_ctes(
+            let arg_type = if matches!(
                 &args[0],
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-            Ok(Expr::Const(Value::Text(sql_type_name(arg_type).into())))
+                SqlExpr::Const(Value::Null)
+                    | SqlExpr::Const(Value::Text(_))
+                    | SqlExpr::Const(Value::TextRef(_, _))
+            ) {
+                SqlType::new(SqlTypeKind::Text).with_identity(UNKNOWN_TYPE_OID, 0)
+            } else {
+                super::super::infer::infer_sql_expr_function_arg_type_with_ctes(
+                    &args[0],
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            };
+            if arg_type.type_oid == UNKNOWN_TYPE_OID {
+                return Ok(Expr::Cast(
+                    Box::new(Expr::Const(Value::Int64(UNKNOWN_TYPE_OID as i64))),
+                    SqlType::new(SqlTypeKind::RegType),
+                ));
+            }
+            Ok(Expr::Cast(
+                Box::new(Expr::Const(Value::Text(sql_type_name(arg_type).into()))),
+                SqlType::new(SqlTypeKind::RegType),
+            ))
         }
         BuiltinScalarFunction::JsonbDeletePath
         | BuiltinScalarFunction::JsonbSet
@@ -3648,6 +3697,7 @@ fn preserve_satisfies_hash_partition_arg_types(
 fn rewrite_variadic_bound_args(
     bound_args: Vec<Expr>,
     arg_types: &[SqlType],
+    declared_arg_types: &[SqlType],
     func_variadic: bool,
     nvargs: usize,
     vatype_oid: u32,
@@ -3656,21 +3706,22 @@ fn rewrite_variadic_bound_args(
     if !func_variadic {
         return Ok(bound_args);
     }
+    if vatype_oid == 0 {
+        return Ok(bound_args);
+    }
     if vatype_oid == ANYOID {
         return Ok(bound_args);
     }
 
-    let element_type = catalog
-        .type_by_oid(vatype_oid)
-        .ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "known variadic element type",
-            actual: vatype_oid.to_string(),
-        })?
-        .sql_type;
-    let array_type = SqlType::array_of(element_type);
-
     if nvargs > 0 {
         let fixed_prefix_len = bound_args.len().saturating_sub(nvargs);
+        let element_type = variadic_rewrite_element_type(
+            vatype_oid,
+            declared_arg_types.get(fixed_prefix_len).copied(),
+            arg_types.get(fixed_prefix_len).copied(),
+            catalog,
+        )?;
+        let array_type = SqlType::array_of(element_type);
         let mut rewritten = bound_args[..fixed_prefix_len].to_vec();
         let elements = bound_args[fixed_prefix_len..]
             .iter()
@@ -3686,9 +3737,51 @@ fn rewrite_variadic_bound_args(
 
     let mut rewritten = bound_args;
     if let (Some(last), Some(last_type)) = (rewritten.last_mut(), arg_types.last()) {
-        *last = coerce_bound_expr(last.clone(), *last_type, array_type);
+        let target_array_type = explicit_variadic_rewrite_array_type(
+            vatype_oid,
+            declared_arg_types.last().copied(),
+            *last_type,
+            catalog,
+        )?;
+        *last = coerce_bound_expr(last.clone(), *last_type, target_array_type);
     }
     Ok(rewritten)
+}
+
+fn variadic_rewrite_element_type(
+    vatype_oid: u32,
+    declared_type: Option<SqlType>,
+    actual_type: Option<SqlType>,
+    catalog: &dyn CatalogLookup,
+) -> Result<SqlType, ParseError> {
+    if matches!(vatype_oid, ANYELEMENTOID | ANYCOMPATIBLEOID | ANYENUMOID) {
+        return declared_type
+            .or(actual_type)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "known polymorphic variadic element type",
+                actual: vatype_oid.to_string(),
+            });
+    }
+    catalog
+        .type_by_oid(vatype_oid)
+        .map(|row| row.sql_type)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "known variadic element type",
+            actual: vatype_oid.to_string(),
+        })
+}
+
+fn explicit_variadic_rewrite_array_type(
+    vatype_oid: u32,
+    declared_type: Option<SqlType>,
+    actual_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<SqlType, ParseError> {
+    if matches!(vatype_oid, ANYELEMENTOID | ANYCOMPATIBLEOID | ANYENUMOID) {
+        return Ok(declared_type.unwrap_or(actual_type));
+    }
+    let element_type = variadic_rewrite_element_type(vatype_oid, None, None, catalog)?;
+    Ok(SqlType::array_of(element_type))
 }
 
 fn bind_regex_count_args(

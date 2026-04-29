@@ -97,6 +97,7 @@ fn lookup_partition_alter_parent(
     catalog: &dyn CatalogLookup,
     table_name: &str,
     if_exists: bool,
+    partitioned_index_action: Option<&'static str>,
 ) -> Result<Option<BoundRelation>, ExecError> {
     let Some(parent) = catalog.lookup_any_relation(table_name) else {
         if if_exists {
@@ -106,6 +107,18 @@ fn lookup_partition_alter_parent(
             table_name.to_string(),
         )));
     };
+    if parent.relkind == 'I'
+        && let Some(action) = partitioned_index_action
+    {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "ALTER action {action} cannot be performed on relation \"{table_name}\""
+            ),
+            detail: Some("This operation is not supported for partitioned indexes.".into()),
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
     if parent.relkind != 'p' || parent.partitioned_table.is_none() {
         return Err(ExecError::Parse(ParseError::WrongObjectType {
             name: table_name.to_string(),
@@ -283,7 +296,7 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let Some(parent) =
-            lookup_partition_alter_parent(&catalog, &stmt.parent_table, stmt.if_exists)?
+            lookup_partition_alter_parent(&catalog, &stmt.parent_table, stmt.if_exists, None)?
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
@@ -341,7 +354,7 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let Some(parent) =
-            lookup_partition_alter_parent(&catalog, &stmt.parent_table, stmt.if_exists)?
+            lookup_partition_alter_parent(&catalog, &stmt.parent_table, stmt.if_exists, None)?
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
@@ -480,8 +493,12 @@ impl Database {
 
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(parent) =
-            lookup_partition_alter_parent(&catalog, &stmt.parent_table, stmt.if_exists)?
+        let Some(parent) = lookup_partition_alter_parent(
+            &catalog,
+            &stmt.parent_table,
+            stmt.if_exists,
+            Some("DETACH PARTITION"),
+        )?
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
@@ -568,8 +585,12 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(parent) =
-            lookup_partition_alter_parent(&catalog, &stmt.parent_table, stmt.if_exists)?
+        let Some(parent) = lookup_partition_alter_parent(
+            &catalog,
+            &stmt.parent_table,
+            stmt.if_exists,
+            Some("DETACH PARTITION"),
+        )?
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
@@ -631,6 +652,7 @@ impl Database {
             &catalog,
             &finalize_stmt.parent_table,
             finalize_stmt.if_exists,
+            Some("DETACH PARTITION"),
         )?
         else {
             return Ok(StatementResult::AffectedRows(0));
@@ -693,8 +715,12 @@ impl Database {
         expect_pending: Option<bool>,
     ) -> Result<Option<(BoundRelation, BoundRelation, PgInheritsRow)>, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(parent) =
-            lookup_partition_alter_parent(&catalog, &stmt.parent_table, stmt.if_exists)?
+        let Some(parent) = lookup_partition_alter_parent(
+            &catalog,
+            &stmt.parent_table,
+            stmt.if_exists,
+            Some("DETACH PARTITION"),
+        )?
         else {
             return Ok(None);
         };

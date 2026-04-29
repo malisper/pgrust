@@ -238,6 +238,68 @@ pub enum SysCacheId {
 }
 
 impl SysCacheId {
+    pub const AGGFNOID: Self = Self::AggFnoid;
+    pub const AMNAME: Self = Self::AmName;
+    pub const AMOID: Self = Self::AmOid;
+    pub const AMOPSTRATEGY: Self = Self::AmopStrategy;
+    pub const AMPROCNUM: Self = Self::AmprocNum;
+    pub const ATTNAME: Self = Self::AttrName;
+    pub const ATTNUM: Self = Self::AttrNum;
+    pub const AUTHNAME: Self = Self::AuthIdRolname;
+    pub const AUTHOID: Self = Self::AuthIdOid;
+    pub const AUTHMEMOID: Self = Self::AuthMembersOid;
+    pub const AUTHMEMROLEMEM: Self = Self::AuthMembersRoleMember;
+    pub const AUTHMEMMEMROLE: Self = Self::AuthMembersMemberRole;
+    pub const AUTHMEMGRANTOR: Self = Self::AuthMembersGrantor;
+    pub const ATTRDEFAULT: Self = Self::AttrDefault;
+    pub const ATTRDEFOID: Self = Self::AttrDefaultOid;
+    pub const CASTOID: Self = Self::CastOid;
+    pub const CASTSOURCETARGET: Self = Self::CastSourceTarget;
+    pub const COLLOID: Self = Self::CollOid;
+    pub const CONSTROID: Self = Self::ConstraintOid;
+    pub const CONSTRAINTRELID: Self = Self::ConstraintRelId;
+    pub const DEPENDDEPENDER: Self = Self::DependDepender;
+    pub const DEPENDREFERENCE: Self = Self::DependReference;
+    pub const DESCRIPTIONOBJ: Self = Self::DescriptionObj;
+    pub const INDEXRELID: Self = Self::IndexRelId;
+    pub const INDEXINDRELID: Self = Self::IndexIndRelId;
+    pub const INHRELIDSEQNO: Self = Self::InheritsRelIdSeqNo;
+    pub const INHPARENT: Self = Self::InheritsParent;
+    pub const LANGNAME: Self = Self::LangName;
+    pub const LANGOID: Self = Self::LangOid;
+    pub const NAMESPACENAME: Self = Self::NamespaceName;
+    pub const NAMESPACEOID: Self = Self::NamespaceOid;
+    pub const CLAAMNAMENSP: Self = Self::ClaAmNameNsp;
+    pub const CLAOID: Self = Self::OpclassOid;
+    pub const OPFAMILYOID: Self = Self::OpfamilyOid;
+    pub const OPEROID: Self = Self::OperOid;
+    pub const OPERNAMENSP: Self = Self::OperNameNsp;
+    pub const PARTRELID: Self = Self::PartRelId;
+    pub const POLICYOID: Self = Self::PolicyOid;
+    pub const POLICYPOLRELIDPOLNAME: Self = Self::PolicyPolrelidPolname;
+    pub const PROCOID: Self = Self::ProcOid;
+    pub const PROCNAMEARGSNSP: Self = Self::ProcNameArgsNsp;
+    pub const PUBLICATIONOID: Self = Self::PublicationOid;
+    pub const PUBLICATIONNAME: Self = Self::PublicationName;
+    pub const PUBLICATIONREL: Self = Self::PublicationRel;
+    pub const PUBLICATIONRELMAP: Self = Self::PublicationRelMap;
+    pub const PUBLICATIONRELPRPUBID: Self = Self::PublicationRelPrpubid;
+    pub const PUBLICATIONNAMESPACE: Self = Self::PublicationNamespace;
+    pub const PUBLICATIONNAMESPACEMAP: Self = Self::PublicationNamespaceMap;
+    pub const RELOID: Self = Self::RelOid;
+    pub const RELNAMENSP: Self = Self::RelNameNsp;
+    pub const REWRITEOID: Self = Self::RewriteOid;
+    pub const RULERELNAME: Self = Self::RuleRelName;
+    pub const STATRELATTINH: Self = Self::StatRelAttInh;
+    pub const STATEXTOID: Self = Self::StatExtOid;
+    pub const STATEXTNAMENSP: Self = Self::StatExtNameNsp;
+    pub const STATEXTRELID: Self = Self::StatisticExtRelId;
+    pub const STATEXTDATASTXOID: Self = Self::StatisticExtDataStxoidInh;
+    pub const TRIGGERRELIDNAME: Self = Self::TriggerRelidName;
+    pub const TRIGGEROID: Self = Self::TriggerOid;
+    pub const TYPEOID: Self = Self::TypeOid;
+    pub const TYPENAMENSP: Self = Self::TypeNameNsp;
+
     fn index_oid(self) -> u32 {
         match self {
             Self::AggFnoid => PG_AGGREGATE_FNOID_INDEX_OID,
@@ -415,6 +477,47 @@ pub enum SysCacheTuple {
     Type(PgTypeRow),
 }
 
+impl SysCacheTuple {
+    pub(crate) fn oid(&self) -> Option<u32> {
+        match self {
+            Self::Aggregate(row) => Some(row.aggfnoid),
+            Self::Am(row) => Some(row.oid),
+            Self::Amop(row) => Some(row.oid),
+            Self::Amproc(row) => Some(row.oid),
+            Self::Attrdef(row) => Some(row.oid),
+            Self::Attribute(_) => None,
+            Self::AuthId(row) => Some(row.oid),
+            Self::AuthMembers(row) => Some(row.oid),
+            Self::Cast(row) => Some(row.oid),
+            Self::Class(row) => Some(row.oid),
+            Self::Collation(row) => Some(row.oid),
+            Self::Constraint(row) => Some(row.oid),
+            Self::Depend(_) => None,
+            Self::Description(_) => None,
+            Self::Index(row) => Some(row.indexrelid),
+            Self::Inherits(_) => None,
+            Self::Language(row) => Some(row.oid),
+            Self::Namespace(row) => Some(row.oid),
+            Self::Opclass(row) => Some(row.oid),
+            Self::Opfamily(row) => Some(row.oid),
+            Self::Operator(row) => Some(row.oid),
+            Self::PartitionedTable(row) => Some(row.partrelid),
+            Self::Policy(row) => Some(row.oid),
+            Self::Proc(row) => Some(row.oid),
+            Self::Publication(row) => Some(row.oid),
+            Self::PublicationRel(row) => Some(row.oid),
+            Self::PublicationNamespace(row) => Some(row.oid),
+            Self::Rewrite(row) => Some(row.oid),
+            Self::Statistic(_) => None,
+            Self::StatisticExt(row) => Some(row.oid),
+            Self::StatisticExtData(row) => Some(row.stxoid),
+            Self::Trigger(row) => Some(row.oid),
+            Self::EventTrigger(row) => Some(row.oid),
+            Self::Type(row) => Some(row.oid),
+        }
+    }
+}
+
 fn oid_key(oid: u32) -> Value {
     Value::Int64(i64::from(oid))
 }
@@ -431,22 +534,36 @@ fn equality_scan_keys(keys: &[Value]) -> Vec<ScanKeyData> {
 }
 
 fn bootstrap_sys_cache_tuple(cache_id: SysCacheId, keys: &[Value]) -> Option<SysCacheTuple> {
-    let SysCacheId::TypeOid = cache_id else {
-        return None;
-    };
-    let [key] = keys else {
-        return None;
-    };
-    let oid = match key {
-        Value::Int32(value) => u32::try_from(*value).ok()?,
-        Value::Int64(value) => u32::try_from(*value).ok()?,
-        _ => return None,
-    };
-    builtin_type_rows()
-        .into_iter()
-        .chain(bootstrap_composite_type_rows())
-        .find(|row| row.oid == oid)
-        .map(SysCacheTuple::Type)
+    match (cache_id, keys) {
+        (SysCacheId::TypeOid, [key]) => {
+            let oid = match key {
+                Value::Int32(value) => u32::try_from(*value).ok()?,
+                Value::Int64(value) => u32::try_from(*value).ok()?,
+                _ => return None,
+            };
+            builtin_type_rows()
+                .into_iter()
+                .chain(bootstrap_composite_type_rows())
+                .find(|row| row.oid == oid)
+                .map(SysCacheTuple::Type)
+        }
+        (SysCacheId::TypeNameNsp, [Value::Text(name), namespace_key]) => {
+            let namespace_oid = match namespace_key {
+                Value::Int32(value) => u32::try_from(*value).ok()?,
+                Value::Int64(value) => u32::try_from(*value).ok()?,
+                _ => return None,
+            };
+            builtin_type_rows()
+                .into_iter()
+                .chain(bootstrap_composite_type_rows())
+                .find(|row| {
+                    row.typnamespace == namespace_oid
+                        && row.typname.eq_ignore_ascii_case(name.as_str())
+                })
+                .map(SysCacheTuple::Type)
+        }
+        _ => None,
+    }
 }
 
 fn extra_type_sys_cache_tuples(
@@ -974,6 +1091,8 @@ pub struct BackendCacheState {
     pub catalog_snapshot: Option<Snapshot>,
     pub catalog_snapshot_ctx: Option<BackendCacheContext>,
     pub transaction_snapshot_override: Option<(TransactionId, Snapshot)>,
+    pub shared_catcache: Option<CatCache>,
+    pub shared_catcache_ctx: Option<BackendCacheContext>,
     pub catcache: Option<CatCache>,
     pub catcache_ctx: Option<BackendCacheContext>,
     pub relation_cache: HashMap<u32, RelCacheEntry>,
@@ -1026,6 +1145,16 @@ impl CatalogStore {
             .collect()
     }
 
+    #[allow(non_snake_case)]
+    pub(crate) fn SearchSysCache(
+        &self,
+        ctx: &CatalogWriteContext,
+        cache_id: SysCacheId,
+        keys: Vec<Value>,
+    ) -> Result<Vec<SysCacheTuple>, CatalogError> {
+        self.search_sys_cache(ctx, cache_id, keys)
+    }
+
     pub(crate) fn search_sys_cache1(
         &self,
         ctx: &CatalogWriteContext,
@@ -1033,6 +1162,16 @@ impl CatalogStore {
         key1: Value,
     ) -> Result<Vec<SysCacheTuple>, CatalogError> {
         self.search_sys_cache(ctx, cache_id, vec![key1])
+    }
+
+    #[allow(non_snake_case)]
+    pub(crate) fn SearchSysCache1(
+        &self,
+        ctx: &CatalogWriteContext,
+        cache_id: SysCacheId,
+        key1: Value,
+    ) -> Result<Vec<SysCacheTuple>, CatalogError> {
+        self.SearchSysCache(ctx, cache_id, vec![key1])
     }
 
     pub(crate) fn search_sys_cache2(
@@ -1045,6 +1184,17 @@ impl CatalogStore {
         self.search_sys_cache(ctx, cache_id, vec![key1, key2])
     }
 
+    #[allow(non_snake_case)]
+    pub(crate) fn SearchSysCache2(
+        &self,
+        ctx: &CatalogWriteContext,
+        cache_id: SysCacheId,
+        key1: Value,
+        key2: Value,
+    ) -> Result<Vec<SysCacheTuple>, CatalogError> {
+        self.SearchSysCache(ctx, cache_id, vec![key1, key2])
+    }
+
     pub(crate) fn search_sys_cache_list1(
         &self,
         ctx: &CatalogWriteContext,
@@ -1054,7 +1204,28 @@ impl CatalogStore {
         self.search_sys_cache_list(ctx, cache_id, vec![key1])
     }
 
+    #[allow(non_snake_case)]
+    pub(crate) fn SearchSysCacheList1(
+        &self,
+        ctx: &CatalogWriteContext,
+        cache_id: SysCacheId,
+        key1: Value,
+    ) -> Result<Vec<SysCacheTuple>, CatalogError> {
+        self.search_sys_cache_list(ctx, cache_id, vec![key1])
+    }
+
     pub(crate) fn search_sys_cache_list2(
+        &self,
+        ctx: &CatalogWriteContext,
+        cache_id: SysCacheId,
+        key1: Value,
+        key2: Value,
+    ) -> Result<Vec<SysCacheTuple>, CatalogError> {
+        self.search_sys_cache_list(ctx, cache_id, vec![key1, key2])
+    }
+
+    #[allow(non_snake_case)]
+    pub(crate) fn SearchSysCacheList2(
         &self,
         ctx: &CatalogWriteContext,
         cache_id: SysCacheId,
@@ -1120,6 +1291,15 @@ impl CatalogStore {
         relation_oid: u32,
     ) -> Result<Option<RelCacheEntry>, CatalogError> {
         self.relation_id_get_relation_with_extra_type_rows(ctx, relation_oid, &[])
+    }
+
+    #[allow(non_snake_case)]
+    pub(crate) fn RelationIdGetRelation(
+        &self,
+        ctx: &CatalogWriteContext,
+        relation_oid: u32,
+    ) -> Result<Option<RelCacheEntry>, CatalogError> {
+        self.relation_id_get_relation(ctx, relation_oid)
     }
 
     pub(crate) fn relation_id_get_relation_with_extra_type_rows(
@@ -1790,6 +1970,16 @@ pub(crate) fn relation_id_get_relation_db(
     Ok(Some(entry))
 }
 
+#[allow(non_snake_case)]
+pub(crate) fn RelationIdGetRelation(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Result<Option<RelCacheEntry>, CatalogError> {
+    relation_id_get_relation_db(db, client_id, txn_ctx, relation_oid)
+}
+
 fn backend_syscache_get(
     db: &Database,
     client_id: ClientId,
@@ -1836,6 +2026,15 @@ pub(crate) fn search_sys_cache_db(
         return Ok(vec![tuple]);
     }
 
+    if matches!(cache_id, SysCacheId::TypeOid | SysCacheId::TypeNameNsp) {
+        let search_path = db.effective_search_path(client_id, None);
+        let dynamic_type_rows = db.dynamic_type_rows_for_search_path(&search_path);
+        let extra_tuples = extra_type_sys_cache_tuples(&dynamic_type_rows, cache_id, &keys);
+        if !extra_tuples.is_empty() {
+            return Ok(extra_tuples);
+        }
+    }
+
     let cache_key = SysCacheQueryKey::new(cache_id, &keys);
     let cache_ctx = BackendCacheContext::from(txn_ctx);
     if txn_ctx.is_none() {
@@ -1877,6 +2076,17 @@ pub(crate) fn search_sys_cache_db(
     Ok(tuples)
 }
 
+#[allow(non_snake_case)]
+pub(crate) fn SearchSysCache(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    keys: Vec<Value>,
+) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    search_sys_cache_db(db, client_id, txn_ctx, cache_id, keys)
+}
+
 pub(crate) fn search_sys_cache1_db(
     db: &Database,
     client_id: ClientId,
@@ -1885,6 +2095,17 @@ pub(crate) fn search_sys_cache1_db(
     key1: Value,
 ) -> Result<Vec<SysCacheTuple>, CatalogError> {
     search_sys_cache_db(db, client_id, txn_ctx, cache_id, vec![key1])
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn SearchSysCache1(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    key1: Value,
+) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    SearchSysCache(db, client_id, txn_ctx, cache_id, vec![key1])
 }
 
 pub(crate) fn search_sys_cache2_db(
@@ -1898,6 +2119,99 @@ pub(crate) fn search_sys_cache2_db(
     search_sys_cache_db(db, client_id, txn_ctx, cache_id, vec![key1, key2])
 }
 
+#[allow(non_snake_case)]
+pub(crate) fn SearchSysCache2(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    key1: Value,
+    key2: Value,
+) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    SearchSysCache(db, client_id, txn_ctx, cache_id, vec![key1, key2])
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn SearchSysCache3(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    key1: Value,
+    key2: Value,
+    key3: Value,
+) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    SearchSysCache(db, client_id, txn_ctx, cache_id, vec![key1, key2, key3])
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn SearchSysCache4(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    key1: Value,
+    key2: Value,
+    key3: Value,
+    key4: Value,
+) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    SearchSysCache(
+        db,
+        client_id,
+        txn_ctx,
+        cache_id,
+        vec![key1, key2, key3, key4],
+    )
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn SearchSysCacheExists(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    keys: Vec<Value>,
+) -> Result<bool, CatalogError> {
+    SearchSysCache(db, client_id, txn_ctx, cache_id, keys).map(|tuples| !tuples.is_empty())
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn GetSysCacheOid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    keys: Vec<Value>,
+) -> Result<Option<u32>, CatalogError> {
+    SearchSysCache(db, client_id, txn_ctx, cache_id, keys)
+        .map(|tuples| tuples.into_iter().find_map(|tuple| tuple.oid()))
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn SysCacheGetAttr(tuple: &SysCacheTuple, attribute_name: &str) -> Option<Value> {
+    let attr = attribute_name.to_ascii_lowercase();
+    if attr == "oid" {
+        return tuple.oid().map(|oid| Value::Int64(i64::from(oid)));
+    }
+
+    match (tuple, attr.as_str()) {
+        (SysCacheTuple::Attribute(row), "attname") => Some(Value::Text(row.attname.clone().into())),
+        (SysCacheTuple::Attribute(row), "attnum") => Some(Value::Int16(row.attnum)),
+        (SysCacheTuple::Class(row), "relname") => Some(Value::Text(row.relname.clone().into())),
+        (SysCacheTuple::Class(row), "relnamespace") => {
+            Some(Value::Int64(i64::from(row.relnamespace)))
+        }
+        (SysCacheTuple::Index(row), "indexrelid") => Some(Value::Int64(i64::from(row.indexrelid))),
+        (SysCacheTuple::Index(row), "indrelid") => Some(Value::Int64(i64::from(row.indrelid))),
+        (SysCacheTuple::Namespace(row), "nspname") => Some(Value::Text(row.nspname.clone().into())),
+        (SysCacheTuple::Opclass(row), "opcname") => Some(Value::Text(row.opcname.clone().into())),
+        (SysCacheTuple::Operator(row), "oprname") => Some(Value::Text(row.oprname.clone().into())),
+        (SysCacheTuple::Proc(row), "proname") => Some(Value::Text(row.proname.clone().into())),
+        (SysCacheTuple::Type(row), "typname") => Some(Value::Text(row.typname.clone().into())),
+        _ => None,
+    }
+}
+
 pub(crate) fn search_sys_cache_list1_db(
     db: &Database,
     client_id: ClientId,
@@ -1906,6 +2220,28 @@ pub(crate) fn search_sys_cache_list1_db(
     key1: Value,
 ) -> Result<Vec<SysCacheTuple>, CatalogError> {
     search_sys_cache_list_db(db, client_id, txn_ctx, cache_id, vec![key1])
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn SearchSysCacheList(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    keys: Vec<Value>,
+) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    search_sys_cache_list_db(db, client_id, txn_ctx, cache_id, keys)
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn SearchSysCacheList1(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    key1: Value,
+) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    SearchSysCacheList(db, client_id, txn_ctx, cache_id, vec![key1])
 }
 
 pub(crate) fn search_sys_cache_list2_db(
@@ -1919,6 +2255,18 @@ pub(crate) fn search_sys_cache_list2_db(
     search_sys_cache_list_db(db, client_id, txn_ctx, cache_id, vec![key1, key2])
 }
 
+#[allow(non_snake_case)]
+pub(crate) fn SearchSysCacheList2(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    key1: Value,
+    key2: Value,
+) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    SearchSysCacheList(db, client_id, txn_ctx, cache_id, vec![key1, key2])
+}
+
 pub(crate) fn search_sys_cache_list3_db(
     db: &Database,
     client_id: ClientId,
@@ -1929,6 +2277,19 @@ pub(crate) fn search_sys_cache_list3_db(
     key3: Value,
 ) -> Result<Vec<SysCacheTuple>, CatalogError> {
     search_sys_cache_list_db(db, client_id, txn_ctx, cache_id, vec![key1, key2, key3])
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn SearchSysCacheList3(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    key1: Value,
+    key2: Value,
+    key3: Value,
+) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    SearchSysCacheList(db, client_id, txn_ctx, cache_id, vec![key1, key2, key3])
 }
 
 fn search_sys_cache_list_db(
@@ -2067,12 +2428,31 @@ fn load_backend_catcache(
 ) -> Result<CatCache, CatalogError> {
     let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
         .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
-    let mut cache = {
+    let cache_ctx = BackendCacheContext::from(txn_ctx);
+    let shared = if let Some(cache) = db
+        .backend_cache_states
+        .read()
+        .get(&client_id)
+        .filter(|state| state.shared_catcache_ctx == Some(cache_ctx))
+        .and_then(|state| state.shared_catcache.clone())
+    {
+        cache
+    } else {
         let txns = db.txns.read();
         let shared = db
             .shared_catalog
             .read()
             .catcache_with_snapshot(&db.pool, &txns, &snapshot, client_id)?;
+        drop(txns);
+
+        let mut states = db.backend_cache_states.write();
+        let state = states.entry(client_id).or_default();
+        state.shared_catcache_ctx = Some(cache_ctx);
+        state.shared_catcache = Some(shared.clone());
+        shared
+    };
+    let mut cache = {
+        let txns = db.txns.read();
         let local = db
             .catalog
             .read()
@@ -2370,10 +2750,33 @@ mod tests {
     use crate::include::catalog::BootstrapCatalogKind;
 
     #[test]
+    fn postgres_syscache_names_map_to_catalog_indexes() {
+        assert_eq!(SysCacheId::RELOID, SysCacheId::RelOid);
+        assert_eq!(SysCacheId::RELOID.index_oid(), PG_CLASS_OID_INDEX_OID);
+        assert_eq!(
+            SysCacheId::RELNAMENSP.index_oid(),
+            PG_CLASS_RELNAME_NSP_INDEX_OID
+        );
+        assert_eq!(
+            SysCacheId::ATTNUM.index_oid(),
+            PG_ATTRIBUTE_RELID_ATTNUM_INDEX_OID
+        );
+        assert_eq!(
+            SysCacheId::INDEXRELID.index_oid(),
+            PG_INDEX_INDEXRELID_INDEX_OID
+        );
+        assert_eq!(SysCacheId::TYPEOID.index_oid(), PG_TYPE_OID_INDEX_OID);
+        assert_eq!(
+            SysCacheId::CONSTROID.index_oid(),
+            PG_CONSTRAINT_OID_INDEX_OID
+        );
+    }
+
+    #[test]
     fn backend_syscache_caches_empty_exact_and_list_results() {
         let mut cache = BackendSysCache::default();
-        let exact_key = SysCacheQueryKey::new(SysCacheId::RelOid, &[oid_key(42)]).unwrap();
-        let list_key = SysCacheQueryKey::new(SysCacheId::AttrNum, &[oid_key(42)]).unwrap();
+        let exact_key = SysCacheQueryKey::new(SysCacheId::RELOID, &[oid_key(42)]).unwrap();
+        let list_key = SysCacheQueryKey::new(SysCacheId::ATTNUM, &[oid_key(42)]).unwrap();
 
         cache.insert(
             BackendCacheContext::Autocommit,
@@ -2409,9 +2812,9 @@ mod tests {
     #[test]
     fn backend_syscache_invalidates_by_catalog_kind() {
         let mut cache = BackendSysCache::default();
-        let rel_key = SysCacheQueryKey::new(SysCacheId::RelOid, &[oid_key(42)]).unwrap();
+        let rel_key = SysCacheQueryKey::new(SysCacheId::RELOID, &[oid_key(42)]).unwrap();
         let type_key = SysCacheQueryKey::new(
-            SysCacheId::TypeNameNsp,
+            SysCacheId::TYPENAMENSP,
             &[Value::Text("t".into()), oid_key(11)],
         )
         .unwrap();
@@ -2456,7 +2859,7 @@ mod tests {
     #[test]
     fn backend_syscache_reuses_transaction_entries_across_command_ids() {
         let mut cache = BackendSysCache::default();
-        let key = SysCacheQueryKey::new(SysCacheId::RelOid, &[oid_key(42)]).unwrap();
+        let key = SysCacheQueryKey::new(SysCacheId::RELOID, &[oid_key(42)]).unwrap();
         let first = BackendCacheContext::Transaction { xid: 1, cid: 1 };
         let second = BackendCacheContext::Transaction { xid: 1, cid: 2 };
         let other_xid = BackendCacheContext::Transaction { xid: 2, cid: 1 };
@@ -2475,6 +2878,6 @@ mod tests {
 
     #[test]
     fn syscache_query_key_skips_unsupported_value_shapes() {
-        assert!(SysCacheQueryKey::new(SysCacheId::TypeOid, &[Value::Float64(1.0)]).is_none());
+        assert!(SysCacheQueryKey::new(SysCacheId::TYPEOID, &[Value::Float64(1.0)]).is_none());
     }
 }

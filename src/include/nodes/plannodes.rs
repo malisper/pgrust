@@ -72,6 +72,14 @@ pub enum AggregateStrategy {
     Plain,
     Sorted,
     Hashed,
+    Mixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregatePhase {
+    Complete,
+    Partial,
+    Finalize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,11 +330,14 @@ pub enum Plan {
     Aggregate {
         plan_info: PlanEstimate,
         strategy: AggregateStrategy,
+        phase: AggregatePhase,
         disabled: bool,
         input: Box<Plan>,
         group_by: Vec<Expr>,
         passthrough_exprs: Vec<Expr>,
         accumulators: Vec<AggAccum>,
+        semantic_accumulators: Option<Vec<AggAccum>>,
+        semantic_output_names: Option<Vec<String>>,
         having: Option<Expr>,
         output_columns: Vec<QueryColumn>,
     },

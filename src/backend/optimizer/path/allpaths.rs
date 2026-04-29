@@ -1678,6 +1678,8 @@ fn build_set_operation_path(
                         }),
                         slot_id: source_id,
                         strategy: AggregateStrategy::Hashed,
+                        phase: crate::include::nodes::plannodes::AggregatePhase::Complete,
+                        semantic_accumulators: None,
                         disabled: !config.enable_hashagg && !can_sort,
                         pathkeys: Vec::new(),
                         input: Box::new(append),
@@ -3632,6 +3634,19 @@ fn query_targets_whole_row_rel(root: &PlannerInfo, relids: &[usize]) -> bool {
     })
 }
 
+fn query_accumulators_whole_row_rel(root: &PlannerInfo, relids: &[usize]) -> bool {
+    root.parse.accumulators.iter().any(|accum| {
+        accum
+            .args
+            .iter()
+            .chain(accum.direct_args.iter())
+            .any(|expr| {
+                let expr = joininfo::flatten_join_alias_vars_query(&root.parse, expr.clone());
+                expr_is_whole_row_rel(root, &expr, relids)
+            })
+    })
+}
+
 fn expr_is_whole_row_rel(root: &PlannerInfo, expr: &Expr, relids: &[usize]) -> bool {
     match expr {
         Expr::Row { fields, .. } => relids.iter().any(|relid| {
@@ -3879,7 +3894,9 @@ fn collect_partitionwise_join_candidate_path(
     }
     let left_whole_row = query_targets_whole_row_rel(root, &left_rel.relids);
     let right_whole_row = query_targets_whole_row_rel(root, &right_rel.relids);
-    if left_whole_row || right_whole_row {
+    let left_agg_whole_row = query_accumulators_whole_row_rel(root, &left_rel.relids);
+    let right_agg_whole_row = query_accumulators_whole_row_rel(root, &right_rel.relids);
+    if left_whole_row || right_whole_row || left_agg_whole_row || right_agg_whole_row {
         return None;
     }
     if !has_partitionwise_equi_join(

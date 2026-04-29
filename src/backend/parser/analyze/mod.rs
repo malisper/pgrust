@@ -35,20 +35,21 @@ use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAmopRow, PgAmprocRow, PgAttributeRow, PgAuthIdRow,
-    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow,
-    PgDatabaseRow, PgDependRow, PgEnumRow, PgEventTriggerRow, PgForeignDataWrapperRow,
-    PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRangeRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTsConfigMapRow, PgTsConfigRow,
-    PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow, RECORD_TYPE_OID,
-    bootstrap_pg_aggregate_rows, bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows,
-    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_conversion_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_opfamily_rows, bootstrap_pg_proc_row_by_oid, bootstrap_pg_proc_rows,
-    bootstrap_pg_proc_rows_by_name, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
+    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttributeRow,
+    PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
+    PgConversionRow, PgDatabaseRow, PgDependRow, PgEnumRow, PgEventTriggerRow,
+    PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow,
+    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgPartitionedTableRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRangeRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow, PgUserMappingRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows,
+    bootstrap_pg_am_rows, bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_conversion_rows, bootstrap_pg_database_rows,
+    bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
+    bootstrap_pg_proc_row_by_oid, bootstrap_pg_proc_rows, bootstrap_pg_proc_rows_by_name,
+    bootstrap_pg_tablespace_rows, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
     bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows,
     builtin_range_rows, builtin_type_row_by_name, builtin_type_row_by_oid, builtin_type_rows,
     is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
@@ -273,6 +274,15 @@ pub(crate) fn relation_get_index_expressions(
     Ok(exprs)
 }
 
+#[allow(non_snake_case)]
+pub(crate) fn RelationGetIndexExpressions(
+    index_meta: &mut crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    heap_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<Expr>, ParseError> {
+    relation_get_index_expressions(index_meta, heap_desc, catalog)
+}
+
 fn bind_index_exprs_uncached(
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     heap_desc: &RelationDesc,
@@ -315,6 +325,15 @@ pub(crate) fn relation_get_index_predicate(
     let predicate = bind_index_predicate_uncached(index_meta, heap_desc, catalog)?;
     index_meta.rd_indpred = Some(predicate.clone());
     Ok(predicate)
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn RelationGetIndexPredicate(
+    index_meta: &mut crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    heap_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    relation_get_index_predicate(index_meta, heap_desc, catalog)
 }
 
 fn bind_index_predicate_uncached(
@@ -883,6 +902,22 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn depend_rows_referencing(
+        &self,
+        refclassid: u32,
+        refobjid: u32,
+        refobjsubid: Option<i32>,
+    ) -> Vec<PgDependRow> {
+        self.depend_rows()
+            .into_iter()
+            .filter(|row| {
+                row.refclassid == refclassid
+                    && row.refobjid == refobjid
+                    && refobjsubid.is_none_or(|objsubid| row.refobjsubid == objsubid)
+            })
+            .collect()
+    }
+
     fn role_name_by_oid(&self, role_oid: u32) -> Option<String> {
         self.authid_rows()
             .into_iter()
@@ -912,6 +947,10 @@ pub trait CatalogLookup {
         self.event_trigger_rows()
             .into_iter()
             .find(|row| row.evtname == name)
+    }
+
+    fn tablespace_rows(&self) -> Vec<PgTablespaceRow> {
+        bootstrap_pg_tablespace_rows().to_vec()
     }
 
     fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
@@ -992,6 +1031,10 @@ pub trait CatalogLookup {
 
     fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
         bootstrap_pg_opfamily_rows()
+    }
+
+    fn am_rows(&self) -> Vec<PgAmRow> {
+        bootstrap_pg_am_rows().to_vec()
     }
 
     fn amproc_rows(&self) -> Vec<PgAmprocRow> {
@@ -1854,8 +1897,8 @@ fn planner_cached_index_expressions(
     }
 
     let index_exprs =
-        relation_get_index_expressions(index_meta, heap_desc, catalog).unwrap_or_default();
-    let index_predicate = relation_get_index_predicate(index_meta, heap_desc, catalog)
+        RelationGetIndexExpressions(index_meta, heap_desc, catalog).unwrap_or_default();
+    let index_predicate = RelationGetIndexPredicate(index_meta, heap_desc, catalog)
         .ok()
         .flatten();
     if let Some(cache) = index_expr_cache {
@@ -1898,6 +1941,10 @@ impl CatalogLookup for Catalog {
 
     fn auth_members_rows(&self) -> Vec<PgAuthMembersRow> {
         CatCache::from_catalog(self).auth_members_rows()
+    }
+
+    fn tablespace_rows(&self) -> Vec<PgTablespaceRow> {
+        CatCache::from_catalog(self).tablespace_rows()
     }
 
     fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
@@ -1967,6 +2014,10 @@ impl CatalogLookup for Catalog {
 
     fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
         CatCache::from_catalog(self).opfamily_rows()
+    }
+
+    fn am_rows(&self) -> Vec<PgAmRow> {
+        CatCache::from_catalog(self).am_rows()
     }
 
     fn collation_rows(&self) -> Vec<PgCollationRow> {
@@ -2777,6 +2828,47 @@ fn normalize_group_by_exprs(
             })
         })
         .collect()
+}
+
+fn take_single_rollup_grouping_set(group_by_exprs: &mut Vec<SqlExpr>) -> bool {
+    let [
+        SqlExpr::FuncCall {
+            name,
+            args,
+            order_by,
+            within_group,
+            distinct,
+            func_variadic,
+            filter,
+            null_treatment,
+            over,
+        },
+    ] = group_by_exprs.as_mut_slice()
+    else {
+        return false;
+    };
+    if !name.eq_ignore_ascii_case("rollup")
+        || !order_by.is_empty()
+        || within_group.is_some()
+        || *distinct
+        || *func_variadic
+        || filter.is_some()
+        || null_treatment.is_some()
+        || over.is_some()
+    {
+        return false;
+    }
+    let crate::include::nodes::parsenodes::SqlCallArgs::Args(call_args) = args else {
+        return false;
+    };
+    let [arg] = call_args.as_slice() else {
+        return false;
+    };
+    if arg.name.is_some() {
+        return false;
+    }
+    *group_by_exprs = vec![arg.value.clone()];
+    true
 }
 
 fn expand_group_by_with_primary_key_dependencies(
@@ -3594,6 +3686,7 @@ fn bind_ctes(
                         distinct_on: Vec::new(),
                         where_qual: None,
                         group_by: Vec::new(),
+                        grouping_sets: Vec::new(),
                         accumulators: Vec::new(),
                         window_clauses: Vec::new(),
                         having_qual: None,
@@ -3682,6 +3775,7 @@ fn bind_ctes(
                         distinct_on: Vec::new(),
                         where_qual: None,
                         group_by: Vec::new(),
+                        grouping_sets: Vec::new(),
                         accumulators: Vec::new(),
                         window_clauses: Vec::new(),
                         having_qual: None,
@@ -4817,6 +4911,7 @@ pub(crate) fn bound_cte_from_materialized_rows(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
             having_qual: None,
@@ -4865,6 +4960,7 @@ pub(crate) fn bound_cte_from_query_rows(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
             having_qual: None,
@@ -4959,6 +5055,7 @@ fn bind_values_query_with_outer(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
             having_qual: None,
@@ -5087,6 +5184,8 @@ fn bind_select_query_with_outer(
         } else {
             normalize_group_by_exprs(stmt, &scope)?
         };
+        let has_single_rollup_grouping_set =
+            take_single_rollup_grouping_set(&mut effective_group_by);
         let constraint_deps =
             expand_group_by_with_primary_key_dependencies(&mut effective_group_by, &scope, catalog);
 
@@ -5198,6 +5297,11 @@ fn bind_select_query_with_outer(
                         )
                     })
                     .collect::<Result<_, _>>()?;
+                let grouping_sets = if has_single_rollup_grouping_set {
+                    vec![group_keys.clone(), Vec::new()]
+                } else {
+                    Vec::new()
+                };
                 let rewritten_group_keys = group_keys.clone();
 
                 return with_grouped_agg_cte_context(&visible_ctes, &local_ctes, || {
@@ -5696,6 +5800,7 @@ fn bind_select_query_with_outer(
                         distinct_on: Vec::new(),
                         where_qual,
                         group_by: rewritten_group_keys,
+                        grouping_sets,
                         accumulators,
                         window_clauses,
                         having_qual: having,
@@ -5799,6 +5904,7 @@ fn bind_select_query_with_outer(
                     distinct_on: Vec::new(),
                     where_qual,
                     group_by: Vec::new(),
+                    grouping_sets: Vec::new(),
                     accumulators: Vec::new(),
                     window_clauses,
                     having_qual: None,
@@ -6034,6 +6140,7 @@ fn bind_set_operation_query_with_outer(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
             having_qual: None,

@@ -780,8 +780,10 @@ impl Database {
         if unique {
             let partition_spec = crate::backend::parser::relation_partition_spec(relation)
                 .map_err(ExecError::Parse)?;
+            let key_count = build_options.indclass.len().min(columns.len());
             let key_columns = columns
                 .iter()
+                .take(key_count)
                 .filter(|column| column.expr_sql.is_none())
                 .map(|column| column.name.clone())
                 .collect::<Vec<_>>();
@@ -1011,14 +1013,16 @@ impl Database {
             .iter()
             .any(|row| row.inhparent == parent_table.relation_oid)
         {
+            let parent_table_name = installer.relation_name(parent_table.relation_oid)?;
             return Err(ExecError::DetailedError {
                 message: format!(
                     "cannot attach index \"{}\" as a partition of index \"{}\"",
                     stmt.child_index_name, stmt.parent_index_name
                 ),
-                detail: Some(
-                    "The child index is not on a partition of the parent index's table.".into(),
-                ),
+                detail: Some(format!(
+                    "Index \"{}\" is not an index on any partition of table \"{}\".",
+                    stmt.child_index_name, parent_table_name
+                )),
                 hint: None,
                 sqlstate: "42809",
             });

@@ -1,8 +1,10 @@
 use super::value_io::format_array_value_text_with_config;
+use crate::backend::executor::exec_expr::append_array_value;
 use crate::backend::executor::execute_readonly_statement;
 use crate::backend::executor::function_guc::execute_with_sql_function_gucs;
 use crate::backend::executor::{
     ExecError, ExecutorContext, QueryColumn, StatementResult, TupleSlot, Value,
+    render_datetime_value_text_with_config, render_geometry_text, render_interval_text_with_config,
     render_multirange_text_with_config, render_range_text_with_config,
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
@@ -13,12 +15,12 @@ use crate::backend::parser::{
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::catalog::PgProcRow;
 use crate::include::catalog::{
-    ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLERANGEOID, ANYRANGEOID, PG_LANGUAGE_SQL_OID,
-    builtin_multirange_name_for_sql_type, builtin_range_name_for_sql_type,
-    range_type_ref_for_sql_type,
+    ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID,
+    ANYRANGEOID, PG_LANGUAGE_SQL_OID, builtin_multirange_name_for_sql_type,
+    builtin_range_name_for_sql_type, range_type_ref_for_sql_type,
 };
-use crate::include::nodes::datum::{ArrayValue, RecordValue};
-use crate::include::nodes::primnodes::Expr;
+use crate::include::nodes::datum::{ArrayValue, RecordDescriptor, RecordValue};
+use crate::include::nodes::primnodes::{Expr, expr_sql_type_hint};
 use crate::pgrust::session::ByteaOutputFormat;
 
 pub(crate) fn execute_user_defined_sql_scalar_function(
@@ -31,12 +33,27 @@ pub(crate) fn execute_user_defined_sql_scalar_function(
         .iter()
         .map(|arg| crate::backend::executor::eval_expr(arg, slot, ctx))
         .collect::<Result<Vec<_>, _>>()?;
-    execute_user_defined_sql_scalar_function_values(row, &arg_values, ctx)
+    let arg_type_oids = sql_function_call_arg_type_oids(args, ctx);
+    execute_user_defined_sql_scalar_function_values_with_arg_type_oids(
+        row,
+        &arg_values,
+        arg_type_oids.as_deref(),
+        ctx,
+    )
 }
 
 pub(crate) fn execute_user_defined_sql_scalar_function_values(
     row: &PgProcRow,
     arg_values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    execute_user_defined_sql_scalar_function_values_with_arg_type_oids(row, arg_values, None, ctx)
+}
+
+pub(crate) fn execute_user_defined_sql_scalar_function_values_with_arg_type_oids(
+    row: &PgProcRow,
+    arg_values: &[Value],
+    arg_type_oids: Option<&[u32]>,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     ctx.check_stack_depth()?;
@@ -69,16 +86,20 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values(
                 "0A000",
             )
         })?;
-        let result = execute_sql_function_query(row, &arg_values, catalog.as_ref(), ctx)?;
+        let result =
+            execute_sql_function_query(row, &arg_values, arg_type_oids, catalog.as_ref(), ctx)?;
         match result {
             StatementResult::Query { rows, .. } => match rows.as_slice() {
                 [] => Ok(Value::Null),
                 [row] if row.len() == 1 => Ok(row[0].clone()),
-                [row] => Err(sql_function_runtime_error(
-                    "scalar SQL function returned an unexpected row shape",
-                    Some(format!("expected 1 column, got {}", row.len())),
-                    "42804",
-                )),
+                [result_row] => out_parameter_record_value(row, catalog.as_ref(), result_row)
+                    .ok_or_else(|| {
+                        sql_function_runtime_error(
+                            "scalar SQL function returned an unexpected row shape",
+                            Some(format!("expected 1 column, got {}", result_row.len())),
+                            "42804",
+                        )
+                    }),
                 _ => Err(sql_function_runtime_error(
                     "scalar SQL function returned more than one row",
                     None,
@@ -93,6 +114,54 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values(
         }
     })
     .map_err(|err| sql_function_context_error(row, err))
+}
+
+fn out_parameter_record_value(
+    row: &PgProcRow,
+    catalog: &dyn CatalogLookup,
+    values: &[Value],
+) -> Option<Value> {
+    let (Some(arg_types), Some(arg_modes)) = (&row.proallargtypes, &row.proargmodes) else {
+        return None;
+    };
+    if arg_types.len() != arg_modes.len() {
+        return None;
+    }
+    let arg_names = row.proargnames.as_deref().unwrap_or(&[]);
+    let fields = arg_types
+        .iter()
+        .zip(arg_modes.iter())
+        .enumerate()
+        .filter_map(|(index, (type_oid, mode))| {
+            matches!(*mode, b'o' | b'b' | b't').then(|| {
+                catalog.type_by_oid(*type_oid).map(|type_row| {
+                    let name = arg_names
+                        .get(index)
+                        .filter(|name| !name.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| format!("column{}", index + 1));
+                    (name, type_row.sql_type)
+                })
+            })?
+        })
+        .collect::<Vec<_>>();
+    if fields.len() != values.len() || fields.len() <= 1 {
+        return None;
+    }
+    Some(Value::Record(RecordValue::from_descriptor(
+        RecordDescriptor::anonymous(fields, -1),
+        values.to_vec(),
+    )))
+}
+
+fn sql_function_call_arg_type_oids(args: &[Expr], ctx: &ExecutorContext) -> Option<Vec<u32>> {
+    let catalog = ctx.catalog.as_deref()?;
+    Some(
+        args.iter()
+            .map(|arg| expr_sql_type_hint(arg).and_then(|ty| catalog.type_oid_for_sql_type(ty)))
+            .map(|oid| oid.unwrap_or(0))
+            .collect(),
+    )
 }
 
 pub(crate) fn execute_user_defined_sql_set_returning_function(
@@ -114,7 +183,14 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
                 "0A000",
             )
         })?;
-        let result = execute_sql_function_query(row, &arg_values, catalog.as_ref(), ctx)?;
+        let arg_type_oids = sql_function_call_arg_type_oids(args, ctx);
+        let result = execute_sql_function_query(
+            row,
+            &arg_values,
+            arg_type_oids.as_deref(),
+            catalog.as_ref(),
+            ctx,
+        )?;
         match result {
             StatementResult::Query { rows, .. } => rows
                 .into_iter()
@@ -139,10 +215,17 @@ pub(crate) fn execute_user_defined_sql_set_returning_function(
 fn execute_sql_function_query(
     row: &PgProcRow,
     arg_values: &[Value],
+    arg_type_oids: Option<&[u32]>,
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
-    let sql = inline_sql_function_body(row, arg_values, catalog, &ctx.datetime_config)?;
+    let sql = inline_sql_function_body(
+        row,
+        arg_values,
+        arg_type_oids,
+        catalog,
+        &ctx.datetime_config,
+    )?;
     let stmt = parse_statement_with_options(
         &sql,
         ParseOptions {
@@ -150,8 +233,12 @@ fn execute_sql_function_query(
             ..ParseOptions::default()
         },
     )?;
-    let result = execute_readonly_statement(stmt, catalog, ctx)?;
-    Ok(result)
+    // SQL-function bodies execute as nested statements; their scan/projection
+    // bindings must not leak back into the caller's current target list.
+    let saved_expr_bindings = std::mem::take(&mut ctx.expr_bindings);
+    let result = execute_readonly_statement(stmt, catalog, ctx);
+    ctx.expr_bindings = saved_expr_bindings;
+    result
 }
 
 fn execute_sql_utility_function(
@@ -203,9 +290,39 @@ fn sql_function_context_error(row: &PgProcRow, err: ExecError) -> ExecError {
     ) {
         return err;
     }
+    if let Some((source, position)) = sql_function_inlining_error(row, &err) {
+        return ExecError::WithInternalQueryContext {
+            source: Box::new(source),
+            context: format!("SQL function \"{}\" during inlining", row.proname),
+            query: row.prosrc.clone(),
+            position,
+        };
+    }
     ExecError::WithContext {
         source: Box::new(err),
         context: format!("SQL function \"{}\" statement 1", row.proname),
+    }
+}
+
+fn sql_function_inlining_error(
+    row: &PgProcRow,
+    err: &ExecError,
+) -> Option<(ExecError, Option<usize>)> {
+    match err {
+        ExecError::TypeMismatch { op, left, right } => {
+            let left_type = left.sql_type_hint().map(sql_type_name)?;
+            let right_type = right.sql_type_hint().map(sql_type_name)?;
+            let position = row.prosrc.find(op).map(|index| index + 1);
+            Some((
+                ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator {
+                    op,
+                    left_type,
+                    right_type,
+                }),
+                position,
+            ))
+        }
+        _ => None,
     }
 }
 
@@ -225,7 +342,26 @@ fn execute_known_lightweight_sql_function(
     if compact.starts_with("selectarray_append($1,row($2,$3,$4)::") && arg_values.len() == 4 {
         return append_composite_array_value(arg_values).map(Some);
     }
+    if compact == "select$1||$2"
+        && arg_values.len() == 2
+        && sql_function_is_array_append_transition(row)?
+    {
+        // :HACK: Preserve PostgreSQL's polymorphic aggregate transition behavior
+        // for SQL support functions of the shape `state_array || element`.
+        // The generic text-substitution SQL-function runner loses the concrete
+        // type of an initially NULL anyarray state before the concat operator
+        // executes.
+        return append_array_value(&arg_values[0], &arg_values[1], false).map(Some);
+    }
     Ok(None)
+}
+
+fn sql_function_is_array_append_transition(row: &PgProcRow) -> Result<bool, ExecError> {
+    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    Ok(matches!(
+        declared_oids.as_slice(),
+        [ANYARRAYOID, ANYELEMENTOID] | [ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEOID]
+    ))
 }
 
 fn validate_sql_polymorphic_runtime_args(
@@ -400,6 +536,7 @@ fn append_composite_array_value(arg_values: &[Value]) -> Result<Value, ExecError
 fn inline_sql_function_body(
     row: &PgProcRow,
     args: &[Value],
+    call_arg_type_oids: Option<&[u32]>,
     catalog: &dyn CatalogLookup,
     datetime_config: &DateTimeConfig,
 ) -> Result<String, ExecError> {
@@ -416,7 +553,7 @@ fn inline_sql_function_body(
         ));
     }
 
-    let arg_type_oids = proc_input_arg_type_oids(row);
+    let arg_type_oids = effective_sql_function_arg_type_oids(row, args.len(), call_arg_type_oids);
     let mut sql = substitute_positional_args_with_catalog(
         body,
         args,
@@ -439,6 +576,23 @@ fn inline_sql_function_body(
         }
     }
     Ok(sql)
+}
+
+fn effective_sql_function_arg_type_oids(
+    row: &PgProcRow,
+    arg_count: usize,
+    call_arg_type_oids: Option<&[u32]>,
+) -> Vec<u32> {
+    let declared = proc_input_arg_type_oids(row);
+    (0..arg_count)
+        .map(|index| {
+            call_arg_type_oids
+                .and_then(|oids| oids.get(index).copied())
+                .filter(|oid| *oid != 0)
+                .or_else(|| declared.get(index).copied())
+                .unwrap_or(0)
+        })
+        .collect()
 }
 
 fn substitute_positional_args_with_catalog(
@@ -742,6 +896,38 @@ fn render_sql_literal_with_catalog(
                 )
             })?)
         ),
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => {
+            let ty = value.sql_type_hint().ok_or_else(|| {
+                sql_function_runtime_error("cannot infer SQL function argument type", None, "42804")
+            })?;
+            let type_name = sql_type_literal_name(catalog, ty)?;
+            let text =
+                render_datetime_value_text_with_config(value, datetime_config).unwrap_or_default();
+            format!("{}::{type_name}", quote_sql_string(&text))
+        }
+        Value::Interval(interval) => {
+            let type_name = sql_type_literal_name(catalog, SqlType::new(SqlTypeKind::Interval))?;
+            let text = render_interval_text_with_config(*interval, datetime_config);
+            format!("{}::{type_name}", quote_sql_string(&text))
+        }
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => {
+            let ty = value.sql_type_hint().ok_or_else(|| {
+                sql_function_runtime_error("cannot infer SQL function argument type", None, "42804")
+            })?;
+            let type_name = sql_type_literal_name(catalog, ty)?;
+            let text = render_geometry_text(value, Default::default()).unwrap_or_default();
+            format!("{}::{type_name}", quote_sql_string(&text))
+        }
         Value::Range(_) => {
             let ty = value.sql_type_hint().ok_or_else(|| {
                 sql_function_runtime_error("cannot infer SQL function argument type", None, "42804")
@@ -839,6 +1025,14 @@ fn render_sql_literal_with_catalog_and_type(
     let Some(type_oid) = type_oid else {
         return render_sql_literal_with_catalog(value, catalog, datetime_config);
     };
+    if matches!(value, Value::Null)
+        && let Some(type_row) = catalog.type_by_oid(type_oid)
+    {
+        if !is_polymorphic_sql_type(type_row.sql_type) {
+            let type_name = sql_type_literal_name(catalog, type_row.sql_type)?;
+            return Ok(format!("NULL::{type_name}"));
+        }
+    }
     let Some(element_type_oid) = expected_array_element_type_oid(catalog, type_oid) else {
         return render_sql_literal_with_catalog(value, catalog, datetime_config);
     };
@@ -856,6 +1050,21 @@ fn render_sql_literal_with_catalog_and_type(
         }
         _ => render_sql_literal_with_catalog(value, catalog, datetime_config),
     }
+}
+
+fn is_polymorphic_sql_type(ty: SqlType) -> bool {
+    matches!(
+        ty.kind,
+        SqlTypeKind::AnyArray
+            | SqlTypeKind::AnyElement
+            | SqlTypeKind::AnyRange
+            | SqlTypeKind::AnyMultirange
+            | SqlTypeKind::AnyCompatible
+            | SqlTypeKind::AnyCompatibleArray
+            | SqlTypeKind::AnyCompatibleRange
+            | SqlTypeKind::AnyCompatibleMultirange
+            | SqlTypeKind::AnyEnum
+    )
 }
 
 fn expected_array_element_type_oid(catalog: &dyn CatalogLookup, type_oid: u32) -> Option<u32> {
@@ -1001,6 +1210,7 @@ mod tests {
         let sql = inline_sql_function_body(
             &row,
             &[Value::Int32(4), Value::Int64(10)],
+            None,
             &catalog,
             &datetime_config,
         )
@@ -1016,6 +1226,7 @@ mod tests {
         let sql = inline_sql_function_body(
             &row,
             &[Value::Text("abc".into())],
+            None,
             &catalog,
             &datetime_config,
         )
@@ -1028,7 +1239,8 @@ mod tests {
         let catalog = crate::backend::parser::Catalog::default();
         let datetime_config = DateTimeConfig::default();
         let row = test_proc_row("return 1", None);
-        let err = inline_sql_function_body(&row, &[], &catalog, &datetime_config).unwrap_err();
+        let err =
+            inline_sql_function_body(&row, &[], None, &catalog, &datetime_config).unwrap_err();
         assert!(matches!(
             err,
             ExecError::DetailedError {
