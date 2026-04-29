@@ -2056,6 +2056,10 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         | "enable_indexscan"
         | "enable_indexonlyscan"
         | "enable_bitmapscan"
+        | "enable_nestloop"
+        | "enable_hashjoin"
+        | "enable_mergejoin"
+        | "enable_material"
         | "enable_hashagg"
         | "enable_sort" => Some("on"),
         "debug_parallel_query" => Some("off"),
@@ -2562,14 +2566,19 @@ impl Session {
                 .get("enable_nestloop")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
+            enable_hashjoin: self
+                .gucs
+                .get("enable_hashjoin")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
             enable_mergejoin: self
                 .gucs
                 .get("enable_mergejoin")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
-            enable_hashjoin: self
+            enable_material: self
                 .gucs
-                .get("enable_hashjoin")
+                .get("enable_material")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
             retain_partial_index_filters: false,
@@ -11006,6 +11015,27 @@ impl Session {
                         &mut txn.catalog_effects,
                     )
                 }
+                Statement::Cluster(ref cluster_stmt) => {
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    if let Some(relation) = catalog.lookup_any_relation(&cluster_stmt.table_name) {
+                        self.lock_table_if_needed(
+                            db,
+                            relation.rel,
+                            TableLockMode::AccessExclusive,
+                        )?;
+                    }
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_cluster_stmt_in_transaction_with_search_path(
+                        client_id,
+                        cluster_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                        &mut txn.temp_effects,
+                    )
+                }
                 Statement::DropType(ref drop_stmt) => {
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
@@ -11482,6 +11512,10 @@ impl Session {
                 | "enable_indexscan"
                 | "enable_indexonlyscan"
                 | "enable_bitmapscan"
+                | "enable_nestloop"
+                | "enable_hashjoin"
+                | "enable_mergejoin"
+                | "enable_material"
                 | "enable_hashagg"
                 | "enable_sort"
                 | "debug_parallel_query"
@@ -13576,6 +13610,10 @@ fn apply_guc_value_to_state(
         | "enable_indexscan"
         | "enable_indexonlyscan"
         | "enable_bitmapscan"
+        | "enable_nestloop"
+        | "enable_hashjoin"
+        | "enable_mergejoin"
+        | "enable_material"
         | "enable_hashagg"
         | "enable_sort"
         | "debug_parallel_query" => {
@@ -14720,6 +14758,7 @@ fn copy_value_to_field(
         }
         Value::Bit(bits) => crate::backend::executor::render_bit_text(bits),
         Value::PgLsn(v) => crate::backend::executor::render_pg_lsn_text(*v),
+        Value::Tid(v) => crate::backend::executor::value_io::render_tid_text(v),
         Value::Inet(v) => v.render_inet(),
         Value::Cidr(v) => v.render_cidr(),
         Value::MacAddr(v) => crate::backend::executor::render_macaddr_text(v),

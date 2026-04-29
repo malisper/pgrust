@@ -12,6 +12,7 @@ use crate::backend::executor::render_datetime_value_text;
 use crate::backend::executor::render_interval_text;
 use crate::backend::executor::render_macaddr_text;
 use crate::backend::executor::render_macaddr8_text;
+use crate::backend::executor::value_io::render_tid_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::stack_depth::stack_depth_limit_error;
@@ -837,6 +838,7 @@ pub(crate) fn jsonb_from_value(
         Value::Uuid(v) => {
             JsonbValue::String(crate::backend::executor::value_io::render_uuid_text(v))
         }
+        Value::Tid(v) => JsonbValue::String(render_tid_text(v)),
         Value::Bool(v) => JsonbValue::Bool(*v),
         Value::Bit(v) => JsonbValue::String(render_bit_text(v)),
         Value::JsonPath(text) => JsonbValue::String(text.to_string()),
@@ -1132,6 +1134,7 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::Int64(v) => Ok(v.to_string()),
         Value::Xid8(v) => Ok(v.to_string()),
         Value::PgLsn(v) => Ok(crate::backend::executor::render_pg_lsn_text(*v)),
+        Value::Tid(v) => Ok(render_tid_text(v)),
         Value::Money(v) => Ok(crate::backend::executor::money_format_text(*v)),
         Value::Float64(v) => Ok(v.to_string()),
         Value::Numeric(v) => Ok(v.render()),

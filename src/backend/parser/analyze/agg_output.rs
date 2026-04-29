@@ -780,6 +780,8 @@ fn bind_grouped_visible_outer_aggregate_call(
     let visible_ctes = current_grouped_agg_visible_ctes();
     let hypothetical =
         resolve_builtin_hypothetical_aggregate(name).is_some() && !direct_args.is_empty();
+    let ordered_set =
+        resolve_builtin_ordered_set_aggregate(name).is_some() && !direct_args.is_empty();
     let Some((aggno, visible_scope)) = match_visible_aggregate_call(
         name,
         direct_args,
@@ -797,7 +799,10 @@ fn bind_grouped_visible_outer_aggregate_call(
     let owner_scope = &visible_scope.input_scope;
     let owner_outer_scopes = outer_scopes.get(visible_scope.levelsup..).unwrap_or(&[]);
     let arg_values: Vec<SqlExpr> = args.args().iter().map(|arg| arg.value.clone()).collect();
-    if !hypothetical && let Some(func) = resolve_builtin_aggregate(name) {
+    if !hypothetical
+        && !ordered_set
+        && let Some(func) = resolve_builtin_aggregate(name)
+    {
         validate_aggregate_arity(func, &arg_values)?;
     }
     let arg_types = arg_values
@@ -813,7 +818,7 @@ fn bind_grouped_visible_outer_aggregate_call(
             )
         })
         .collect::<Vec<_>>();
-    let resolved = if hypothetical {
+    let resolved = if hypothetical || ordered_set {
         None
     } else {
         Some(
@@ -858,7 +863,7 @@ fn bind_grouped_visible_outer_aggregate_call(
             return Err(set_returning_not_allowed_error("aggregate arguments"));
         }
     }
-    let bound_direct_args = if hypothetical {
+    let bound_direct_args = if hypothetical || ordered_set {
         if aggregate_args_are_named(direct_args) {
             return Err(ParseError::UnexpectedToken {
                 expected: "aggregate arguments without names",
@@ -952,6 +957,32 @@ fn bind_grouped_visible_outer_aggregate_call(
             bound_order_exprs,
             catalog,
         )?
+    } else if ordered_set {
+        let direct_arg_types = direct_args
+            .iter()
+            .map(|arg| {
+                infer_sql_expr_type_with_ctes(
+                    &arg.value,
+                    owner_scope,
+                    catalog,
+                    owner_outer_scopes,
+                    None,
+                    &visible_ctes,
+                )
+            })
+            .collect::<Vec<_>>();
+        coerce_ordered_set_aggregate_inputs(
+            name,
+            direct_args,
+            &direct_arg_types,
+            bound_direct_args,
+            args.args(),
+            &arg_types,
+            bound_args,
+            order_by,
+            bound_order_exprs,
+            catalog,
+        )?
     } else {
         let bound_order_by = bound_order_exprs
             .into_iter()
@@ -975,6 +1006,14 @@ fn bind_grouped_visible_outer_aggregate_call(
     };
     let (aggfnoid, aggtype, aggvariadic) = if hypothetical {
         let resolved = resolve_hypothetical_aggregate_call(name).ok_or_else(|| {
+            ParseError::UnexpectedToken {
+                expected: "supported aggregate",
+                actual: name.to_string(),
+            }
+        })?;
+        (resolved.proc_oid, resolved.result_type, false)
+    } else if ordered_set {
+        let resolved = resolve_ordered_set_aggregate_call(name, &arg_types).ok_or_else(|| {
             ParseError::UnexpectedToken {
                 expected: "supported aggregate",
                 actual: name.to_string(),
@@ -1496,11 +1535,15 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 normalize_aggregate_call(args, order_by, within_group.as_deref());
             if over.is_none()
                 && within_group.is_none()
-                && resolve_builtin_hypothetical_aggregate(name).is_some()
+                && (resolve_builtin_hypothetical_aggregate(name).is_some()
+                    || resolve_builtin_ordered_set_aggregate(name).is_some())
             {
                 return Err(ordered_set_requires_within_group_error(name));
             }
-            if within_group.is_some() && resolve_builtin_hypothetical_aggregate(name).is_none() {
+            if within_group.is_some()
+                && resolve_builtin_hypothetical_aggregate(name).is_none()
+                && resolve_builtin_ordered_set_aggregate(name).is_none()
+            {
                 return Err(not_ordered_set_aggregate_error(name));
             }
             if let Some(func) = resolve_builtin_aggregate(name) {
@@ -1549,12 +1592,14 @@ pub(super) fn bind_agg_output_expr_in_clause(
             }) {
                 let hypothetical = resolve_builtin_hypothetical_aggregate(name).is_some()
                     && !direct_args.is_empty();
+                let ordered_set = resolve_builtin_ordered_set_aggregate(name).is_some()
+                    && !direct_args.is_empty();
                 let arg_values: Vec<SqlExpr> = aggregate_args
                     .args()
                     .iter()
                     .map(|arg| arg.value.clone())
                     .collect();
-                if !hypothetical {
+                if !hypothetical && !ordered_set {
                     validate_distinct_aggregate_order_by(
                         &arg_values,
                         &aggregate_order_by,
@@ -1573,7 +1618,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         )
                     })
                     .collect::<Vec<_>>();
-                let resolved = if hypothetical {
+                let resolved = if hypothetical || ordered_set {
                     None
                 } else {
                     Some(
@@ -1602,7 +1647,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         return Err(set_returning_not_allowed_error("aggregate arguments"));
                     }
                 }
-                let bound_direct_args = if hypothetical {
+                let bound_direct_args = if hypothetical || ordered_set {
                     if aggregate_args_are_named(&direct_args) {
                         return Err(ParseError::UnexpectedToken {
                             expected: "aggregate arguments without names",
@@ -1698,6 +1743,31 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         bound_order_exprs,
                         catalog,
                     )?
+                } else if ordered_set {
+                    let direct_arg_types = direct_args
+                        .iter()
+                        .map(|arg| {
+                            grouped_infer_sql_expr_type(
+                                &arg.value,
+                                input_scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    coerce_ordered_set_aggregate_inputs(
+                        name,
+                        &direct_args,
+                        &direct_arg_types,
+                        bound_direct_args,
+                        aggregate_args.args(),
+                        &arg_types,
+                        bound_args,
+                        &aggregate_order_by,
+                        bound_order_exprs,
+                        catalog,
+                    )?
                 } else {
                     let bound_order_by = bound_order_exprs
                         .into_iter()
@@ -1731,6 +1801,13 @@ pub(super) fn bind_agg_output_expr_in_clause(
                             actual: name.clone(),
                         }
                     })?;
+                    (resolved.proc_oid, resolved.result_type, false)
+                } else if ordered_set {
+                    let resolved = resolve_ordered_set_aggregate_call(name, &arg_types)
+                        .ok_or_else(|| ParseError::UnexpectedToken {
+                            expected: "supported aggregate",
+                            actual: name.clone(),
+                        })?;
                     (resolved.proc_oid, resolved.result_type, false)
                 } else {
                     let resolved = resolved

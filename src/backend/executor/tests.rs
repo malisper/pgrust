@@ -506,6 +506,7 @@ fn people_pets_merge_join_plan(kind: JoinType, join_qual: Vec<Expr>, qual: Vec<E
         )],
         outer_merge_keys: vec![local_var(0)],
         inner_merge_keys: vec![local_var(2)],
+        merge_key_descending: vec![false],
         join_qual,
         qual,
     }
@@ -590,6 +591,7 @@ fn values_people_pets_merge_join_plan(
         )],
         outer_merge_keys: vec![local_var(0)],
         inner_merge_keys: vec![local_var(1)],
+        merge_key_descending: vec![false],
         join_qual,
         qual,
     }
@@ -2337,6 +2339,7 @@ fn manual_merge_join_emits_duplicate_groups_in_merge_order() {
         )],
         outer_merge_keys: vec![local_var(0)],
         inner_merge_keys: vec![local_var(0)],
+        merge_key_descending: vec![false],
         join_qual: vec![],
         qual: vec![],
     };
@@ -2808,6 +2811,7 @@ fn manual_merge_join_null_keys_do_not_match_each_other() {
         )],
         outer_merge_keys: vec![local_var(0)],
         inner_merge_keys: vec![local_var(0)],
+        merge_key_descending: vec![false],
         join_qual: vec![],
         qual: vec![],
     };
@@ -13141,6 +13145,25 @@ fn to_char_numeric_fill_mode_respects_integer_zero_masks() {
 }
 
 #[test]
+fn to_char_numeric_fill_mode_can_trail_zero_mask() {
+    let base = temp_dir("to_char_numeric_trailing_fm");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select to_char(42, '000000000000FM')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("000000000042".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn width_bucket_supports_numeric_and_float_special_cases() {
     let base = temp_dir("width_bucket_numeric_float");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -16738,6 +16761,35 @@ fn hypothetical_set_aggregates_compute_expected_results() {
 }
 
 #[test]
+fn percentile_disc_ordered_set_aggregate_returns_discrete_value() {
+    let base = temp_dir("percentile_disc_ordered_set");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select percentile_disc(0.5) within group (order by x)
+             from (values (1),(2),(3),(null)) v(x)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(2)]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select percentile_disc(0.5) within group (order by x desc)
+             from (values (1),(2),(3),(4)) v(x)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(3)]],
+    );
+}
+
+#[test]
 fn hypothetical_set_aggregates_support_multicolumn_ordering_and_empty_percent_rank() {
     let base = temp_dir("hypothetical_set_aggregates_multicolumn");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -16753,6 +16805,25 @@ fn hypothetical_set_aggregates_support_multicolumn_ordering_and_empty_percent_ra
         )
         .unwrap(),
         vec![vec![Value::Int64(3), Value::Int64(3)]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select rank('00000000-0000-0000-0000-000000000000', '2', '2')
+                    within group (order by v, id, id::text)
+             from (values
+                 ('00000000-0000-0000-0000-000000000000'::uuid, 1),
+                 ('00000000-0000-0000-0000-000000010009'::uuid, 10010),
+                 ('00000000-0000-0000-0000-000000000001'::uuid, 2),
+                 (null::uuid, 0),
+                 (null::uuid, 20002),
+                 (null::uuid, 20003)
+             ) s(v, id)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(2)]],
     );
     assert_query_rows(
         run_sql(
