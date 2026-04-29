@@ -4063,6 +4063,27 @@ fn explain_hash_child_uses_one_level_of_indentation() {
 }
 
 #[test]
+fn planner_pushes_varless_quals_to_single_base_scan() {
+    let catalog = catalog_with_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select id from items where random() < 2::float8",
+        &catalog,
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("Filter: (random() <")),
+        "expected random() predicate as scan filter, got {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.trim() == "Filter"),
+        "expected no separate upper Filter node, got {lines:?}"
+    );
+}
+
+#[test]
 fn explain_formats_distinct_minmax_with_unique_and_index_only_scan() {
     let catalog = catalog_with_inherited_indexed_items();
     let planned =

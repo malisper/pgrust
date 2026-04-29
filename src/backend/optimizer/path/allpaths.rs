@@ -109,7 +109,11 @@ pub(super) fn residual_where_qual(root: &PlannerInfo) -> Option<Expr> {
         .map(|clause| expand_join_rte_vars(root, clause))
         .filter(|clause| {
             let relids = expr_relids(clause);
-            !(!has_outer_joins(root) && relids.len() > 1) && !is_pushable_base_clause(root, &relids)
+            let pushed_to_single_base =
+                relids.is_empty() && single_direct_base_relid(root).is_some();
+            !pushed_to_single_base
+                && !(!has_outer_joins(root) && relids.len() > 1)
+                && !is_pushable_base_clause(root, &relids)
         })
         .collect();
     and_exprs(clauses)
@@ -143,15 +147,29 @@ fn assign_base_restrictinfo(root: &mut PlannerInfo, catalog: &dyn CatalogLookup)
         for clause in flatten_and_conjuncts(where_qual) {
             let clause = expand_join_rte_vars(root, clause);
             let relids = expr_relids(&clause);
-            if !is_pushable_base_clause(root, &relids) {
-                continue;
-            }
-            let relid = relids[0];
+            let varless_clause = relids.is_empty();
+            let relid = if relids.is_empty() {
+                let Some(relid) = single_direct_base_relid(root) else {
+                    continue;
+                };
+                relid
+            } else {
+                if !is_pushable_base_clause(root, &relids) {
+                    continue;
+                }
+                relids[0]
+            };
             let security_level = root
                 .parse
                 .rtable
                 .get(relid.saturating_sub(1))
-                .map(|rte| rte.security_quals.len())
+                .map(|rte| {
+                    if varless_clause {
+                        0
+                    } else {
+                        rte.security_quals.len()
+                    }
+                })
                 .unwrap_or(0);
             let restrict =
                 joininfo::make_restrict_info_with_security(clause, security_level, catalog);
@@ -268,6 +286,29 @@ fn equalities_match_commuted(left: &Expr, right: &Expr) -> bool {
         return false;
     };
     (left_a == right_a && left_b == right_b) || (left_a == right_b && left_b == right_a)
+}
+
+fn single_direct_base_relid(root: &PlannerInfo) -> Option<usize> {
+    let mut direct_relids = root
+        .parse
+        .rtable
+        .iter()
+        .enumerate()
+        .filter_map(|(index, rte)| {
+            if matches!(rte.kind, RangeTblEntryKind::Relation { .. })
+                && root
+                    .simple_rel_array
+                    .get(index + 1)
+                    .and_then(Option::as_ref)
+                    .is_some()
+            {
+                Some(index + 1)
+            } else {
+                None
+            }
+        });
+    let relid = direct_relids.next()?;
+    direct_relids.next().is_none().then_some(relid)
 }
 
 fn base_filter_expr(rel: &RelOptInfo) -> Option<Expr> {

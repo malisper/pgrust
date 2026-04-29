@@ -776,3 +776,20 @@ Hash EXPLAIN child indentation bucket:
 - Latest rowsecurity regression result with the requested 120s timeout:
   `738/774` matched, `36` mismatches, `707` diff lines, `34` hunks. New diff
   copied to `/tmp/diffs/rowsecurity.diff`.
+
+Varless RLS qual placement bucket:
+- Varless WHERE predicates are now pushed into the single direct base relation
+  when a query has exactly one base rel, instead of remaining as a separate
+  upper filter.
+- Those varless predicates use security level 0 because they cannot leak row
+  values, so constant non-leakproof predicates like `f_leak('abc')` stay before
+  RLS policy quals like PostgreSQL.
+- Added focused coverage for a varless `random()` predicate rendering as a scan
+  filter rather than an upper `Filter` node.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  planner_pushes_varless_quals_to_single_base_scan` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `740/774` matched, `34` mismatches, `676` diff lines, `32` hunks. New diff
+  copied to `/tmp/diffs/rowsecurity.diff`.
