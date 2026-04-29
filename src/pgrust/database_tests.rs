@@ -2740,6 +2740,9 @@ fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Ve
 
 fn assert_sqlstate(err: ExecError, expected_sqlstate: &str, expected_message_part: &str) {
     match err {
+        ExecError::WithContext { source, .. } => {
+            assert_sqlstate(*source, expected_sqlstate, expected_message_part)
+        }
         ExecError::DetailedError {
             message, sqlstate, ..
         }
@@ -17403,6 +17406,35 @@ fn plpgsql_variable_conflict_modes_control_static_select_resolution() {
     assert_eq!(
         session_query_rows(&mut session, &db, "select plpgsql_conflict_test()"),
         vec![vec![Value::Text("10,20".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_missing_return_reports_function_context() {
+    let base = temp_dir("plpgsql_missing_return_context");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_missing_return_context() returns int language plpgsql as $$
+         begin
+           null;
+         end
+         $$",
+    )
+    .unwrap();
+
+    let err = db
+        .execute(1, "select plpgsql_missing_return_context()")
+        .unwrap_err();
+    assert!(exec_error_context_contains(
+        &err,
+        "PL/pgSQL function plpgsql_missing_return_context()"
+    ));
+    assert_sqlstate(
+        err,
+        "2F005",
+        "control reached end of function without RETURN",
     );
 }
 

@@ -1496,10 +1496,13 @@ fn execute_compiled_function(
                 } else if let Some(slot) = output_slot {
                     state.scalar_return = Some(cast_value(state.values[*slot].clone(), *ty)?);
                 } else {
-                    return Err(function_runtime_error(
-                        "control reached end of function without RETURN",
-                        None,
-                        "2F005",
+                    return Err(with_plpgsql_function_context(
+                        function_runtime_error(
+                            "control reached end of function without RETURN",
+                            None,
+                            "2F005",
+                        ),
+                        compiled,
                     ));
                 }
             }
@@ -6354,6 +6357,13 @@ fn with_plpgsql_context_at_line(
             "PL/pgSQL function {} line {line} at {action}",
             compiled_context_name(compiled)
         ),
+    }
+}
+
+fn with_plpgsql_function_context(err: ExecError, compiled: &CompiledFunction) -> ExecError {
+    ExecError::WithContext {
+        source: Box::new(err),
+        context: format!("PL/pgSQL function {}", compiled_context_name(compiled)),
     }
 }
 
