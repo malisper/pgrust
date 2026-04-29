@@ -6336,6 +6336,50 @@ impl PlanNode for NestedLoopJoinState {
             self.right_rows = Some(rows);
         }
 
+        if self.join_qual_never_matches && matches!(self.kind, JoinType::Full) {
+            let right_rows = self.right_rows.as_ref().unwrap();
+            while self.unmatched_right_index < right_rows.len() {
+                let ri = self.unmatched_right_index;
+                self.unmatched_right_index += 1;
+                let mut combined_values = vec![Value::Null; self.left_width];
+                combined_values.extend(right_rows[ri].slot.tts_values.iter().cloned());
+                self.slot.tts_values = combined_values;
+                self.slot.tts_nvalid = self.left_width + self.right_width;
+                self.slot.kind = SlotKind::Virtual;
+                self.slot.virtual_tid = None;
+                self.slot.decode_offset = 0;
+                self.current_bindings = right_rows[ri].system_bindings.clone();
+                set_active_system_bindings(ctx, &self.current_bindings);
+                clear_outer_expr_bindings(ctx);
+                clear_inner_expr_bindings(ctx);
+                finish_row(&mut self.stats, start);
+                return Ok(Some(&mut self.slot));
+            }
+
+            match self.left.exec_proc_node(ctx)?.is_some() {
+                true => {
+                    let left = self.left.materialize_current_row()?;
+                    let mut combined_values = left.slot.tts_values;
+                    combined_values.extend(std::iter::repeat_n(Value::Null, self.right_width));
+                    self.slot.tts_values = combined_values;
+                    self.slot.tts_nvalid = self.left_width + self.right_width;
+                    self.slot.kind = SlotKind::Virtual;
+                    self.slot.virtual_tid = None;
+                    self.slot.decode_offset = 0;
+                    self.current_bindings = left.system_bindings;
+                    set_active_system_bindings(ctx, &self.current_bindings);
+                    clear_outer_expr_bindings(ctx);
+                    clear_inner_expr_bindings(ctx);
+                    finish_row(&mut self.stats, start);
+                    return Ok(Some(&mut self.slot));
+                }
+                false => {
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                }
+            }
+        }
+
         loop {
             ctx.check_for_interrupts()?;
             if self.current_left.is_none() {

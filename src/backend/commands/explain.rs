@@ -21,9 +21,9 @@ use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, Expr, INNER_VAR, JoinType, OUTER_VAR, ParamKind,
     ProjectSetTarget, QueryColumn, RowsFromSource, ScalarFunctionImpl, SetReturningCall,
     SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn, SqlJsonTableColumnKind,
-    SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable,
-    SqlXmlTableColumnKind, SubPlan, TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind,
-    attrno_index, expr_sql_type_hint, set_returning_call_exprs, user_attrno,
+    SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumnKind,
+    SubPlan, TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind, attrno_index,
+    expr_sql_type_hint, set_returning_call_exprs, user_attrno,
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
 
@@ -2684,6 +2684,11 @@ fn verbose_function_scan_label(
 
 fn verbose_function_scan_name(call: &SetReturningCall, ctx: &VerboseExplainContext) -> String {
     match call {
+        SetReturningCall::UserDefined {
+            function_name,
+            inlined_expr: Some(_),
+            ..
+        } => function_name.clone(),
         SetReturningCall::UserDefined {
             proc_oid,
             function_name,
@@ -5671,9 +5676,7 @@ fn render_verbose_join_expr(
         Expr::FieldSelect {
             expr: inner, field, ..
         } => {
-            if let Expr::Row { fields, .. } = inner.as_ref()
-                && let Some((_, value)) = fields.iter().find(|(name, _)| name == field)
-            {
+            if let Some(value) = field_select_projected_value(inner, field) {
                 return render_verbose_join_expr(value, left_names, right_names, ctx);
             }
             format!("{expr:?}")
@@ -5783,6 +5786,35 @@ fn render_verbose_join_expr(
     }
 }
 
+fn field_select_projected_value<'a>(inner: &'a Expr, field: &str) -> Option<&'a Expr> {
+    if let Expr::Row { fields, .. } = inner
+        && let Some((_, value)) = fields
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(field))
+    {
+        return Some(value);
+    }
+    let Expr::Case(case_expr) = inner else {
+        return None;
+    };
+    if case_expr.arg.is_some()
+        || case_expr.args.is_empty()
+        || !case_expr
+            .args
+            .iter()
+            .all(|arm| matches!(arm.result, Expr::Const(Value::Null)))
+    {
+        return None;
+    }
+    let Expr::Row { fields, .. } = case_expr.defresult.as_ref() else {
+        return None;
+    };
+    fields
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(field))
+        .map(|(_, value)| value)
+}
+
 fn render_verbose_expr(
     expr: &Expr,
     column_names: &[String],
@@ -5800,9 +5832,7 @@ fn render_verbose_expr(
         Expr::FieldSelect {
             expr: inner, field, ..
         } => {
-            if let Expr::Row { fields, .. } = inner.as_ref()
-                && let Some((_, value)) = fields.iter().find(|(name, _)| name == field)
-            {
+            if let Some(value) = field_select_projected_value(inner, field) {
                 return render_verbose_expr(value, column_names, ctx);
             }
             strip_outer_parens(&render_explain_expr(expr, column_names))

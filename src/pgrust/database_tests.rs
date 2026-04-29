@@ -1322,7 +1322,7 @@ fn sql_polymorphic_out_function_resolves_anyelement_outputs() {
         query_rows(
             &db,
             1,
-            "select pg_typeof(f3), pg_typeof(f4)
+            "select pg_typeof(f3)::text, pg_typeof(f4)::text
              from rf_dup_compatible(22, array[44::bigint])",
         ),
         vec![vec![
@@ -13416,13 +13416,13 @@ fn nested_views_and_pg_views_work() {
                 Value::Text("public".into()),
                 Value::Text("first_view".into()),
                 Value::Text("postgres".into()),
-                Value::Text("select id\n   from base_items".into()),
+                Value::Text(" SELECT id\n   FROM base_items;".into()),
             ],
             vec![
                 Value::Text("public".into()),
                 Value::Text("second_view".into()),
                 Value::Text("postgres".into()),
-                Value::Text("select id\n   from first_view".into()),
+                Value::Text(" SELECT id\n   FROM first_view;".into()),
             ],
         ]
     );

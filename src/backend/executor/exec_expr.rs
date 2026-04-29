@@ -8884,7 +8884,14 @@ fn eval_plpgsql_builtin_function(
     {
         return result;
     }
-    if let Some(result) = eval_range_function(func, &values, result_type, func_variadic) {
+    if let Some(result) = eval_range_function(
+        func,
+        &values,
+        result_type,
+        func_variadic,
+        None,
+        &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+    ) {
         return result;
     }
     if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {
@@ -9799,6 +9806,38 @@ fn eval_text_search_builtin_function(
         })
     };
     let catalog = catalog_lookup(ctx);
+    let arg_config_name =
+        |values: &[Value], index: usize, op: &'static str| -> Result<Option<String>, ExecError> {
+            let Some(value) = values.get(index) else {
+                return Ok(None);
+            };
+            if matches!(value, Value::Null) {
+                return Ok(None);
+            }
+            if let Some(text) = value.as_text() {
+                return Ok(Some(text.to_string()));
+            }
+            let oid = match value {
+                Value::Int32(oid) if *oid >= 0 => Some(*oid as u32),
+                Value::Int64(oid) if *oid >= 0 => Some(*oid as u32),
+                _ => None,
+            };
+            if let Some(oid) = oid
+                && let Some(row) = catalog.and_then(|catalog| {
+                    catalog
+                        .ts_config_rows()
+                        .into_iter()
+                        .find(|row| row.oid == oid)
+                })
+            {
+                return Ok(Some(row.cfgname));
+            }
+            Err(ExecError::TypeMismatch {
+                op,
+                left: value.clone(),
+                right: Value::Null,
+            })
+        };
 
     match func {
         BuiltinScalarFunction::TsMatch => {
@@ -9827,7 +9866,7 @@ fn eval_text_search_builtin_function(
                     catalog,
                 ),
                 [_, _] => crate::backend::tsearch::to_tsvector_with_config_name(
-                    arg_text(values, 0, "to_tsvector")?.as_deref(),
+                    arg_config_name(values, 0, "to_tsvector")?.as_deref(),
                     arg_text(values, 1, "to_tsvector")?
                         .as_deref()
                         .unwrap_or_default(),
@@ -9851,7 +9890,7 @@ fn eval_text_search_builtin_function(
                 jsonb_to_tsvector_value(default_config_name(), &values[0], values.get(1), catalog)
             }
             [_, Value::Jsonb(_), _] => jsonb_to_tsvector_value(
-                arg_text(values, 0, "jsonb_to_tsvector")?.as_deref(),
+                arg_config_name(values, 0, "jsonb_to_tsvector")?.as_deref(),
                 &values[1],
                 values.get(2),
                 catalog,
@@ -9870,7 +9909,7 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "to_tsquery")?,
                 ),
                 [_, _] => (
-                    arg_text(values, 0, "to_tsquery")?,
+                    arg_config_name(values, 0, "to_tsquery")?,
                     arg_text(values, 1, "to_tsquery")?,
                 ),
                 _ => unreachable!(),
@@ -9903,7 +9942,7 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "plainto_tsquery")?,
                 ),
                 [_, _] => (
-                    arg_text(values, 0, "plainto_tsquery")?,
+                    arg_config_name(values, 0, "plainto_tsquery")?,
                     arg_text(values, 1, "plainto_tsquery")?,
                 ),
                 _ => unreachable!(),
@@ -9929,7 +9968,7 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "phraseto_tsquery")?,
                 ),
                 [_, _] => (
-                    arg_text(values, 0, "phraseto_tsquery")?,
+                    arg_config_name(values, 0, "phraseto_tsquery")?,
                     arg_text(values, 1, "phraseto_tsquery")?,
                 ),
                 _ => unreachable!(),
@@ -9955,7 +9994,7 @@ fn eval_text_search_builtin_function(
                     arg_text(values, 0, "websearch_to_tsquery")?,
                 ),
                 [_, _] => (
-                    arg_text(values, 0, "websearch_to_tsquery")?,
+                    arg_config_name(values, 0, "websearch_to_tsquery")?,
                     arg_text(values, 1, "websearch_to_tsquery")?,
                 ),
                 _ => unreachable!(),
@@ -10553,6 +10592,9 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
         }
         BuiltinScalarFunction::TestCanonicalizePath => eval_test_canonicalize_path(values),
         BuiltinScalarFunction::TestRelpath => Ok(Value::Bool(false)),
+        func if is_text_search_builtin_function(func) => {
+            eval_text_search_builtin_function(func, values, Some(ctx))
+        }
         _ => execute_builtin_scalar_function_value_call(func, values),
     }
 }
@@ -10698,7 +10740,14 @@ pub(crate) fn eval_builtin_function(
     {
         return result;
     }
-    if let Some(result) = eval_range_function(func, &values, result_type, func_variadic) {
+    if let Some(result) = eval_range_function(
+        func,
+        &values,
+        result_type,
+        func_variadic,
+        ctx.catalog.as_deref(),
+        &ctx.datetime_config,
+    ) {
         return result;
     }
     if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {

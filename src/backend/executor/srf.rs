@@ -8,7 +8,9 @@ use super::expr_json::{
 use super::expr_txid::eval_txid_snapshot_xip_values;
 use super::expr_xml::eval_sql_xml_table;
 use super::pg_regex::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows};
-use super::sqlfunc::execute_user_defined_sql_set_returning_function;
+use super::sqlfunc::{
+    execute_user_defined_sql_scalar_function, execute_user_defined_sql_set_returning_function,
+};
 use super::{ExecError, ExecutorContext, Expr, SetReturningCall, TupleSlot, Value, eval_expr};
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
 use crate::backend::access::index::buildkeys::materialize_heap_row_values;
@@ -153,8 +155,15 @@ fn eval_inlined_user_defined_function_scan(
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
     let value = crate::backend::executor::eval_expr(expr, slot, ctx)?;
+    single_row_function_scan_slots(value, output_columns)
+}
+
+fn single_row_function_scan_slots(
+    value: Value,
+    output_columns: &[QueryColumn],
+) -> Result<Vec<TupleSlot>, ExecError> {
     let values = match value {
-        Value::Record(record) if output_columns.len() != 1 => record.fields,
+        Value::Record(record) if output_columns.len() == record.fields.len() => record.fields,
         Value::Null if output_columns.len() != 1 => {
             std::iter::repeat_n(Value::Null, output_columns.len()).collect()
         }
@@ -445,6 +454,10 @@ fn execute_user_defined_set_returning_function_by_language(
     }
     if row.proname.eq_ignore_ascii_case("pg_show_all_settings") {
         return Ok(eval_pg_show_all_settings(output_columns));
+    }
+    if !row.proretset && row.prolang == crate::include::catalog::PG_LANGUAGE_SQL_OID {
+        let value = execute_user_defined_sql_scalar_function(&row, args, slot, ctx)?;
+        return single_row_function_scan_slots(value, output_columns);
     }
     if row.prolang == crate::include::catalog::PG_LANGUAGE_SQL_OID {
         execute_user_defined_sql_set_returning_function(&row, args, output_columns, slot, ctx)

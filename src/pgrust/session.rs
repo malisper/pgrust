@@ -7947,6 +7947,27 @@ impl Session {
                 func_variadic: *func_variadic,
                 with_ordinality: *with_ordinality,
             },
+            FromItem::RowsFrom {
+                functions,
+                with_ordinality,
+            } => FromItem::RowsFrom {
+                functions: functions
+                    .iter()
+                    .map(|function| {
+                        Ok(crate::backend::parser::RowsFromFunction {
+                            name: function.name.clone(),
+                            args: function
+                                .args
+                                .iter()
+                                .map(|arg| Self::substitute_function_arg(arg, subst))
+                                .collect::<Result<Vec<_>, _>>()?,
+                            func_variadic: function.func_variadic,
+                            column_definitions: function.column_definitions.clone(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ExecError>>()?,
+                with_ordinality: *with_ordinality,
+            },
             FromItem::JsonTable(_) | FromItem::XmlTable(_) => from.clone(),
             FromItem::TableSample { source, sample } => {
                 let mut sample = sample.clone();

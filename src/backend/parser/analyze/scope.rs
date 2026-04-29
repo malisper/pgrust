@@ -9,10 +9,10 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::{
-    AttrNumber, ColumnDesc, FuncExpr, JoinType, JsonRecordFunction, RowsFromItem, RowsFromSource,
-    SELF_ITEM_POINTER_ATTR_NO, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
-    SqlJsonTableColumnKind, SqlJsonTablePassingArg, SqlJsonTablePlan, SqlJsonTableQuotes,
-    SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn, SqlXmlTableColumnKind,
+    AttrNumber, BoolExpr, CaseExpr, CaseWhen, ColumnDesc, FuncExpr, JoinType, JsonRecordFunction,
+    RowsFromItem, RowsFromSource, SELF_ITEM_POINTER_ATTR_NO, SqlJsonTable, SqlJsonTableBehavior,
+    SqlJsonTableColumn, SqlJsonTableColumnKind, SqlJsonTablePassingArg, SqlJsonTablePlan,
+    SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumn, SqlXmlTableColumnKind,
     SqlXmlTableNamespace, TABLE_OID_ATTR_NO, Var, expr_sql_type_hint, user_attrno,
 };
 
@@ -4105,6 +4105,7 @@ fn analyze_sql_function_target_only_body(
         distinct_on: Vec::new(),
         where_qual: None,
         group_by: Vec::new(),
+        grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
         having_qual: None,
@@ -4113,6 +4114,7 @@ fn analyze_sql_function_target_only_body(
         limit_count: stmt.limit,
         limit_offset: stmt.offset.unwrap_or(0),
         locking_clause: None,
+        locking_targets: Vec::new(),
         row_marks: Vec::new(),
         has_target_srfs: false,
         recursive_union: None,
@@ -4126,7 +4128,34 @@ fn decrement_inline_expr_varlevels(expr: Expr) -> Expr {
             var.varlevelsup -= 1;
             Expr::Var(var)
         }
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(decrement_inline_expr_varlevels)
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Case(case_expr) => Expr::Case(Box::new(CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| Box::new(decrement_inline_expr_varlevels(*arg))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| CaseWhen {
+                    expr: decrement_inline_expr_varlevels(arm.expr),
+                    result: decrement_inline_expr_varlevels(arm.result),
+                })
+                .collect(),
+            defresult: Box::new(decrement_inline_expr_varlevels(*case_expr.defresult)),
+            ..*case_expr
+        })),
         Expr::Cast(inner, ty) => Expr::Cast(Box::new(decrement_inline_expr_varlevels(*inner)), ty),
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(decrement_inline_expr_varlevels(*inner))),
+        Expr::IsNotNull(inner) => {
+            Expr::IsNotNull(Box::new(decrement_inline_expr_varlevels(*inner)))
+        }
         Expr::FieldSelect {
             expr,
             field,
@@ -4151,6 +4180,10 @@ fn decrement_inline_expr_varlevels(expr: Expr) -> Expr {
                 .collect(),
             ..*func
         })),
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(decrement_inline_expr_varlevels(*left)),
+            Box::new(decrement_inline_expr_varlevels(*right)),
+        ),
         other => other,
     }
 }

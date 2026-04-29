@@ -429,6 +429,17 @@ fn apply_create_view_column_names(
     Ok(())
 }
 
+fn apply_create_view_column_names_to_query(query: &mut Query, column_names: &[String]) {
+    for (target, name) in query
+        .target_list
+        .iter_mut()
+        .filter(|target| !target.resjunk)
+        .zip(column_names.iter())
+    {
+        target.name = name.clone();
+    }
+}
+
 fn collect_rule_dependencies_from_query(
     query: &Query,
     catalog: &dyn CatalogLookup,
@@ -2112,7 +2123,9 @@ fn from_item_requires_original_view_sql(item: &FromItem) -> bool {
             matches!(column_aliases, AliasColumnSpec::Definitions(_))
                 || from_item_requires_original_view_sql(source)
         }
-        FromItem::Lateral(source) => from_item_requires_original_view_sql(source),
+        FromItem::Lateral(source) | FromItem::TableSample { source, .. } => {
+            from_item_requires_original_view_sql(source)
+        }
         FromItem::DerivedTable(query) => select_query_requires_original_view_sql(query),
         FromItem::Join { left, right, .. } => {
             from_item_requires_original_view_sql(left)
@@ -5073,6 +5086,8 @@ impl Database {
         )?;
         let constraint_oids = analyzed_query.constraint_deps.clone();
         let plan = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?.plan_tree;
+        let mut stored_query = analyzed_query.clone();
+        apply_create_view_column_names_to_query(&mut stored_query, &create_stmt.column_names);
         let canonical_sql = if select_query_requires_original_view_sql(&create_stmt.query) {
             // :HACK: The analyzed `Query` does not yet retain enough CTE
             // and table-function alias structure to deparse every stored view
@@ -5084,7 +5099,7 @@ impl Database {
                 .trim_end_matches(';')
                 .to_string()
         } else {
-            render_view_query_sql(&analyzed_query, &catalog)
+            render_view_query_sql(&stored_query, &catalog)
         };
         let canonical_query_sql = append_view_check_option(canonical_sql, create_stmt.check_option);
         let mut desc = crate::backend::executor::RelationDesc {

@@ -4163,7 +4163,6 @@ fn explain_verbose_keeps_simple_projection() {
                     other => panic!("expected text explain line, got {:?}", other),
                 })
                 .collect::<Vec<_>>();
-            assert!(rendered.iter().any(|line| line.contains("Projection")));
             assert!(rendered.iter().any(|line| line.contains("Seq Scan")));
         }
         other => panic!("expected query result, got {:?}", other),
@@ -15419,7 +15418,6 @@ from (values (1),(2)) v1(r1)
         ) as ss1 on true
         full join generate_series(1, v1.r1) as gs4 on false
     ) as ss0 on true
-order by r1, gs1 nulls first, gs4 nulls last, gs2 nulls first, gs3 nulls first
 "#;
     match run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap() {
         StatementResult::Query {

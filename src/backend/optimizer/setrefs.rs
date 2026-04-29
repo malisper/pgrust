@@ -19,8 +19,8 @@ use crate::include::nodes::plannodes::{
 };
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, JoinType, OUTER_VAR,
-    OpExpr, OrderByEntry, Param, ParamKind, QueryColumn, RowsFromSource, ScalarArrayOpExpr, SubPlan,
-    TargetEntry, Var, WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
+    OpExpr, OrderByEntry, Param, ParamKind, QueryColumn, RowsFromSource, ScalarArrayOpExpr,
+    SubPlan, TargetEntry, Var, WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
     is_executor_special_varno, is_system_attr, set_returning_call_exprs, user_attrno,
 };
 use std::collections::BTreeSet;
@@ -1325,6 +1325,32 @@ fn lower_projection_expr_by_input_target(
                 })
                 .collect(),
             array_type,
+        },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| {
+                    (
+                        name,
+                        lower_projection_expr_by_input_target(root, expr, input, input_tlist),
+                    )
+                })
+                .collect(),
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(lower_projection_expr_by_input_target(
+                root,
+                *expr,
+                input,
+                input_tlist,
+            )),
+            field,
+            field_type,
         },
         Expr::Coalesce(left, right) => Expr::Coalesce(
             Box::new(lower_projection_expr_by_input_target(
@@ -5634,12 +5660,13 @@ fn set_nested_loop_join_references(
         split_join_restrict_clauses(kind, &restrict_clauses);
     let join_qual = lower_join_clause_list(ctx, join_restrict_clauses, &left, &right);
     let qual = lower_join_clause_list(ctx, other_restrict_clauses, &left, &right);
+    let inherited_param_ids = ctx
+        .ext_params
+        .iter()
+        .map(|param| param.paramid)
+        .collect::<Vec<_>>();
     let (mut right_plan, nest_params) = {
         let inherited_params = ctx.ext_params.clone();
-        let inherited_param_ids = inherited_params
-            .iter()
-            .map(|param| param.paramid)
-            .collect::<Vec<_>>();
         let mut right_ctx = SetRefsContext {
             root: ctx.root,
             catalog: ctx.catalog,
@@ -5709,6 +5736,10 @@ fn set_nested_loop_join_references(
     let mut nest_params = nest_params;
     let mut retained_ext_params = Vec::new();
     for param in std::mem::take(&mut ctx.ext_params) {
+        if inherited_param_ids.contains(&param.paramid) {
+            retained_ext_params.push(param);
+            continue;
+        }
         if !plan_contains_exec_param_id(&right_plan, param.paramid) {
             retained_ext_params.push(param);
             continue;
@@ -7383,6 +7414,22 @@ fn rebuild_setrefs_expr(
             elements: elements.into_iter().map(recurse).collect(),
             array_type,
         },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, recurse(expr)))
+                .collect(),
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(recurse(*expr)),
+            field,
+            field_type,
+        },
         Expr::Coalesce(left, right) => {
             Expr::Coalesce(Box::new(recurse(*left)), Box::new(recurse(*right)))
         }
@@ -7550,6 +7597,22 @@ fn fully_expand_output_expr(expr: Expr, path: &Path) -> Expr {
                 .map(|element| fully_expand_output_expr(element, path))
                 .collect(),
             array_type,
+        },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, fully_expand_output_expr(expr, path)))
+                .collect(),
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(fully_expand_output_expr(*expr, path)),
+            field,
+            field_type,
         },
         Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
             array: Box::new(fully_expand_output_expr(*array, path)),

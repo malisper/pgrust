@@ -857,14 +857,27 @@ fn render_from_node(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode, indent: u
             } else {
                 format!("{join_type} JOIN")
             };
+            let needs_parentheses = indent > 3
+                || ctx
+                    .query
+                    .rtable
+                    .get(rtindex.saturating_sub(1))
+                    .and_then(|rte| rte.alias.as_ref())
+                    .is_some()
+                || join_operand_requires_outer_parentheses(ctx, left)
+                || join_operand_requires_outer_parentheses(ctx, right);
+            let join_indent = if needs_parentheses {
+                indent + 2
+            } else {
+                indent + 3
+            };
             let joined_body = format!(
                 "{left_sql}\n{}{} {}{}",
-                " ".repeat(indent + 2),
+                " ".repeat(join_indent),
                 join_keyword,
                 right_sql,
                 constraint
             );
-            let needs_parentheses = true;
             let joined = if needs_parentheses {
                 format!("({joined_body})")
             } else {
@@ -873,6 +886,19 @@ fn render_from_node(ctx: &ViewDeparseContext<'_>, node: &JoinTreeNode, indent: u
             append_join_alias(ctx, *rtindex, joined)
         }
     }
+}
+
+fn join_operand_requires_outer_parentheses(
+    ctx: &ViewDeparseContext<'_>,
+    node: &JoinTreeNode,
+) -> bool {
+    let JoinTreeNode::RangeTblRef(index) = node else {
+        return false;
+    };
+    ctx.query
+        .rtable
+        .get(index.saturating_sub(1))
+        .is_some_and(|rte| !matches!(rte.kind, RangeTblEntryKind::Relation { .. }))
 }
 
 fn render_rte(ctx: &ViewDeparseContext<'_>, index: usize) -> String {

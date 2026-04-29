@@ -7864,6 +7864,8 @@ fn const_gist_argument_value(expr: &Expr) -> Option<Value> {
         &values,
         func.funcresulttype,
         func.funcvariadic,
+        None,
+        &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
     ) {
         return result.ok();
     }

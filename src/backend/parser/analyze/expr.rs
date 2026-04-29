@@ -2889,22 +2889,24 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 }
             }
         }
-        SqlExpr::Parameter(index) => Expr::Param(Param {
-            paramkind: ParamKind::External,
-            paramid: *index,
-            paramtype: external_param_type(*index)
-                .unwrap_or_else(|| SqlType::new(SqlTypeKind::Text)),
-        }),
-        SqlExpr::ParamRef(index) => {
-            current_sql_function_inline_arg(*index)
-                .map(|arg| arg.expr)
-                .ok_or_else(|| ParseError::DetailedError {
-                    message: format!("there is no parameter ${index}"),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42P02",
-                })?
-        }
+        SqlExpr::Parameter(index) => current_sql_function_inline_arg(*index)
+            .map(|arg| arg.expr)
+            .unwrap_or_else(|| {
+                Expr::Param(Param {
+                    paramkind: ParamKind::External,
+                    paramid: *index,
+                    paramtype: external_param_type(*index)
+                        .unwrap_or_else(|| SqlType::new(SqlTypeKind::Text)),
+                })
+            }),
+        SqlExpr::ParamRef(index) => current_sql_function_inline_arg(*index)
+            .map(|arg| arg.expr)
+            .ok_or_else(|| ParseError::DetailedError {
+                message: format!("there is no parameter ${index}"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P02",
+            })?,
         SqlExpr::Default => {
             return Err(ParseError::UnexpectedToken {
                 expected: "expression",
