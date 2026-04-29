@@ -3460,6 +3460,16 @@ fn collect_set_returning_call_exec_paramids(
         .for_each(|expr| collect_expr_exec_paramids(expr, out));
 }
 
+fn collect_set_returning_call_external_exec_paramids(
+    call: &crate::include::nodes::primnodes::SetReturningCall,
+    bound: &BTreeSet<usize>,
+    out: &mut BTreeSet<usize>,
+) {
+    set_returning_call_exprs(call)
+        .into_iter()
+        .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+}
+
 fn collect_expr_exec_paramids(expr: &Expr, out: &mut BTreeSet<usize>) {
     match expr {
         Expr::Param(Param {
@@ -3504,7 +3514,8 @@ fn collect_expr_exec_paramids(expr: &Expr, out: &mut BTreeSet<usize>) {
             }
         }
         Expr::SubPlan(subplan) => {
-            out.extend(subplan.par_param.iter().copied());
+            // par_param ids are subplan-local slots populated from args at
+            // execution; the containing plan only depends directly on args.
             if let Some(testexpr) = &subplan.testexpr {
                 collect_expr_exec_paramids(testexpr, out);
             }
@@ -3664,7 +3675,7 @@ fn collect_plan_external_exec_paramids(
                         collect_external_expr_exec_paramids(&entry.expr, bound, out)
                     }
                     ProjectSetTarget::Set { call, .. } => {
-                        collect_set_returning_call_exec_paramids(call, out)
+                        collect_set_returning_call_external_exec_paramids(call, bound, out)
                     }
                 }
             });
@@ -3817,7 +3828,9 @@ fn collect_plan_external_exec_paramids(
             collect_plan_external_exec_paramids(input, bound, out);
             collect_window_clause_exec_paramids(clause, out);
         }
-        Plan::FunctionScan { call, .. } => collect_set_returning_call_exec_paramids(call, out),
+        Plan::FunctionScan { call, .. } => {
+            collect_set_returning_call_external_exec_paramids(call, bound, out)
+        }
         Plan::Values { rows, .. } => rows
             .iter()
             .flatten()
@@ -5389,37 +5402,43 @@ fn set_nested_loop_join_references(
     let left_for_late_params = left.clone();
     let left_plan = set_plan_refs(ctx, *left);
     let mut nest_params = nest_params;
-    let mut retained_ext_params = Vec::new();
-    for param in std::mem::take(&mut ctx.ext_params) {
-        if !plan_contains_exec_param_id(&right_plan, param.paramid) {
-            retained_ext_params.push(param);
-            continue;
+    if !matches!(
+        kind,
+        crate::include::nodes::primnodes::JoinType::Right
+            | crate::include::nodes::primnodes::JoinType::Full
+    ) {
+        let mut retained_ext_params = Vec::new();
+        for param in std::mem::take(&mut ctx.ext_params) {
+            if !plan_contains_exec_param_id(&right_plan, param.paramid) {
+                retained_ext_params.push(param);
+                continue;
+            }
+            let fixed_expr = fix_upper_expr_for_input(
+                ctx.root,
+                param.expr.clone(),
+                &left_for_late_params,
+                &left_tlist,
+            );
+            if can_bind_as_nest_param(&param.expr, &fixed_expr) {
+                let label = label_for_expr(ctx, &param.expr).or(param.label.clone());
+                nest_params.push(ExecParamSource {
+                    paramid: param.paramid,
+                    expr: lower_expr(
+                        ctx,
+                        fixed_expr,
+                        LowerMode::Input {
+                            path: Some(&left_for_late_params),
+                            tlist: &left_tlist,
+                        },
+                    ),
+                    label,
+                });
+            } else {
+                retained_ext_params.push(param);
+            }
         }
-        let fixed_expr = fix_upper_expr_for_input(
-            ctx.root,
-            param.expr.clone(),
-            &left_for_late_params,
-            &left_tlist,
-        );
-        if can_bind_as_nest_param(&param.expr, &fixed_expr) {
-            let label = label_for_expr(ctx, &param.expr).or(param.label.clone());
-            nest_params.push(ExecParamSource {
-                paramid: param.paramid,
-                expr: lower_expr(
-                    ctx,
-                    fixed_expr,
-                    LowerMode::Input {
-                        path: Some(&left_for_late_params),
-                        tlist: &left_tlist,
-                    },
-                ),
-                label,
-            });
-        } else {
-            retained_ext_params.push(param);
-        }
+        ctx.ext_params = retained_ext_params;
     }
-    ctx.ext_params = retained_ext_params;
     right_plan =
         maybe_wrap_nested_loop_inner_plan(ctx.root, kind, right_plan, &nest_params, left_rows);
     Plan::NestedLoopJoin {
