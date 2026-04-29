@@ -23,8 +23,8 @@ use crate::include::nodes::datum::{
     RecordDescriptor, RecordValue,
 };
 use crate::include::nodes::primnodes::{
-    Expr, FuncExpr, RelationDesc, ScalarFunctionImpl, Var, attrno_index, expr_sql_type_hint,
-    user_attrno,
+    BuiltinScalarFunction, Expr, FuncExpr, RelationDesc, ScalarFunctionImpl, Var, attrno_index,
+    expr_sql_type_hint, user_attrno,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1729,20 +1729,8 @@ fn evaluate_partition_bound_expr(
         ));
     }
     let folded = crate::backend::optimizer::fold_expr_constants(bound)?;
-    let value = match folded {
-        Expr::Const(value) => value,
-        Expr::CurrentTimestamp { precision } => {
-            crate::backend::executor::current_timestamp_value(precision, true)
-        }
-        Expr::LocalTimestamp { precision } => {
-            crate::backend::executor::current_timestamp_value(precision, false)
-        }
-        _ => {
-            return Err(partition_bound_error(
-                "partition bound values must be constant",
-            ));
-        }
-    };
+    let value = partition_bound_const_expr_value(&folded, catalog)?
+        .ok_or_else(|| partition_bound_error("partition bound values must be constant"))?;
     if matches!(target.kind, SqlTypeKind::Bool)
         && matches!(
             value,
@@ -1759,6 +1747,58 @@ fn evaluate_partition_bound_expr(
         &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
     )
     .map_err(|_| partition_bound_cast_error(target, key_name))
+}
+
+fn partition_bound_const_expr_value(
+    expr: &Expr,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Value>, ParseError> {
+    match expr {
+        Expr::Const(value) => Ok(Some(value.clone())),
+        Expr::CurrentTimestamp { precision } => Ok(Some(
+            crate::backend::executor::current_timestamp_value(*precision, true),
+        )),
+        Expr::LocalTimestamp { precision } => Ok(Some(
+            crate::backend::executor::current_timestamp_value(*precision, false),
+        )),
+        Expr::Collate { expr, .. } => partition_bound_const_expr_value(expr, catalog),
+        Expr::Cast(inner, target) => {
+            let Some(value) = partition_bound_const_expr_value(inner, catalog)? else {
+                return Ok(None);
+            };
+            let source_type = expr_sql_type_hint(inner).or_else(|| value.sql_type_hint());
+            let value = cast_value_with_source_type_catalog_and_config(
+                value,
+                source_type,
+                *target,
+                Some(catalog),
+                &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            )
+            .map_err(|_| partition_bound_error("partition bound values must be constant"))?;
+            Ok(Some(value))
+        }
+        Expr::Func(func)
+            if matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(BuiltinScalarFunction::ToChar)
+            ) =>
+        {
+            let mut values = Vec::with_capacity(func.args.len());
+            for arg in &func.args {
+                let Some(value) = partition_bound_const_expr_value(arg, catalog)? else {
+                    return Ok(None);
+                };
+                values.push(value);
+            }
+            crate::backend::executor::eval_to_char_function(
+                &values,
+                &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            )
+            .map(Some)
+            .map_err(|_| partition_bound_error("partition bound values must be constant"))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn partition_bound_cast_error(target: SqlType, key_name: &str) -> ParseError {
