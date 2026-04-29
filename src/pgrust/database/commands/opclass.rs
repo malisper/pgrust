@@ -5,8 +5,8 @@ use crate::backend::executor::expr_reg::format_type_text;
 use crate::backend::parser::{
     AlterOperatorClassAction, AlterOperatorClassStatement, AlterOperatorFamilyAction,
     AlterOperatorFamilyStatement, CatalogLookup, CreateOperatorClassItem,
-    CreateOperatorClassStatement, CreateOperatorFamilyStatement, DropOperatorFamilyStatement,
-    ParseError, parse_type_name, resolve_raw_type_name,
+    CreateOperatorClassStatement, CreateOperatorFamilyStatement, DropOperatorClassStatement,
+    DropOperatorFamilyStatement, ParseError, parse_type_name, resolve_raw_type_name,
 };
 use crate::backend::utils::cache::lsyscache::access_method_row_by_name;
 use crate::backend::utils::cache::syscache::{
@@ -1935,6 +1935,85 @@ impl Database {
         let effect = {
             let mut catalog_guard = self.catalog.write();
             catalog_guard.drop_operator_family_mvcc(&current, &ctx)?
+        };
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_drop_operator_class_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &DropOperatorClassStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_drop_operator_class_stmt_in_transaction_with_search_path(
+            client_id,
+            stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[])
+    }
+
+    pub(crate) fn execute_drop_operator_class_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &DropOperatorClassStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let access_method =
+            resolve_index_access_method(self, client_id, Some((xid, cid)), &stmt.access_method)?;
+        let Some(current) = lookup_opclass_row(
+            self,
+            client_id,
+            Some((xid, cid)),
+            stmt.schema_name.as_deref(),
+            &stmt.opclass_name,
+            access_method.oid,
+            configured_search_path,
+        )?
+        else {
+            if stmt.if_exists {
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "operator class \"{}\" does not exist for access method \"{}\"",
+                    stmt.opclass_name, stmt.access_method
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            });
+        };
+        ensure_opclass_owner(
+            self,
+            client_id,
+            Some((xid, cid)),
+            &current,
+            &stmt.opclass_name,
+        )?;
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: Some(self.txn_waiter.clone()),
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = {
+            let mut catalog_guard = self.catalog.write();
+            catalog_guard.drop_operator_class_mvcc(&current, &ctx)?
         };
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);

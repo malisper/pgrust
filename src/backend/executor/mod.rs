@@ -122,11 +122,11 @@ pub(crate) use expr_txid::{
 pub(crate) use expr_xml::{render_xml_output_text, strip_xml_declaration, validate_xml_input};
 pub use fmgr::ScalarFunctionCallInfo;
 pub(crate) use nodes::{
-    pg_sql_sort_by, render_explain_expr, render_explain_join_expr,
+    pg_sql_sort_by, render_explain_expr, render_explain_join_expr, render_explain_literal,
     render_explain_projection_expr_with_qualifier, render_index_order_by,
     render_index_scan_condition_with_key_names,
     render_index_scan_condition_with_key_names_and_runtime_renderer,
-    render_verbose_range_support_expr,
+    render_verbose_range_support_expr, runtime_pruned_startup_child_indexes,
 };
 pub use random::PgPrngState;
 pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_positional_args};
@@ -208,6 +208,7 @@ pub(crate) use permissions::relation_values_visible_for_error_detail;
 pub struct ExprEvalBindings {
     pub exec_params: HashMap<usize, Value>,
     pub initplan_values: HashMap<usize, Value>,
+    pub external_params: HashMap<usize, Value>,
     pub outer_tuple: Option<Vec<Value>>,
     pub outer_system_bindings: Vec<SystemVarBinding>,
     pub inner_tuple: Option<Vec<Value>>,

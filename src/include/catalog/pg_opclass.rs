@@ -4,6 +4,7 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::*;
 
 pub const ARRAY_BTREE_OPCLASS_OID: u32 = 76012;
+pub const ARRAY_HASH_OPCLASS_OID: u32 = 76235;
 pub const BOOL_BTREE_OPCLASS_OID: u32 = 424;
 pub const INT2_BTREE_OPCLASS_OID: u32 = 1979;
 pub const INT4_BTREE_OPCLASS_OID: u32 = 1978;
@@ -761,6 +762,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BOX_TYPE_OID,
         ),
         hash_row(
+            ARRAY_HASH_OPCLASS_OID,
+            "array_ops",
+            HASH_ARRAY_FAMILY_OID,
+            ANYARRAYOID,
+        ),
+        hash_row(
             BOOL_HASH_OPCLASS_OID,
             "bool_ops",
             HASH_BOOL_FAMILY_OID,
@@ -1120,6 +1127,7 @@ pub fn default_btree_opclass_oid(type_oid: u32) -> Option<u32> {
 
 pub fn default_hash_opclass_oid(type_oid: u32) -> Option<u32> {
     Some(match type_oid {
+        ANYARRAYOID => ARRAY_HASH_OPCLASS_OID,
         BOOL_TYPE_OID => BOOL_HASH_OPCLASS_OID,
         INT2_TYPE_OID => INT2_HASH_OPCLASS_OID,
         INT4_TYPE_OID => INT4_HASH_OPCLASS_OID,

@@ -7,7 +7,7 @@ use crate::include::nodes::parsenodes::SetOperator;
 use crate::include::nodes::parsenodes::TableSampleClause;
 use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::plannodes::{
-    AggregatePhase, AggregateStrategy, IndexScanKey, PlanEstimate,
+    AggregatePhase, AggregateStrategy, IndexScanKey, PartitionPrunePlan, PlanEstimate,
 };
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
@@ -450,6 +450,7 @@ pub enum Path {
         source_id: usize,
         desc: RelationDesc,
         child_roots: Vec<Option<PlannerSubroot>>,
+        partition_prune: Option<PartitionPrunePlan>,
         children: Vec<Path>,
     },
     MergeAppend {
@@ -458,6 +459,7 @@ pub enum Path {
         source_id: usize,
         desc: RelationDesc,
         items: Vec<OrderByEntry>,
+        partition_prune: Option<PartitionPrunePlan>,
         children: Vec<Path>,
     },
     Unique {

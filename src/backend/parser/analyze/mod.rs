@@ -144,6 +144,29 @@ use std::rc::Rc;
 use system_views::*;
 use window::*;
 
+thread_local! {
+    static EXTERNAL_PARAM_TYPES: RefCell<Vec<(usize, SqlType)>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn with_external_param_types<T>(types: &[(usize, SqlType)], f: impl FnOnce() -> T) -> T {
+    EXTERNAL_PARAM_TYPES.with(|cell| {
+        let old = cell.replace(types.to_vec());
+        let result = f();
+        cell.replace(old);
+        result
+    })
+}
+
+pub(crate) fn external_param_type(paramid: usize) -> Option<SqlType> {
+    EXTERNAL_PARAM_TYPES.with(|cell| {
+        cell.borrow()
+            .iter()
+            .rev()
+            .find(|(candidate, _)| *candidate == paramid)
+            .map(|(_, ty)| *ty)
+    })
+}
+
 pub(crate) fn is_system_column_name(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),

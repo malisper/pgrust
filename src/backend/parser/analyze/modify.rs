@@ -2324,11 +2324,13 @@ fn rewrite_auto_view_scan_plan(
             plan_info,
             source_id,
             desc,
+            partition_prune,
             children,
         } => Plan::Append {
             plan_info,
             source_id,
             desc,
+            partition_prune,
             children: children
                 .into_iter()
                 .map(|child| {
@@ -2347,12 +2349,14 @@ fn rewrite_auto_view_scan_plan(
             source_id,
             desc,
             items,
+            partition_prune,
             children,
         } => Plan::MergeAppend {
             plan_info,
             source_id,
             desc,
             items,
+            partition_prune,
             children: children
                 .into_iter()
                 .map(|child| {
@@ -3192,11 +3196,16 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         targets
             .into_iter()
             .map(|mut target| {
+                let parent_visible_exprs = target.parent_visible_exprs.clone();
                 target
                     .rls_write_checks
                     .extend(resolved.view_check_options.iter().cloned().map(|check| {
                         RlsWriteCheck {
-                            expr: check.expr,
+                            expr: rewrite_local_vars_for_output_exprs(
+                                check.expr,
+                                1,
+                                &parent_visible_exprs,
+                            ),
                             policy_name: None,
                             source: crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(
                                 check.view_name,

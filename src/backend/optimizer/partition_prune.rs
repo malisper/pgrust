@@ -1,23 +1,45 @@
 use std::cmp::Ordering;
 
+use crate::backend::executor::cast_value_with_source_type_catalog_and_config;
 use crate::backend::executor::compare_order_values;
 use crate::backend::parser::{
     CatalogLookup, LoweredPartitionSpec, PartitionBoundSpec, PartitionRangeDatumValue,
-    PartitionStrategy, SerializedPartitionValue, SubqueryComparisonOp, deserialize_partition_bound,
-    partition_value_to_value, relation_partition_spec,
+    PartitionStrategy, SerializedPartitionValue, SqlType, SqlTypeKind, SubqueryComparisonOp,
+    deserialize_partition_bound, partition_value_to_value, relation_partition_spec,
 };
 use crate::backend::utils::cache::catcache::sql_type_oid;
-use crate::include::catalog::{ANYOID, PG_LANGUAGE_SQL_OID, builtin_scalar_function_for_proc_oid};
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::include::catalog::{
+    ANYARRAYOID, ANYOID, PG_LANGUAGE_SQL_OID, builtin_scalar_function_for_proc_oid,
+};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, Expr, OpExprKind, RelationDesc, ScalarFunctionImpl,
-    attrno_index, user_attrno,
+    attrno_index, expr_sql_type_hint, user_attrno,
 };
 
 pub(super) fn partition_may_satisfy_filter(
     spec: Option<&LoweredPartitionSpec>,
     bound: Option<&PartitionBoundSpec>,
     sibling_bounds: &[PartitionBoundSpec],
+    filter: Option<&Expr>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> bool {
+    partition_may_satisfy_filter_with_ancestor_bound(
+        spec,
+        bound,
+        sibling_bounds,
+        None,
+        filter,
+        catalog,
+    )
+}
+
+pub(super) fn partition_may_satisfy_filter_with_ancestor_bound(
+    spec: Option<&LoweredPartitionSpec>,
+    bound: Option<&PartitionBoundSpec>,
+    sibling_bounds: &[PartitionBoundSpec],
+    ancestor_bound: Option<&PartitionBoundSpec>,
     filter: Option<&Expr>,
     catalog: Option<&dyn CatalogLookup>,
 ) -> bool {
@@ -30,7 +52,179 @@ pub(super) fn partition_may_satisfy_filter(
     let Some(bound) = bound else {
         return true;
     };
-    expr_may_match_bound(filter, spec, bound, sibling_bounds, catalog)
+    expr_may_match_bound(
+        filter,
+        spec,
+        bound,
+        sibling_bounds,
+        ancestor_bound,
+        catalog,
+        None,
+    )
+}
+
+pub(super) fn partition_may_satisfy_filter_for_relation(
+    spec: Option<&LoweredPartitionSpec>,
+    bound: Option<&PartitionBoundSpec>,
+    sibling_bounds: &[PartitionBoundSpec],
+    ancestor_bound: Option<&PartitionBoundSpec>,
+    filter: Option<&Expr>,
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    let Some(spec) = spec else {
+        return true;
+    };
+    let Some(bound) = bound else {
+        return true;
+    };
+    expr_may_match_bound(
+        filter,
+        spec,
+        bound,
+        sibling_bounds,
+        ancestor_bound,
+        Some(catalog),
+        Some(relation_oid),
+    )
+}
+
+pub(crate) fn partition_may_satisfy_filter_with_runtime_values(
+    spec: &LoweredPartitionSpec,
+    bound: Option<&PartitionBoundSpec>,
+    sibling_bounds: &[PartitionBoundSpec],
+    filter: &Expr,
+    catalog: Option<&dyn CatalogLookup>,
+    mut eval_runtime_value: impl FnMut(&Expr) -> Option<Value>,
+) -> bool {
+    let Some(bound) = bound else {
+        return true;
+    };
+    let filter = substitute_runtime_prune_values(filter, &mut eval_runtime_value);
+    expr_may_match_bound(&filter, spec, bound, sibling_bounds, None, catalog, None)
+}
+
+fn substitute_runtime_prune_values(
+    expr: &Expr,
+    eval_runtime_value: &mut impl FnMut(&Expr) -> Option<Value>,
+) -> Expr {
+    if !expr_contains_tuple_var(expr)
+        && !matches!(expr, Expr::Random)
+        && let Some(value) = eval_runtime_value(expr)
+    {
+        return Expr::Const(value);
+    }
+    match expr {
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
+            boolop: bool_expr.boolop,
+            args: bool_expr
+                .args
+                .iter()
+                .map(|arg| substitute_runtime_prune_values(arg, eval_runtime_value))
+                .collect(),
+        })),
+        Expr::Op(op) => {
+            let mut op = op.clone();
+            op.args = op
+                .args
+                .iter()
+                .map(|arg| substitute_runtime_prune_values(arg, eval_runtime_value))
+                .collect();
+            Expr::Op(op)
+        }
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
+            crate::include::nodes::primnodes::ScalarArrayOpExpr {
+                left: Box::new(substitute_runtime_prune_values(
+                    &saop.left,
+                    eval_runtime_value,
+                )),
+                op: saop.op,
+                use_or: saop.use_or,
+                right: Box::new(substitute_runtime_prune_values(
+                    &saop.right,
+                    eval_runtime_value,
+                )),
+                collation_oid: saop.collation_oid,
+            },
+        )),
+        Expr::Cast(inner, ty) => Expr::Cast(
+            Box::new(substitute_runtime_prune_values(inner, eval_runtime_value)),
+            *ty,
+        ),
+        Expr::Collate {
+            expr: inner,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(substitute_runtime_prune_values(inner, eval_runtime_value)),
+            collation_oid: *collation_oid,
+        },
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(substitute_runtime_prune_values(
+            inner,
+            eval_runtime_value,
+        ))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(substitute_runtime_prune_values(
+            inner,
+            eval_runtime_value,
+        ))),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(substitute_runtime_prune_values(left, eval_runtime_value)),
+            Box::new(substitute_runtime_prune_values(right, eval_runtime_value)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(substitute_runtime_prune_values(left, eval_runtime_value)),
+            Box::new(substitute_runtime_prune_values(right, eval_runtime_value)),
+        ),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .iter()
+                .map(|element| substitute_runtime_prune_values(element, eval_runtime_value))
+                .collect(),
+            array_type: *array_type,
+        },
+        Expr::Func(func) => {
+            let mut func = func.clone();
+            func.args = func
+                .args
+                .iter()
+                .map(|arg| substitute_runtime_prune_values(arg, eval_runtime_value))
+                .collect();
+            Expr::Func(func)
+        }
+        other => other.clone(),
+    }
+}
+
+fn expr_contains_tuple_var(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(_) => true,
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_tuple_var),
+        Expr::Op(op) => op.args.iter().any(expr_contains_tuple_var),
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_tuple_var(&saop.left) || expr_contains_tuple_var(&saop.right)
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => expr_contains_tuple_var(inner),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_tuple_var(left) || expr_contains_tuple_var(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_tuple_var),
+        Expr::Func(func) => func.args.iter().any(expr_contains_tuple_var),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_contains_tuple_var),
+        _ => false,
+    }
 }
 
 pub(crate) fn relation_may_satisfy_own_partition_bound(
@@ -77,7 +271,15 @@ pub(crate) fn relation_may_satisfy_own_partition_bound(
                         .and_then(|text| deserialize_partition_bound(text.as_str()).ok())
                 })
                 .collect::<Vec<_>>();
-            expr_may_match_bound(filter, &spec, &bound, &sibling_bounds, Some(catalog))
+            expr_may_match_bound(
+                filter,
+                &spec,
+                &bound,
+                &sibling_bounds,
+                None,
+                Some(catalog),
+                None,
+            )
         })
 }
 
@@ -141,9 +343,18 @@ fn expr_may_match_bound(
     spec: &LoweredPartitionSpec,
     bound: &PartitionBoundSpec,
     sibling_bounds: &[PartitionBoundSpec],
+    ancestor_bound: Option<&PartitionBoundSpec>,
     catalog: Option<&dyn CatalogLookup>,
+    relation_oid: Option<u32>,
 ) -> bool {
-    if let Some(result) = explicit_list_bound_may_match_expr(expr, spec, bound) {
+    if let (Some(catalog), Some(relation_oid)) = (catalog, relation_oid)
+        && !relation_may_satisfy_own_partition_bound(catalog, relation_oid, Some(expr))
+    {
+        return false;
+    }
+    if let Some(result) =
+        explicit_list_bound_may_match_expr(expr, spec, bound, catalog, relation_oid)
+    {
         return result;
     }
     if let Some((key_index, value)) = partition_key_bool_equality_predicate(expr, spec) {
@@ -154,27 +365,60 @@ fn expr_may_match_bound(
             key_index,
             &Value::Bool(value),
             catalog,
+            ancestor_bound,
         );
     }
     match expr {
+        Expr::Const(Value::Bool(value)) => *value,
         Expr::Bool(bool_expr) => match bool_expr.boolop {
             BoolExprType::And => {
-                range_may_satisfy_conjunction(expr, spec, bound, sibling_bounds).unwrap_or(true)
+                range_may_satisfy_conjunction(expr, spec, bound, sibling_bounds, ancestor_bound)
+                    .unwrap_or(true)
                     && hash_may_satisfy_conjunction(expr, spec, bound, catalog).unwrap_or(true)
-                    && bool_expr
-                        .args
-                        .iter()
-                        .all(|arg| expr_may_match_bound(arg, spec, bound, sibling_bounds, catalog))
+                    && bool_expr.args.iter().all(|arg| {
+                        expr_may_match_bound(
+                            arg,
+                            spec,
+                            bound,
+                            sibling_bounds,
+                            ancestor_bound,
+                            catalog,
+                            relation_oid,
+                        )
+                    })
             }
-            BoolExprType::Or => bool_expr
-                .args
-                .iter()
-                .any(|arg| expr_may_match_bound(arg, spec, bound, sibling_bounds, catalog)),
+            BoolExprType::Or => bool_expr.args.iter().any(|arg| {
+                expr_may_match_bound(
+                    arg,
+                    spec,
+                    bound,
+                    sibling_bounds,
+                    ancestor_bound,
+                    catalog,
+                    relation_oid,
+                ) || relaxed_or_arm_may_match_bound(
+                    arg,
+                    spec,
+                    bound,
+                    sibling_bounds,
+                    ancestor_bound,
+                    catalog,
+                    relation_oid,
+                )
+            }),
             BoolExprType::Not => true,
         },
         Expr::IsNull(inner) => partition_key_index(inner, spec)
             .map(|index| {
-                bound_may_contain_value(spec, bound, sibling_bounds, index, &Value::Null, catalog)
+                bound_may_contain_value(
+                    spec,
+                    bound,
+                    sibling_bounds,
+                    index,
+                    &Value::Null,
+                    catalog,
+                    ancestor_bound,
+                )
             })
             .unwrap_or(true),
         Expr::IsNotNull(inner) => partition_key_index(inner, spec)
@@ -185,7 +429,7 @@ fn expr_may_match_bound(
                 return true;
             };
             let Some((key_index, key_on_left, value)) =
-                partition_key_const_cmp(left, right, spec, op.collation_oid)
+                partition_key_const_cmp(left, right, spec, op.collation_oid, catalog)
             else {
                 return true;
             };
@@ -199,6 +443,7 @@ fn expr_may_match_bound(
                 &value,
                 op.collation_oid,
                 catalog,
+                ancestor_bound,
             )
         }
         Expr::IsDistinctFrom(left, right) => partition_key_const_distinct_cmp(left, right, spec)
@@ -240,6 +485,7 @@ fn expr_may_match_bound(
                         &value,
                         saop.collation_oid,
                         catalog,
+                        ancestor_bound,
                     )
                 })
             } else {
@@ -254,6 +500,7 @@ fn expr_may_match_bound(
                         &value,
                         saop.collation_oid,
                         catalog,
+                        ancestor_bound,
                     )
                 })
             }
@@ -262,10 +509,40 @@ fn expr_may_match_bound(
     }
 }
 
+fn relaxed_or_arm_may_match_bound(
+    expr: &Expr,
+    spec: &LoweredPartitionSpec,
+    bound: &PartitionBoundSpec,
+    sibling_bounds: &[PartitionBoundSpec],
+    ancestor_bound: Option<&PartitionBoundSpec>,
+    catalog: Option<&dyn CatalogLookup>,
+    relation_oid: Option<u32>,
+) -> bool {
+    let Expr::Bool(bool_expr) = expr else {
+        return false;
+    };
+    if bool_expr.boolop != BoolExprType::And {
+        return false;
+    }
+    bool_expr.args.iter().any(|arg| {
+        expr_may_match_bound(
+            arg,
+            spec,
+            bound,
+            sibling_bounds,
+            ancestor_bound,
+            catalog,
+            relation_oid,
+        )
+    })
+}
+
 fn explicit_list_bound_may_match_expr(
     expr: &Expr,
     spec: &crate::backend::parser::LoweredPartitionSpec,
     bound: &PartitionBoundSpec,
+    catalog: Option<&dyn CatalogLookup>,
+    relation_oid: Option<u32>,
 ) -> Option<bool> {
     let (
         PartitionStrategy::List,
@@ -280,7 +557,7 @@ fn explicit_list_bound_may_match_expr(
     Some(
         values
             .iter()
-            .any(|value| list_value_may_match_expr(value, expr, spec)),
+            .any(|value| list_value_may_match_expr(value, expr, spec, catalog, relation_oid)),
     )
 }
 
@@ -288,7 +565,14 @@ fn list_value_may_match_expr(
     value: &SerializedPartitionValue,
     expr: &Expr,
     spec: &crate::backend::parser::LoweredPartitionSpec,
+    catalog: Option<&dyn CatalogLookup>,
+    relation_oid: Option<u32>,
 ) -> bool {
+    if let (Some(catalog), Some(relation_oid)) = (catalog, relation_oid)
+        && !relation_may_satisfy_own_partition_bound(catalog, relation_oid, Some(expr))
+    {
+        return false;
+    }
     if let Some((key_index, required_value)) = partition_key_bool_equality_predicate(expr, spec)
         && key_index == 0
     {
@@ -304,11 +588,11 @@ fn list_value_may_match_expr(
             BoolExprType::And => bool_expr
                 .args
                 .iter()
-                .all(|arg| list_value_may_match_expr(value, arg, spec)),
+                .all(|arg| list_value_may_match_expr(value, arg, spec, catalog, relation_oid)),
             BoolExprType::Or => bool_expr
                 .args
                 .iter()
-                .any(|arg| list_value_may_match_expr(value, arg, spec)),
+                .any(|arg| list_value_may_match_expr(value, arg, spec, catalog, relation_oid)),
             BoolExprType::Not => true,
         },
         Expr::IsNull(inner) => partition_key_index(inner, spec)
@@ -323,7 +607,7 @@ fn list_value_may_match_expr(
             };
             let collation_oid = op.collation_oid;
             let Some((key_index, key_on_left, constant)) =
-                partition_key_const_cmp(left, right, spec, collation_oid)
+                partition_key_const_cmp(left, right, spec, collation_oid, catalog)
             else {
                 return true;
             };
@@ -379,19 +663,21 @@ fn partition_key_const_cmp(
     right: &Expr,
     spec: &LoweredPartitionSpec,
     query_collation_oid: Option<u32>,
+    catalog: Option<&dyn CatalogLookup>,
 ) -> Option<(usize, bool, Value)> {
     for (index, key_expr) in spec.key_exprs.iter().enumerate() {
         let key_collation_oid = spec.partcollation.get(index).copied().unwrap_or(0);
         if collation_mismatch(query_collation_oid, key_collation_oid) {
             continue;
         }
+        let key_type = spec.key_types.get(index).copied();
         if partition_key_expr_matches(left, key_expr).is_some()
-            && let Some(value) = const_value(right)
+            && let Some(value) = const_value_for_partition_key(right, key_type, catalog)
         {
             return Some((index, true, value));
         }
         if partition_key_expr_matches(right, key_expr).is_some()
-            && let Some(value) = const_value(left)
+            && let Some(value) = const_value_for_partition_key(left, key_type, catalog)
         {
             return Some((index, false, value));
         }
@@ -531,7 +817,51 @@ fn partition_key_type_is_bool(
 fn partition_key_expr_matches<'a>(expr: &'a Expr, key_expr: &Expr) -> Option<&'a Expr> {
     let normalized = normalize_key_expr(expr);
     let normalized_key = normalize_key_expr(key_expr);
-    (normalized == normalized_key || simple_var_matches(normalized, normalized_key)).then_some(expr)
+    (normalized == normalized_key
+        || simple_var_matches(normalized, normalized_key)
+        || casted_partition_key_expr_matches(expr, key_expr))
+    .then_some(expr)
+}
+
+fn casted_partition_key_expr_matches(expr: &Expr, key_expr: &Expr) -> bool {
+    let Expr::Cast(inner, cast_ty) = expr else {
+        return false;
+    };
+    partition_key_expr_matches(inner, key_expr).is_some()
+        && partition_key_cast_is_prune_compatible(key_expr, cast_ty)
+}
+
+fn partition_key_cast_is_prune_compatible(
+    key_expr: &Expr,
+    cast_ty: &crate::backend::parser::SqlType,
+) -> bool {
+    let Some(key_ty) = expr_sql_type_hint(normalize_key_expr(key_expr)) else {
+        return false;
+    };
+    key_ty == *cast_ty
+        || (integer_partition_cast_type(&key_ty) && integer_partition_cast_type(cast_ty))
+        || (text_relabel_partition_cast_type(&key_ty) && text_relabel_partition_cast_type(cast_ty))
+}
+
+fn integer_partition_cast_type(ty: &crate::backend::parser::SqlType) -> bool {
+    !ty.is_array
+        && matches!(
+            ty.kind,
+            crate::backend::parser::SqlTypeKind::Int2
+                | crate::backend::parser::SqlTypeKind::Int4
+                | crate::backend::parser::SqlTypeKind::Int8
+        )
+}
+
+fn text_relabel_partition_cast_type(ty: &crate::backend::parser::SqlType) -> bool {
+    !ty.is_array
+        && matches!(
+            ty.kind,
+            crate::backend::parser::SqlTypeKind::Text
+                | crate::backend::parser::SqlTypeKind::Varchar
+                | crate::backend::parser::SqlTypeKind::Char
+                | crate::backend::parser::SqlTypeKind::Name
+        )
 }
 
 fn simple_var_matches(left: &Expr, right: &Expr) -> bool {
@@ -555,7 +885,7 @@ fn normalize_key_expr(expr: &Expr) -> &Expr {
         {
             normalize_key_expr(&func.args[0])
         }
-        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => normalize_key_expr(inner),
+        Expr::Collate { expr: inner, .. } => normalize_key_expr(inner),
         other => other,
     }
 }
@@ -570,6 +900,68 @@ fn const_value(expr: &Expr) -> Option<Value> {
         Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => const_value(inner),
         _ => None,
     }
+}
+
+fn const_value_for_partition_key(
+    expr: &Expr,
+    key_type: Option<SqlType>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Option<Value> {
+    match expr {
+        Expr::Const(value) => coerce_const_for_partition_key(value.clone(), key_type, catalog),
+        Expr::Collate { expr: inner, .. } => {
+            const_value_for_partition_key(inner, key_type, catalog)
+        }
+        Expr::Cast(inner, target_type) => {
+            let key_type = key_type?;
+            if *target_type != key_type {
+                return None;
+            }
+            let value = const_value(inner)?;
+            let source_type = expr_sql_type_hint(inner).or_else(|| value.sql_type_hint())?;
+            cast_value_with_source_type_catalog_and_config(
+                value,
+                Some(source_type),
+                key_type,
+                catalog,
+                &DateTimeConfig::default(),
+            )
+            .ok()
+        }
+        _ => None,
+    }
+}
+
+fn coerce_const_for_partition_key(
+    value: Value,
+    key_type: Option<SqlType>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Option<Value> {
+    let key_type = key_type?;
+    if !partition_prune_should_fold_const_cast(key_type) {
+        return Some(value);
+    }
+    let source_type = value.sql_type_hint()?;
+    catalog
+        .and_then(|catalog| {
+            cast_value_with_source_type_catalog_and_config(
+                value.clone(),
+                Some(source_type),
+                key_type,
+                Some(catalog),
+                &DateTimeConfig::default(),
+            )
+            .ok()
+        })
+        .or(Some(value))
+}
+
+fn partition_prune_should_fold_const_cast(target_type: SqlType) -> bool {
+    !target_type.is_array
+        && matches!(
+            target_type.kind,
+            SqlTypeKind::Enum | SqlTypeKind::Composite | SqlTypeKind::Record
+        )
 }
 
 fn const_bool_value(expr: &Expr) -> Option<bool> {
@@ -633,15 +1025,22 @@ fn bound_may_satisfy_comparison(
     value: &Value,
     collation_oid: Option<u32>,
     catalog: Option<&dyn CatalogLookup>,
+    ancestor_bound: Option<&PartitionBoundSpec>,
 ) -> bool {
     if matches!(value, Value::Null) {
         return false;
     }
     let op = if key_on_left { op } else { commute_op(op) };
     match op {
-        OpExprKind::Eq => {
-            bound_may_contain_value(spec, bound, sibling_bounds, key_index, value, catalog)
-        }
+        OpExprKind::Eq => bound_may_contain_value(
+            spec,
+            bound,
+            sibling_bounds,
+            key_index,
+            value,
+            catalog,
+            ancestor_bound,
+        ),
         OpExprKind::NotEq => {
             bound_may_contain_non_equal_value(spec, bound, key_index, value, collation_oid)
         }
@@ -654,6 +1053,7 @@ fn bound_may_satisfy_comparison(
                 op,
                 value,
                 collation_oid,
+                ancestor_bound,
             )
         }
         _ => true,
@@ -677,6 +1077,7 @@ fn bound_may_contain_value(
     key_index: usize,
     value: &Value,
     catalog: Option<&dyn CatalogLookup>,
+    ancestor_bound: Option<&PartitionBoundSpec>,
 ) -> bool {
     match (&spec.strategy, bound) {
         (PartitionStrategy::List, PartitionBoundSpec::List { values, is_default }) => {
@@ -699,6 +1100,7 @@ fn bound_may_contain_value(
             value,
             OpExprKind::Eq,
             None,
+            ancestor_bound,
         )
         .unwrap_or(true),
         (PartitionStrategy::Hash, PartitionBoundSpec::Hash { .. }) => {
@@ -771,6 +1173,7 @@ fn bound_may_satisfy_distinctness(
                         key_index,
                         value,
                         None,
+                        None,
                     );
                 }
                 return list_default_may_contain_distinct_bool_value(
@@ -786,7 +1189,7 @@ fn bound_may_satisfy_distinctness(
         }
         (PartitionStrategy::Range, _) if !distinct => {
             if matches!(value, Value::Null) {
-                bound_may_contain_value(spec, bound, sibling_bounds, key_index, value, None)
+                bound_may_contain_value(spec, bound, sibling_bounds, key_index, value, None, None)
             } else {
                 range_may_satisfy_conjunction_value(
                     spec,
@@ -795,6 +1198,7 @@ fn bound_may_satisfy_distinctness(
                     key_index,
                     value,
                     OpExprKind::Eq,
+                    None,
                     None,
                 )
                 .unwrap_or(true)
@@ -817,6 +1221,7 @@ fn bound_may_satisfy_distinctness(
                 &Value::Bool(!value),
                 OpExprKind::Eq,
                 None,
+                None,
             )
             .unwrap_or(true)
         }
@@ -835,6 +1240,7 @@ fn bound_may_overlap_inequality(
     op: OpExprKind,
     value: &Value,
     collation_oid: Option<u32>,
+    ancestor_bound: Option<&PartitionBoundSpec>,
 ) -> bool {
     match (&spec.strategy, bound) {
         (PartitionStrategy::List, PartitionBoundSpec::List { values, is_default }) => {
@@ -854,6 +1260,7 @@ fn bound_may_overlap_inequality(
             value,
             op,
             collation_oid,
+            ancestor_bound,
         )
         .unwrap_or(true),
         _ => true,
@@ -1102,6 +1509,7 @@ fn range_may_satisfy_conjunction(
     spec: &LoweredPartitionSpec,
     bound: &PartitionBoundSpec,
     sibling_bounds: &[PartitionBoundSpec],
+    ancestor_bound: Option<&PartitionBoundSpec>,
 ) -> Option<bool> {
     if !matches!(spec.strategy, PartitionStrategy::Range) {
         return None;
@@ -1118,7 +1526,7 @@ fn range_may_satisfy_conjunction(
     if !saw_constraint {
         return None;
     }
-    range_bound_may_overlap_constraints(spec, bound, sibling_bounds, &constraints)
+    range_bound_may_overlap_constraints(spec, bound, sibling_bounds, ancestor_bound, &constraints)
 }
 
 fn range_may_satisfy_conjunction_value(
@@ -1129,6 +1537,7 @@ fn range_may_satisfy_conjunction_value(
     value: &Value,
     op: OpExprKind,
     collation_oid: Option<u32>,
+    ancestor_bound: Option<&PartitionBoundSpec>,
 ) -> Option<bool> {
     if !matches!(spec.strategy, PartitionStrategy::Range) {
         return None;
@@ -1144,7 +1553,7 @@ fn range_may_satisfy_conjunction_value(
     ) {
         return Some(false);
     }
-    range_bound_may_overlap_constraints(spec, bound, sibling_bounds, &constraints)
+    range_bound_may_overlap_constraints(spec, bound, sibling_bounds, ancestor_bound, &constraints)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1201,7 +1610,7 @@ fn apply_hash_constraint(
                 return ConstraintApplyResult::Ignored;
             };
             let Some((key_index, _, value)) =
-                partition_key_const_cmp(left, right, spec, op.collation_oid)
+                partition_key_const_cmp(left, right, spec, op.collation_oid, None)
             else {
                 return ConstraintApplyResult::Ignored;
             };
@@ -1301,17 +1710,28 @@ fn partition_hash_support_proc(
         .opclass_rows()
         .into_iter()
         .find(|row| row.oid == opclass_oid)?;
-    let key_type_oid = sql_type_oid(*spec.key_types.get(key_index)?);
+    let key_type = *spec.key_types.get(key_index)?;
+    let key_type_oid = sql_type_oid(key_type);
     catalog
         .amproc_rows()
         .into_iter()
         .find(|row| {
             row.amprocfamily == opclass.opcfamily
                 && row.amprocnum == 2
-                && (row.amproclefttype == key_type_oid || row.amproclefttype == ANYOID)
-                && (row.amprocrighttype == key_type_oid || row.amprocrighttype == ANYOID)
+                && hash_amproc_type_matches(row.amproclefttype, key_type_oid, key_type)
+                && hash_amproc_type_matches(row.amprocrighttype, key_type_oid, key_type)
         })
         .map(|row| row.amproc)
+}
+
+fn hash_amproc_type_matches(
+    proc_type_oid: u32,
+    key_type_oid: u32,
+    key_type: crate::include::nodes::parsenodes::SqlType,
+) -> bool {
+    proc_type_oid == key_type_oid
+        || proc_type_oid == ANYOID
+        || (key_type.is_array && proc_type_oid == ANYARRAYOID)
 }
 
 fn eval_partition_hash_support_proc(
@@ -1418,7 +1838,7 @@ fn apply_range_constraint(
                 return ConstraintApplyResult::Ignored;
             };
             let Some((key_index, key_on_left, value)) =
-                partition_key_const_cmp(left, right, spec, op.collation_oid)
+                partition_key_const_cmp(left, right, spec, op.collation_oid, None)
             else {
                 return ConstraintApplyResult::Ignored;
             };
@@ -1594,6 +2014,7 @@ fn range_bound_may_overlap_constraints(
     spec: &LoweredPartitionSpec,
     bound: &PartitionBoundSpec,
     sibling_bounds: &[PartitionBoundSpec],
+    ancestor_bound: Option<&PartitionBoundSpec>,
     constraints: &[KeyConstraint],
 ) -> Option<bool> {
     let PartitionBoundSpec::Range {
@@ -1606,13 +2027,25 @@ fn range_bound_may_overlap_constraints(
     };
     if *is_default {
         if let Some(values) = exact_constraint_values(constraints) {
+            if let Some(ancestor_bound) = ancestor_bound
+                && !ancestor_bound.is_default()
+                && range_bound_contains_tuple(ancestor_bound, &values, &spec.partcollation)
+                    == Some(false)
+            {
+                return Some(false);
+            }
             return Some(!sibling_bounds.iter().any(|sibling| {
                 !sibling.is_default()
                     && range_bound_contains_tuple(sibling, &values, &spec.partcollation)
                         == Some(true)
             }));
         }
-        return range_default_may_overlap_constraints(spec, sibling_bounds, constraints);
+        return range_default_may_overlap_constraints(
+            spec,
+            sibling_bounds,
+            ancestor_bound,
+            constraints,
+        );
     }
     if constraints
         .iter()
@@ -1647,35 +2080,61 @@ fn range_bound_may_overlap_constraints(
 fn range_default_may_overlap_constraints(
     spec: &crate::backend::parser::LoweredPartitionSpec,
     sibling_bounds: &[PartitionBoundSpec],
+    ancestor_bound: Option<&PartitionBoundSpec>,
     constraints: &[KeyConstraint],
 ) -> Option<bool> {
-    if spec.key_exprs.len() != 1 || constraints.len() != 1 {
+    if constraints
+        .iter()
+        .any(|constraint| constraint.requires_null)
+    {
         return Some(true);
     }
-    let constraint = &constraints[0];
-    if constraint.requires_null {
+    if spec.key_exprs.len() > 1 && !multi_key_default_interval_supported(constraints) {
         return Some(true);
     }
-    let Some(interval) = query_interval_from_constraint(constraint) else {
+    let Some(mut interval) = query_interval_from_constraints(constraints) else {
         return Some(true);
     };
-    let collation_oid = spec.partcollation.first().copied().filter(|oid| *oid != 0);
-    range_interval_covered_by_non_default_siblings(&interval, sibling_bounds, collation_oid)
+    if let Some(ancestor_bound) = ancestor_bound {
+        let Some(intersection) = intersect_query_interval_with_range_bound(
+            &interval,
+            ancestor_bound,
+            &spec.partcollation,
+        ) else {
+            return Some(true);
+        };
+        let Some(intersection) = intersection else {
+            return Some(false);
+        };
+        interval = intersection;
+    }
+    range_interval_covered_by_non_default_siblings(&interval, sibling_bounds, &spec.partcollation)
         .map(|covered| !covered)
         .or(Some(true))
 }
 
+fn multi_key_default_interval_supported(constraints: &[KeyConstraint]) -> bool {
+    let Some((last, prefix)) = constraints.split_last() else {
+        return true;
+    };
+    prefix
+        .iter()
+        .all(|constraint| constraint.equal.is_some() && !constraint.requires_null)
+        && (last.lower.is_some() || last.upper.is_some())
+}
+
 #[derive(Clone, Debug)]
 struct QueryInterval {
-    lower: BoundPoint,
-    upper: BoundPoint,
+    lower: Vec<BoundPoint>,
+    lower_inclusive: bool,
+    upper: Vec<BoundPoint>,
     upper_inclusive: bool,
 }
 
 #[derive(Clone, Debug)]
 struct RangeInterval {
-    lower: BoundPoint,
-    upper: BoundPoint,
+    lower: Vec<BoundPoint>,
+    upper: Vec<BoundPoint>,
 }
 
 #[derive(Clone, Debug)]
@@ -1685,54 +2144,141 @@ enum BoundPoint {
     PosInfinity,
 }
 
-fn query_interval_from_constraint(constraint: &KeyConstraint) -> Option<QueryInterval> {
-    if constraint.equal.is_some() {
+fn query_interval_from_constraints(constraints: &[KeyConstraint]) -> Option<QueryInterval> {
+    if constraints
+        .iter()
+        .all(|constraint| constraint.equal.is_some())
+    {
         return None;
     }
-    if constraint.lower.is_none() && constraint.upper.is_none() {
+    if constraints
+        .iter()
+        .all(|constraint| constraint.lower.is_none() && constraint.upper.is_none())
+    {
         return None;
     }
+    if !constraints_form_single_prefix_interval(constraints) {
+        return None;
+    }
+    let lower = query_bound_components(constraints, QueryBoundSide::Lower)
+        .into_iter()
+        .map(|component| bound_point_from_query_component(&component))
+        .collect::<Vec<_>>();
+    let upper_components = query_bound_components(constraints, QueryBoundSide::Upper);
+    let upper = upper_components
+        .iter()
+        .map(bound_point_from_query_component)
+        .collect::<Vec<_>>();
+    let lower_inclusive = constraints
+        .iter()
+        .find_map(|constraint| constraint.lower.as_ref().map(|bound| bound.inclusive))
+        .unwrap_or(true);
+    let upper_inclusive = upper_components
+        .iter()
+        .rev()
+        .find_map(|component| match component {
+            QueryBoundComponent::Value { inclusive, .. } => Some(*inclusive),
+            QueryBoundComponent::NegInfinity | QueryBoundComponent::PosInfinity => None,
+        })
+        .unwrap_or(false);
     Some(QueryInterval {
-        lower: constraint
-            .lower
-            .as_ref()
-            .map(|bound| BoundPoint::Value(bound.value.clone()))
-            .unwrap_or(BoundPoint::NegInfinity),
-        upper: constraint
-            .upper
-            .as_ref()
-            .map(|bound| BoundPoint::Value(bound.value.clone()))
-            .unwrap_or(BoundPoint::PosInfinity),
-        upper_inclusive: constraint
-            .upper
-            .as_ref()
-            .map(|bound| bound.inclusive)
-            .unwrap_or(false),
+        lower,
+        lower_inclusive,
+        upper,
+        upper_inclusive,
     })
+}
+
+fn constraints_form_single_prefix_interval(constraints: &[KeyConstraint]) -> bool {
+    let mut saw_range_key = false;
+    for (index, constraint) in constraints.iter().enumerate() {
+        if saw_range_key {
+            if constraint_has_bound(constraint) {
+                return false;
+            }
+            continue;
+        }
+        if constraint.equal.is_some() {
+            continue;
+        }
+        if constraint.lower.is_some() || constraint.upper.is_some() {
+            saw_range_key = true;
+            continue;
+        }
+        return constraints
+            .iter()
+            .skip(index + 1)
+            .all(|constraint| !constraint_has_bound(constraint));
+    }
+    true
+}
+
+fn constraint_has_bound(constraint: &KeyConstraint) -> bool {
+    constraint.equal.is_some() || constraint.lower.is_some() || constraint.upper.is_some()
+}
+
+fn bound_point_from_query_component(component: &QueryBoundComponent<'_>) -> BoundPoint {
+    match component {
+        QueryBoundComponent::NegInfinity => BoundPoint::NegInfinity,
+        QueryBoundComponent::PosInfinity => BoundPoint::PosInfinity,
+        QueryBoundComponent::Value { value, .. } => BoundPoint::Value((*value).clone()),
+    }
+}
+
+fn intersect_query_interval_with_range_bound(
+    query: &QueryInterval,
+    bound: &PartitionBoundSpec,
+    collations: &[u32],
+) -> Option<Option<QueryInterval>> {
+    let Some(range) = range_interval_from_non_default_bound(bound) else {
+        return Some(Some(query.clone()));
+    };
+    let (lower, lower_inclusive) =
+        match compare_bound_tuples(&query.lower, &range.lower, collations)? {
+            Ordering::Less => (range.lower, true),
+            Ordering::Equal => (query.lower.clone(), query.lower_inclusive),
+            Ordering::Greater => (query.lower.clone(), query.lower_inclusive),
+        };
+    let (upper, upper_inclusive) =
+        match compare_bound_tuples(&query.upper, &range.upper, collations)? {
+            Ordering::Less => (query.upper.clone(), query.upper_inclusive),
+            Ordering::Equal => (query.upper.clone(), false),
+            Ordering::Greater => (range.upper, false),
+        };
+    match compare_bound_tuples(&lower, &upper, collations)? {
+        Ordering::Greater => Some(None),
+        Ordering::Equal if !(lower_inclusive && upper_inclusive) => Some(None),
+        _ => Some(Some(QueryInterval {
+            lower,
+            lower_inclusive,
+            upper,
+            upper_inclusive,
+        })),
+    }
 }
 
 fn range_interval_covered_by_non_default_siblings(
     query: &QueryInterval,
     sibling_bounds: &[PartitionBoundSpec],
-    collation_oid: Option<u32>,
+    collations: &[u32],
 ) -> Option<bool> {
     let mut ranges = sibling_bounds
         .iter()
         .filter_map(range_interval_from_non_default_bound)
         .collect::<Vec<_>>();
     ranges.sort_by(|left, right| {
-        compare_bound_points(&left.lower, &right.lower, collation_oid).unwrap_or(Ordering::Equal)
+        compare_bound_tuples(&left.lower, &right.lower, collations).unwrap_or(Ordering::Equal)
     });
     let mut covered_until = query.lower.clone();
     for range in ranges {
-        if compare_bound_points(&range.upper, &covered_until, collation_oid)? != Ordering::Greater {
+        if compare_bound_tuples(&range.upper, &covered_until, collations)? != Ordering::Greater {
             continue;
         }
-        if compare_bound_points(&range.lower, &covered_until, collation_oid)? == Ordering::Greater {
+        if compare_bound_tuples(&range.lower, &covered_until, collations)? == Ordering::Greater {
             return Some(false);
         }
         covered_until = range.upper;
-        match compare_bound_points(&covered_until, &query.upper, collation_oid)? {
+        match compare_bound_tuples(&covered_until, &query.upper, collations)? {
             Ordering::Greater => return Some(true),
             Ordering::Equal if !query.upper_inclusive => return Some(true),
             _ => {}
@@ -1750,12 +2296,9 @@ fn range_interval_from_non_default_bound(bound: &PartitionBoundSpec) -> Option<R
     else {
         return None;
     };
-    if from.len() != 1 || to.len() != 1 {
-        return None;
-    }
     Some(RangeInterval {
-        lower: bound_point_from_range_datum(&from[0]),
-        upper: bound_point_from_range_datum(&to[0]),
+        lower: from.iter().map(bound_point_from_range_datum).collect(),
+        upper: to.iter().map(bound_point_from_range_datum).collect(),
     })
 }
 
@@ -1783,6 +2326,24 @@ fn compare_bound_points(
             compare_order_values(left, right, collation_oid, None, false).ok()
         }
     }
+}
+
+fn compare_bound_tuples(
+    left: &[BoundPoint],
+    right: &[BoundPoint],
+    collations: &[u32],
+) -> Option<Ordering> {
+    let width = left.len().max(right.len());
+    for index in 0..width {
+        let left_point = left.get(index).unwrap_or(&BoundPoint::PosInfinity);
+        let right_point = right.get(index).unwrap_or(&BoundPoint::PosInfinity);
+        let collation_oid = collations.get(index).copied().filter(|oid| *oid != 0);
+        let cmp = compare_bound_points(left_point, right_point, collation_oid)?;
+        if cmp != Ordering::Equal {
+            return Some(cmp);
+        }
+    }
+    Some(Ordering::Equal)
 }
 
 fn exact_constraint_values(constraints: &[KeyConstraint]) -> Option<Vec<Value>> {
@@ -1865,35 +2426,56 @@ fn query_bound_components(
     constraints: &[KeyConstraint],
     side: QueryBoundSide,
 ) -> Vec<QueryBoundComponent<'_>> {
-    constraints
-        .iter()
-        .map(|constraint| {
-            if let Some(equal) = &constraint.equal {
-                return QueryBoundComponent::Value {
-                    value: equal,
-                    inclusive: true,
-                };
+    let mut components = Vec::with_capacity(constraints.len());
+    let mut trailing_fill = None;
+    for constraint in constraints {
+        if let Some(fill) = trailing_fill.clone() {
+            components.push(fill);
+            continue;
+        }
+        if let Some(equal) = &constraint.equal {
+            components.push(QueryBoundComponent::Value {
+                value: equal,
+                inclusive: true,
+            });
+            continue;
+        }
+        let bound = match side {
+            QueryBoundSide::Lower => constraint.lower.as_ref(),
+            QueryBoundSide::Upper => constraint.upper.as_ref(),
+        };
+        if let Some(bound) = bound {
+            components.push(QueryBoundComponent::Value {
+                value: &bound.value,
+                inclusive: bound.inclusive,
+            });
+            if !bound.inclusive {
+                trailing_fill = Some(trailing_component_for_range_key(side, bound.inclusive));
             }
-            match side {
-                QueryBoundSide::Lower => constraint
-                    .lower
-                    .as_ref()
-                    .map(|bound| QueryBoundComponent::Value {
-                        value: &bound.value,
-                        inclusive: bound.inclusive,
-                    })
-                    .unwrap_or(QueryBoundComponent::NegInfinity),
-                QueryBoundSide::Upper => constraint
-                    .upper
-                    .as_ref()
-                    .map(|bound| QueryBoundComponent::Value {
-                        value: &bound.value,
-                        inclusive: bound.inclusive,
-                    })
-                    .unwrap_or(QueryBoundComponent::PosInfinity),
-            }
-        })
-        .collect()
+        } else {
+            components.push(unbounded_component_for_side(side));
+        }
+    }
+    components
+}
+
+fn unbounded_component_for_side(side: QueryBoundSide) -> QueryBoundComponent<'static> {
+    match side {
+        QueryBoundSide::Lower => QueryBoundComponent::NegInfinity,
+        QueryBoundSide::Upper => QueryBoundComponent::PosInfinity,
+    }
+}
+
+fn trailing_component_for_range_key(
+    side: QueryBoundSide,
+    inclusive: bool,
+) -> QueryBoundComponent<'static> {
+    match (side, inclusive) {
+        (QueryBoundSide::Lower, true) => QueryBoundComponent::NegInfinity,
+        (QueryBoundSide::Lower, false) => QueryBoundComponent::PosInfinity,
+        (QueryBoundSide::Upper, true) => QueryBoundComponent::PosInfinity,
+        (QueryBoundSide::Upper, false) => QueryBoundComponent::NegInfinity,
+    }
 }
 
 fn compare_query_bound_to_range_bound(
@@ -2013,7 +2595,7 @@ mod tests {
         bound: &PartitionBoundSpec,
         sibling_bounds: &[PartitionBoundSpec],
     ) -> bool {
-        super::expr_may_match_bound(expr, spec, bound, sibling_bounds, None)
+        super::expr_may_match_bound(expr, spec, bound, sibling_bounds, None, None, None)
     }
 
     fn list_spec() -> LoweredPartitionSpec {
@@ -2039,6 +2621,21 @@ mod tests {
             partattrs: vec![1],
             partclass: vec![0],
             partcollation: vec![0],
+        }
+    }
+
+    fn multi_int_range_spec(width: usize) -> LoweredPartitionSpec {
+        LoweredPartitionSpec {
+            strategy: PartitionStrategy::Range,
+            key_columns: (0..width).map(|index| format!("k{index}")).collect(),
+            key_exprs: (0..width)
+                .map(|index| int_key_att_expr(1, (index + 1) as i32))
+                .collect(),
+            key_types: vec![SqlType::new(SqlTypeKind::Int4); width],
+            key_sqls: (0..width).map(|index| format!("k{index}")).collect(),
+            partattrs: (1..=width as i16).collect(),
+            partclass: vec![0; width],
+            partcollation: vec![0; width],
         }
     }
 
@@ -2136,6 +2733,17 @@ mod tests {
         }
     }
 
+    fn multi_int_range_bound(
+        from: Vec<PartitionRangeDatumValue>,
+        to: Vec<PartitionRangeDatumValue>,
+    ) -> PartitionBoundSpec {
+        PartitionBoundSpec::Range {
+            from,
+            to,
+            is_default: false,
+        }
+    }
+
     fn int_range_default_bound() -> PartitionBoundSpec {
         PartitionBoundSpec::Range {
             from: Vec::new(),
@@ -2150,6 +2758,16 @@ mod tests {
 
     fn int_cmp(op: OpExprKind, value: i32) -> Expr {
         Expr::op_auto(op, vec![int_key_expr(42), Expr::Const(Value::Int32(value))])
+    }
+
+    fn int_att_cmp(attno: i32, op: OpExprKind, value: i32) -> Expr {
+        Expr::op_auto(
+            op,
+            vec![
+                int_key_att_expr(42, attno),
+                Expr::Const(Value::Int32(value)),
+            ],
+        )
     }
 
     fn null_bound() -> PartitionBoundSpec {
@@ -2397,6 +3015,120 @@ mod tests {
                 &siblings
             ));
         }
+    }
+
+    #[test]
+    fn range_default_with_ancestor_uses_intersected_domain() {
+        let spec = range_spec();
+        let default_bound = int_range_default_bound();
+        let ancestor = int_range_bound(int_value(31), PartitionRangeDatumValue::MaxValue);
+        let siblings = vec![int_range_bound(
+            int_value(31),
+            PartitionRangeDatumValue::MaxValue,
+        )];
+
+        assert!(!super::expr_may_match_bound(
+            &int_cmp(OpExprKind::LtEq, 31),
+            &spec,
+            &default_bound,
+            &siblings,
+            Some(&ancestor),
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn multi_key_range_default_keeps_unsupported_prefix_intervals() {
+        let spec = multi_int_range_spec(2);
+        let default_bound = int_range_default_bound();
+        let siblings = vec![
+            multi_int_range_bound(
+                vec![
+                    PartitionRangeDatumValue::MinValue,
+                    PartitionRangeDatumValue::MinValue,
+                ],
+                vec![int_value(1), PartitionRangeDatumValue::MinValue],
+            ),
+            multi_int_range_bound(
+                vec![int_value(1), PartitionRangeDatumValue::MinValue],
+                vec![int_value(1), int_value(1)],
+            ),
+            multi_int_range_bound(
+                vec![int_value(1), int_value(1)],
+                vec![int_value(2), PartitionRangeDatumValue::MinValue],
+            ),
+        ];
+
+        assert!(expr_may_match_bound(
+            &int_att_cmp(1, OpExprKind::Lt, 2),
+            &spec,
+            &default_bound,
+            &siblings,
+        ));
+    }
+
+    #[test]
+    fn multi_key_range_default_prunes_final_key_interval_with_equal_prefix() {
+        let spec = multi_int_range_spec(2);
+        let default_bound = int_range_default_bound();
+        let siblings = vec![multi_int_range_bound(
+            vec![int_value(2), PartitionRangeDatumValue::MinValue],
+            vec![int_value(2), int_value(1)],
+        )];
+        let expr = Expr::and(
+            int_att_cmp(1, OpExprKind::Eq, 2),
+            int_att_cmp(2, OpExprKind::Lt, 1),
+        );
+
+        assert!(!expr_may_match_bound(
+            &expr,
+            &spec,
+            &default_bound,
+            &siblings
+        ));
+    }
+
+    #[test]
+    fn range_is_not_null_keeps_non_default_partitions() {
+        let spec = range_spec();
+        let first = int_range_bound(PartitionRangeDatumValue::MinValue, int_value(1));
+        let second = int_range_bound(int_value(1), int_value(10));
+        let expr = Expr::IsNotNull(Box::new(int_key_expr(42)));
+
+        assert!(expr_may_match_bound(&expr, &spec, &first, &[]));
+        assert!(expr_may_match_bound(&expr, &spec, &second, &[]));
+    }
+
+    #[test]
+    fn casted_partition_key_is_not_treated_as_same_opfamily_match() {
+        let spec = range_spec();
+        let first = int_range_bound(PartitionRangeDatumValue::MinValue, int_value(1));
+        let casted_key = Expr::Cast(
+            Box::new(int_key_expr(42)),
+            SqlType::new(SqlTypeKind::Numeric),
+        );
+        let expr = Expr::op_auto(
+            OpExprKind::Eq,
+            vec![casted_key, Expr::Const(Value::Numeric("1".into()))],
+        );
+
+        assert!(expr_may_match_bound(&expr, &spec, &first, &[]));
+    }
+
+    #[test]
+    fn integer_family_partition_key_cast_still_prunes_range_partitions() {
+        let spec = range_spec();
+        let first = int_range_bound(PartitionRangeDatumValue::MinValue, int_value(1));
+        let second = int_range_bound(int_value(1), int_value(10));
+        let casted_key = Expr::Cast(Box::new(int_key_expr(42)), SqlType::new(SqlTypeKind::Int8));
+        let expr = Expr::op_auto(
+            OpExprKind::Eq,
+            vec![casted_key, Expr::Const(Value::Int64(1))],
+        );
+
+        assert!(!expr_may_match_bound(&expr, &spec, &first, &[]));
+        assert!(expr_may_match_bound(&expr, &spec, &second, &[]));
     }
 
     #[test]

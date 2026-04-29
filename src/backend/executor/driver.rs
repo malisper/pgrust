@@ -521,6 +521,10 @@ fn execute_statement_with_source(
             expected: "DROP OPERATOR FAMILY handled by database/session layer",
             actual: "DROP OPERATOR FAMILY".into(),
         })),
+        Statement::DropOperatorClass(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP OPERATOR CLASS handled by database/session layer",
+            actual: "DROP OPERATOR CLASS".into(),
+        })),
         Statement::CreateTextSearch(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE TEXT SEARCH handled by database/session layer",
             actual: "CREATE TEXT SEARCH".into(),
@@ -944,6 +948,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::DropOperatorFamily(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP OPERATOR FAMILY".into(),
+        })),
+        Statement::DropOperatorClass(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP OPERATOR CLASS".into(),
         })),
         Statement::CreateTextSearch(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

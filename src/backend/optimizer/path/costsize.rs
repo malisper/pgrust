@@ -122,6 +122,7 @@ pub(super) fn optimize_path_with_config(
                 source_id,
                 desc,
                 child_roots,
+                partition_prune,
                 children,
                 ..
             } => {
@@ -156,6 +157,7 @@ pub(super) fn optimize_path_with_config(
                     source_id,
                     desc,
                     child_roots,
+                    partition_prune,
                     children,
                 }
             }
@@ -164,6 +166,7 @@ pub(super) fn optimize_path_with_config(
                 source_id,
                 desc,
                 items,
+                partition_prune,
                 children,
                 ..
             } => {
@@ -196,6 +199,7 @@ pub(super) fn optimize_path_with_config(
                     source_id,
                     desc,
                     items,
+                    partition_prune,
                     children,
                 }
             }

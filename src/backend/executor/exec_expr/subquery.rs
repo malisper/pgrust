@@ -469,7 +469,8 @@ pub(super) fn eval_scalar_subquery(
                     message: "subquery must return only one column".into(),
                     hint: None,
                 });
-            }
+            };
+            let value = values.into_iter().next().unwrap_or(Value::Null);
             if first_value.is_some() {
                 return Err(ExecError::CardinalityViolation {
                     message: "more than one row returned by a subquery used as an expression"
@@ -477,7 +478,7 @@ pub(super) fn eval_scalar_subquery(
                     hint: None,
                 });
             }
-            first_value = Some(values[0].clone());
+            first_value = Some(value);
         }
         Ok(first_value.unwrap_or(Value::Null))
     })?;
@@ -853,6 +854,17 @@ pub(super) fn compare_subquery_values(
                 right,
             }),
         },
+        SubqueryComparisonOp::RegexMatch | SubqueryComparisonOp::NotRegexMatch => {
+            let matched = eval_regex_match_operator(&left, &right)?;
+            match (op, matched) {
+                (_, Value::Null) => Ok(Value::Null),
+                (SubqueryComparisonOp::RegexMatch, value) => Ok(value),
+                (SubqueryComparisonOp::NotRegexMatch, Value::Bool(value)) => {
+                    Ok(Value::Bool(!value))
+                }
+                (_, other) => Err(ExecError::NonBoolQual(other)),
+            }
+        }
         SubqueryComparisonOp::Like => eval_like(&left, &right, None, collation_oid, false, false),
         SubqueryComparisonOp::NotLike => eval_like(&left, &right, None, collation_oid, false, true),
         SubqueryComparisonOp::ILike => eval_like(&left, &right, None, collation_oid, true, false),
