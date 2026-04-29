@@ -10204,6 +10204,18 @@ fn table_inheritance_merges_columns_and_scans_children() {
 
     let explain = explain_lines(&db, 1, "select a, b from parent_inh order by a");
     assert!(explain.iter().any(|line| line.contains("Append")));
+    assert!(
+        explain
+            .iter()
+            .any(|line| line.contains("Seq Scan on parent_inh parent_inh_1")),
+        "expected parent append child alias, got {explain:?}"
+    );
+    assert!(
+        explain
+            .iter()
+            .any(|line| line.contains("Seq Scan on child_inh parent_inh_2")),
+        "expected inherited child append alias, got {explain:?}"
+    );
 }
 
 #[test]

@@ -241,6 +241,16 @@ CREATE VIEW / policy-dependency bucket:
   `709/774` matched, `65` mismatches, `1148` diff lines. New diff copied to
   `/tmp/diffs/rowsecurity.diff`.
 
+Inherited append EXPLAIN alias bucket:
+- Relation append planning now applies PostgreSQL-style child aliases to every
+  inherited/partitioned child scan (`parent_1`, `parent_2`, ...), while leaving
+  set-operation and partitionwise-join appends alone.
+- Extended the inheritance scan test to require parent/child EXPLAIN aliases.
+- Focused inheritance and `row_security` tests passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result: `718/774` matched, `56` mismatches,
+  `1053` diff lines. New diff copied to `/tmp/diffs/rowsecurity.diff`.
+
 SQL function/GUC bucket:
 - SQL-language functions now accept single-statement `WITH` bodies and
   SQL-standard `BEGIN ATOMIC ... END` bodies.

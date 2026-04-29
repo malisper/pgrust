@@ -4748,6 +4748,7 @@ fn set_append_references(
     plan_info: PlanEstimate,
     source_id: usize,
     desc: crate::include::nodes::primnodes::RelationDesc,
+    relids: Vec<usize>,
     child_roots: Vec<Option<PlannerSubroot>>,
     children: Vec<Path>,
 ) -> Plan {
@@ -4757,9 +4758,10 @@ fn set_append_references(
         child_roots.len(),
         children.len()
     );
-    let single_child_root_alias = (children.len() == 1)
+    let relation_append_alias = (relids.as_slice() == [source_id])
         .then(|| append_source_alias(ctx, source_id))
         .flatten();
+    let child_count = children.len();
     Plan::Append {
         plan_info,
         source_id,
@@ -4774,8 +4776,13 @@ fn set_append_references(
                     .map(PlannerSubroot::as_ref)
                     .or(ctx.root);
                 let mut child_plan = recurse_with_root(ctx, child_root, child);
-                if let Some(alias) = single_child_root_alias.as_deref() {
-                    apply_single_append_scan_alias(&mut child_plan, alias);
+                if let Some(alias) = relation_append_alias.as_deref() {
+                    let child_alias = if child_count == 1 {
+                        alias.to_string()
+                    } else {
+                        format!("{}_{}", alias, index + 1)
+                    };
+                    apply_single_append_scan_alias(&mut child_plan, &child_alias);
                 }
                 child_plan
             })
@@ -6158,10 +6165,19 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             source_id,
             desc,
+            relids,
             child_roots,
             children,
             ..
-        } => set_append_references(ctx, plan_info, source_id, desc, child_roots, children),
+        } => set_append_references(
+            ctx,
+            plan_info,
+            source_id,
+            desc,
+            relids,
+            child_roots,
+            children,
+        ),
         Path::MergeAppend {
             plan_info,
             source_id,
