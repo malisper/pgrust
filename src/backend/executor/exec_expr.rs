@@ -4422,16 +4422,17 @@ fn index_column_opclass_display_name(
         return None;
     }
     let type_oid = crate::backend::utils::cache::catcache::sql_type_oid(sql_type);
-    if crate::include::catalog::default_opclass_oid_for_am(
+    if crate::include::catalog::index_opclass_is_implicit_for_definition(
         index.index_meta.am_oid,
         type_oid,
         sql_type,
-    ) == Some(opclass_oid)
-        && index
-            .index_meta
-            .indclass_options
-            .get(index_column)
-            .is_none_or(Vec::is_empty)
+        opclass_oid,
+        index.index_meta.indisexclusion,
+    ) && index
+        .index_meta
+        .indclass_options
+        .get(index_column)
+        .is_none_or(Vec::is_empty)
     {
         return None;
     }
