@@ -26888,6 +26888,11 @@ fn build_comparison_expr(left: SqlExpr, op: &str, right: SqlExpr) -> Result<SqlE
         "?" => SqlExpr::JsonbExists(Box::new(left), Box::new(right)),
         "?|" => SqlExpr::JsonbExistsAny(Box::new(left), Box::new(right)),
         "?&" => SqlExpr::JsonbExistsAll(Box::new(left), Box::new(right)),
+        "#-" => SqlExpr::BinaryOperator {
+            op: "#-".into(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
         "&&" if expr_is_array_syntax(&left) && expr_is_array_syntax(&right) => {
             SqlExpr::ArrayOverlap(Box::new(left), Box::new(right))
         }

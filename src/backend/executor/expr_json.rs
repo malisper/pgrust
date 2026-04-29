@@ -226,6 +226,35 @@ pub(crate) fn jsonb_to_tsvector_value(
     Ok(Value::TsVector(TsVector::new(builder.lexemes)))
 }
 
+pub(crate) fn json_to_tsvector_value(
+    config_name: Option<&str>,
+    json: &Value,
+    flags: Option<&Value>,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    let Value::Json(text) = json else {
+        return Err(ExecError::TypeMismatch {
+            op: "json_to_tsvector",
+            left: json.clone(),
+            right: Value::Null,
+        });
+    };
+    let flags = match flags {
+        Some(value) => parse_jsonb_to_tsvector_flags(value)?,
+        None => JsonbTsVectorFlags::strings_only(),
+    };
+    let json = JsonbValue::from_serde(parse_json_text(text.as_str())?)?;
+    let mut builder = JsonbTsVectorBuilder {
+        config_name,
+        catalog,
+        flags,
+        next_position: 1,
+        lexemes: Vec::new(),
+    };
+    builder.add_value(&json)?;
+    Ok(Value::TsVector(TsVector::new(builder.lexemes)))
+}
+
 fn parse_jsonb_to_tsvector_flags(value: &Value) -> Result<JsonbTsVectorFlags, ExecError> {
     let parsed = ParsedJsonValue::from_value(value)?;
     let json = match parsed {
@@ -699,10 +728,16 @@ pub(crate) fn eval_json_builtin_function(
                 )))
             }
             BuiltinScalarFunction::JsonTypeof => {
+                if matches!(values.first(), None | Some(Value::Null)) {
+                    return Ok(Value::Null);
+                }
                 let json = ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))?;
                 Ok(Value::Text(CompactString::new(json.typeof_name())))
             }
             BuiltinScalarFunction::JsonbTypeof => {
+                if matches!(values.first(), None | Some(Value::Null)) {
+                    return Ok(Value::Null);
+                }
                 let json = ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))?;
                 Ok(Value::Text(CompactString::new(json.typeof_name())))
             }
@@ -865,6 +900,15 @@ pub(crate) fn eval_json_builtin_function(
                     parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_pretty")?;
                 Ok(Value::Text(CompactString::from_owned(
                     serde_json::to_string_pretty(&json.to_serde()).unwrap(),
+                )))
+            }
+            BuiltinScalarFunction::JsonbConcat => {
+                let left =
+                    parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_concat")?;
+                let right =
+                    parse_jsonb_target(values.get(1).unwrap_or(&Value::Null), "jsonb_concat")?;
+                Ok(Value::Jsonb(encode_jsonb(
+                    &crate::backend::executor::jsonb::jsonb_concat(&left, &right),
                 )))
             }
             BuiltinScalarFunction::JsonbDelete => {
@@ -1062,6 +1106,7 @@ pub(crate) fn eval_json_builtin_function(
         | BuiltinScalarFunction::JsonbExtractPathText
         | BuiltinScalarFunction::JsonbBuildArray
         | BuiltinScalarFunction::JsonbBuildObject
+        | BuiltinScalarFunction::JsonbConcat
         | BuiltinScalarFunction::JsonbContains
         | BuiltinScalarFunction::JsonbContained
         | BuiltinScalarFunction::JsonbDelete
@@ -2659,12 +2704,16 @@ fn json_object_text_value(value: &Value, op: &'static str) -> Result<Option<Stri
 
 fn json_builder_key_for_object_constructor(
     value: &Value,
-    _op: &'static str,
+    op: &'static str,
     arg_index: usize,
 ) -> Result<String, ExecError> {
     match value {
         Value::Null => Err(ExecError::DetailedError {
-            message: format!("argument {arg_index}: key must not be null"),
+            message: if op == "json_build_object" {
+                "null value not allowed for object key".into()
+            } else {
+                format!("argument {arg_index}: key must not be null")
+            },
             detail: None,
             hint: None,
             sqlstate: "22004",
@@ -3840,8 +3889,12 @@ fn delete_jsonb_path_inner(
                     .collect(),
             ),
             JsonbValue::Array(items) => {
-                let Some(index) = parse_jsonb_path_array_index(step, items.len(), path_index + 1)?
-                else {
+                let index = if path_index == 0 {
+                    parse_optional_jsonb_path_array_index(step, items.len())
+                } else {
+                    parse_jsonb_path_array_index(step, items.len(), path_index + 1)?
+                };
+                let Some(index) = index else {
                     return Ok(JsonbValue::Array(items.clone()));
                 };
                 let mut out = items.clone();
@@ -4071,6 +4124,12 @@ fn parse_jsonb_path_array_index(
             ),
         })?;
     Ok(normalize_array_index(len, index))
+}
+
+fn parse_optional_jsonb_path_array_index(step: &str, len: usize) -> Option<usize> {
+    step.parse::<i32>()
+        .ok()
+        .and_then(|index| normalize_array_index(len, index))
 }
 
 #[derive(Debug, Clone)]

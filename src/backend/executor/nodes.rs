@@ -14,6 +14,7 @@ use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
 use crate::backend::executor::expr_casts::cast_value;
 use crate::backend::executor::expr_geometry::render_geometry_text;
 use crate::backend::executor::expr_ops::compare_order_values;
+use crate::backend::executor::jsonb::{compare_jsonb, decode_jsonb};
 use crate::backend::executor::pg_regex::explain_similar_pattern;
 use crate::backend::executor::srf::{
     eval_project_set_returning_call, eval_set_returning_call,
@@ -66,7 +67,7 @@ use crate::include::nodes::primnodes::{
     is_special_varno,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
@@ -205,6 +206,28 @@ pub(crate) fn pg_sql_sort_by<T>(
     }
 
     sort(values, &mut compare);
+}
+
+fn aggregate_key_value_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Jsonb(left_bytes), Value::Jsonb(right_bytes)) => {
+            match (decode_jsonb(left_bytes), decode_jsonb(right_bytes)) {
+                (Ok(left_json), Ok(right_json)) => {
+                    compare_jsonb(&left_json, &right_json) == std::cmp::Ordering::Equal
+                }
+                _ => left_bytes == right_bytes,
+            }
+        }
+        _ => left == right,
+    }
+}
+
+fn aggregate_key_values_equal(left: &[Value], right: &[Value]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| aggregate_key_value_equal(left, right))
 }
 
 #[cfg(test)]
@@ -4933,6 +4956,7 @@ fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
         BuiltinScalarFunction::Lower => "lower".into(),
         BuiltinScalarFunction::Upper => "upper".into(),
         BuiltinScalarFunction::Length => "length".into(),
+        BuiltinScalarFunction::OctetLength => "octet_length".into(),
         BuiltinScalarFunction::JsonBuildArray => "json_build_array".into(),
         BuiltinScalarFunction::JsonBuildObject => "json_build_object".into(),
         BuiltinScalarFunction::JsonbBuildArray => "jsonb_build_array".into(),
@@ -7996,7 +8020,7 @@ fn new_aggregate_group(
         accum_states,
         distinct_inputs: accumulators
             .iter()
-            .map(|accum| accum.distinct.then(HashSet::new))
+            .map(|accum| accum.distinct.then(Vec::new))
             .collect(),
         direct_arg_values: vec![None; accumulators.len()],
         ordered_inputs: vec![Vec::new(); accumulators.len()],
@@ -8046,10 +8070,14 @@ fn advance_aggregate_group(
             .iter()
             .map(|arg| eval_expr(arg, slot, ctx))
             .collect::<Result<Vec<_>, _>>()?;
-        if let Some(seen_inputs) = group.distinct_inputs[i].as_mut()
-            && !seen_inputs.insert(values.clone())
-        {
-            continue;
+        if let Some(seen_inputs) = group.distinct_inputs[i].as_mut() {
+            if seen_inputs
+                .iter()
+                .any(|seen| aggregate_key_values_equal(seen, &values))
+            {
+                continue;
+            }
+            seen_inputs.push(values.clone());
         }
         if accum.order_by.is_empty() {
             runtimes[i].transition(&mut group.accum_states[i], &values, ctx)?;
@@ -8166,8 +8194,9 @@ impl PlanNode for AggregateState {
                     self.key_buffer.push(eval_expr(expr, slot, ctx)?);
                 }
 
-                let group_idx = if let Some(index) =
-                    groups.iter().position(|g| g.key_values == self.key_buffer)
+                let group_idx = if let Some(index) = groups
+                    .iter()
+                    .position(|g| aggregate_key_values_equal(&g.key_values, &self.key_buffer))
                 {
                     index
                 } else {

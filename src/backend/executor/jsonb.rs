@@ -1484,6 +1484,10 @@ pub(crate) fn jsonb_get<'a>(
                 let name = key.as_text().unwrap();
                 items.iter().find(|(k, _)| k == name).map(|(_, v)| v)
             }
+            JsonbValue::Array(_) => key
+                .as_text()
+                .and_then(|text| text.parse::<i32>().ok())
+                .and_then(|idx| jsonb_get_index(value, idx)),
             _ => None,
         },
         Value::Int16(index) => jsonb_get_index(value, *index as i32),

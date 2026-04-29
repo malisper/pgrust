@@ -285,7 +285,7 @@ fn invalid_jsonb_scalar_cast(value: &JsonbValue, target: SqlTypeKind) -> ExecErr
 fn cast_jsonb_scalar_value(
     parsed: &JsonbValue,
     ty: SqlType,
-    config: &DateTimeConfig,
+    _config: &DateTimeConfig,
 ) -> Result<Value, ExecError> {
     match ty.kind {
         SqlTypeKind::Bool => match parsed {
@@ -300,9 +300,7 @@ fn cast_jsonb_scalar_value(
         | SqlTypeKind::Int8
         | SqlTypeKind::Numeric => match parsed {
             JsonbValue::Null => Ok(Value::Null),
-            JsonbValue::Numeric(value) => {
-                cast_text_value_with_config(&value.render(), ty, true, config)
-            }
+            JsonbValue::Numeric(value) => cast_numeric_value(value.clone(), ty, true),
             other => Err(invalid_jsonb_scalar_cast(other, ty.kind)),
         },
         _ => Err(ExecError::TypeMismatch {

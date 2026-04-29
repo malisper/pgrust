@@ -409,6 +409,18 @@ impl AccumState {
                 unique_keys: false,
                 strict_values: false,
             },
+            (AggFunc::JsonObjectAggUnique, _) => AccumState::JsonObjectAgg {
+                pairs: Vec::new(),
+                jsonb: false,
+                unique_keys: true,
+                strict_values: false,
+            },
+            (AggFunc::JsonObjectAggUniqueStrict, _) => AccumState::JsonObjectAgg {
+                pairs: Vec::new(),
+                jsonb: false,
+                unique_keys: true,
+                strict_values: true,
+            },
             (AggFunc::JsonbObjectAgg, _) => AccumState::JsonObjectAgg {
                 pairs: Vec::new(),
                 jsonb: true,
@@ -681,6 +693,8 @@ impl AccumState {
             },
             (
                 AggFunc::JsonObjectAgg
+                | AggFunc::JsonObjectAggUnique
+                | AggFunc::JsonObjectAggUniqueStrict
                 | AggFunc::JsonbObjectAgg
                 | AggFunc::JsonbObjectAggUnique
                 | AggFunc::JsonbObjectAggUniqueStrict,
@@ -691,13 +705,18 @@ impl AccumState {
                     pairs,
                     unique_keys,
                     strict_values,
+                    jsonb,
                     ..
                 } = state
                 {
                     let key = values.first().unwrap_or(&Value::Null);
                     if matches!(key, Value::Null) {
                         return Err(ExecError::DetailedError {
-                            message: "field name must not be null".into(),
+                            message: if *jsonb {
+                                "field name must not be null".into()
+                            } else {
+                                "null value not allowed for object key".into()
+                            },
                             detail: None,
                             hint: None,
                             sqlstate: "22004",
@@ -1551,6 +1570,8 @@ fn finalize_regr_stats(
         | AggFunc::JsonAgg
         | AggFunc::JsonbAgg
         | AggFunc::JsonObjectAgg
+        | AggFunc::JsonObjectAggUnique
+        | AggFunc::JsonObjectAggUniqueStrict
         | AggFunc::JsonbObjectAgg
         | AggFunc::JsonbObjectAggUnique
         | AggFunc::JsonbObjectAggUniqueStrict
@@ -2239,7 +2260,7 @@ pub(crate) struct AggGroup {
     pub(crate) key_values: Vec<Value>,
     pub(crate) passthrough_values: Vec<Value>,
     pub(crate) accum_states: Vec<AccumState>,
-    pub(crate) distinct_inputs: Vec<Option<HashSet<Vec<Value>>>>,
+    pub(crate) distinct_inputs: Vec<Option<Vec<Vec<Value>>>>,
     pub(crate) direct_arg_values: Vec<Option<Vec<Value>>>,
     pub(crate) ordered_inputs: Vec<Vec<OrderedAggInput>>,
 }

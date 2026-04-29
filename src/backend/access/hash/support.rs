@@ -1,3 +1,4 @@
+use crate::backend::executor::jsonb::{JsonbValue, decode_jsonb};
 use crate::include::catalog::BPCHAR_HASH_OPCLASS_OID;
 use crate::include::nodes::datum::{
     ArrayValue, InetValue, MultirangeValue, RangeBound, RangeValue, RecordValue, Value,
@@ -183,7 +184,10 @@ pub(crate) fn hash_value_extended(
         Value::Uuid(value) => hash_bytes_extended(value, seed),
         Value::Inet(value) | Value::Cidr(value) => hash_inet_value(value, seed),
         Value::PgLsn(value) => hash_bytes_extended(&value.to_le_bytes(), seed),
-        Value::Jsonb(value) => hash_bytes_extended(value, seed),
+        Value::Jsonb(value) => match decode_jsonb(value) {
+            Ok(json) => hash_jsonb_value(&json, seed),
+            Err(_) => hash_bytes_extended(value, seed),
+        },
         Value::Array(values) => {
             let array = ArrayValue::from_nested_values(values.clone(), vec![1])?;
             hash_array_value(&array, seed)?
@@ -222,6 +226,43 @@ fn hash_inet_value(value: &InetValue, seed: u64) -> u64 {
         }
     }
     hash_bytes_extended(&bytes, seed)
+}
+
+fn hash_jsonb_value(value: &JsonbValue, seed: u64) -> u64 {
+    match value {
+        JsonbValue::Null => hash_bytes_extended(b"n", seed),
+        JsonbValue::String(value) => hash_combine64(
+            hash_bytes_extended(b"s", seed),
+            hash_bytes_extended(value.as_bytes(), seed),
+        ),
+        JsonbValue::Numeric(value) => hash_combine64(
+            hash_bytes_extended(b"m", seed),
+            hash_bytes_extended(value.normalize_display_scale().render().as_bytes(), seed),
+        ),
+        JsonbValue::Bool(value) => hash_combine64(
+            hash_bytes_extended(b"b", seed),
+            hash_uint32_extended(u32::from(*value), seed),
+        ),
+        JsonbValue::Array(items) => {
+            let mut hash = hash_bytes_extended(b"a", seed);
+            for item in items {
+                hash = hash_combine64(hash, hash_jsonb_value(item, seed));
+            }
+            hash
+        }
+        JsonbValue::Object(items) => {
+            let mut hash = hash_bytes_extended(b"o", seed);
+            for (key, value) in items {
+                hash = hash_combine64(hash, hash_bytes_extended(key.as_bytes(), seed));
+                hash = hash_combine64(hash, hash_jsonb_value(value, seed));
+            }
+            hash
+        }
+        other => hash_combine64(
+            hash_bytes_extended(b"t", seed),
+            hash_bytes_extended(format!("{other:?}").as_bytes(), seed),
+        ),
+    }
 }
 
 fn hash_array_value(value: &ArrayValue, seed: u64) -> Result<u64, String> {
@@ -362,6 +403,23 @@ mod tests {
             hash_index_value(&Value::Bytea(vec![1, 2, 3]), None).unwrap(),
             hash_index_value(&Value::Bytea(vec![1, 2, 4]), None).unwrap()
         );
+    }
+
+    #[test]
+    fn hash_value_matches_semantic_jsonb_numeric_equality() {
+        let left = Value::Jsonb(
+            crate::backend::executor::jsonb::parse_jsonb_text("{\"age\":25}")
+                .expect("jsonb parses"),
+        );
+        let right = Value::Jsonb(
+            crate::backend::executor::jsonb::parse_jsonb_text("{\"age\":25.0}")
+                .expect("jsonb parses"),
+        );
+        assert_eq!(
+            hash_index_value(&left, None).unwrap(),
+            hash_index_value(&right, None).unwrap()
+        );
+        assert!(hash_values_equal(&left, &right, None));
     }
 
     #[test]

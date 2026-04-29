@@ -55,7 +55,8 @@ use super::expr_datetime::{
 use super::expr_geometry::eval_geometry_function;
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_record_builtin_function,
-    eval_jsonpath_operator, eval_sql_json_query_function_expr, jsonb_to_tsvector_value,
+    eval_jsonpath_operator, eval_sql_json_query_function_expr, json_to_tsvector_value,
+    jsonb_to_tsvector_value,
 };
 use super::expr_locks::eval_advisory_lock_builtin_function;
 use super::expr_mac::eval_macaddr_function;
@@ -95,9 +96,10 @@ use super::expr_string::{
     eval_crc32c_function, eval_decode_function, eval_encode_function, eval_format_function,
     eval_get_bit_bytes, eval_get_byte, eval_initcap_function, eval_left_function,
     eval_length_function, eval_like, eval_lower_function, eval_lpad_function, eval_md5_function,
-    eval_parse_ident_function, eval_pg_rust_is_catalog_text_unique_index_oid,
-    eval_pg_rust_test_enc_conversion, eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler,
-    eval_pg_rust_test_int44in, eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
+    eval_octet_length_function, eval_parse_ident_function,
+    eval_pg_rust_is_catalog_text_unique_index_oid, eval_pg_rust_test_enc_conversion,
+    eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler, eval_pg_rust_test_int44in,
+    eval_pg_rust_test_int44out, eval_pg_rust_test_opclass_options_func,
     eval_pg_rust_test_pt_in_widget, eval_pg_rust_test_widget_in, eval_pg_rust_test_widget_out,
     eval_pg_size_bytes_function, eval_pg_size_pretty_function, eval_position_function,
     eval_quote_ident_function, eval_quote_literal_function, eval_repeat_function,
@@ -133,7 +135,8 @@ use crate::backend::catalog::object_address::{
 };
 use crate::backend::catalog::rowcodec::pg_description_row_from_values;
 use crate::backend::executor::jsonb::{
-    JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
+    JsonbValue, decode_jsonb, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any,
+    jsonb_from_value, parse_json_text_input,
 };
 use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
@@ -9259,11 +9262,11 @@ fn eval_ts_headline_values(values: &[Value]) -> Result<Value, ExecError> {
     if values.iter().any(|value| matches!(value, Value::Null)) {
         return Ok(Value::Null);
     }
-    let (document, query) = match values {
-        [document, Value::TsQuery(query)] => (document.as_text(), query),
-        [document, Value::TsQuery(query), _options] => (document.as_text(), query),
-        [_config, document, Value::TsQuery(query)] => (document.as_text(), query),
-        [_config, document, Value::TsQuery(query), _options] => (document.as_text(), query),
+    let (document, query, options) = match values {
+        [document, Value::TsQuery(query)] => (document, query, None),
+        [document, Value::TsQuery(query), options] => (document, query, Some(options)),
+        [_config, document, Value::TsQuery(query)] => (document, query, None),
+        [_config, document, Value::TsQuery(query), options] => (document, query, Some(options)),
         _ => {
             return Err(ExecError::TypeMismatch {
                 op: "ts_headline",
@@ -9272,21 +9275,111 @@ fn eval_ts_headline_values(values: &[Value]) -> Result<Value, ExecError> {
             });
         }
     };
-    let document = document.ok_or_else(|| ExecError::TypeMismatch {
-        op: "ts_headline",
-        left: values.first().cloned().unwrap_or(Value::Null),
-        right: values.get(1).cloned().unwrap_or(Value::Null),
-    })?;
+    let headline_options = parse_ts_headline_options(options)?;
     if tsquery_is_empty(query) {
-        return Ok(Value::Text(document.into()));
+        return ts_headline_identity(document);
     }
     let lexemes = tsquery_lexemes_for_headline(&query.root);
     if lexemes.is_empty() {
-        return Ok(Value::Text(document.into()));
+        return ts_headline_identity(document);
     }
-    Ok(Value::Text(
-        highlight_headline_text(document, &lexemes).into(),
-    ))
+    match document {
+        Value::Json(text) => {
+            let mut json = parse_json_text_input(text.as_str())?;
+            highlight_json_strings_for_headline(&mut json, &lexemes, &headline_options);
+            Ok(Value::Json(CompactString::from_owned(
+                serde_json::to_string(&json).unwrap_or_else(|_| "null".into()),
+            )))
+        }
+        Value::Jsonb(bytes) => {
+            let mut json = decode_jsonb(bytes)?.to_serde();
+            highlight_json_strings_for_headline(&mut json, &lexemes, &headline_options);
+            Ok(Value::Jsonb(crate::backend::executor::jsonb::encode_jsonb(
+                &JsonbValue::from_serde(json)?,
+            )))
+        }
+        _ => {
+            let document = document.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "ts_headline",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            })?;
+            Ok(Value::Text(
+                highlight_headline_text(document, &lexemes, &headline_options).into(),
+            ))
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TsHeadlineOptions {
+    start_sel: String,
+    stop_sel: String,
+}
+
+fn parse_ts_headline_options(options: Option<&Value>) -> Result<TsHeadlineOptions, ExecError> {
+    let mut parsed = TsHeadlineOptions {
+        start_sel: "<b>".into(),
+        stop_sel: "</b>".into(),
+    };
+    let Some(options) = options else {
+        return Ok(parsed);
+    };
+    let options = options.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "ts_headline",
+        left: options.clone(),
+        right: Value::Null,
+    })?;
+    for item in options.split(',') {
+        let Some((key, value)) = item.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if key.eq_ignore_ascii_case("StartSel") {
+            parsed.start_sel = value.into();
+        } else if key.eq_ignore_ascii_case("StopSel") {
+            parsed.stop_sel = value.into();
+        }
+    }
+    Ok(parsed)
+}
+
+fn ts_headline_identity(document: &Value) -> Result<Value, ExecError> {
+    match document {
+        Value::Json(_) | Value::Jsonb(_) => Ok(document.clone()),
+        _ => {
+            let text = document.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "ts_headline",
+                left: document.clone(),
+                right: Value::Null,
+            })?;
+            Ok(Value::Text(text.into()))
+        }
+    }
+}
+
+fn highlight_json_strings_for_headline(
+    value: &mut serde_json::Value,
+    lexemes: &[String],
+    options: &TsHeadlineOptions,
+) {
+    match value {
+        serde_json::Value::String(text) => {
+            *text = highlight_headline_text(text, lexemes, options);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                highlight_json_strings_for_headline(item, lexemes, options);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for value in fields.values_mut() {
+                highlight_json_strings_for_headline(value, lexemes, options);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
 }
 
 fn tsquery_lexemes_for_headline(node: &crate::include::nodes::tsearch::TsQueryNode) -> Vec<String> {
@@ -9316,7 +9409,11 @@ fn tsquery_lexemes_for_headline(node: &crate::include::nodes::tsearch::TsQueryNo
     lexemes
 }
 
-fn highlight_headline_text(document: &str, lexemes: &[String]) -> String {
+fn highlight_headline_text(
+    document: &str,
+    lexemes: &[String],
+    options: &TsHeadlineOptions,
+) -> String {
     let mut out = String::with_capacity(document.len());
     let mut token = String::new();
     for ch in document.chars() {
@@ -9324,24 +9421,27 @@ fn highlight_headline_text(document: &str, lexemes: &[String]) -> String {
             token.push(ch);
             continue;
         }
-        flush_headline_token(&mut out, &mut token, lexemes);
+        flush_headline_token(&mut out, &mut token, lexemes, options);
         out.push(ch);
     }
-    flush_headline_token(&mut out, &mut token, lexemes);
+    flush_headline_token(&mut out, &mut token, lexemes, options);
     out
 }
 
-fn flush_headline_token(out: &mut String, token: &mut String, lexemes: &[String]) {
+fn flush_headline_token(
+    out: &mut String,
+    token: &mut String,
+    lexemes: &[String],
+    options: &TsHeadlineOptions,
+) {
     if token.is_empty() {
         return;
     }
     let lower = token.to_ascii_lowercase();
-    if lexemes.iter().any(|lexeme| {
-        lower == *lexeme || lower.starts_with(lexeme) || lexeme.starts_with(lower.as_str())
-    }) {
-        out.push_str("<b>");
+    if lexemes.iter().any(|lexeme| lower == *lexeme) {
+        out.push_str(&options.start_sel);
         out.push_str(token);
-        out.push_str("</b>");
+        out.push_str(&options.stop_sel);
     } else {
         out.push_str(token);
     }
@@ -9391,6 +9491,7 @@ fn eval_plpgsql_builtin_function(
     }
     match func {
         BuiltinScalarFunction::ToTsVector
+        | BuiltinScalarFunction::JsonToTsVector
         | BuiltinScalarFunction::JsonbToTsVector
         | BuiltinScalarFunction::ToTsQuery
         | BuiltinScalarFunction::PlainToTsQuery
@@ -9401,6 +9502,7 @@ fn eval_plpgsql_builtin_function(
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
         },
+        BuiltinScalarFunction::OctetLength => eval_octet_length_function(&values),
         BuiltinScalarFunction::BitLength => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_bit_length_function(&values),
@@ -10120,6 +10222,7 @@ fn is_text_search_builtin_function(func: BuiltinScalarFunction) -> bool {
     matches!(
         func,
         BuiltinScalarFunction::ToTsVector
+            | BuiltinScalarFunction::JsonToTsVector
             | BuiltinScalarFunction::JsonbToTsVector
             | BuiltinScalarFunction::ToTsQuery
             | BuiltinScalarFunction::PlainToTsQuery
@@ -10342,8 +10445,19 @@ fn eval_text_search_builtin_function(
         }
         BuiltinScalarFunction::TsHeadline => eval_ts_headline_values(values),
         BuiltinScalarFunction::ToTsVector => {
+            if let [Value::Json(_)] = values {
+                return json_to_tsvector_value(default_config_name(), &values[0], None, catalog);
+            }
             if let [Value::Jsonb(_)] = values {
                 return jsonb_to_tsvector_value(default_config_name(), &values[0], None, catalog);
+            }
+            if let [_, Value::Json(_)] = values {
+                return json_to_tsvector_value(
+                    arg_config_name(values, 0, "to_tsvector")?.as_deref(),
+                    &values[1],
+                    None,
+                    catalog,
+                );
             }
             if let [_, Value::Jsonb(_)] = values {
                 return jsonb_to_tsvector_value(
@@ -10375,6 +10489,29 @@ fn eval_text_search_builtin_function(
                 .map(Value::TsVector)
                 .map_err(|e| parse_error("to_tsvector", e))
         }
+        BuiltinScalarFunction::JsonToTsVector => match values {
+            [Value::Null, _]
+            | [_, Value::Null]
+            | [Value::Null, _, _]
+            | [_, Value::Null, _]
+            | [_, _, Value::Null] => {
+                return Ok(Value::Null);
+            }
+            [Value::Json(_), _] => {
+                json_to_tsvector_value(default_config_name(), &values[0], values.get(1), catalog)
+            }
+            [_, Value::Json(_), _] => json_to_tsvector_value(
+                arg_config_name(values, 0, "json_to_tsvector")?.as_deref(),
+                &values[1],
+                values.get(2),
+                catalog,
+            ),
+            _ => Err(ExecError::TypeMismatch {
+                op: "json_to_tsvector",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
         BuiltinScalarFunction::JsonbToTsVector => match values {
             [Value::Null, _]
             | [_, Value::Null]
@@ -11315,6 +11452,7 @@ pub(crate) fn eval_builtin_function(
     }
     match func {
         BuiltinScalarFunction::ToTsVector
+        | BuiltinScalarFunction::JsonToTsVector
         | BuiltinScalarFunction::JsonbToTsVector
         | BuiltinScalarFunction::ToTsQuery
         | BuiltinScalarFunction::PlainToTsQuery
@@ -12147,6 +12285,7 @@ pub(crate) fn eval_builtin_function(
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
         },
+        BuiltinScalarFunction::OctetLength => eval_octet_length_function(&values),
         BuiltinScalarFunction::BitLength => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_bit_length_function(&values),
