@@ -496,7 +496,7 @@ pub fn execute_user_defined_scalar_function(
     let values = row.values()?;
     match &compiled.return_contract {
         FunctionReturnContract::Scalar { ty, .. } => match values {
-            [value] => cast_value(value.clone(), *ty),
+            [value] => cast_function_scalar_return_value(value.clone(), *ty),
             other => Err(function_runtime_error(
                 "scalar function returned an unexpected row shape",
                 Some(format!("expected 1 column, got {}", other.len())),
@@ -600,7 +600,7 @@ fn execute_user_defined_scalar_function_values_with_actual_arg_types(
     })?;
     let values = row.values()?;
     match values {
-        [value] => cast_value(value.clone(), *ty),
+        [value] => cast_function_scalar_return_value(value.clone(), *ty),
         other => Err(function_runtime_error(
             "scalar function returned an unexpected row shape",
             Some(format!("expected 1 column, got {}", other.len())),
@@ -1510,7 +1510,10 @@ fn execute_compiled_function(
                 if ty.kind == SqlTypeKind::Void {
                     state.scalar_return = Some(Value::Null);
                 } else if let Some(slot) = output_slot {
-                    state.scalar_return = Some(cast_value(state.values[*slot].clone(), *ty)?);
+                    state.scalar_return = Some(cast_function_scalar_return_value(
+                        state.values[*slot].clone(),
+                        *ty,
+                    )?);
                 } else {
                     return Err(with_plpgsql_function_context(
                         function_runtime_error(
@@ -2524,6 +2527,38 @@ fn exec_function_stmt_list(
     Ok(FunctionControl::Continue)
 }
 
+fn cast_function_scalar_return_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
+    match value {
+        Value::Record(record)
+            if !matches!(ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite) =>
+        {
+            cast_value(
+                Value::Text(crate::backend::executor::value_io::format_record_text(&record).into()),
+                ty,
+            )
+        }
+        other => cast_value(other, ty),
+    }
+}
+
+fn return_row_values_from_value(
+    value: Value,
+    contract: &FunctionReturnContract,
+    expected_record_shape: Option<&[QueryColumn]>,
+) -> Vec<Value> {
+    match value {
+        Value::Record(record) => record.fields,
+        Value::Null => match contract {
+            FunctionReturnContract::FixedRow { columns, .. } => vec![Value::Null; columns.len()],
+            FunctionReturnContract::AnonymousRecord { .. } => expected_record_shape
+                .map(|columns| vec![Value::Null; columns.len()])
+                .unwrap_or_else(|| vec![Value::Null]),
+            _ => vec![Value::Null],
+        },
+        other => vec![other],
+    }
+}
+
 fn exec_function_return(
     expr: Option<&CompiledExpr>,
     compiled: &CompiledFunction,
@@ -2554,9 +2589,12 @@ fn exec_function_return(
             output_slot,
         } => {
             state.scalar_return = Some(match expr {
-                Some(expr) => cast_value(eval_function_expr(expr, &state.values, ctx)?, *ty)?,
+                Some(expr) => cast_function_scalar_return_value(
+                    eval_function_expr(expr, &state.values, ctx)?,
+                    *ty,
+                )?,
                 None if ty.kind == SqlTypeKind::Void => Value::Null,
-                None => cast_value(
+                None => cast_function_scalar_return_value(
                     state.values[output_slot.ok_or_else(|| {
                         function_runtime_error(
                             "control reached end of function without RETURN",
@@ -2576,10 +2614,11 @@ fn exec_function_return(
         FunctionReturnContract::FixedRow { setof: false, .. } => {
             if let Some(expr) = expr {
                 let value = eval_function_expr(expr, &state.values, ctx)?;
-                let row = match value {
-                    Value::Record(record) => record.fields,
-                    other => vec![other],
-                };
+                let row = return_row_values_from_value(
+                    value,
+                    &compiled.return_contract,
+                    expected_record_shape,
+                );
                 state.rows.clear();
                 state.rows.push(coerce_function_result_row(
                     row,
@@ -2594,10 +2633,11 @@ fn exec_function_return(
                 let value = eval_function_expr(expr, &state.values, ctx)?;
                 state.rows.clear();
                 if let Some(shape) = expected_record_shape {
-                    let row = match value {
-                        Value::Record(record) => record.fields,
-                        other => vec![other],
-                    };
+                    let row = return_row_values_from_value(
+                        value,
+                        &compiled.return_contract,
+                        expected_record_shape,
+                    );
                     state.rows.push(coerce_row_to_columns(row, shape)?);
                 } else {
                     state.rows.push(TupleSlot::virtual_row(vec![value]));
@@ -2632,7 +2672,7 @@ fn exec_function_return_next(
                 })?]
                 .clone(),
             };
-            let value = cast_value(value, *ty)?;
+            let value = cast_function_scalar_return_value(value, *ty)?;
             state.rows.push(TupleSlot::virtual_row(vec![value]));
             Ok(())
         }
@@ -2640,10 +2680,11 @@ fn exec_function_return_next(
         | FunctionReturnContract::AnonymousRecord { setof: true } => {
             let row = if let Some(expr) = expr {
                 let value = eval_function_expr(expr, &state.values, ctx)?;
-                match value {
-                    Value::Record(record) => record.fields,
-                    other => vec![other],
-                }
+                return_row_values_from_value(
+                    value,
+                    &compiled.return_contract,
+                    expected_record_shape,
+                )
             } else if matches!(
                 &compiled.return_contract,
                 FunctionReturnContract::FixedRow {

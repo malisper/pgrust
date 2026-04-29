@@ -49071,6 +49071,49 @@ fn casted_row_constructor_keeps_row_default_name_for_expansion() {
 }
 
 #[test]
+fn plpgsql_composite_return_handles_null_and_scalar_mismatch() {
+    let dir = temp_dir("plpgsql_composite_return_values");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type pl_comp_return as (i int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function pl_comp_return_next() returns setof pl_comp_return language plpgsql as $$
+         begin
+           return next (1, 'one')::pl_comp_return;
+           return next null::pl_comp_return;
+         end
+         $$",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from pl_comp_return_next()"),
+        vec![
+            vec![Value::Int32(1), Value::Text("one".into())],
+            vec![Value::Null, Value::Null],
+        ]
+    );
+
+    db.execute(
+        1,
+        "create function pl_comp_scalar_mismatch() returns int4 language plpgsql as $$
+         begin
+           return (1, 'hello')::pl_comp_return;
+         end
+         $$",
+    )
+    .unwrap();
+    let err = db
+        .execute(1, "select pl_comp_scalar_mismatch()")
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("InvalidIntegerInput"),
+        "expected invalid integer input, got {err:?}"
+    );
+}
+
+#[test]
 fn drop_function_ignores_argument_names_and_out_only_modes() {
     let dir = temp_dir("drop_function_mode_signature");
     let db = Database::open(&dir, 64).unwrap();
