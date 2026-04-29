@@ -1324,6 +1324,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 Some(BuiltinScalarFunction::HashValueExtended(_)) => {
                     SqlType::new(SqlTypeKind::Int8)
                 }
+                Some(BuiltinScalarFunction::PgCharToEncoding) => SqlType::new(SqlTypeKind::Int4),
                 Some(BuiltinScalarFunction::ToJson)
                 | Some(BuiltinScalarFunction::ArrayToJson)
                 | Some(BuiltinScalarFunction::JsonBuildArray)

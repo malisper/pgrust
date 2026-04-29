@@ -2037,6 +2037,72 @@ fn eval_pg_encoding_to_char(values: &[Value]) -> Result<Value, ExecError> {
     Ok(Value::Text(name.into()))
 }
 
+fn eval_pg_char_to_encoding(values: &[Value]) -> Result<Value, ExecError> {
+    let name = match values {
+        [value] if value.as_text().is_some() => value.as_text().expect("guarded above"),
+        [Value::Null] => return Ok(Value::Null),
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op: "pg_char_to_encoding",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: Value::Text(String::new().into()),
+            });
+        }
+    };
+    let cleaned: String = name
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    let encoding = match cleaned.as_str() {
+        "" => -1,
+        "sqlascii" => 0,
+        "eucjp" => 1,
+        "euccn" => 2,
+        "euckr" => 3,
+        "euctw" => 4,
+        "eucjis2004" => 5,
+        "utf8" | "unicode" => 6,
+        "muleinternal" => 7,
+        "latin1" | "iso88591" => 8,
+        "latin2" | "iso88592" => 9,
+        "latin3" | "iso88593" => 10,
+        "latin4" | "iso88594" => 11,
+        "latin5" | "iso88599" => 12,
+        "latin6" | "iso885910" => 13,
+        "latin7" | "iso885913" => 14,
+        "latin8" | "iso885914" => 15,
+        "latin9" | "iso885915" => 16,
+        "latin10" | "iso885916" => 17,
+        "win1256" | "windows1256" => 18,
+        "win1258" | "windows1258" | "abc" | "tcvn" | "tcvn5712" | "vscii" => 19,
+        "win866" | "windows866" | "alt" => 20,
+        "win874" | "windows874" => 21,
+        "koi8r" | "koi8" => 22,
+        "win1251" | "windows1251" | "win" => 23,
+        "win1252" | "windows1252" => 24,
+        "iso88595" => 25,
+        "iso88596" => 26,
+        "iso88597" => 27,
+        "iso88598" => 28,
+        "win1250" | "windows1250" => 29,
+        "win1253" | "windows1253" => 30,
+        "win1254" | "windows1254" => 31,
+        "win1255" | "windows1255" => 32,
+        "win1257" | "windows1257" => 33,
+        "koi8u" => 34,
+        "sjis" | "shiftjis" | "mskanji" | "win932" | "windows932" => 35,
+        "big5" | "win950" | "windows950" => 36,
+        "gbk" | "win936" | "windows936" => 37,
+        "uhc" | "win949" | "windows949" => 38,
+        "gb18030" => 39,
+        "johab" => 40,
+        "shiftjis2004" => 41,
+        _ => -1,
+    };
+    Ok(Value::Int32(encoding))
+}
+
 fn eval_convert(values: &[Value]) -> Result<Value, ExecError> {
     match values {
         [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
@@ -9786,6 +9852,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
         BuiltinScalarFunction::Random
         | BuiltinScalarFunction::GetDatabaseEncoding
+        | BuiltinScalarFunction::PgCharToEncoding
         | BuiltinScalarFunction::PgEncodingToChar
         | BuiltinScalarFunction::PgGetAcl
         | BuiltinScalarFunction::PgGetUserById
@@ -11481,6 +11548,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::UnicodeAssigned => eval_unicode_assigned_function(&values),
         BuiltinScalarFunction::Normalize => eval_unicode_normalize_function(&values),
         BuiltinScalarFunction::IsNormalized => eval_unicode_is_normalized_function(&values),
+        BuiltinScalarFunction::PgCharToEncoding => eval_pg_char_to_encoding(&values),
         BuiltinScalarFunction::PgEncodingToChar => eval_pg_encoding_to_char(&values),
         BuiltinScalarFunction::PgMyTempSchema => Ok(Value::Int64(i64::from(
             current_temp_namespace_oid(ctx).unwrap_or(0),

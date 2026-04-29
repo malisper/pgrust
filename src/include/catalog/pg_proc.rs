@@ -808,6 +808,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'v',
         ),
         proc_row(
+            1264,
+            "pg_char_to_encoding",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[NAME_TYPE_OID]),
+            "PG_char_to_encoding",
+            1,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
             1597,
             "pg_encoding_to_char",
             NAME_TYPE_OID,
@@ -11763,6 +11775,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("unicode_normalize_func", BuiltinScalarFunction::Normalize),
         ("is_normalized", BuiltinScalarFunction::IsNormalized),
         ("unicode_is_normalized", BuiltinScalarFunction::IsNormalized),
+        (
+            "pg_char_to_encoding",
+            BuiltinScalarFunction::PgCharToEncoding,
+        ),
         (
             "pg_encoding_to_char",
             BuiltinScalarFunction::PgEncodingToChar,

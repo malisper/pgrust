@@ -494,6 +494,7 @@ pub enum BuiltinScalarFunction {
     UnicodeAssigned,
     Normalize,
     IsNormalized,
+    PgCharToEncoding,
     PgEncodingToChar,
     PgMyTempSchema,
     PgRustInternalBinaryCoercible,
