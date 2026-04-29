@@ -7,8 +7,7 @@ use crate::backend::executor::expr_reg::{format_regprocedure_oid_optional, forma
 use crate::backend::parser::{parse_type_name, resolve_raw_type_name};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::syscache::{
-    SysCacheId, SysCacheTuple, search_sys_cache_list1_db, search_sys_cache_list2_db,
-    search_sys_cache1_db,
+    SearchSysCache1, SearchSysCacheList1, SearchSysCacheList2, SysCacheId, SysCacheTuple,
 };
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::{
@@ -450,11 +449,11 @@ fn drop_dependents_for_reference(
     txn_ctx: CatalogTxnContext,
     referenced: ObjectAddress,
 ) -> Vec<crate::include::catalog::PgDependRow> {
-    search_sys_cache_list2_db(
+    SearchSysCacheList2(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::DependReference,
+        SysCacheId::DEPENDREFERENCE,
         drop_oid_key(referenced.classid),
         drop_oid_key(referenced.objid),
     )
@@ -476,11 +475,11 @@ fn drop_inheritance_children(
     txn_ctx: CatalogTxnContext,
     parent_oid: u32,
 ) -> Vec<crate::include::catalog::PgInheritsRow> {
-    search_sys_cache_list1_db(
+    SearchSysCacheList1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::InheritsParent,
+        SysCacheId::INHPARENT,
         drop_oid_key(parent_oid),
     )
     .map(|tuples| {
@@ -501,11 +500,11 @@ fn drop_constraint_row_by_oid(
     txn_ctx: CatalogTxnContext,
     oid: u32,
 ) -> Option<PgConstraintRow> {
-    search_sys_cache1_db(
+    SearchSysCache1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::ConstraintOid,
+        SysCacheId::CONSTROID,
         drop_oid_key(oid),
     )
     .ok()?
@@ -522,11 +521,11 @@ fn drop_rewrite_row_by_oid(
     txn_ctx: CatalogTxnContext,
     oid: u32,
 ) -> Option<PgRewriteRow> {
-    search_sys_cache1_db(
+    SearchSysCache1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::RewriteOid,
+        SysCacheId::REWRITEOID,
         drop_oid_key(oid),
     )
     .ok()?
@@ -733,20 +732,11 @@ fn drop_function_arg_type_oid(
     catalog: &dyn crate::backend::parser::CatalogLookup,
 ) -> Result<Option<u32>, ParseError> {
     let mut text = arg.trim();
-    let lower = text.to_ascii_lowercase();
-    for (mode, callable) in [
-        ("inout", true),
-        ("variadic", true),
-        ("in", true),
-        ("out", false),
-    ] {
-        if lower == mode || lower.starts_with(&format!("{mode} ")) {
-            if !callable {
-                return Ok(None);
-            }
-            text = text[mode.len()..].trim_start();
-            break;
+    if let Some((rest, callable)) = strip_drop_function_arg_mode(text) {
+        if !callable {
+            return Ok(None);
         }
+        text = rest;
     }
 
     let raw_type = match parse_type_name(text).and_then(|raw_type| {
@@ -757,6 +747,9 @@ fn drop_function_arg_type_oid(
             let Some(rest) = strip_leading_sql_word(text) else {
                 return Err(first_err);
             };
+            let rest = strip_drop_function_arg_mode(rest)
+                .map(|(rest, _)| rest)
+                .unwrap_or(rest);
             parse_type_name(rest)?
         }
     };
@@ -769,6 +762,22 @@ fn drop_function_arg_type_oid(
         })
         .map(Some)
         .ok_or_else(|| ParseError::UnsupportedType(arg.to_string()))
+}
+
+fn strip_drop_function_arg_mode(text: &str) -> Option<(&str, bool)> {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    for (mode, callable) in [
+        ("inout", true),
+        ("variadic", true),
+        ("in", true),
+        ("out", false),
+    ] {
+        if lower == mode || lower.starts_with(&format!("{mode} ")) {
+            return Some((trimmed[mode.len()..].trim_start(), callable));
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -795,19 +804,10 @@ fn drop_routine_arg_spec(
     catalog: &dyn crate::backend::parser::CatalogLookup,
 ) -> Result<DropRoutineArgSpec, ParseError> {
     let mut text = arg.trim();
-    let lower = text.to_ascii_lowercase();
     let mut parsed_mode = None;
-    for (mode, code) in [
-        ("inout", b'b'),
-        ("variadic", b'v'),
-        ("in", b'i'),
-        ("out", b'o'),
-    ] {
-        if lower == mode || lower.starts_with(&format!("{mode} ")) {
-            parsed_mode = Some(code);
-            text = text[mode.len()..].trim_start();
-            break;
-        }
+    if let Some((rest, mode)) = strip_drop_routine_arg_mode(text) {
+        parsed_mode = Some(mode);
+        text = rest;
     }
 
     let raw_type = match parse_type_name(text).and_then(|raw_type| {
@@ -817,6 +817,12 @@ fn drop_routine_arg_spec(
         Err(first_err) => {
             let Some(rest) = strip_leading_sql_word(text) else {
                 return Err(first_err);
+            };
+            let rest = if let Some((rest, mode)) = strip_drop_routine_arg_mode(rest) {
+                parsed_mode = Some(mode);
+                rest
+            } else {
+                rest
             };
             parse_type_name(rest)?
         }
@@ -833,6 +839,22 @@ fn drop_routine_arg_spec(
         mode: parsed_mode,
         type_oid,
     })
+}
+
+fn strip_drop_routine_arg_mode(text: &str) -> Option<(&str, u8)> {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    for (mode, code) in [
+        ("inout", b'b'),
+        ("variadic", b'v'),
+        ("in", b'i'),
+        ("out", b'o'),
+    ] {
+        if lower == mode || lower.starts_with(&format!("{mode} ")) {
+            return Some((trimmed[mode.len()..].trim_start(), code));
+        }
+    }
+    None
 }
 
 fn drop_table_direct_dependencies(
@@ -1912,8 +1934,11 @@ impl Database {
         let range_types_guard = self.range_types.read();
         let mut drops = Vec::new();
         for domain_name in &domain_names {
-            let (normalized, _, _) =
-                self.normalize_domain_name_for_create(domain_name, configured_search_path)?;
+            let (normalized, _, _) = self.normalize_domain_name_for_create(
+                client_id,
+                domain_name,
+                configured_search_path,
+            )?;
             let Some(domain) = domains_guard.get(&normalized).cloned() else {
                 if drop_stmt.if_exists {
                     continue;
@@ -2483,7 +2508,6 @@ impl Database {
             .backend_catcache(client_id, Some((xid, cid)))
             .map_err(map_catalog_error)?;
         let mut dropped = 0usize;
-        let mut cascade_notice_groups = Vec::new();
         for schema_name in &drop_stmt.schema_names {
             let maybe_schema = catcache
                 .namespace_by_name(schema_name)
@@ -2556,48 +2580,6 @@ impl Database {
                     configured_search_path,
                     &auth_catalog,
                 );
-
-                let mut relation_notice_rows = relation_rows
-                    .iter()
-                    .filter(|row| {
-                        (!row.relispartition
-                            || !partition_has_parent_in_schema(&catcache, row.oid, schema.oid))
-                            && matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'v')
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                relation_notice_rows.sort_by_key(|row| row.oid);
-                for relation in relation_notice_rows {
-                    notices.push(format!(
-                        "drop cascades to {} {}",
-                        drop_table_relation_kind_name(relation.relkind),
-                        drop_schema_display_relation_name(
-                            &catcache,
-                            &visible_namespaces,
-                            relation.relnamespace,
-                            &relation.relname
-                        )
-                    ));
-                }
-
-                let mut proc_rows = catcache
-                    .proc_rows()
-                    .into_iter()
-                    .filter(|row| row.pronamespace == schema.oid)
-                    .collect::<Vec<_>>();
-                proc_rows.sort_by_key(|row| row.oid);
-                for proc_row in proc_rows {
-                    let signature = drop_proc_signature_text(&proc_row, &catalog);
-                    notices.push(format!(
-                        "drop cascades to function {}",
-                        drop_schema_display_signature_name(
-                            &catcache,
-                            &visible_namespaces,
-                            proc_row.pronamespace,
-                            &signature
-                        )
-                    ));
-                }
 
                 let mut conversion_rows = catcache
                     .conversion_rows()
@@ -2734,8 +2716,73 @@ impl Database {
                     ));
                 }
 
-                if !notices.is_empty() {
-                    cascade_notice_groups.push(notices);
+                let mut relation_notice_rows = relation_rows
+                    .iter()
+                    .filter(|row| {
+                        (!row.relispartition
+                            || !partition_has_parent_in_schema(&catcache, row.oid, schema.oid))
+                            && matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'S' | 'v')
+                            && (row.relkind != 'S'
+                                || !sequence_is_owned_by_relation_in_schema(
+                                    &catcache, row.oid, schema.oid,
+                                ))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                relation_notice_rows.sort_by_key(|row| row.oid);
+                for relation in relation_notice_rows {
+                    notices.push(format!(
+                        "drop cascades to {} {}",
+                        drop_table_relation_kind_name(relation.relkind),
+                        drop_schema_display_object_name(
+                            &catcache,
+                            &visible_namespaces,
+                            relation.relnamespace,
+                            &relation.relname
+                        )
+                    ));
+                }
+
+                let mut tail_notices = Vec::new();
+                for row in catcache.type_rows().into_iter().filter(|row| {
+                    row.typnamespace == schema.oid && matches!(row.typtype, 'd' | 'e')
+                }) {
+                    tail_notices.push((
+                        row.oid,
+                        format!(
+                            "drop cascades to type {}",
+                            drop_schema_display_object_name(
+                                &catcache,
+                                &visible_namespaces,
+                                row.typnamespace,
+                                &row.typname
+                            )
+                        ),
+                    ));
+                }
+                for proc_row in catcache
+                    .proc_rows()
+                    .into_iter()
+                    .filter(|row| row.pronamespace == schema.oid)
+                {
+                    tail_notices.push((
+                        proc_row.oid,
+                        format!(
+                            "drop cascades to function {}",
+                            drop_proc_signature_text(&proc_row, &catalog)
+                        ),
+                    ));
+                }
+                tail_notices.sort_by_key(|(oid, _)| *oid);
+                notices.extend(tail_notices.into_iter().map(|(_, notice)| notice));
+
+                match notices.as_slice() {
+                    [] => {}
+                    [notice] => push_notice(notice.clone()),
+                    notices => push_notice_with_detail(
+                        format!("drop cascades to {} other objects", notices.len()),
+                        notices.join("\n"),
+                    ),
                 }
             }
             let mut namespace_cid = cid;
@@ -2770,19 +2817,6 @@ impl Database {
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
             dropped += 1;
-        }
-        let cascade_notices = cascade_notice_groups
-            .into_iter()
-            .rev()
-            .flatten()
-            .collect::<Vec<_>>();
-        match cascade_notices.as_slice() {
-            [] => {}
-            [notice] => push_notice(notice.clone()),
-            notices => push_notice_with_detail(
-                format!("drop cascades to {} other objects", notices.len()),
-                notices.join("\n"),
-            ),
         }
         Ok(StatementResult::AffectedRows(dropped))
     }

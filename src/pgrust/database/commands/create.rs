@@ -15,17 +15,19 @@ use crate::backend::parser::{
 };
 use crate::backend::rewrite::render_view_query_sql;
 use crate::backend::utils::cache::syscache::{
-    SysCacheId, SysCacheTuple, search_sys_cache_list1_db, search_sys_cache1_db,
+    SearchSysCache1, SearchSysCacheList1, SysCacheId, SysCacheTuple,
 };
 use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::utils::misc::notices::{
     push_backend_notice, push_notice, push_notice_with_detail,
 };
 use crate::include::catalog::{
-    ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
-    BYTEA_TYPE_OID, EVENT_TRIGGER_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID,
-    PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgProcRow, RECORD_TYPE_OID, VOID_TYPE_OID,
+    ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
+    ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
+    ANYNONARRAYOID, ANYOID, ANYRANGEOID, BYTEA_TYPE_OID, EVENT_TRIGGER_TYPE_OID, INTERNAL_TYPE_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID,
+    PG_LANGUAGE_SQL_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgProcRow, RECORD_TYPE_OID,
+    VOID_TYPE_OID,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
@@ -1079,6 +1081,7 @@ pub(super) fn normalize_create_proc_name_for_search_path(
             for schema in search_path {
                 match schema.as_str() {
                     "" | "$user" | "pg_temp" => continue,
+                    schema if schema.starts_with("pg_temp_") => continue,
                     "pg_catalog" => continue,
                     _ => {
                         if let Some(namespace_oid) =
@@ -1202,6 +1205,37 @@ fn aggregate_transition_input_oids(
     }
 }
 
+fn validate_polymorphic_aggregate_transition_type(
+    stype_oid: u32,
+    transition_input_oids: &[u32],
+) -> Result<(), ExecError> {
+    if stype_oid != ANYARRAYOID {
+        return Ok(());
+    }
+    if transition_input_oids.iter().copied().any(|oid| {
+        matches!(
+            oid,
+            ANYELEMENTOID
+                | ANYARRAYOID
+                | ANYNONARRAYOID
+                | ANYENUMOID
+                | ANYRANGEOID
+                | ANYMULTIRANGEOID
+        )
+    }) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: "cannot determine transition data type".into(),
+        detail: Some(
+            "A result of type anyarray requires at least one input of type anyelement, anyarray, anynonarray, anyenum, anyrange, or anymultirange."
+                .into(),
+        ),
+        hint: None,
+        sqlstate: "42P13",
+    })
+}
+
 fn aggregate_direct_arg_count(signature: &AggregateSignatureKind) -> i16 {
     match signature {
         AggregateSignatureKind::Star => 0,
@@ -1290,6 +1324,12 @@ fn aggregate_provariadic(
 }
 
 fn variadic_element_type_oid(catalog: &dyn CatalogLookup, type_oid: u32) -> u32 {
+    match type_oid {
+        ANYARRAYOID => return ANYELEMENTOID,
+        ANYCOMPATIBLEARRAYOID => return ANYCOMPATIBLEOID,
+        ANYENUMOID => return ANYENUMOID,
+        _ => {}
+    }
     catalog
         .type_rows()
         .into_iter()
@@ -1461,19 +1501,36 @@ fn lookup_aggregate_support_proc_row(
                 });
             }
         }
-        Err(err) => {
-            return Err(match err {
-                ParseError::DetailedError {
-                    message, sqlstate, ..
-                } if sqlstate == "42883" => ExecError::DetailedError {
-                    message,
-                    detail: None,
-                    hint: None,
-                    sqlstate,
-                },
-                err => ExecError::Parse(err),
-            });
+        Err(err @ ParseError::DetailedError { sqlstate, .. })
+            if matches!(sqlstate, "42804" | "42883") =>
+        {
+            if let Some(support) =
+                lookup_exact_aggregate_support_proc(catalog, proc_name, arg_oids)?
+            {
+                support
+            } else if arg_oids
+                .iter()
+                .copied()
+                .any(is_polymorphic_aggregate_signature_oid)
+            {
+                return Err(aggregate_support_proc_missing_error(
+                    catalog, proc_name, arg_oids,
+                ));
+            } else {
+                return Err(match err {
+                    ParseError::DetailedError {
+                        message, sqlstate, ..
+                    } => ExecError::DetailedError {
+                        message,
+                        detail: None,
+                        hint: None,
+                        sqlstate,
+                    },
+                    err => ExecError::Parse(err),
+                });
+            }
         }
+        Err(err) => return Err(ExecError::Parse(err)),
     };
     if support.row.prokind != 'f' {
         return Err(ExecError::DetailedError {
@@ -1533,6 +1590,40 @@ fn aggregate_support_from_resolved(
         result_type: resolved.result_type,
         declared_arg_types: resolved.declared_arg_types,
     })
+}
+
+fn aggregate_support_proc_missing_error(
+    catalog: &dyn CatalogLookup,
+    proc_name: &str,
+    arg_oids: &[u32],
+) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "function {} does not exist",
+            exact_proc_signature(catalog, proc_name, arg_oids)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42883",
+    }
+}
+
+fn is_polymorphic_aggregate_signature_oid(oid: u32) -> bool {
+    matches!(
+        oid,
+        ANYOID
+            | ANYELEMENTOID
+            | ANYARRAYOID
+            | ANYNONARRAYOID
+            | ANYENUMOID
+            | ANYRANGEOID
+            | ANYMULTIRANGEOID
+            | ANYCOMPATIBLEOID
+            | ANYCOMPATIBLENONARRAYOID
+            | ANYCOMPATIBLEARRAYOID
+            | ANYCOMPATIBLERANGEOID
+            | ANYCOMPATIBLEMULTIRANGEOID
+    )
 }
 
 fn aggregate_runtime_coercion_retry_types(actual_types: &[SqlType]) -> Option<Vec<SqlType>> {
@@ -1763,7 +1854,7 @@ fn proc_drop_signature_hint(row: &PgProcRow, catalog: &dyn CatalogLookup) -> Str
         .into_iter()
         .map(|oid| proc_signature_type_name(catalog, oid))
         .collect::<Vec<_>>()
-        .join(", ");
+        .join(",");
     format!("Use DROP FUNCTION {}({}) first.", row.proname, args)
 }
 
@@ -1807,6 +1898,7 @@ fn invalid_procedure_attribute() -> ExecError {
 }
 
 fn validate_proc_arg_order(args: &[CreateFunctionArg], proc_kind: char) -> Result<(), ExecError> {
+    validate_proc_arg_names(args)?;
     let mut saw_variadic_input = false;
     let mut saw_default = false;
     for arg in args {
@@ -1859,6 +1951,37 @@ fn validate_proc_arg_order(args: &[CreateFunctionArg], proc_kind: char) -> Resul
         }
         if arg.variadic && is_input {
             saw_variadic_input = true;
+        }
+    }
+    Ok(())
+}
+
+fn validate_proc_arg_names(args: &[CreateFunctionArg]) -> Result<(), ExecError> {
+    for (index, arg) in args.iter().enumerate() {
+        let Some(name) = arg.name.as_deref().filter(|name| !name.is_empty()) else {
+            continue;
+        };
+        let is_input =
+            matches!(arg.mode, FunctionArgMode::In | FunctionArgMode::InOut) || arg.variadic;
+        let is_output = matches!(arg.mode, FunctionArgMode::Out | FunctionArgMode::InOut);
+        for prev in &args[..index] {
+            if prev.name.as_deref() != Some(name) {
+                continue;
+            }
+            let prev_is_input =
+                matches!(prev.mode, FunctionArgMode::In | FunctionArgMode::InOut) || prev.variadic;
+            let prev_is_output = matches!(prev.mode, FunctionArgMode::Out | FunctionArgMode::InOut);
+            if (is_input && prev_is_output && !prev_is_input && !is_output)
+                || (prev_is_input && is_output && !is_input && !prev_is_output)
+            {
+                continue;
+            }
+            return Err(ExecError::DetailedError {
+                message: format!("parameter name \"{name}\" used more than once"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
         }
     }
     Ok(())
@@ -2751,8 +2874,11 @@ impl Database {
             Some(_) => None,
             None => None,
         };
-        let (normalized, object_name, namespace_oid) = self
-            .normalize_domain_name_for_create(&create_stmt.domain_name, configured_search_path)?;
+        let (normalized, object_name, namespace_oid) = self.normalize_domain_name_for_create(
+            client_id,
+            &create_stmt.domain_name,
+            configured_search_path,
+        )?;
         let domains = self.domains.write();
         if domains.contains_key(&normalized) {
             return Err(ExecError::Parse(ParseError::UnsupportedType(
@@ -3415,6 +3541,7 @@ impl Database {
         let stype_oid = catalog
             .type_oid_for_sql_type(stype)
             .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(format!("{stype:?}"))))?;
+        validate_polymorphic_aggregate_transition_type(stype_oid, &transition_input_oids)?;
         if create_stmt.serialfunc_name.is_some() != create_stmt.deserialfunc_name.is_some() {
             return Err(ExecError::DetailedError {
                 message:
@@ -4629,11 +4756,11 @@ impl Database {
         txn_ctx: Option<(TransactionId, CommandId)>,
         role_oid: u32,
     ) -> Result<Option<PgAuthIdRow>, ExecError> {
-        Ok(search_sys_cache1_db(
+        Ok(SearchSysCache1(
             self,
             client_id,
             txn_ctx,
-            SysCacheId::AuthIdOid,
+            SysCacheId::AUTHOID,
             Value::Int64(i64::from(role_oid)),
         )
         .map_err(map_catalog_error)?
@@ -4650,11 +4777,11 @@ impl Database {
         txn_ctx: Option<(TransactionId, CommandId)>,
         member_oid: u32,
     ) -> Result<Vec<PgAuthMembersRow>, ExecError> {
-        Ok(search_sys_cache_list1_db(
+        Ok(SearchSysCacheList1(
             self,
             client_id,
             txn_ctx,
-            SysCacheId::AuthMembersMemberRole,
+            SysCacheId::AUTHMEMMEMROLE,
             Value::Int64(i64::from(member_oid)),
         )
         .map_err(map_catalog_error)?

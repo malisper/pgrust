@@ -1047,6 +1047,7 @@ impl PlannerInfo {
 
 fn rewrite_minmax_aggregate_query(query: Query) -> Query {
     if !query.group_by.is_empty()
+        || !query.grouping_sets.is_empty()
         || query.having_qual.is_some()
         || !query.window_clauses.is_empty()
         || query.has_target_srfs
@@ -1093,6 +1094,7 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         distinct_on: query.distinct_on,
         where_qual: None,
         group_by: Vec::new(),
+        grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
         having_qual: None,
@@ -1462,6 +1464,7 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
         distinct_on: Vec::new(),
         where_qual,
         group_by: Vec::new(),
+        grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
         having_qual: None,

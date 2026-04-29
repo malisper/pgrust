@@ -27,13 +27,12 @@ fn local_var(index: usize) -> Expr {
     })
 }
 
-fn planned_subquery_plan(
+fn planned_subquery_plan<'a>(
     subplan: &crate::include::nodes::primnodes::SubPlan,
-    ctx: &ExecutorContext,
-) -> Result<Plan, ExecError> {
+    ctx: &'a ExecutorContext,
+) -> Result<&'a Plan, ExecError> {
     ctx.subplans
         .get(subplan.plan_id)
-        .cloned()
         .ok_or(ExecError::DetailedError {
             message: "unplanned subquery reached executor".into(),
             detail: Some(
@@ -452,10 +451,10 @@ pub(super) fn eval_scalar_subquery(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let plan = planned_subquery_plan(subplan, ctx)?;
+    let plan = planned_subquery_plan(subplan, ctx)?.clone();
     with_scoped_subquery_runtime(ctx, |ctx| {
         bind_subplan_params(subplan, slot, ctx)?;
-        let mut state = executor_start(plan.clone());
+        let mut state = executor_start(plan);
         let mut first_value = None;
         while let Some(mut inner_slot) = exec_next(&mut state, ctx)? {
             let values = subplan_visible_values(subplan, &mut inner_slot)?;
@@ -496,10 +495,10 @@ pub(super) fn eval_row_compare_subquery(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let plan = planned_subquery_plan(subplan, ctx)?;
+    let plan = planned_subquery_plan(subplan, ctx)?.clone();
     with_scoped_subquery_runtime(ctx, |ctx| {
         bind_subplan_params(subplan, slot, ctx)?;
-        let mut state = executor_start(plan.clone());
+        let mut state = executor_start(plan);
         let mut first_value = None;
         while let Some(mut inner_slot) = exec_next(&mut state, ctx)? {
             let values = subplan_visible_values(subplan, &mut inner_slot)?;
@@ -526,10 +525,10 @@ pub(super) fn eval_array_subquery(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let plan = planned_subquery_plan(subplan, ctx)?;
+    let plan = planned_subquery_plan(subplan, ctx)?.clone();
     with_scoped_subquery_runtime(ctx, |ctx| {
         bind_subplan_params(subplan, slot, ctx)?;
-        let mut state = executor_start(plan.clone());
+        let mut state = executor_start(plan);
         let mut values = Vec::new();
         while let Some(mut inner_slot) = exec_next(&mut state, ctx)? {
             let mut row = subplan_visible_values(subplan, &mut inner_slot)?;
@@ -557,7 +556,7 @@ pub(super) fn eval_exists_subquery(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let plan = planned_subquery_plan(subplan, ctx)?;
+    let plan = planned_subquery_plan(subplan, ctx)?.clone();
     with_scoped_subquery_runtime(ctx, |ctx| {
         bind_subplan_params(subplan, slot, ctx)?;
         if plan_is_proven_empty(&plan) {
@@ -569,7 +568,7 @@ pub(super) fn eval_exists_subquery(
         if let Some(value) = eval_exists_membership_fast_path(subplan, &plan, ctx)? {
             return Ok(value);
         }
-        let mut state = executor_start(plan.clone());
+        let mut state = executor_start(plan);
         Ok(Value::Bool(exec_next(&mut state, ctx)?.is_some()))
     })
 }
@@ -583,7 +582,7 @@ pub(super) fn eval_quantified_subquery(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let plan = planned_subquery_plan(subplan, ctx)?;
+    let plan = planned_subquery_plan(subplan, ctx)?.clone();
     // :HACK: `join.sql` currently hits a pathological executor path for the
     // specific uncorrelated `unique1 IN (SELECT unique1 FROM tenk1 b JOIN
     // tenk1 c USING (unique1) WHERE b.unique2 = 42)` shape. Fail fast until
@@ -606,7 +605,7 @@ pub(super) fn eval_quantified_subquery(
     }
     with_scoped_subquery_runtime(ctx, |ctx| {
         bind_subplan_params(subplan, slot, ctx)?;
-        let mut state = executor_start(plan.clone());
+        let mut state = executor_start(plan);
         let mut saw_row = false;
         let mut saw_null = false;
         while let Some(mut inner_slot) = exec_next(&mut state, ctx)? {

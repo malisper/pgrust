@@ -1680,6 +1680,41 @@ mod tests {
     }
 
     #[test]
+    fn parse_static_query_for_loop_with_many_parenthesized_values() {
+        let block = parse_block(
+            "
+            begin
+                for objtype in values
+                    ('table'), ('index'), ('sequence'), ('view'),
+                    ('materialized view'), ('foreign table'),
+                    ('table column'), ('foreign table column'),
+                    ('aggregate'), ('function'), ('procedure'), ('type'), ('cast'),
+                    ('table constraint'), ('domain constraint'), ('conversion'), ('default value'),
+                    ('operator'), ('operator class'), ('operator family'), ('rule'), ('trigger'),
+                    ('text search parser'), ('text search dictionary'),
+                    ('text search template'), ('text search configuration'),
+                    ('policy'), ('user mapping'), ('default acl'), ('transform'),
+                    ('operator of access method'), ('function of access method'),
+                    ('publication namespace'), ('publication relation')
+                loop
+                    null;
+                end loop;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::ForQuery { source, body, .. } = &block.statements[0] else {
+            panic!("expected query FOR loop");
+        };
+        let ForQuerySource::Static(source) = source else {
+            panic!("expected static query FOR loop");
+        };
+        assert!(source.contains("('publication relation')"));
+        assert_eq!(body.len(), 1);
+    }
+
+    #[test]
     fn parse_dynamic_execute_query_for_loop_with_using() {
         let block = parse_block(
             "

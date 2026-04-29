@@ -1056,6 +1056,26 @@ pub fn default_opclass_oid_for_am(am_oid: u32, type_oid: u32, sql_type: SqlType)
         .map(|row| row.oid)
 }
 
+pub fn index_opclass_is_implicit_for_definition(
+    am_oid: u32,
+    type_oid: u32,
+    sql_type: SqlType,
+    opclass_oid: u32,
+    indisexclusion: bool,
+) -> bool {
+    if default_opclass_oid_for_am(am_oid, type_oid, sql_type) == Some(opclass_oid) {
+        return true;
+    }
+    // :HACK: PostgreSQL temporal/exclusion GiST indexes use btree_gist default
+    // opclasses for scalar equality columns. pgrust currently stores the
+    // matching btree opclass OID as the executor stand-in, so hide it from
+    // pg_get_indexdef/psql output the same way PostgreSQL hides an implicit
+    // default GiST opclass.
+    am_oid == GIST_AM_OID
+        && indisexclusion
+        && default_btree_opclass_oid(type_oid) == Some(opclass_oid)
+}
+
 pub fn default_btree_opclass_oid(type_oid: u32) -> Option<u32> {
     Some(match type_oid {
         BOOL_TYPE_OID => BOOL_BTREE_OPCLASS_OID,

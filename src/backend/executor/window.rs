@@ -1,5 +1,6 @@
-use super::agg::AccumState;
+use super::agg::{AccumState, AggregateRuntime};
 use super::exec_expr::eval_expr;
+use super::expr_agg_support::build_aggregate_runtime;
 use super::expr_ops::{compare_order_values, values_are_distinct};
 use super::{ExecError, ExecutorContext};
 use crate::backend::utils::time::datetime::{
@@ -13,8 +14,8 @@ use crate::include::nodes::datum::{IntervalValue, NumericValue, Value};
 use crate::include::nodes::execnodes::{MaterializedRow, SystemVarBinding, TupleSlot};
 use crate::include::nodes::parsenodes::{WindowFrameExclusion, WindowFrameMode};
 use crate::include::nodes::primnodes::{
-    AggFunc, BuiltinWindowFunction, OrderByEntry, WindowClause, WindowFrameBound, WindowFuncExpr,
-    WindowFuncKind,
+    AggAccum, AggFunc, Aggref, BuiltinWindowFunction, OrderByEntry, WindowClause, WindowFrameBound,
+    WindowFuncExpr, WindowFuncKind,
 };
 use std::cmp::Ordering;
 
@@ -1047,9 +1048,10 @@ fn nth_non_null_included_frame_row_index(
 
 fn advance_window_aggregate(
     ctx: &mut ExecutorContext,
+    runtime: &AggregateRuntime,
     state: &mut AccumState,
     row: &mut MaterializedRow,
-    aggref: &crate::include::nodes::primnodes::Aggref,
+    aggref: &Aggref,
 ) -> Result<(), ExecError> {
     set_active_system_bindings(ctx, &row.system_bindings);
     set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
@@ -1065,14 +1067,7 @@ fn advance_window_aggregate(
         .iter()
         .map(|arg| eval_expr(arg, &mut row.slot, ctx).map(|value| value.to_owned_value()))
         .collect::<Result<Vec<_>, _>>()?;
-    let func = builtin_aggregate_function_for_proc_oid(aggref.aggfnoid).unwrap_or_else(|| {
-        panic!(
-            "window aggregate {:?} lacks builtin implementation mapping",
-            aggref.aggfnoid
-        )
-    });
-    let transition = AccumState::transition_fn(func, aggref.args.len(), aggref.aggdistinct);
-    transition(state, &values)?;
+    runtime.transition(state, &values, ctx)?;
     Ok(())
 }
 
@@ -1500,31 +1495,34 @@ fn evaluate_builtin_window(
 fn evaluate_aggregate_window(
     ctx: &mut ExecutorContext,
     clause: &WindowClause,
-    aggref: &crate::include::nodes::primnodes::Aggref,
+    aggref: &Aggref,
     partition_rows: &mut [PreparedWindowRow],
     has_order_by: bool,
 ) -> Result<Vec<Value>, ExecError> {
-    let func = builtin_aggregate_function_for_proc_oid(aggref.aggfnoid).unwrap_or_else(|| {
-        panic!(
-            "window aggregate {:?} lacks builtin implementation mapping",
-            aggref.aggfnoid
-        )
-    });
-    let mut state = AccumState::new(func, aggref.aggdistinct, aggref.aggtype);
+    let accum = window_aggref_accum(aggref);
+    let runtime = build_aggregate_runtime(&accum, ctx)?;
+    let builtin_func = match &runtime {
+        AggregateRuntime::Builtin { func, .. } => Some(*func),
+        _ => None,
+    };
+    let mut state = runtime.initialize_state(&accum);
     if !has_order_by
         && matches!(clause.spec.frame.mode, WindowFrameMode::Range)
         && clause.spec.frame.exclusion == WindowFrameExclusion::NoOthers
     {
         for row in partition_rows.iter_mut() {
-            advance_window_aggregate(ctx, &mut state, &mut row.row, aggref)?;
+            advance_window_aggregate(ctx, &runtime, &mut state, &mut row.row, aggref)?;
         }
-        return Ok(vec![state.finalize(); partition_rows.len()]);
+        let value = runtime.finalize(&accum, &state, &[], &[], ctx)?;
+        return Ok(vec![value; partition_rows.len()]);
     }
 
-    if let Some(values) =
-        evaluate_peer_prefix_aggregate_window(ctx, clause, aggref, partition_rows, func)?
-    {
-        return Ok(values);
+    if let Some(func) = builtin_func {
+        if let Some(values) =
+            evaluate_peer_prefix_aggregate_window(ctx, clause, aggref, partition_rows, func)?
+        {
+            return Ok(values);
+        }
     }
 
     // PostgreSQL advances aggregate state incrementally for nonshrinking frames.
@@ -1532,20 +1530,21 @@ fn evaluate_aggregate_window(
     // devolve into per-row full-frame rescans.
     if frame_uses_prefix_accumulation(clause, partition_rows, ctx, aggref)? {
         let mut values = Vec::with_capacity(partition_rows.len());
-        let mut state = AccumState::new(func, aggref.aggdistinct, aggref.aggtype);
+        let mut state = runtime.initialize_state(&accum);
         let mut advanced_end = 0usize;
         for row_index in 0..partition_rows.len() {
             let (_, frame_end) = evaluate_window_frame(ctx, clause, partition_rows, row_index)?;
             while advanced_end < frame_end {
                 advance_window_aggregate(
                     ctx,
+                    &runtime,
                     &mut state,
                     &mut partition_rows[advanced_end].row,
                     aggref,
                 )?;
                 advanced_end += 1;
             }
-            values.push(state.finalize());
+            values.push(runtime.finalize(&accum, &state, &[], &[], ctx)?);
         }
         return Ok(values);
     }
@@ -1554,7 +1553,7 @@ fn evaluate_aggregate_window(
     for row_index in 0..partition_rows.len() {
         let (frame_start, frame_end) =
             evaluate_window_frame(ctx, clause, partition_rows, row_index)?;
-        let mut state = AccumState::new(func, aggref.aggdistinct, aggref.aggtype);
+        let mut state = runtime.initialize_state(&accum);
         let included_indexes = (frame_start..frame_end)
             .map(|candidate| {
                 row_is_included_by_frame_exclusion(clause, partition_rows, row_index, candidate)
@@ -1562,17 +1561,36 @@ fn evaluate_aggregate_window(
             })
             .collect::<Result<Vec<_>, _>>()?;
         for row_index in included_indexes.into_iter().flatten() {
-            advance_window_aggregate(ctx, &mut state, &mut partition_rows[row_index].row, aggref)?;
+            advance_window_aggregate(
+                ctx,
+                &runtime,
+                &mut state,
+                &mut partition_rows[row_index].row,
+                aggref,
+            )?;
         }
-        values.push(state.finalize());
+        values.push(runtime.finalize(&accum, &state, &[], &[], ctx)?);
     }
     Ok(values)
+}
+
+fn window_aggref_accum(aggref: &Aggref) -> AggAccum {
+    AggAccum {
+        aggfnoid: aggref.aggfnoid,
+        agg_variadic: aggref.aggvariadic,
+        direct_args: aggref.direct_args.clone(),
+        args: aggref.args.clone(),
+        order_by: aggref.aggorder.clone(),
+        filter: aggref.aggfilter.clone(),
+        distinct: aggref.aggdistinct,
+        sql_type: aggref.aggtype,
+    }
 }
 
 fn evaluate_peer_prefix_aggregate_window(
     ctx: &mut ExecutorContext,
     clause: &WindowClause,
-    aggref: &crate::include::nodes::primnodes::Aggref,
+    aggref: &Aggref,
     partition_rows: &mut [PreparedWindowRow],
     func: AggFunc,
 ) -> Result<Option<Vec<Value>>, ExecError> {
@@ -1610,7 +1628,11 @@ fn evaluate_peer_prefix_aggregate_window(
         let group_end =
             peer_group_end_for_index(partition_rows, &clause.spec.order_by, group_start)?;
         for row in partition_rows.iter_mut().take(group_end).skip(group_start) {
-            advance_window_aggregate(ctx, &mut state, &mut row.row, aggref)?;
+            let runtime = AggregateRuntime::Builtin {
+                func,
+                transition: AccumState::transition_fn(func, aggref.args.len(), aggref.aggdistinct),
+            };
+            advance_window_aggregate(ctx, &runtime, &mut state, &mut row.row, aggref)?;
         }
         let value = state.finalize();
         values.extend(std::iter::repeat_n(value, group_end - group_start));

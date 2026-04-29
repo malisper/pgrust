@@ -1738,7 +1738,7 @@ pub(crate) fn index_key_values_for_row(
                 })
             })?;
             let mut index_meta = index.index_meta.clone();
-            fallback_exprs = crate::backend::parser::relation_get_index_expressions(
+            fallback_exprs = crate::backend::parser::RelationGetIndexExpressions(
                 &mut index_meta,
                 heap_desc,
                 catalog,
@@ -5949,8 +5949,11 @@ fn relation_acl_allows_as(
                 hint: None,
                 sqlstate: "XX000",
             })?;
-    let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
     let auth = auth_state_for_privilege_check(ctx, check_as_user_oid);
+    if auth.current_user_oid() == class_row.relowner {
+        return Ok(true);
+    }
+    let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
     if auth.has_effective_membership(class_row.relowner, &auth_catalog)
         || auth_catalog
             .role_by_oid(auth.current_user_oid())
@@ -6020,8 +6023,11 @@ fn relation_or_all_column_acls_allow_as(
                 hint: None,
                 sqlstate: "XX000",
             })?;
-    let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
     let auth = auth_state_for_privilege_check(ctx, check_as_user_oid);
+    if auth.current_user_oid() == class_row.relowner {
+        return Ok(true);
+    }
+    let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
     if auth.has_effective_membership(class_row.relowner, &auth_catalog)
         || auth_catalog
             .role_by_oid(auth.current_user_oid())
@@ -7175,6 +7181,7 @@ fn execute_insert_project_set_row(
         distinct_on: Vec::new(),
         where_qual: None,
         group_by: Vec::new(),
+        grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
         having_qual: None,

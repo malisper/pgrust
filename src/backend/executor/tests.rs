@@ -4871,6 +4871,35 @@ fn explain_expr_renders_geometry_consts_as_sql_literals() {
 }
 
 #[test]
+fn explain_sort_key_renders_box_coordinate_subscripts() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::{BuiltinScalarFunction, ScalarFunctionImpl};
+
+    let expr = Expr::func_with_impl(
+        0,
+        Some(SqlType::new(SqlTypeKind::Float8)),
+        false,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointX),
+        vec![Expr::func_with_impl(
+            0,
+            Some(SqlType::new(SqlTypeKind::Point)),
+            false,
+            ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxHigh),
+            vec![Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(0),
+                varlevelsup: 0,
+                vartype: SqlType::new(SqlTypeKind::Box),
+            })],
+        )],
+    );
+    assert_eq!(
+        render_explain_expr(&expr, &["home_base".into()]),
+        "((home_base[0])[0])"
+    );
+}
+
+#[test]
 fn explain_const_false_scan_filter_uses_one_time_filter() {
     let base = temp_dir("explain_const_false_scan_filter");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -15858,6 +15887,46 @@ fn point_coordinate_subscripts_return_float8_values() {
         )
         .unwrap(),
         vec![vec![Value::Float64(1.5), Value::Float64(2.5)]],
+    );
+}
+
+#[test]
+fn box_subscripts_return_high_and_low_points() {
+    use crate::include::nodes::datum::GeoPoint;
+
+    let base = temp_dir("box_subscripts");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ('((1,2),(3,4))'::box)[0], ('((1,2),(3,4))'::box)[1], (('((1,2),(3,4))'::box)[0])[1]",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Point(GeoPoint { x: 3.0, y: 4.0 }),
+            Value::Point(GeoPoint { x: 1.0, y: 2.0 }),
+            Value::Float64(4.0),
+        ]],
+    );
+}
+
+#[test]
+fn point_contained_by_circle_matches_circle_contains_point() {
+    let base = temp_dir("point_contained_by_circle");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '(1,1)'::point <@ '<(0,0),2>'::circle, '<(0,0),2>'::circle @> '(3,0)'::point",
+        )
+        .unwrap(),
+        vec![vec![Value::Bool(true), Value::Bool(false)]],
     );
 }
 

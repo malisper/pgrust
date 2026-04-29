@@ -265,6 +265,116 @@ fn aggregate_output_expr(accum: &crate::include::nodes::primnodes::AggAccum, agg
     }))
 }
 
+fn render_semantic_expr_name(root: Option<&PlannerInfo>, expr: &Expr) -> String {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => root
+            .and_then(|root| root.parse.rtable.get(var.varno.saturating_sub(1)))
+            .and_then(|rte| {
+                attrno_index(var.varattno).and_then(|index| {
+                    rte.desc.columns.get(index).map(|column| {
+                        let qualifier = rte.alias.as_deref().or_else(|| {
+                            (!rte.eref.aliasname.is_empty()).then_some(rte.eref.aliasname.as_str())
+                        });
+                        qualifier
+                            .map(|qualifier| format!("{qualifier}.{}", column.name))
+                            .unwrap_or_else(|| column.name.clone())
+                    })
+                })
+            })
+            .unwrap_or_else(|| crate::backend::executor::render_explain_expr(expr, &[])),
+        Expr::Op(op) if op.args.len() == 2 => {
+            let op_text = match op.op {
+                crate::include::nodes::primnodes::OpExprKind::Add => "+",
+                crate::include::nodes::primnodes::OpExprKind::Sub => "-",
+                crate::include::nodes::primnodes::OpExprKind::Mul => "*",
+                crate::include::nodes::primnodes::OpExprKind::Div => "/",
+                crate::include::nodes::primnodes::OpExprKind::Mod => "%",
+                crate::include::nodes::primnodes::OpExprKind::Eq => "=",
+                crate::include::nodes::primnodes::OpExprKind::NotEq => "<>",
+                crate::include::nodes::primnodes::OpExprKind::Lt => "<",
+                crate::include::nodes::primnodes::OpExprKind::LtEq => "<=",
+                crate::include::nodes::primnodes::OpExprKind::Gt => ">",
+                crate::include::nodes::primnodes::OpExprKind::GtEq => ">=",
+                _ => return crate::backend::executor::render_explain_expr(expr, &[]),
+            };
+            format!(
+                "({} {} {})",
+                render_semantic_expr_name(root, &op.args[0]),
+                op_text,
+                render_semantic_expr_name(root, &op.args[1])
+            )
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            render_semantic_expr_name(root, inner)
+        }
+        Expr::Const(value) => {
+            let rendered =
+                crate::backend::executor::render_explain_expr(&Expr::Const(value.clone()), &[]);
+            rendered
+                .strip_prefix('(')
+                .and_then(|value| value.strip_suffix(')'))
+                .unwrap_or(&rendered)
+                .to_string()
+        }
+        _ => crate::backend::executor::render_explain_expr(expr, &[]),
+    }
+}
+
+fn render_semantic_accum_name(root: Option<&PlannerInfo>, accum: &AggAccum) -> String {
+    let name = crate::include::catalog::builtin_aggregate_function_for_proc_oid(accum.aggfnoid)
+        .map(|func| func.name().to_string())
+        .unwrap_or_else(|| format!("agg_{}", accum.aggfnoid));
+    let mut args = if accum.args.is_empty() {
+        vec!["*".into()]
+    } else {
+        accum
+            .args
+            .iter()
+            .map(|arg| render_semantic_expr_name(root, arg))
+            .collect::<Vec<_>>()
+    };
+    if accum.distinct && !args.is_empty() {
+        args[0] = format!("DISTINCT {}", args[0]);
+    }
+    let mut rendered = format!("{name}({})", args.join(", "));
+    if !accum.order_by.is_empty() {
+        let order_by = accum
+            .order_by
+            .iter()
+            .map(|item| render_semantic_expr_name(root, &item.expr))
+            .collect::<Vec<_>>()
+            .join(", ");
+        rendered = format!("{name}({} ORDER BY {order_by})", args.join(", "));
+    }
+    rendered
+}
+
+fn aggregate_semantic_output_names(
+    root: Option<&PlannerInfo>,
+    group_by: &[Expr],
+    passthrough_exprs: &[Expr],
+    accumulators: &[AggAccum],
+) -> Vec<String> {
+    let mut names =
+        Vec::with_capacity(group_by.len() + passthrough_exprs.len() + accumulators.len());
+    names.extend(
+        group_by
+            .iter()
+            .map(|expr| render_semantic_expr_name(root, expr)),
+    );
+    names.extend(
+        passthrough_exprs
+            .iter()
+            .map(|expr| render_semantic_expr_name(root, expr)),
+    );
+    names.extend(
+        accumulators
+            .iter()
+            .map(|accum| render_semantic_accum_name(root, accum)),
+    );
+    names
+}
+
 fn dedup_match_exprs(exprs: Vec<Expr>) -> Vec<Expr> {
     let mut deduped = Vec::new();
     for expr in exprs {
@@ -337,10 +447,13 @@ fn build_projection_tlist(
 fn build_aggregate_tlist(
     root: Option<&PlannerInfo>,
     slot_id: usize,
+    phase: crate::include::nodes::plannodes::AggregatePhase,
     group_by: &[Expr],
     passthrough_exprs: &[Expr],
     accumulators: &[crate::include::nodes::primnodes::AggAccum],
+    semantic_accumulators: Option<&[crate::include::nodes::primnodes::AggAccum]>,
 ) -> IndexedTlist {
+    let display_accumulators = semantic_accumulators.unwrap_or(accumulators);
     let mut entries =
         Vec::with_capacity(group_by.len() + passthrough_exprs.len() + accumulators.len());
     for (index, expr) in group_by.iter().enumerate() {
@@ -375,14 +488,20 @@ fn build_aggregate_tlist(
         });
     }
     for (aggno, accum) in accumulators.iter().enumerate() {
+        let display_accum = display_accumulators.get(aggno).unwrap_or(accum);
         let index = group_by.len() + passthrough_exprs.len() + aggno;
+        let output_type = if phase == crate::include::nodes::plannodes::AggregatePhase::Partial {
+            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Record)
+        } else {
+            accum.sql_type
+        };
         entries.push(IndexedTlistEntry {
             index,
-            sql_type: accum.sql_type,
+            sql_type: output_type,
             ressortgroupref: 0,
             match_exprs: dedup_match_exprs(vec![
-                slot_var(slot_id, user_attrno(index), accum.sql_type),
-                aggregate_output_expr(accum, aggno),
+                slot_var(slot_id, user_attrno(index), output_type),
+                aggregate_output_expr(display_accum, aggno),
             ]),
         });
     }
@@ -639,11 +758,21 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
         | Path::LockRows { input, .. } => build_path_tlist(root, input),
         Path::Aggregate {
             slot_id,
+            phase,
             group_by,
             passthrough_exprs,
             accumulators,
+            semantic_accumulators,
             ..
-        } => build_aggregate_tlist(root, *slot_id, group_by, passthrough_exprs, accumulators),
+        } => build_aggregate_tlist(
+            root,
+            *slot_id,
+            *phase,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            semantic_accumulators.as_deref(),
+        ),
         Path::WindowAgg {
             slot_id,
             input,
@@ -702,7 +831,7 @@ fn search_input_tlist_entry<'a>(
     input: &Path,
     tlist: &'a IndexedTlist,
 ) -> Option<&'a IndexedTlistEntry> {
-    let flattened_expr = root.map(|root| flatten_join_alias_vars(root, expr.clone()));
+    let flattened_expr = root.and_then(|root| maybe_flatten_join_alias_vars(root, expr));
     search_tlist_entry(root, expr, tlist).or_else(|| {
         let mut matched_index = None;
         for entry in &tlist.entries {
@@ -737,6 +866,146 @@ fn search_input_tlist_entry<'a>(
         }
         matched_index.and_then(|index| tlist.entries.iter().find(|entry| entry.index == index))
     })
+}
+
+fn maybe_flatten_join_alias_vars(root: &PlannerInfo, expr: &Expr) -> Option<Expr> {
+    expr_references_join_alias_var(root, expr).then(|| flatten_join_alias_vars(root, expr.clone()))
+}
+
+fn expr_references_join_alias_var(root: &PlannerInfo, expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => root
+            .parse
+            .rtable
+            .get(var.varno.saturating_sub(1))
+            .is_some_and(|rte| matches!(rte.kind, RangeTblEntryKind::Join { .. })),
+        Expr::Aggref(aggref) => {
+            aggref
+                .direct_args
+                .iter()
+                .any(|expr| expr_references_join_alias_var(root, expr))
+                || aggref
+                    .args
+                    .iter()
+                    .any(|expr| expr_references_join_alias_var(root, expr))
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|entry| expr_references_join_alias_var(root, &entry.expr))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(|expr| expr_references_join_alias_var(root, expr))
+        }
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|expr| expr_references_join_alias_var(root, expr))
+                || case_expr.args.iter().any(|arm| {
+                    expr_references_join_alias_var(root, &arm.expr)
+                        || expr_references_join_alias_var(root, &arm.result)
+                })
+                || expr_references_join_alias_var(root, &case_expr.defresult)
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_ref()
+            .is_some_and(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_ref()
+            .is_some_and(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::ScalarArrayOp(op) => {
+            expr_references_join_alias_var(root, &op.left)
+                || expr_references_join_alias_var(root, &op.right)
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::Cast(inner, _) => expr_references_join_alias_var(root, inner),
+        Expr::Collate { expr, .. } => expr_references_join_alias_var(root, expr),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_references_join_alias_var(root, expr)
+                || expr_references_join_alias_var(root, pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_references_join_alias_var(root, expr))
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_references_join_alias_var(root, inner),
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            expr_references_join_alias_var(root, left)
+                || expr_references_join_alias_var(root, right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_references_join_alias_var(root, expr)),
+        Expr::FieldSelect { expr, .. } => expr_references_join_alias_var(root, expr),
+        Expr::Coalesce(left, right) => {
+            expr_references_join_alias_var(root, left)
+                || expr_references_join_alias_var(root, right)
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_references_join_alias_var(root, array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| expr_references_join_alias_var(root, expr))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| expr_references_join_alias_var(root, expr))
+                })
+        }
+        Expr::SqlJsonQueryFunction(_)
+        | Expr::SetReturning(_)
+        | Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
 }
 
 fn output_component_matches_expr(candidate: &Expr, expr: &Expr) -> bool {
@@ -5319,26 +5588,41 @@ fn set_aggregate_references(
     plan_info: PlanEstimate,
     slot_id: usize,
     strategy: crate::include::nodes::plannodes::AggregateStrategy,
+    phase: crate::include::nodes::plannodes::AggregatePhase,
     disabled: bool,
     input: Box<Path>,
     group_by: Vec<Expr>,
     passthrough_exprs: Vec<Expr>,
     accumulators: Vec<AggAccum>,
+    semantic_accumulators: Option<Vec<AggAccum>>,
     having: Option<Expr>,
     output_columns: Vec<QueryColumn>,
 ) -> Plan {
     let input_tlist = build_path_tlist(ctx.root, &input);
     let aggregate_layout =
-        aggregate_output_vars(slot_id, &group_by, &passthrough_exprs, &accumulators);
+        aggregate_output_vars(slot_id, phase, &group_by, &passthrough_exprs, &accumulators);
     let aggregate_tlist = build_aggregate_tlist(
         ctx.root,
         slot_id,
+        phase,
         &group_by,
         &passthrough_exprs,
         &accumulators,
+        semantic_accumulators.as_deref(),
     );
     let semantic_group_by = group_by.clone();
     let semantic_passthrough_exprs = passthrough_exprs.clone();
+    let semantic_output_names = (phase
+        == crate::include::nodes::plannodes::AggregatePhase::Finalize
+        || semantic_accumulators.is_some())
+    .then(|| {
+        aggregate_semantic_output_names(
+            ctx.root,
+            &semantic_group_by,
+            &semantic_passthrough_exprs,
+            semantic_accumulators.as_deref().unwrap_or(&accumulators),
+        )
+    });
     let root = ctx.root;
     let group_by = group_by
         .into_iter()
@@ -5401,11 +5685,14 @@ fn set_aggregate_references(
     Plan::Aggregate {
         plan_info,
         strategy,
+        phase,
         disabled,
         input: Box::new(set_plan_refs(ctx, *input)),
         group_by,
         passthrough_exprs,
         accumulators,
+        semantic_accumulators,
+        semantic_output_names,
         having,
         output_columns,
     }
@@ -6013,11 +6300,13 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             slot_id,
             strategy,
+            phase,
             disabled,
             input,
             group_by,
             passthrough_exprs,
             accumulators,
+            semantic_accumulators,
             having,
             output_columns,
             ..
@@ -6026,11 +6315,13 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             slot_id,
             strategy,
+            phase,
             disabled,
             input,
             group_by,
             passthrough_exprs,
             accumulators,
+            semantic_accumulators,
             having,
             output_columns,
         ),
@@ -6249,7 +6540,14 @@ fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bo
     let Some(root) = root else {
         return false;
     };
-    flatten_join_alias_vars(root, left.clone()) == flatten_join_alias_vars(root, right.clone())
+    let flattened_left = maybe_flatten_join_alias_vars(root, left);
+    let flattened_right = maybe_flatten_join_alias_vars(root, right);
+    match (flattened_left.as_ref(), flattened_right.as_ref()) {
+        (None, None) => false,
+        (Some(left), None) => left == right,
+        (None, Some(right)) => left == right,
+        (Some(left), Some(right)) => left == right,
+    }
 }
 
 fn rebuild_setrefs_expr(
@@ -6566,10 +6864,9 @@ fn fully_expand_output_expr(expr: Expr, path: &Path) -> Expr {
 }
 
 fn fully_expand_output_expr_with_root(root: Option<&PlannerInfo>, expr: Expr, path: &Path) -> Expr {
-    let expr = match root {
-        Some(root) => flatten_join_alias_vars(root, expr),
-        None => expr,
-    };
+    let expr = root
+        .and_then(|root| maybe_flatten_join_alias_vars(root, &expr))
+        .unwrap_or(expr);
     fully_expand_output_expr(expr, path)
 }
 
