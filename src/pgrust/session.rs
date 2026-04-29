@@ -3290,14 +3290,6 @@ impl Session {
                 self.execute_create_transform_for_object_address(db, &stmt.sql, xid, cid)?;
                 Ok(Some(StatementResult::AffectedRows(0)))
             }
-            "CREATE SUBSCRIPTION" => {
-                self.execute_create_subscription_for_object_address(db, &stmt.sql);
-                Ok(Some(StatementResult::AffectedRows(0)))
-            }
-            "DROP SUBSCRIPTION" => {
-                self.execute_drop_subscription_for_object_address(db, &stmt.sql);
-                Ok(Some(StatementResult::AffectedRows(0)))
-            }
             _ => Ok(None),
         }
     }
@@ -3779,6 +3771,7 @@ impl Session {
             | Statement::CommentOnForeignDataWrapper(_)
             | Statement::CommentOnForeignServer(_)
             | Statement::CommentOnPublication(_)
+            | Statement::CommentOnSubscription(_)
             | Statement::CommentOnStatistics(_)
             | Statement::CommentOnAggregate(_)
             | Statement::CommentOnFunction(_)
@@ -5406,6 +5399,14 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::CreateSubscription(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_create_subscription_stmt_with_search_path(
+                    self.client_id,
+                    create_stmt,
+                    search_path.as_deref(),
+                )
+            }
             Statement::CreateTrigger(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_create_trigger_stmt_with_search_path(
@@ -5615,6 +5616,14 @@ impl Session {
             Statement::DropPublication(ref drop_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_drop_publication_stmt_with_search_path(
+                    self.client_id,
+                    drop_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::DropSubscription(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_drop_subscription_stmt_with_search_path(
                     self.client_id,
                     drop_stmt,
                     search_path.as_deref(),
@@ -6018,6 +6027,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_alter_publication_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterSubscription(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_subscription_stmt_with_search_path(
                         self.client_id,
                         alter_stmt,
                         search_path.as_deref(),
@@ -7093,6 +7120,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_comment_on_publication_stmt_with_search_path(
+                        self.client_id,
+                        comment_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::CommentOnSubscription(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_comment_on_subscription_stmt_with_search_path(
                         self.client_id,
                         comment_stmt,
                         search_path.as_deref(),
@@ -9829,6 +9874,18 @@ impl Session {
                         &mut txn.catalog_effects,
                     )
                 }
+                Statement::CommentOnSubscription(ref comment_stmt) => {
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_comment_on_subscription_stmt_in_transaction_with_search_path(
+                        client_id,
+                        comment_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                    )
+                }
                 Statement::CommentOnStatistics(ref comment_stmt) => {
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
@@ -9970,6 +10027,18 @@ impl Session {
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_create_publication_stmt_in_transaction_with_search_path(
+                        client_id,
+                        create_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::CreateSubscription(ref create_stmt) => {
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_create_subscription_stmt_in_transaction_with_search_path(
                         client_id,
                         create_stmt,
                         xid,
@@ -11686,6 +11755,18 @@ impl Session {
                         catalog_effects,
                     )
                 }
+                Statement::DropSubscription(ref drop_stmt) => {
+                    let search_path = self.configured_search_path();
+                    let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                    db.execute_drop_subscription_stmt_in_transaction_with_search_path(
+                        client_id,
+                        drop_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        catalog_effects,
+                    )
+                }
                 Statement::DropStatistics(ref drop_stmt) => {
                     let search_path = self.configured_search_path();
                     let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
@@ -11805,6 +11886,18 @@ impl Session {
                     let search_path = self.configured_search_path();
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_alter_publication_stmt_in_transaction_with_search_path(
+                        client_id,
+                        alter_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::AlterSubscription(ref alter_stmt) => {
+                    let search_path = self.configured_search_path();
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_alter_subscription_stmt_in_transaction_with_search_path(
                         client_id,
                         alter_stmt,
                         xid,

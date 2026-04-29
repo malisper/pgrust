@@ -42,8 +42,8 @@ use crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_VISIBLE;
 use crate::include::catalog::{
     BTREE_AM_OID, C_COLLATION_OID, DATE_TYPE_OID, DEFAULT_COLLATION_OID, GIST_AM_OID,
     GIST_TSVECTOR_FAMILY_OID, HASH_AM_OID, PG_LARGEOBJECT_METADATA_RELATION_OID,
-    PG_NAMESPACE_RELATION_OID, POSIX_COLLATION_OID, SPGIST_AM_OID, TEXT_TYPE_OID,
-    TIMESTAMPTZ_TYPE_OID,
+    PG_NAMESPACE_RELATION_OID, PG_SUBSCRIPTION_RELATION_OID, POSIX_COLLATION_OID, SPGIST_AM_OID,
+    TEXT_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
 };
 use crate::include::nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimestampTzADT};
 use crate::include::nodes::datum::{ArrayValue, Value};
@@ -1804,6 +1804,64 @@ impl PlanNode for SeqScanState {
                     }
                 }
                 self.scan_rows = rows_by_oid.into_values().collect();
+            }
+            loop {
+                let Some(values) = self.scan_rows.get(self.scan_index).cloned() else {
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                };
+                self.scan_index += 1;
+                self.slot
+                    .store_virtual_row(values, None, Some(self.relation_oid));
+                self.current_bindings = vec![SystemVarBinding {
+                    varno: self.source_id,
+                    table_oid: self.relation_oid,
+                    tid: None,
+                }];
+                set_active_system_bindings(ctx, &self.current_bindings);
+                if let Some(qual) = &self.qual {
+                    let outer_values = materialize_slot_values(&mut self.slot)?;
+                    let current_bindings = self.current_bindings.clone();
+                    set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                    clear_inner_expr_bindings(ctx);
+                    if !qual(&mut self.slot, ctx)? {
+                        note_filtered_row(&mut self.stats);
+                        continue;
+                    }
+                }
+                finish_row(&mut self.stats, start);
+                return Ok(Some(&mut self.slot));
+            }
+        }
+        if self.relation_oid == PG_SUBSCRIPTION_RELATION_OID {
+            let start = if ctx.timed {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            begin_node(&mut self.stats, ctx)?;
+            if self.scan_rows.is_empty() {
+                let db = ctx
+                    .database
+                    .as_ref()
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: "pg_subscription scan requires database context".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "XX000",
+                    })?;
+                self.scan_rows = db
+                    .object_addresses
+                    .read()
+                    .subscriptions
+                    .iter()
+                    .filter(|entry| entry.row.subdbid == db.database_oid)
+                    .map(|entry| {
+                        crate::pgrust::database::commands::subscription::pg_subscription_row_values(
+                            &entry.row,
+                        )
+                    })
+                    .collect();
             }
             loop {
                 let Some(values) = self.scan_rows.get(self.scan_index).cloned() else {

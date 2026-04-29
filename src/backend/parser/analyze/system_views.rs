@@ -289,6 +289,7 @@ pub(super) fn bind_builtin_system_view(
         SyntheticSystemViewKind::PgStatRecoveryPrefetch => {
             catalog.pg_stat_recovery_prefetch_rows()
         }
+        SyntheticSystemViewKind::PgStatSubscriptionStats => catalog.pg_stat_subscription_stats_rows(),
         SyntheticSystemViewKind::PgStatAllTables => catalog.pg_stat_all_tables_rows(),
         SyntheticSystemViewKind::PgStatUserTables => catalog.pg_stat_user_tables_rows(),
         SyntheticSystemViewKind::PgStatioUserTables => catalog.pg_statio_user_tables_rows(),

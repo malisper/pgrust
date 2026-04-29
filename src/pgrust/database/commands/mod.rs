@@ -44,6 +44,7 @@ pub(crate) mod rules;
 mod schema;
 mod sequence;
 mod session_auth;
+pub(crate) mod subscription;
 mod tablespace;
 mod text_search;
 mod trigger;

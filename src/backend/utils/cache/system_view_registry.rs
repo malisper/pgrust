@@ -28,6 +28,7 @@ pub enum SyntheticSystemViewKind {
     PgStatArchiver,
     PgStatBgwriter,
     PgStatRecoveryPrefetch,
+    PgStatSubscriptionStats,
     PgStatAllTables,
     PgStatUserTables,
     PgStatioUserTables,
@@ -153,6 +154,10 @@ const PG_STAT_BGWRITER_ALIASES: &[&str] = &["pg_stat_bgwriter", "pg_catalog.pg_s
 const PG_STAT_RECOVERY_PREFETCH_ALIASES: &[&str] = &[
     "pg_stat_recovery_prefetch",
     "pg_catalog.pg_stat_recovery_prefetch",
+];
+const PG_STAT_SUBSCRIPTION_STATS_ALIASES: &[&str] = &[
+    "pg_stat_subscription_stats",
+    "pg_catalog.pg_stat_subscription_stats",
 ];
 const PG_STAT_ALL_TABLES_ALIASES: &[&str] =
     &["pg_stat_all_tables", "pg_catalog.pg_stat_all_tables"];
@@ -648,6 +653,30 @@ const PG_STAT_RECOVERY_PREFETCH_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::new("io_depth", SqlType::new(SqlTypeKind::Int4)),
 ];
 
+const PG_STAT_SUBSCRIPTION_STATS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("subid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("subname", SqlType::new(SqlTypeKind::Name)),
+    SyntheticSystemViewColumn::new("apply_error_count", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("sync_error_count", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("confl_insert_exists", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new(
+        "confl_update_origin_differs",
+        SqlType::new(SqlTypeKind::Int8),
+    ),
+    SyntheticSystemViewColumn::new("confl_update_exists", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("confl_update_missing", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new(
+        "confl_delete_origin_differs",
+        SqlType::new(SqlTypeKind::Int8),
+    ),
+    SyntheticSystemViewColumn::new("confl_delete_missing", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new(
+        "confl_multiple_unique_conflicts",
+        SqlType::new(SqlTypeKind::Int8),
+    ),
+    SyntheticSystemViewColumn::new("stats_reset", SqlType::new(SqlTypeKind::TimestampTz)),
+];
+
 const PG_LOCKS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("locktype"),
     SyntheticSystemViewColumn::new("database", SqlType::new(SqlTypeKind::Oid)),
@@ -986,7 +1015,7 @@ const INFORMATION_SCHEMA_FOREIGN_TABLE_OPTIONS_COLUMNS: &[SyntheticSystemViewCol
     SyntheticSystemViewColumn::text("option_value"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 51] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 52] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgEnum,
         canonical_name: "pg_catalog.pg_enum",
@@ -1160,6 +1189,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 51] = [
         canonical_name: "pg_catalog.pg_stat_recovery_prefetch",
         aliases: PG_STAT_RECOVERY_PREFETCH_ALIASES,
         columns: PG_STAT_RECOVERY_PREFETCH_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgStatSubscriptionStats,
+        canonical_name: "pg_catalog.pg_stat_subscription_stats",
+        aliases: PG_STAT_SUBSCRIPTION_STATS_ALIASES,
+        columns: PG_STAT_SUBSCRIPTION_STATS_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

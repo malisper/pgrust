@@ -11702,8 +11702,17 @@ pub(crate) fn eval_builtin_function(
             ctx.stats.write().reset_slru(target);
             Ok(Value::Null)
         }
-        BuiltinScalarFunction::PgStatResetReplicationSlot
-        | BuiltinScalarFunction::PgStatResetSubscriptionStats => Ok(Value::Null),
+        BuiltinScalarFunction::PgStatResetReplicationSlot => Ok(Value::Null),
+        BuiltinScalarFunction::PgStatResetSubscriptionStats => {
+            let oid = stats_oid_arg(&values, "pg_stat_reset_subscription_stats")?;
+            if let Some(db) = ctx.database.as_ref() {
+                db.object_addresses.write().reset_subscription_stats(
+                    oid,
+                    crate::backend::utils::activity::now_timestamptz(),
+                );
+            }
+            Ok(Value::Null)
+        }
         BuiltinScalarFunction::PgStatGetReplicationSlot
         | BuiltinScalarFunction::PgStatGetSubscriptionStats => Ok(Value::Null),
         BuiltinScalarFunction::PgStatHaveStats => {

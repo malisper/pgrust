@@ -289,9 +289,13 @@ fn execute_statement_with_source(
         Statement::AlterPublication(_)
         | Statement::CommentOnPublication(_)
         | Statement::CreatePublication(_)
-        | Statement::DropPublication(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "PUBLICATION handled by database/session layer",
-            actual: "PUBLICATION".into(),
+        | Statement::DropPublication(_)
+        | Statement::AlterSubscription(_)
+        | Statement::CommentOnSubscription(_)
+        | Statement::CreateSubscription(_)
+        | Statement::DropSubscription(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "PUBLICATION/SUBSCRIPTION handled by database/session layer",
+            actual: "PUBLICATION/SUBSCRIPTION".into(),
         })),
         Statement::CreateTextSearchDictionary(_)
         | Statement::AlterTextSearchDictionary(_)

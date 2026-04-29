@@ -1,6 +1,7 @@
 use crate::backend::executor::expr_reg;
 use crate::backend::parser::{CatalogLookup, RawTypeName, resolve_raw_type_name};
 use crate::include::catalog::*;
+use crate::include::nodes::datetime::TimestampTzADT;
 
 const INVALID_PARAMETER_VALUE: &str = "22023";
 const UNDEFINED_OBJECT: &str = "42704";
@@ -52,9 +53,8 @@ pub struct TransformAddressEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionAddressEntry {
-    pub oid: u32,
-    pub name: String,
-    pub owner_oid: u32,
+    pub row: PgSubscriptionRow,
+    pub stats_reset: Option<TimestampTzADT>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,26 +126,91 @@ impl ObjectAddressState {
     }
 
     pub fn upsert_subscription(&mut self, name: String, owner_oid: u32) -> u32 {
-        if let Some(row) = self
+        if let Some(entry) = self
             .subscriptions
             .iter_mut()
-            .find(|row| row.name.eq_ignore_ascii_case(&name))
+            .find(|entry| entry.row.subname.eq_ignore_ascii_case(&name))
         {
-            row.owner_oid = owner_oid;
-            return row.oid;
+            entry.row.subowner = owner_oid;
+            return entry.row.oid;
         }
         let oid = self.allocate_oid();
-        self.subscriptions.push(SubscriptionAddressEntry {
+        let row = PgSubscriptionRow {
             oid,
-            name,
-            owner_oid,
+            subdbid: 0,
+            subskiplsn: 0,
+            subname: name,
+            subowner: owner_oid,
+            subenabled: false,
+            subbinary: false,
+            substream: 'p',
+            subtwophasestate: 'd',
+            subdisableonerr: false,
+            subpasswordrequired: true,
+            subrunasowner: false,
+            subfailover: false,
+            subconninfo: String::new(),
+            subslotname: None,
+            subsynccommit: "off".into(),
+            subpublications: Vec::new(),
+            suborigin: "any".into(),
+        };
+        self.subscriptions.push(SubscriptionAddressEntry {
+            row,
+            stats_reset: None,
         });
         oid
     }
 
-    pub fn drop_subscription(&mut self, name: &str) {
+    pub fn insert_subscription_row(&mut self, mut row: PgSubscriptionRow) -> u32 {
+        if row.oid == 0 {
+            row.oid = self.allocate_oid();
+        }
+        let oid = row.oid;
+        self.subscriptions.push(SubscriptionAddressEntry {
+            row,
+            stats_reset: None,
+        });
+        oid
+    }
+
+    pub fn subscription_by_name(&self, name: &str) -> Option<&SubscriptionAddressEntry> {
         self.subscriptions
-            .retain(|row| !row.name.eq_ignore_ascii_case(name));
+            .iter()
+            .find(|entry| entry.row.subname.eq_ignore_ascii_case(name))
+    }
+
+    pub fn subscription_by_name_mut(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut SubscriptionAddressEntry> {
+        self.subscriptions
+            .iter_mut()
+            .find(|entry| entry.row.subname.eq_ignore_ascii_case(name))
+    }
+
+    pub fn subscription_by_oid(&self, oid: u32) -> Option<&SubscriptionAddressEntry> {
+        self.subscriptions.iter().find(|entry| entry.row.oid == oid)
+    }
+
+    pub fn drop_subscription(&mut self, name: &str) -> Option<SubscriptionAddressEntry> {
+        let index = self
+            .subscriptions
+            .iter()
+            .position(|entry| entry.row.subname.eq_ignore_ascii_case(name))?;
+        Some(self.subscriptions.remove(index))
+    }
+
+    pub fn reset_subscription_stats(&mut self, oid: u32, stats_reset: TimestampTzADT) -> bool {
+        if let Some(entry) = self
+            .subscriptions
+            .iter_mut()
+            .find(|entry| entry.row.oid == oid)
+        {
+            entry.stats_reset = Some(stats_reset);
+            return true;
+        }
+        false
     }
 }
 
@@ -1244,11 +1309,11 @@ fn subscription_address(
             state
                 .subscriptions
                 .iter()
-                .find(|row| row.name.eq_ignore_ascii_case(name))
+                .find(|row| row.row.subname.eq_ignore_ascii_case(name))
         })
         .map(|row| ObjectAddress {
             classid: PG_SUBSCRIPTION_RELATION_OID,
-            objid: row.oid,
+            objid: row.row.oid,
             objsubid: 0,
         })
         .ok_or_else(|| undefined_object(format!("subscription \"{name}\" does not exist")))
@@ -1518,7 +1583,7 @@ fn object_type_for_address(
                 state
                     .subscriptions
                     .iter()
-                    .find(|row| row.oid == address.objid)
+                    .find(|row| row.row.oid == address.objid)
             })
             .map(|_| "subscription")
             .unwrap_or("subscription"),
@@ -1875,10 +1940,10 @@ fn fill_identity(
                 state
                     .subscriptions
                     .iter()
-                    .find(|row| row.oid == address.objid)
+                    .find(|row| row.row.oid == address.objid)
             }) {
-                identity.name = Some(row.name.clone());
-                identity.identity = Some(row.name.clone());
+                identity.name = Some(row.row.subname.clone());
+                identity.identity = Some(row.row.subname.clone());
             }
         }
         PG_PUBLICATION_RELATION_OID => {
@@ -2240,8 +2305,8 @@ fn fill_address_parts(
                 state
                     .subscriptions
                     .iter()
-                    .find(|row| row.oid == address.objid)
-                    .map(|row| row.name.clone())
+                    .find(|row| row.row.oid == address.objid)
+                    .map(|row| row.row.subname.clone())
             }),
             parts,
         ),

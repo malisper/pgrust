@@ -151,6 +151,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_publication_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_subscription_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_constraint_comment_statement(&sql)? {
         return Ok(stmt);
     }
@@ -3316,6 +3319,28 @@ fn try_parse_publication_statement(sql: &str) -> Result<Option<Statement>, Parse
     Ok(None)
 }
 
+fn try_parse_subscription_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create subscription ") {
+        return build_create_subscription_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateSubscription(stmt)));
+    }
+    if lowered.starts_with("alter subscription ") {
+        return build_alter_subscription_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterSubscription(stmt)));
+    }
+    if lowered.starts_with("drop subscription ") {
+        return build_drop_subscription_statement(trimmed)
+            .map(|stmt| Some(Statement::DropSubscription(stmt)));
+    }
+    if lowered.starts_with("comment on subscription ") {
+        return build_comment_on_subscription_statement(trimmed)
+            .map(|stmt| Some(Statement::CommentOnSubscription(stmt)));
+    }
+    Ok(None)
+}
+
 fn try_parse_constraint_comment_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -3861,6 +3886,388 @@ fn build_comment_on_publication_statement(
         publication_name,
         comment,
     })
+}
+
+fn build_create_subscription_statement(
+    sql: &str,
+) -> Result<CreateSubscriptionStatement, ParseError> {
+    let rest = sql
+        .get("create subscription".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (subscription_name, mut rest) = parse_unqualified_identifier(rest, "subscription name")?;
+    rest = rest.trim_start();
+    if !keyword_at_start(rest, "connection") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CONNECTION string literal",
+            actual: subscription_syntax_error_token(rest),
+        });
+    }
+    rest = consume_keyword(rest, "connection").trim_start();
+    let token_len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+        expected: "connection string literal",
+        actual: subscription_syntax_error_token(rest),
+    })?;
+    let connection = decode_string_literal(&rest[..token_len])?;
+    rest = rest[token_len..].trim_start();
+    if !keyword_at_start(rest, "publication") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "PUBLICATION publication_name [, ...]",
+            actual: subscription_syntax_error_token(rest),
+        });
+    }
+    rest = consume_keyword(rest, "publication").trim_start();
+    let (publications, mut rest) = parse_subscription_publication_list(rest)?;
+    let mut options = Vec::new();
+    if keyword_at_start(rest, "with") {
+        rest = consume_keyword(rest, "with").trim_start();
+        let (parsed_options, next) = parse_subscription_options_clause(rest)?;
+        options = parsed_options;
+        rest = next.trim_start();
+    }
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of CREATE SUBSCRIPTION",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CreateSubscriptionStatement {
+        subscription_name,
+        connection,
+        publications,
+        options,
+    })
+}
+
+fn build_alter_subscription_statement(sql: &str) -> Result<AlterSubscriptionStatement, ParseError> {
+    let rest = sql
+        .get("alter subscription".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (subscription_name, rest) = parse_unqualified_identifier(rest, "subscription name")?;
+    let rest = rest.trim_start();
+
+    let (action, rest) = if keyword_at_start(rest, "rename") {
+        let rest = consume_keyword(rest, "rename").trim_start();
+        if !keyword_at_start(rest, "to") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "RENAME TO new_name",
+                actual: rest.into(),
+            });
+        }
+        let rest = consume_keyword(rest, "to").trim_start();
+        let (new_name, rest) = parse_unqualified_identifier(rest, "subscription name")?;
+        (AlterSubscriptionAction::Rename { new_name }, rest)
+    } else if keyword_at_start(rest, "owner") {
+        let rest = consume_keyword(rest, "owner").trim_start();
+        if !keyword_at_start(rest, "to") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "OWNER TO new_owner",
+                actual: rest.into(),
+            });
+        }
+        let rest = consume_keyword(rest, "to").trim_start();
+        let (new_owner, rest) = parse_unqualified_identifier(rest, "role name")?;
+        (AlterSubscriptionAction::OwnerTo { new_owner }, rest)
+    } else if keyword_at_start(rest, "connection") {
+        let rest = consume_keyword(rest, "connection").trim_start();
+        let token_len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+            expected: "connection string literal",
+            actual: subscription_syntax_error_token(rest),
+        })?;
+        (
+            AlterSubscriptionAction::Connection(decode_string_literal(&rest[..token_len])?),
+            &rest[token_len..],
+        )
+    } else if keyword_at_start(rest, "set") {
+        let rest = consume_keyword(rest, "set").trim_start();
+        if rest.starts_with('(') {
+            let (options, rest) = parse_subscription_options_clause(rest)?;
+            (AlterSubscriptionAction::SetOptions(options), rest)
+        } else if keyword_at_start(rest, "publication") {
+            let rest = consume_keyword(rest, "publication").trim_start();
+            let (publications, rest) = parse_subscription_publication_list(rest)?;
+            let (options, rest) = parse_optional_subscription_with_options(rest)?;
+            (
+                AlterSubscriptionAction::SetPublication {
+                    publications,
+                    options,
+                },
+                rest,
+            )
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ALTER SUBSCRIPTION SET action",
+                actual: rest.into(),
+            });
+        }
+    } else if keyword_at_start(rest, "add") {
+        let rest = consume_keyword(rest, "add").trim_start();
+        if !keyword_at_start(rest, "publication") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ADD PUBLICATION publication_name [, ...]",
+                actual: rest.into(),
+            });
+        }
+        let rest = consume_keyword(rest, "publication").trim_start();
+        let (publications, rest) = parse_subscription_publication_list(rest)?;
+        let (options, rest) = parse_optional_subscription_with_options(rest)?;
+        (
+            AlterSubscriptionAction::AddPublication {
+                publications,
+                options,
+            },
+            rest,
+        )
+    } else if keyword_at_start(rest, "drop") {
+        let rest = consume_keyword(rest, "drop").trim_start();
+        if !keyword_at_start(rest, "publication") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "DROP PUBLICATION publication_name [, ...]",
+                actual: rest.into(),
+            });
+        }
+        let rest = consume_keyword(rest, "publication").trim_start();
+        let (publications, rest) = parse_subscription_publication_list(rest)?;
+        let (options, rest) = parse_optional_subscription_with_options(rest)?;
+        (
+            AlterSubscriptionAction::DropPublication {
+                publications,
+                options,
+            },
+            rest,
+        )
+    } else if keyword_at_start(rest, "refresh") {
+        let rest = consume_keyword(rest, "refresh").trim_start();
+        if !keyword_at_start(rest, "publication") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "REFRESH PUBLICATION",
+                actual: rest.into(),
+            });
+        }
+        let rest = consume_keyword(rest, "publication").trim_start();
+        let (options, rest) = parse_optional_subscription_with_options(rest)?;
+        (
+            AlterSubscriptionAction::RefreshPublication { options },
+            rest,
+        )
+    } else if keyword_at_start(rest, "enable") {
+        (
+            AlterSubscriptionAction::Enable,
+            consume_keyword(rest, "enable"),
+        )
+    } else if keyword_at_start(rest, "disable") {
+        (
+            AlterSubscriptionAction::Disable,
+            consume_keyword(rest, "disable"),
+        )
+    } else if keyword_at_start(rest, "skip") {
+        let rest = consume_keyword(rest, "skip").trim_start();
+        let (options, rest) = parse_subscription_options_clause(rest)?;
+        (AlterSubscriptionAction::Skip(options), rest)
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER SUBSCRIPTION action",
+            actual: rest.into(),
+        });
+    };
+
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER SUBSCRIPTION",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(AlterSubscriptionStatement {
+        subscription_name,
+        action,
+    })
+}
+
+fn build_drop_subscription_statement(sql: &str) -> Result<DropSubscriptionStatement, ParseError> {
+    let mut rest = sql
+        .get("drop subscription".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next;
+    }
+    let mut cascade = false;
+    if let Some(idx) = find_next_top_level_keyword(rest, &["cascade", "restrict"]) {
+        let suffix = rest[idx..].trim_start();
+        cascade = keyword_at_start(suffix, "cascade");
+        rest = rest[..idx].trim_end();
+    }
+    let subscription_names = split_top_level_items(rest, ',')?
+        .into_iter()
+        .map(|item| {
+            let (name, trailing) = parse_unqualified_identifier(&item, "subscription name")?;
+            if !trailing.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "subscription name",
+                    actual: item,
+                });
+            }
+            Ok(name)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if subscription_names.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "subscription name",
+            actual: sql.into(),
+        });
+    }
+    Ok(DropSubscriptionStatement {
+        if_exists,
+        subscription_names,
+        cascade,
+    })
+}
+
+fn build_comment_on_subscription_statement(
+    sql: &str,
+) -> Result<CommentOnSubscriptionStatement, ParseError> {
+    let rest = sql
+        .get("comment on subscription".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (subscription_name, mut rest) = parse_unqualified_identifier(rest, "subscription name")?;
+    rest = rest.trim_start();
+    if !keyword_at_start(rest, "is") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "IS string literal or NULL",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "is").trim_start();
+    let (comment, rest) = if keyword_at_start(rest, "null") {
+        (None, consume_keyword(rest, "null"))
+    } else {
+        let token_len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+            expected: "comment string literal or NULL",
+            actual: rest.into(),
+        })?;
+        (
+            Some(decode_string_literal(&rest[..token_len])?),
+            &rest[token_len..],
+        )
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of COMMENT ON SUBSCRIPTION",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CommentOnSubscriptionStatement {
+        subscription_name,
+        comment,
+    })
+}
+
+fn parse_subscription_publication_list(input: &str) -> Result<(Vec<String>, &str), ParseError> {
+    let with_idx = find_next_top_level_keyword(input, &["with"]).unwrap_or(input.len());
+    let names_sql = input[..with_idx].trim();
+    if names_sql.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "publication name",
+            actual: subscription_syntax_error_token(&input[with_idx..]),
+        });
+    }
+    let publications = split_top_level_items(names_sql, ',')?
+        .into_iter()
+        .map(|item| {
+            let (name, trailing) = parse_unqualified_identifier(&item, "publication name")?;
+            if !trailing.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "publication name",
+                    actual: item,
+                });
+            }
+            Ok(name)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((publications, &input[with_idx..]))
+}
+
+fn parse_optional_subscription_with_options(
+    rest: &str,
+) -> Result<(Vec<SubscriptionOption>, &str), ParseError> {
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "with") {
+        return Ok((Vec::new(), rest));
+    }
+    parse_subscription_options_clause(consume_keyword(rest, "with").trim_start())
+}
+
+fn parse_subscription_options_clause(
+    input: &str,
+) -> Result<(Vec<SubscriptionOption>, &str), ParseError> {
+    let (segment, rest) = take_parenthesized_segment(input)?;
+    let mut options = Vec::new();
+    let mut seen = BTreeSet::new();
+    for item in split_top_level_items(&segment, ',')? {
+        if item.trim().is_empty() {
+            continue;
+        }
+        let (name, trailing) = parse_sql_identifier(&item)?;
+        let normalized_name = name.to_ascii_lowercase();
+        if !seen.insert(normalized_name.clone()) {
+            return Err(ParseError::ConflictingOrRedundantOptions {
+                option: normalized_name,
+            });
+        }
+        let trailing = trailing.trim_start();
+        let value = if let Some(value) = trailing.strip_prefix('=') {
+            let (value, trailing) = parse_subscription_option_value(value)?;
+            if !trailing.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "subscription option value",
+                    actual: trailing.trim().into(),
+                });
+            }
+            Some(value)
+        } else {
+            if !trailing.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "subscription option",
+                    actual: item,
+                });
+            }
+            None
+        };
+        options.push(SubscriptionOption {
+            name: normalized_name,
+            value,
+        });
+    }
+    Ok((options, rest))
+}
+
+fn parse_subscription_option_value(
+    input: &str,
+) -> Result<(SubscriptionOptionValue, &str), ParseError> {
+    let input = input.trim_start();
+    if let Some(token_len) = scan_string_literal_token_len(input) {
+        return Ok((
+            SubscriptionOptionValue::String(decode_string_literal(&input[..token_len])?),
+            &input[token_len..],
+        ));
+    }
+    let (value, rest) = parse_sql_identifier(input)?;
+    Ok((SubscriptionOptionValue::Identifier(value), rest))
+}
+
+fn subscription_syntax_error_token(rest: &str) -> String {
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return "syntax error at or near \";\"".into();
+    }
+    format!(
+        "syntax error at or near \"{}\"",
+        leading_identifier_token(rest)
+    )
 }
 
 fn build_comment_on_constraint_statement(

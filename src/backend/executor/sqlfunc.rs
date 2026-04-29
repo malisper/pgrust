@@ -1112,6 +1112,13 @@ fn execute_sql_utility_function(
 ) -> Result<Option<Value>, ExecError> {
     let body = normalized_sql_function_body(&row.prosrc);
     let lower = body.to_ascii_lowercase();
+    if starts_with_sql_command(&lower, "alter subscription") && lower.contains("refresh") {
+        return Err(sql_function_runtime_error(
+            "ALTER SUBSCRIPTION with refresh cannot be executed from a function",
+            None,
+            "0A000",
+        ));
+    }
     let command = if starts_with_sql_command(&lower, "analyze") {
         Some("ANALYZE")
     } else if starts_with_sql_command(&lower, "vacuum") {
