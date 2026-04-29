@@ -17250,6 +17250,46 @@ fn plpgsql_variadic_parameter_is_visible_as_positional_array() {
 }
 
 #[test]
+fn plpgsql_get_diagnostics_pg_context_reports_live_stack() {
+    let base = temp_dir("plpgsql_pg_context");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function plpgsql_context_inner() returns text language plpgsql as $$
+         declare
+           _context text;
+         begin
+           get diagnostics _context = pg_context;
+           return _context;
+         end
+         $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function plpgsql_context_outer() returns text language plpgsql as $$
+         declare
+           _context text;
+         begin
+           _context := plpgsql_context_inner();
+           return _context;
+         end
+         $$",
+    )
+    .unwrap();
+
+    let rows = query_rows(&db, 1, "select plpgsql_context_outer()");
+    let Value::Text(context) = &rows[0][0] else {
+        panic!("expected context text, got {rows:?}");
+    };
+    assert!(context.contains("PL/pgSQL function plpgsql_context_inner()"));
+    assert!(context.contains("at GET DIAGNOSTICS"));
+    assert!(context.contains("PL/pgSQL function plpgsql_context_outer()"));
+    assert!(context.contains("at assignment"));
+}
+
+#[test]
 fn plpgsql_get_diagnostics_pg_routine_oid_reports_current_function() {
     let base = temp_dir("plpgsql_pg_routine_oid");
     let db = Database::open(&base, 16).unwrap();

@@ -214,6 +214,13 @@ impl PlpgsqlErrorFields {
 }
 
 #[derive(Debug, Clone)]
+struct PlpgsqlContextFrame {
+    function_name: String,
+    line: usize,
+    action: &'static str,
+}
+
+#[derive(Debug, Clone)]
 struct FunctionCursor {
     columns: Vec<QueryColumn>,
     rows: Vec<Vec<Value>>,
@@ -239,6 +246,7 @@ thread_local! {
     static EVENT_TRIGGER_DDL_COMMANDS: std::cell::RefCell<Vec<Vec<EventTriggerDdlCommandRow>>> = const { std::cell::RefCell::new(Vec::new()) };
     static EVENT_TRIGGER_DROPPED_OBJECTS: std::cell::RefCell<Vec<Vec<EventTriggerDroppedObjectRow>>> = const { std::cell::RefCell::new(Vec::new()) };
     static EVENT_TRIGGER_TABLE_REWRITE: std::cell::RefCell<Vec<Option<(u32, i32, String)>>> = const { std::cell::RefCell::new(Vec::new()) };
+    static CONTEXT_STACK: std::cell::RefCell<Vec<PlpgsqlContextFrame>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 pub fn take_notices() -> Vec<PlpgsqlNotice> {
@@ -272,6 +280,45 @@ fn current_event_trigger_table_rewrite_relation_name_for_oid(oid: u32) -> Option
             row.as_ref()
                 .filter(|(relation_oid, _, _)| *relation_oid == oid)
                 .map(|(_, _, relation_name)| relation_name.clone())
+        })
+    })
+}
+
+fn with_context_frame<T>(
+    compiled: &CompiledFunction,
+    line: usize,
+    action: &'static str,
+    f: impl FnOnce() -> Result<T, ExecError>,
+) -> Result<T, ExecError> {
+    CONTEXT_STACK.with(|stack| {
+        stack.borrow_mut().push(PlpgsqlContextFrame {
+            function_name: compiled_context_name(compiled),
+            line,
+            action,
+        })
+    });
+    let result = f();
+    CONTEXT_STACK.with(|stack| {
+        stack.borrow_mut().pop();
+    });
+    result
+}
+
+fn current_plpgsql_context() -> Option<String> {
+    CONTEXT_STACK.with(|stack| {
+        let stack = stack.borrow();
+        (!stack.is_empty()).then(|| {
+            stack
+                .iter()
+                .rev()
+                .map(|frame| {
+                    format!(
+                        "PL/pgSQL function {} line {} at {}",
+                        frame.function_name, frame.line, frame.action
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
         })
     })
 }
@@ -2027,8 +2074,14 @@ fn exec_function_stmt(
     ctx: &mut ExecutorContext,
 ) -> Result<FunctionControl, ExecError> {
     match stmt {
-        CompiledStmt::WithLine { stmt, .. } => {
-            exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx)
+        CompiledStmt::WithLine { line, stmt } => {
+            if matches!(stmt.as_ref(), CompiledStmt::Block(_)) {
+                exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx)
+            } else {
+                with_context_frame(compiled, *line, stmt_context_action(stmt), || {
+                    exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx)
+                })
+            }
         }
         CompiledStmt::Block(block) => {
             exec_function_block(block, compiled, expected_record_shape, state, ctx)
@@ -4390,6 +4443,7 @@ fn exec_function_get_diagnostics(
                 "row_count" => Value::Int64(state.last_row_count as i64),
                 "found" => Value::Bool(false),
                 "pg_routine_oid" => Value::Int64(compiled.proc_oid as i64),
+                "pg_context" => diagnostic_text(current_plpgsql_context().as_deref()),
                 _ => diagnostic_text(None),
             }
         };
