@@ -254,10 +254,13 @@ pub(crate) fn validate_partitioned_index_backed_constraints(
     };
     if partition_spec.partattrs.iter().any(|attnum| *attnum == 0) && !constraint_actions.is_empty()
     {
+        let constraint_kind = partition_constraint_kind(&constraint_actions[0]);
         return Err(ParseError::DetailedError {
-            message: "unsupported UNIQUE constraint with partition key expressions".into(),
+            message: format!(
+                "unsupported {constraint_kind} constraint with partition key definition"
+            ),
             detail: Some(format!(
-                "Table \"{relation_name}\" uses an expression in the partition key."
+                "{constraint_kind} constraints cannot be used when partition keys include expressions."
             )),
             hint: None,
             sqlstate: "0A000",
@@ -273,11 +276,7 @@ pub(crate) fn validate_partitioned_index_backed_constraints(
             if normalized_columns.contains(&key_column.to_ascii_lowercase()) {
                 continue;
             }
-            let constraint_kind = if action.primary {
-                "PRIMARY KEY"
-            } else {
-                "UNIQUE"
-            };
+            let constraint_kind = partition_constraint_kind(action);
             return Err(ParseError::DetailedError {
                 message:
                     "unique constraint on partitioned table must include all partitioning columns"
@@ -291,6 +290,16 @@ pub(crate) fn validate_partitioned_index_backed_constraints(
         }
     }
     Ok(())
+}
+
+fn partition_constraint_kind(action: &IndexBackedConstraintAction) -> &'static str {
+    if action.primary {
+        "PRIMARY KEY"
+    } else if action.exclusion {
+        "EXCLUDE"
+    } else {
+        "UNIQUE"
+    }
 }
 
 pub(crate) fn validate_partitioned_check_constraints(

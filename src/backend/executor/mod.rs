@@ -662,6 +662,12 @@ pub enum ExecError {
         source: Box<ExecError>,
         context: String,
     },
+    WithInternalQueryContext {
+        source: Box<ExecError>,
+        context: String,
+        query: String,
+        position: Option<usize>,
+    },
     Heap(HeapError),
     Tuple(TupleError),
     Parse(ParseError),

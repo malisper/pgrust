@@ -4,7 +4,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::BufferPool;
-use crate::backend::access::heap::vacuumlazy::vacuum_relation_scan;
+use crate::backend::access::heap::vacuumlazy::{vacuum_relation_pages, vacuum_relation_scan};
 use crate::backend::access::index::indexam::{
     index_beginscan, index_build_stub, index_bulk_delete, index_endscan, index_getnext,
     index_vacuum_cleanup,
@@ -553,6 +553,76 @@ pub fn vacuum_system_catalog_indexes_for_kinds_in_db(
             let stats = index_bulk_delete(&ctx, BTREE_AM_OID, &dead_item_callback, None)?;
             let _ = index_vacuum_cleanup(&ctx, BTREE_AM_OID, Some(stats))?;
         }
+    }
+    Ok(())
+}
+
+pub fn vacuum_system_catalog_heaps_and_indexes_for_kinds_in_db(
+    pool: &Arc<BufferPool<SmgrStorageBackend>>,
+    txns: &Arc<RwLock<TransactionManager>>,
+    db_oid: u32,
+    kinds: &[BootstrapCatalogKind],
+) -> Result<(), CatalogError> {
+    let interrupts = Arc::new(InterruptState::new());
+    let mut visited_kinds = std::collections::BTreeSet::new();
+    for &kind in kinds {
+        if !visited_kinds.insert(kind) {
+            continue;
+        }
+
+        let heap_relation = bootstrap_catalog_rel(kind, db_oid);
+        let scan = vacuum_relation_scan(pool, 0, heap_relation, txns)
+            .map_err(|err| CatalogError::Io(format!("catalog heap vacuum scan failed: {err:?}")))?;
+        if scan.dead_tids.is_empty() {
+            continue;
+        }
+
+        let mut vacuumed_all_indexes = true;
+        for descriptor in system_catalog_indexes_for_heap(kind) {
+            let index_relation = system_catalog_index_rel(*descriptor, db_oid);
+            let index_blocks = pool
+                .with_storage_mut(|storage| storage.smgr.nblocks(index_relation, ForkNumber::Main))
+                .unwrap_or(0);
+            if index_blocks == 0 {
+                continue;
+            }
+            let ctx = IndexVacuumContext {
+                pool: Arc::clone(pool),
+                txns: Arc::clone(txns),
+                client_id: 0,
+                interrupts: Arc::clone(&interrupts),
+                heap_relation,
+                heap_desc: crate::include::catalog::bootstrap_relation_desc(kind),
+                index_relation,
+                index_name: descriptor.relation_name.to_string(),
+                index_desc: system_catalog_index_desc(*descriptor),
+                index_meta: system_catalog_index_relcache(*descriptor),
+            };
+            let dead_item_callback = |tid| scan.dead_tids.contains(&tid);
+            let Ok(stats) = index_bulk_delete(&ctx, BTREE_AM_OID, &dead_item_callback, None) else {
+                vacuumed_all_indexes = false;
+                break;
+            };
+            if index_vacuum_cleanup(&ctx, BTREE_AM_OID, Some(stats)).is_err() {
+                vacuumed_all_indexes = false;
+                break;
+            }
+        }
+        if !vacuumed_all_indexes {
+            continue;
+        }
+
+        vacuum_relation_pages(
+            pool,
+            0,
+            heap_relation,
+            kind.relation_oid(),
+            txns,
+            &scan,
+            None,
+            true,
+        )
+        .map_err(|err| CatalogError::Io(format!("catalog heap vacuum failed: {err:?}")))?;
     }
     Ok(())
 }

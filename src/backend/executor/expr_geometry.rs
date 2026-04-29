@@ -212,6 +212,8 @@ pub(crate) fn eval_geometry_function(
         BuiltinScalarFunction::GeoSub => eval_geo_sub(values),
         BuiltinScalarFunction::GeoMul => eval_geo_mul(values),
         BuiltinScalarFunction::GeoDiv => eval_geo_div(values),
+        BuiltinScalarFunction::GeoBoxHigh => eval_geo_box_point(values, 0),
+        BuiltinScalarFunction::GeoBoxLow => eval_geo_box_point(values, 1),
         BuiltinScalarFunction::GeoPointX => eval_geo_point_coord(values, 0),
         BuiltinScalarFunction::GeoPointY => eval_geo_point_coord(values, 1),
         _ => return None,
@@ -1355,6 +1357,9 @@ fn eval_geo_contained_by(values: &[Value]) -> Result<Value, ExecError> {
         (Value::Point(point), Value::Polygon(poly)) => {
             Ok(Value::Bool(point_in_polygon(point, poly) != 0))
         }
+        (Value::Point(point), Value::Circle(circle)) => {
+            Ok(Value::Bool(point_circle_distance(point, circle) == 0.0))
+        }
         (Value::Point(point), Value::Line(line)) => {
             Ok(Value::Bool(line_contains_point(line, point)))
         }
@@ -1577,6 +1582,17 @@ fn eval_geo_div(values: &[Value]) -> Result<Value, ExecError> {
 fn eval_geo_point_coord(values: &[Value], index: i32) -> Result<Value, ExecError> {
     unary_geometry(values, "[]", |value| match value {
         Value::Point(point) => Ok(Value::Float64(if index == 0 { point.x } else { point.y })),
+        other => type_mismatch_unary("[]", other),
+    })
+}
+
+fn eval_geo_box_point(values: &[Value], index: i32) -> Result<Value, ExecError> {
+    unary_geometry(values, "[]", |value| match value {
+        Value::Box(geo_box) => Ok(Value::Point(if index == 0 {
+            geo_box.high.clone()
+        } else {
+            geo_box.low.clone()
+        })),
         other => type_mismatch_unary("[]", other),
     })
 }

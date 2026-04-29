@@ -21,6 +21,7 @@ pub use exec::{
 pub(crate) use exec::{
     execute_user_defined_event_trigger_function, execute_user_defined_procedure_values,
     execute_user_defined_scalar_function, execute_user_defined_scalar_function_values,
+    execute_user_defined_scalar_function_values_with_arg_types,
     execute_user_defined_set_returning_function, execute_user_defined_trigger_function,
 };
 pub use gram::parse_block;

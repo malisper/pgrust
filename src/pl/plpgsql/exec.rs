@@ -411,7 +411,33 @@ pub fn execute_user_defined_scalar_function_values(
         .iter()
         .map(Value::sql_type_hint)
         .collect::<Vec<_>>();
-    let compiled = compiled_function_for_proc(proc_oid, None, &arg_types, ctx)?;
+    execute_user_defined_scalar_function_values_with_actual_arg_types(
+        proc_oid, arg_values, &arg_types, ctx,
+    )
+}
+
+pub fn execute_user_defined_scalar_function_values_with_arg_types(
+    proc_oid: u32,
+    arg_values: &[Value],
+    arg_types: &[SqlType],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let actual_arg_types = arg_types.iter().copied().map(Some).collect::<Vec<_>>();
+    execute_user_defined_scalar_function_values_with_actual_arg_types(
+        proc_oid,
+        arg_values,
+        &actual_arg_types,
+        ctx,
+    )
+}
+
+fn execute_user_defined_scalar_function_values_with_actual_arg_types(
+    proc_oid: u32,
+    arg_values: &[Value],
+    actual_arg_types: &[Option<SqlType>],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let compiled = compiled_function_for_proc(proc_oid, None, actual_arg_types, ctx)?;
 
     let FunctionReturnContract::Scalar { setof, ty, .. } = &compiled.return_contract else {
         return Err(function_runtime_error(
@@ -4096,7 +4122,8 @@ fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
 
 fn exec_error_sqlstate(err: &ExecError) -> &'static str {
     match err {
-        ExecError::WithContext { source, .. } => exec_error_sqlstate(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => exec_error_sqlstate(source),
         ExecError::RaiseException(_) => "P0001",
         ExecError::DivisionByZero(_) => "22012",
         ExecError::DetailedError { sqlstate, .. } => sqlstate,
@@ -4364,6 +4391,9 @@ fn has_plpgsql_context_for(err: &ExecError, function_name: &str) -> bool {
             context.starts_with(&format!("{prefix} "))
                 || context.starts_with(&format!("{prefix}("))
                 || has_plpgsql_context_for(source, function_name)
+        }
+        ExecError::WithInternalQueryContext { source, .. } => {
+            has_plpgsql_context_for(source, function_name)
         }
         _ => false,
     }
