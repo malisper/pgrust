@@ -19427,6 +19427,55 @@ fn invalid_json_input_errors() {
 }
 
 #[test]
+fn json_preserves_raw_text_for_extraction_and_record_expansion() {
+    let base = temp_dir("json_raw_text_preservation");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            r#"select '{"a": {"b":{"c": "foo"}}}'::json #> array['a']"#,
+        )
+        .unwrap(),
+        vec![vec![Value::Json(r#"{"b":{"c": "foo"}}"#.into())]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            r#"select b from json_to_record('{"b":{"c":16, "d":2}}'::json) as t(b json)"#,
+        )
+        .unwrap(),
+        vec![vec![Value::Json(r#"{"c":16, "d":2}"#.into())]],
+    );
+}
+
+#[test]
+fn json_text_extraction_rejects_text_incompatible_unicode_escapes() {
+    let base = temp_dir("json_text_unicode_validation");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        r#"select json '{ "a": "null \u0000 escape" }' ->> 'a'"#,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::JsonInput {
+            detail: Some(detail),
+            ..
+        } if detail == "\\u0000 cannot be converted to text."
+    ));
+}
+
+#[test]
 fn jsonb_operators_and_scalar_functions_work() {
     let base = temp_dir("jsonb_ops");
     let txns = TransactionManager::new_durable(&base).unwrap();

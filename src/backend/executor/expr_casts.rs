@@ -29,7 +29,7 @@ use super::expr_txid::{cast_text_to_txid_snapshot, is_txid_snapshot_type_oid};
 use super::node_types::*;
 use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, jsonb_to_value, parse_json_text_input, parse_jsonb_text,
-    parse_jsonb_text_with_limit, render_jsonb_bytes,
+    parse_jsonb_text_with_limit, render_jsonb_bytes, validate_json_text_input_with_limit,
 };
 use crate::backend::libpq::pqformat::{FloatFormatOptions, format_float4_text, format_float8_text};
 use crate::backend::parser::{
@@ -3860,16 +3860,17 @@ pub(crate) fn soft_input_error_info_with_catalog_and_config(
         };
     }
     if !ty.is_array && matches!(ty.kind, SqlTypeKind::Json | SqlTypeKind::Jsonb) {
+        if matches!(ty.kind, SqlTypeKind::Json) {
+            return match validate_json_text_input_with_limit(text, config.max_stack_depth_kb) {
+                Ok(()) => Ok(None),
+                Err(err) => Ok(Some(input_error_info(err, text))),
+            };
+        }
         match parse_json_text_input(text) {
-            Ok(_) => {
-                if matches!(ty.kind, SqlTypeKind::Jsonb) {
-                    match parse_jsonb_text_with_limit(text, config.max_stack_depth_kb) {
-                        Ok(_) => return Ok(None),
-                        Err(err) => return Ok(Some(input_error_info(err, text))),
-                    }
-                }
-                return Ok(None);
-            }
+            Ok(_) => match parse_jsonb_text_with_limit(text, config.max_stack_depth_kb) {
+                Ok(_) => return Ok(None),
+                Err(err) => return Ok(Some(input_error_info(err, text))),
+            },
             Err(err) => return Ok(Some(input_error_info(err, text))),
         }
     }
@@ -6267,7 +6268,7 @@ pub(crate) fn cast_text_value_with_config(
         SqlTypeKind::MacAddr => parse_macaddr_text(text).map(Value::MacAddr),
         SqlTypeKind::MacAddr8 => parse_macaddr8_text(text).map(Value::MacAddr8),
         SqlTypeKind::Json => {
-            validate_json_text(text)?;
+            validate_json_text_input_with_limit(text, config.max_stack_depth_kb)?;
             Ok(Value::Json(CompactString::new(text)))
         }
         SqlTypeKind::Jsonb => Ok(Value::Jsonb(parse_jsonb_text_with_limit(
