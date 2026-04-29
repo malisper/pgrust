@@ -27,7 +27,7 @@ use crate::include::catalog::{
     ANYNONARRAYOID, ANYOID, ANYRANGEOID, BYTEA_TYPE_OID, EVENT_TRIGGER_TYPE_OID, INTERNAL_TYPE_OID,
     PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID,
     PG_LANGUAGE_SQL_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgProcRow, RECORD_TYPE_OID,
-    VOID_TYPE_OID,
+    TRIGGER_TYPE_OID, VOID_TYPE_OID,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
@@ -3702,6 +3702,7 @@ impl Database {
                 has_plpgsql_output_args,
                 prorettype == VOID_TYPE_OID,
                 proretset,
+                matches!(prorettype, TRIGGER_TYPE_OID | EVENT_TRIGGER_TYPE_OID),
                 proargnames.as_deref().unwrap_or(&[]),
                 &plpgsql_arg_types,
                 gucs,

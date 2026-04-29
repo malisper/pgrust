@@ -39,8 +39,17 @@ pub(crate) fn validate_create_function_body(
     body: &str,
     has_output_args: bool,
 ) -> Result<(), ParseError> {
-    validate_create_function_body_with_options(body, has_output_args, false, false, &[], &[], None)
-        .map(|_| ())
+    validate_create_function_body_with_options(
+        body,
+        has_output_args,
+        false,
+        false,
+        false,
+        &[],
+        &[],
+        None,
+    )
+    .map(|_| ())
 }
 
 pub(crate) fn validate_create_function_body_with_options(
@@ -48,6 +57,7 @@ pub(crate) fn validate_create_function_body_with_options(
     has_output_args: bool,
     returns_void: bool,
     returns_set: bool,
+    allows_bare_return: bool,
     arg_names: &[String],
     arg_types: &[(String, SqlType)],
     gucs: Option<&HashMap<String, String>>,
@@ -55,7 +65,13 @@ pub(crate) fn validate_create_function_body_with_options(
     let block = parse_block(body)?;
     validate_declared_cursor_arguments(&block)?;
     validate_raise_placeholders(&block)?;
-    validate_return_statements(&block, has_output_args, returns_void, returns_set)?;
+    validate_return_statements(
+        &block,
+        has_output_args,
+        returns_void,
+        returns_set,
+        allows_bare_return,
+    )?;
     validate_get_diagnostics_targets(&block, arg_types)?;
     validate_static_sql(&block)?;
     let mut notices = Vec::new();
@@ -421,13 +437,26 @@ fn validate_return_statements(
     has_output_args: bool,
     returns_void: bool,
     returns_set: bool,
+    allows_bare_return: bool,
 ) -> Result<(), ParseError> {
     for stmt in &block.statements {
-        validate_return_stmt_in_stmt(stmt, has_output_args, returns_void, returns_set)?;
+        validate_return_stmt_in_stmt(
+            stmt,
+            has_output_args,
+            returns_void,
+            returns_set,
+            allows_bare_return,
+        )?;
     }
     for handler in &block.exception_handlers {
         for stmt in &handler.statements {
-            validate_return_stmt_in_stmt(stmt, has_output_args, returns_void, returns_set)?;
+            validate_return_stmt_in_stmt(
+                stmt,
+                has_output_args,
+                returns_void,
+                returns_set,
+                allows_bare_return,
+            )?;
         }
     }
     Ok(())
@@ -438,11 +467,16 @@ fn validate_return_stmt_in_stmt(
     has_output_args: bool,
     returns_void: bool,
     returns_set: bool,
+    allows_bare_return: bool,
 ) -> Result<(), ParseError> {
     match stmt {
-        Stmt::WithLine { stmt, .. } => {
-            validate_return_stmt_in_stmt(stmt, has_output_args, returns_void, returns_set)
-        }
+        Stmt::WithLine { stmt, .. } => validate_return_stmt_in_stmt(
+            stmt,
+            has_output_args,
+            returns_void,
+            returns_set,
+            allows_bare_return,
+        ),
         Stmt::Return { expr: Some(_) } if has_output_args => Err(ParseError::DetailedError {
             message: "RETURN cannot have a parameter in function with OUT parameters".into(),
             detail: None,
@@ -455,7 +489,9 @@ fn validate_return_stmt_in_stmt(
             hint: None,
             sqlstate: "42804",
         }),
-        Stmt::Return { expr: None } if !has_output_args && !returns_void && !returns_set => {
+        Stmt::Return { expr: None }
+            if !has_output_args && !returns_void && !returns_set && !allows_bare_return =>
+        {
             Err(ParseError::DetailedError {
                 message: "missing expression at or near \";\"".into(),
                 detail: None,
@@ -463,9 +499,13 @@ fn validate_return_stmt_in_stmt(
                 sqlstate: "42601",
             })
         }
-        Stmt::Block(block) => {
-            validate_return_statements(block, has_output_args, returns_void, returns_set)
-        }
+        Stmt::Block(block) => validate_return_statements(
+            block,
+            has_output_args,
+            returns_void,
+            returns_set,
+            allows_bare_return,
+        ),
         Stmt::Continue => Ok(()),
         Stmt::If {
             branches,
@@ -473,11 +513,23 @@ fn validate_return_stmt_in_stmt(
         } => {
             for (_, body) in branches {
                 for stmt in body {
-                    validate_return_stmt_in_stmt(stmt, has_output_args, returns_void, returns_set)?;
+                    validate_return_stmt_in_stmt(
+                        stmt,
+                        has_output_args,
+                        returns_void,
+                        returns_set,
+                        allows_bare_return,
+                    )?;
                 }
             }
             for stmt in else_branch {
-                validate_return_stmt_in_stmt(stmt, has_output_args, returns_void, returns_set)?;
+                validate_return_stmt_in_stmt(
+                    stmt,
+                    has_output_args,
+                    returns_void,
+                    returns_set,
+                    allows_bare_return,
+                )?;
             }
             Ok(())
         }
@@ -487,7 +539,13 @@ fn validate_return_stmt_in_stmt(
         | Stmt::ForQuery { body, .. }
         | Stmt::ForEach { body, .. } => {
             for stmt in body {
-                validate_return_stmt_in_stmt(stmt, has_output_args, returns_void, returns_set)?;
+                validate_return_stmt_in_stmt(
+                    stmt,
+                    has_output_args,
+                    returns_void,
+                    returns_set,
+                    allows_bare_return,
+                )?;
             }
             Ok(())
         }
