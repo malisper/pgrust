@@ -10481,22 +10481,26 @@ fn type_rows_for_relation_name(
     let relname = relation_object_name(relation_name);
     let mut rows = Vec::new();
     if entry.row_type_oid != 0 {
-        rows.push(crate::include::catalog::composite_type_row(
+        rows.push(crate::include::catalog::composite_type_row_with_owner(
             relname,
             entry.row_type_oid,
             entry.namespace_oid,
+            entry.owner_oid,
             entry.relation_oid,
             entry.array_type_oid,
         ));
     }
     if entry.array_type_oid != 0 {
-        rows.push(crate::include::catalog::composite_array_type_row(
-            relname,
-            entry.array_type_oid,
-            entry.namespace_oid,
-            entry.row_type_oid,
-            entry.relation_oid,
-        ));
+        rows.push(
+            crate::include::catalog::composite_array_type_row_with_owner(
+                relname,
+                entry.array_type_oid,
+                entry.namespace_oid,
+                entry.owner_oid,
+                entry.row_type_oid,
+                entry.relation_oid,
+            ),
+        );
     }
     rows
 }

@@ -1529,11 +1529,29 @@ pub fn composite_type_row(
     relid: u32,
     array_oid: u32,
 ) -> PgTypeRow {
+    composite_type_row_with_owner(
+        name,
+        oid,
+        namespace_oid,
+        BOOTSTRAP_SUPERUSER_OID,
+        relid,
+        array_oid,
+    )
+}
+
+pub fn composite_type_row_with_owner(
+    name: &str,
+    oid: u32,
+    namespace_oid: u32,
+    owner_oid: u32,
+    relid: u32,
+    array_oid: u32,
+) -> PgTypeRow {
     PgTypeRow {
         oid,
         typname: name.to_string(),
         typnamespace: namespace_oid,
-        typowner: BOOTSTRAP_SUPERUSER_OID,
+        typowner: owner_oid,
         typacl: None,
         typlen: -1,
         typbyval: false,
@@ -1566,11 +1584,29 @@ pub fn composite_array_type_row(
     elem_oid: u32,
     relid: u32,
 ) -> PgTypeRow {
+    composite_array_type_row_with_owner(
+        name,
+        oid,
+        namespace_oid,
+        BOOTSTRAP_SUPERUSER_OID,
+        elem_oid,
+        relid,
+    )
+}
+
+pub fn composite_array_type_row_with_owner(
+    name: &str,
+    oid: u32,
+    namespace_oid: u32,
+    owner_oid: u32,
+    elem_oid: u32,
+    relid: u32,
+) -> PgTypeRow {
     PgTypeRow {
         oid,
         typname: format!("_{name}"),
         typnamespace: namespace_oid,
-        typowner: BOOTSTRAP_SUPERUSER_OID,
+        typowner: owner_oid,
         typacl: None,
         typlen: -1,
         typbyval: false,

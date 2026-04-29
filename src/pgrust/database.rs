@@ -89,9 +89,9 @@ use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsS
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CURRENT_DATABASE_NAME,
-    PUBLIC_NAMESPACE_OID, PgConstraintRow, PgEnumRow, PgRangeRow, PgTypeRow, RangeCanonicalization,
-    UNKNOWN_TYPE_OID, annotate_catalog_type_io_procs, builtin_type_row_by_oid, builtin_type_rows,
+    CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CURRENT_DATABASE_NAME, PUBLIC_NAMESPACE_OID,
+    PgConstraintRow, PgEnumRow, PgRangeRow, PgTypeRow, RangeCanonicalization, UNKNOWN_TYPE_OID,
+    annotate_catalog_type_io_procs, builtin_type_row_by_oid, builtin_type_rows,
     synthetic_type_output_proc_oid, system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
@@ -364,6 +364,7 @@ pub(crate) struct EnumTypeEntry {
     pub array_oid: u32,
     pub name: String,
     pub namespace_oid: u32,
+    pub owner_oid: u32,
     pub labels: Vec<EnumLabelEntry>,
     pub creating_xid: Option<TransactionId>,
     pub typacl: Option<Vec<String>>,
@@ -1091,7 +1092,7 @@ impl Database {
                         oid: entry.oid,
                         typname: entry.name.clone(),
                         typnamespace: entry.namespace_oid,
-                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typowner: entry.owner_oid,
                         typacl: entry.typacl.clone(),
                         typlen: 4,
                         typbyval: true,
@@ -1122,7 +1123,7 @@ impl Database {
                         oid: entry.array_oid,
                         typname: format!("_{}", entry.name),
                         typnamespace: entry.namespace_oid,
-                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typowner: entry.owner_oid,
                         typacl: entry.typacl.clone(),
                         typlen: -1,
                         typbyval: false,

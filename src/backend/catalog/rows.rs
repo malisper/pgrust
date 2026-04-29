@@ -14,7 +14,7 @@ use crate::include::catalog::{
     PgShdependRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow,
     PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
     PgTypeRow, PgUserMappingRow, bootstrap_composite_type_rows, builtin_type_row_by_oid,
-    composite_array_type_row, composite_type_row,
+    composite_array_type_row_with_owner, composite_type_row_with_owner,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -421,19 +421,21 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
     });
 
     if entry.row_type_oid != 0 {
-        rows.types.push(composite_type_row(
+        rows.types.push(composite_type_row_with_owner(
             relname,
             entry.row_type_oid,
             entry.namespace_oid,
+            entry.owner_oid,
             entry.relation_oid,
             entry.array_type_oid,
         ));
     }
     if entry.array_type_oid != 0 {
-        rows.types.push(composite_array_type_row(
+        rows.types.push(composite_array_type_row_with_owner(
             relname,
             entry.array_type_oid,
             entry.namespace_oid,
+            entry.owner_oid,
             entry.row_type_oid,
             entry.relation_oid,
         ));

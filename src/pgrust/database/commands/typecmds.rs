@@ -2448,6 +2448,7 @@ impl Database {
                 array_oid,
                 name: object_name,
                 namespace_oid,
+                owner_oid: self.auth_state(client_id).current_user_oid(),
                 labels,
                 creating_xid: Some(xid),
                 typacl: None,

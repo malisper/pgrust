@@ -153,12 +153,92 @@ fn canonicalize_acl_privileges(privileges: &str, allowed: &str) -> String {
         .collect()
 }
 
+fn acl_privilege_present(privileges: &str, privilege: char) -> bool {
+    privileges.chars().any(|ch| ch == privilege)
+}
+
+fn acl_privilege_grantable(privileges: &str, privilege: char) -> bool {
+    let mut chars = privileges.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == privilege {
+            return matches!(chars.peek(), Some('*'));
+        }
+        if matches!(chars.peek(), Some('*')) {
+            chars.next();
+        }
+    }
+    false
+}
+
+fn canonicalize_acl_privileges_with_grant_options(
+    existing_privileges: &str,
+    added_privileges: &str,
+    added_grantable: bool,
+    allowed: &str,
+) -> String {
+    let mut result = String::new();
+    for ch in allowed.chars() {
+        let present =
+            acl_privilege_present(existing_privileges, ch) || added_privileges.contains(ch);
+        if !present {
+            continue;
+        }
+        result.push(ch);
+        if acl_privilege_grantable(existing_privileges, ch)
+            || (added_grantable && added_privileges.contains(ch))
+        {
+            result.push('*');
+        }
+    }
+    result
+}
+
+fn remove_acl_privileges_with_grant_options(
+    existing_privileges: &str,
+    removed_privileges: &str,
+    allowed: &str,
+) -> String {
+    let mut result = String::new();
+    for ch in allowed.chars() {
+        if !acl_privilege_present(existing_privileges, ch) || removed_privileges.contains(ch) {
+            continue;
+        }
+        result.push(ch);
+        if acl_privilege_grantable(existing_privileges, ch) {
+            result.push('*');
+        }
+    }
+    result
+}
+
+fn acl_entry_grants_all_options(privileges: &str, required_privileges: &str) -> bool {
+    required_privileges
+        .chars()
+        .all(|ch| acl_privilege_grantable(privileges, ch))
+}
+
+fn acl_grants_all_options(
+    acl: &[String],
+    effective_names: &BTreeSet<String>,
+    required_privileges: &str,
+) -> bool {
+    acl.iter().any(|item| {
+        parse_acl_item(item)
+            .map(|(grantee, privileges, _)| {
+                effective_names.contains(&grantee)
+                    && acl_entry_grants_all_options(&privileges, required_privileges)
+            })
+            .unwrap_or(false)
+    })
+}
+
 fn grant_table_acl_entry(
     acl: &mut Vec<String>,
     grantee: &str,
     grantor: &str,
     privilege_chars: &str,
     allowed: &str,
+    grantable: bool,
 ) {
     if let Some(existing) = acl.iter_mut().find(|item| {
         parse_acl_item(item)
@@ -168,8 +248,10 @@ fn grant_table_acl_entry(
             .unwrap_or(false)
     }) {
         let (_, existing_privileges, _) = parse_acl_item(existing).expect("validated above");
-        let merged = canonicalize_acl_privileges(
-            &format!("{existing_privileges}{privilege_chars}"),
+        let merged = canonicalize_acl_privileges_with_grant_options(
+            &existing_privileges,
+            privilege_chars,
+            grantable,
             allowed,
         );
         *existing = format!("{grantee}={merged}/{grantor}");
@@ -177,7 +259,7 @@ fn grant_table_acl_entry(
     }
     acl.push(format!(
         "{grantee}={}/{grantor}",
-        canonicalize_acl_privileges(privilege_chars, allowed)
+        canonicalize_acl_privileges_with_grant_options("", privilege_chars, grantable, allowed)
     ));
 }
 
@@ -194,11 +276,11 @@ fn revoke_table_acl_entry(
         if item_grantee != grantee {
             return true;
         }
-        let remaining: String = existing_privileges
-            .chars()
-            .filter(|ch| !privilege_chars.contains(*ch))
-            .collect();
-        let remaining = canonicalize_acl_privileges(&remaining, allowed);
+        let remaining = remove_acl_privileges_with_grant_options(
+            &existing_privileges,
+            privilege_chars,
+            allowed,
+        );
         if remaining.is_empty() {
             return false;
         }
@@ -1030,18 +1112,12 @@ impl Database {
             let auth_catalog = self
                 .auth_catalog(client_id, Some((xid, current_cid)))
                 .map_err(map_catalog_error)?;
-            if !auth_catalog
+            let current_user_can_grant_as_owner = auth_catalog
                 .role_by_oid(auth.current_user_oid())
                 .is_some_and(|row| row.rolsuper)
-                && !auth.has_effective_membership(relation.owner_oid, &auth_catalog)
-            {
-                return Err(ExecError::DetailedError {
-                    message: format!("must be owner of table {object_name}"),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42501",
-                });
-            }
+                || auth.has_effective_membership(relation.owner_oid, &auth_catalog);
+            let effective_names = (!current_user_can_grant_as_owner)
+                .then(|| effective_acl_grantee_names(&auth, &auth_catalog));
             let owner_name = auth_catalog
                 .role_by_oid(relation.owner_oid)
                 .map(|row| row.rolname.clone())
@@ -1060,6 +1136,9 @@ impl Database {
                     hint: None,
                     sqlstate: "XX000",
                 })?;
+            let catcache = self
+                .backend_catcache(client_id, Some((xid, current_cid)))
+                .map_err(map_catalog_error)?;
             if let Some(column_specs) = table_column_privilege_specs(&stmt.privilege, &stmt.columns)
             {
                 let mut column_acls = BTreeMap::<i16, Vec<String>>::new();
@@ -1084,6 +1163,20 @@ impl Database {
                         let acl = column_acls
                             .entry(attnum)
                             .or_insert_with(|| column.attacl.clone().unwrap_or_default());
+                        if !current_user_can_grant_as_owner
+                            && !acl_grants_all_options(
+                                acl,
+                                effective_names.as_ref().expect("effective names"),
+                                privilege_chars,
+                            )
+                        {
+                            return Err(ExecError::DetailedError {
+                                message: format!("must be owner of table {object_name}"),
+                                detail: None,
+                                hint: None,
+                                sqlstate: "42501",
+                            });
+                        }
                         for grantee_name in &stmt.grantee_names {
                             let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
                                 String::new()
@@ -1104,6 +1197,7 @@ impl Database {
                                 &grantor_name,
                                 privilege_chars,
                                 TABLE_ALL_PRIVILEGE_CHARS,
+                                stmt.with_grant_option,
                             );
                         }
                     }
@@ -1134,9 +1228,6 @@ impl Database {
                 continue;
             }
 
-            let catcache = self
-                .backend_catcache(client_id, Some((xid, current_cid)))
-                .map_err(map_catalog_error)?;
             let privilege_chars = relation_privilege_chars(&stmt.privilege, relation.relkind)
                 .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedEof))?;
             let allowed_privilege_chars = allowed_relation_privilege_chars(relation.relkind);
@@ -1148,6 +1239,20 @@ impl Database {
                         .into_iter()
                         .collect()
                 });
+            if !current_user_can_grant_as_owner
+                && !acl_grants_all_options(
+                    &acl,
+                    effective_names.as_ref().expect("effective names"),
+                    privilege_chars,
+                )
+            {
+                return Err(ExecError::DetailedError {
+                    message: format!("must be owner of table {object_name}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42501",
+                });
+            }
             for grantee_name in &stmt.grantee_names {
                 let grantee_acl_name = if grantee_name.eq_ignore_ascii_case("public") {
                     String::new()
@@ -1168,6 +1273,7 @@ impl Database {
                     &grantor_name,
                     privilege_chars,
                     allowed_privilege_chars,
+                    stmt.with_grant_option,
                 );
             }
             let ctx = CatalogWriteContext {
