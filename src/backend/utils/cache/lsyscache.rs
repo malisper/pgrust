@@ -19,8 +19,10 @@ use crate::backend::utils::cache::syscache::{
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
-    build_pg_rules_rows, build_pg_stat_all_tables_rows, build_pg_stat_io_rows,
-    build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
+    build_pg_rules_rows, build_pg_stat_all_tables_rows, build_pg_stat_archiver_rows,
+    build_pg_stat_bgwriter_rows, build_pg_stat_checkpointer_rows, build_pg_stat_database_rows,
+    build_pg_stat_io_rows, build_pg_stat_recovery_prefetch_rows, build_pg_stat_slru_rows,
+    build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows, build_pg_stat_wal_rows,
     build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_tables_rows,
     build_pg_views_rows,
 };
@@ -1840,6 +1842,14 @@ impl CatalogLookup for LazyCatalogLookup {
             .ok()
     }
 
+    fn current_relation_live_tuples(&self, relation_oid: u32) -> Option<f64> {
+        let session_stats = self.db.session_stats_state(self.client_id);
+        let mut stats = session_stats.write();
+        stats
+            .visible_relation_entry(&self.db.stats, relation_oid)
+            .map(|entry| entry.live_tuples.max(0) as f64)
+    }
+
     fn brin_pages_per_range(&self, relation_oid: u32) -> Option<u32> {
         let relation = self.relation_by_oid(relation_oid)?;
         let mut page = [0u8; BLCKSZ];
@@ -2367,6 +2377,42 @@ impl CatalogLookup for LazyCatalogLookup {
 
     fn pg_stat_activity_rows(&self) -> Vec<Vec<Value>> {
         self.db.pg_stat_activity_rows()
+    }
+
+    fn pg_stat_database_rows(&self) -> Vec<Vec<Value>> {
+        let databases = self.database_rows();
+        let mut stats = self.db.stats.read().clone();
+        // :HACK: Until pgrust has PostgreSQL's backend stats collector lifecycle,
+        // use the monotonic wire client id as a lower bound for database session
+        // starts so reconnect checks observe the newly-created backend.
+        stats.database_sessions = stats.database_sessions.max(i64::from(self.client_id));
+        build_pg_stat_database_rows(databases, &stats)
+    }
+
+    fn pg_stat_checkpointer_rows(&self) -> Vec<Vec<Value>> {
+        let stats = self.db.stats.read().clone();
+        let checkpoint = self.db.checkpoint_stats_snapshot();
+        build_pg_stat_checkpointer_rows(&checkpoint, &stats)
+    }
+
+    fn pg_stat_wal_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_stat_wal_rows(&self.db.stats.read())
+    }
+
+    fn pg_stat_slru_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_stat_slru_rows(&self.db.stats.read())
+    }
+
+    fn pg_stat_archiver_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_stat_archiver_rows(&self.db.stats.read())
+    }
+
+    fn pg_stat_bgwriter_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_stat_bgwriter_rows(&self.db.stats.read())
+    }
+
+    fn pg_stat_recovery_prefetch_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_stat_recovery_prefetch_rows(&self.db.stats.read())
     }
 
     fn pg_stat_all_tables_rows(&self) -> Vec<Vec<Value>> {

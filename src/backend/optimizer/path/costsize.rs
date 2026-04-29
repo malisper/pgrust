@@ -1296,6 +1296,7 @@ fn relation_stats_with_inherit(
     let (relpages, reltuples) = if let Some(class_row) = class_row.as_ref() {
         if relkind_has_storage(class_row.relkind) {
             if let Some(mut current_pages) = catalog.current_relation_pages(relation_oid) {
+                let storage_pages = current_pages;
                 if current_pages < 10 && class_row.reltuples < 0.0 && !class_row.relhassubclass {
                     current_pages = 10;
                 }
@@ -1305,6 +1306,18 @@ fn relation_stats_with_inherit(
                     0.0
                 } else if class_row.reltuples >= 0.0 && class_row.relpages > 0 {
                     (class_row.reltuples / class_row.relpages as f64 * relpages).round()
+                } else if storage_pages >= 10
+                    && let Some(live_tuples) = catalog
+                        .current_relation_live_tuples(relation_oid)
+                        .filter(|tuples| *tuples > 0.0)
+                {
+                    // :HACK: pgrust's heap storage does not yet model all heap
+                    // reloptions that affect physical density, notably low
+                    // fillfactor.  For relations large enough to avoid
+                    // PostgreSQL's "fresh small table" heuristic, the stats
+                    // subsystem's live count is a closer compatibility estimate
+                    // than pgrust's current page-density fallback.
+                    live_tuples
                 } else {
                     (heap_fallback_density(width) * relpages).round()
                 };
@@ -2307,6 +2320,9 @@ fn build_join_paths_internal(
     pathtarget: PathTarget,
     output_columns: Vec<QueryColumn>,
 ) -> Vec<Path> {
+    let config = root
+        .map(|root| root.config)
+        .unwrap_or_else(PlannerConfig::default);
     let left_uses_immediate_outer = path_uses_immediate_outer_columns(&left);
     let right_uses_immediate_outer = path_uses_immediate_outer_columns(&right);
     let check_lateral_relid_dependencies = !matches!(kind, JoinType::Full);
@@ -2332,7 +2348,7 @@ fn build_join_paths_internal(
         || allow_base_cross_swap;
 
     let mut paths = Vec::new();
-    if allow_default_orientation {
+    if config.enable_nestloop && allow_default_orientation {
         paths.push(estimate_nested_loop_join_internal(
             root,
             left.clone(),
@@ -2362,7 +2378,7 @@ fn build_join_paths_internal(
         }
     }
 
-    if allow_swapped_orientation {
+    if config.enable_nestloop && allow_swapped_orientation {
         paths.push(estimate_nested_loop_join_internal(
             root,
             right.clone(),
@@ -2393,6 +2409,7 @@ fn build_join_paths_internal(
     }
 
     if !lateral_orientation_locked
+        && config.enable_hashjoin
         && !matches!(kind, JoinType::Cross)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, left_relids, right_relids)
@@ -2413,6 +2430,7 @@ fn build_join_paths_internal(
     }
 
     if !lateral_orientation_locked
+        && config.enable_mergejoin
         && !matches!(kind, JoinType::Cross)
         && let Some(merge_join) =
             extract_merge_join_clauses(&restrict_clauses, left_relids, right_relids)
@@ -2433,6 +2451,7 @@ fn build_join_paths_internal(
     }
 
     if !lateral_orientation_locked
+        && config.enable_hashjoin
         && matches!(kind, JoinType::Inner)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, right_relids, left_relids)
@@ -2453,6 +2472,7 @@ fn build_join_paths_internal(
     }
 
     if !lateral_orientation_locked
+        && config.enable_mergejoin
         && matches!(kind, JoinType::Inner)
         && let Some(merge_join) =
             extract_merge_join_clauses(&restrict_clauses, right_relids, left_relids)
@@ -5999,6 +6019,12 @@ fn estimate_relation_width(desc: &RelationDesc, stats: &HashMap<i16, PgStatistic
                 .unwrap_or_else(|| {
                     if column.storage.attlen > 0 {
                         column.storage.attlen as usize
+                    } else if matches!(
+                        column.sql_type.kind,
+                        SqlTypeKind::Char | SqlTypeKind::Varchar
+                    ) && let Some(length) = column.sql_type.char_len()
+                    {
+                        length.max(1) as usize
                     } else {
                         estimate_sql_type_width(column.sql_type)
                     }

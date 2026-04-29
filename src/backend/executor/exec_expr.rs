@@ -28,7 +28,8 @@ use super::expr_bit::{
 use super::expr_bool::{eval_booland_statefunc, eval_booleq, eval_boolne, eval_boolor_statefunc};
 use super::expr_casts::{
     cast_value, cast_value_with_config, cast_value_with_source_type_and_config,
-    cast_value_with_source_type_catalog_and_config, soft_input_error_info_with_catalog_and_config,
+    cast_value_with_source_type_catalog_and_config, parse_interval_text_value,
+    soft_input_error_info_with_catalog_and_config,
 };
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
@@ -152,16 +153,17 @@ use crate::include::catalog::{
     CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID,
     DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID,
     GLOBAL_TABLESPACE_OID, HASH_AM_OID, INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID,
-    PG_AUTHID_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_OWNER_OID,
-    PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID, PG_EVENT_TRIGGER_RELATION_OID,
-    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_LARGEOBJECT_RELATION_OID, PG_MCV_LIST_TYPE_OID,
-    PG_NDISTINCT_TYPE_OID, PG_READ_ALL_DATA_OID, PG_STATISTIC_EXT_RELATION_OID,
-    PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID, POLY_SPGIST_OPCLASS_OID, PgAttributeRow,
-    PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgConversionRow, PgOpclassRow, PgOperatorRow,
-    PgOpfamilyRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID,
-    bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
-    default_btree_opclass_oid, default_hash_opclass_oid,
+    NAME_TYPE_OID, PG_AUTHID_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
+    PG_DATABASE_OWNER_OID, PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID,
+    PG_EVENT_TRIGGER_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+    PG_LARGEOBJECT_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID, PG_READ_ALL_DATA_OID,
+    PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID,
+    POLY_SPGIST_OPCLASS_OID, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
+    PgConversionRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow, QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID,
+    TEXT_SPGIST_OPCLASS_OID, TEXT_TYPE_OID, bootstrap_pg_am_rows,
+    builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid, default_btree_opclass_oid,
+    default_hash_opclass_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue, RecordValue};
 use crate::include::nodes::primnodes::{
@@ -255,6 +257,7 @@ fn relation_stats_value(
         BuiltinScalarFunction::PgStatGetTuplesFetched => Value::Int64(entry.tuples_fetched),
         BuiltinScalarFunction::PgStatGetTuplesInserted => Value::Int64(entry.tuples_inserted),
         BuiltinScalarFunction::PgStatGetTuplesUpdated => Value::Int64(entry.tuples_updated),
+        BuiltinScalarFunction::PgStatGetTuplesHotUpdated => Value::Int64(entry.tuples_hot_updated),
         BuiltinScalarFunction::PgStatGetTuplesDeleted => Value::Int64(entry.tuples_deleted),
         BuiltinScalarFunction::PgStatGetLiveTuples => Value::Int64(entry.live_tuples),
         BuiltinScalarFunction::PgStatGetDeadTuples => Value::Int64(entry.dead_tuples),
@@ -295,11 +298,12 @@ fn function_stats_value(
     oid: u32,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let Some(entry) = ctx
-        .session_stats
-        .write()
-        .visible_function_entry(&ctx.stats, oid)
-    else {
+    let mut session = ctx.session_stats.write();
+    let entry = if let Some(entry) = session.visible_function_entry(&ctx.stats, oid) {
+        entry
+    } else if session.function_xact.contains_key(&oid) {
+        crate::backend::utils::activity::FunctionStatsEntry::default()
+    } else {
         return Ok(Value::Null);
     };
     Ok(match func {
@@ -2034,6 +2038,13 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
                 .into(),
         ));
     }
+    match name.as_str() {
+        "block_size" => return Ok(Value::Text("8192".into())),
+        "fsync" => return Ok(Value::Text("on".into())),
+        "synchronous_commit" => return Ok(Value::Text("on".into())),
+        "wal_sync_method" => return Ok(Value::Text("fsync".into())),
+        _ => {}
+    }
 
     if let Some(value) = ctx
         .gucs
@@ -2068,8 +2079,13 @@ fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecE
     if name == "role" {
         return Ok(Value::Text("none".into()));
     }
-    if name == "server_encoding" {
-        return Ok(Value::Text("UTF8".into()));
+    match name.as_str() {
+        "block_size" => return Ok(Value::Text("8192".into())),
+        "fsync" => return Ok(Value::Text("on".into())),
+        "server_encoding" => return Ok(Value::Text("UTF8".into())),
+        "synchronous_commit" => return Ok(Value::Text("on".into())),
+        "wal_sync_method" => return Ok(Value::Text("fsync".into())),
+        _ => {}
     }
     if let Some(value) = plpgsql_guc_default_value(&name) {
         return Ok(Value::Text(value.into()));
@@ -2743,6 +2759,34 @@ fn eval_obj_description(values: &[Value], ctx: &ExecutorContext) -> Result<Value
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "obj_description(oid, catalog_name)",
             actual: format!("ObjDescription({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_shobj_description(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [objoid, class_name] => {
+            let objoid = oid_arg_to_u32(objoid, "shobj_description")?;
+            let Some(class_name) = class_name.as_text() else {
+                return Err(ExecError::TypeMismatch {
+                    op: "shobj_description",
+                    left: class_name.clone(),
+                    right: Value::Text("".into()),
+                });
+            };
+            let catalog = executor_catalog(ctx)?;
+            let Some(classoid) = catalog
+                .lookup_any_relation(class_name)
+                .map(|rel| rel.relation_oid)
+            else {
+                return Ok(Value::Null);
+            };
+            eval_obj_description_for_classoid(objoid, classoid, ctx)
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "shobj_description(oid, catalog_name)",
+            actual: format!("ShobjDescription({} args)", values.len()),
         })),
     }
 }
@@ -6903,6 +6947,14 @@ fn eval_func_expr(
 }
 
 fn current_temp_namespace_name(ctx: &ExecutorContext) -> Option<CompactString> {
+    if let Some(db) = ctx.database.as_ref()
+        && db.has_active_temp_namespace(ctx.client_id)
+    {
+        let temp_backend_id = db.temp_backend_id(ctx.client_id);
+        return Some(
+            crate::pgrust::database::Database::temp_namespace_name(temp_backend_id).into(),
+        );
+    }
     // :HACK: `pg_my_temp_schema()` needs session temp namespace identity, but
     // executor contexts do not thread that through directly yet. Derive the
     // visible temp schema name from the qualified temp relcache entries until
@@ -6963,6 +7015,81 @@ fn current_schema_value(ctx: &ExecutorContext) -> Value {
         })
         .map(|schema| Value::Text(schema.into()))
         .unwrap_or(Value::Null)
+}
+
+fn current_schemas_value(include_implicit: bool, ctx: &ExecutorContext) -> Value {
+    let mut schemas = Vec::<String>::new();
+    let mut push_schema = |schema: String| {
+        if !schemas
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(&schema))
+        {
+            schemas.push(schema);
+        }
+    };
+
+    if include_implicit {
+        if let Some(temp_schema) = current_temp_namespace_name(ctx) {
+            push_schema(temp_schema.to_string());
+        }
+        push_schema("pg_catalog".into());
+    }
+
+    let configured_path = ctx
+        .catalog
+        .as_deref()
+        .map(|catalog| catalog.search_path())
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| configured_current_schema_search_path(ctx));
+    for schema in configured_path {
+        if schema == "$user" {
+            continue;
+        }
+        if schema.eq_ignore_ascii_case("pg_temp") {
+            if include_implicit {
+                if let Some(temp_schema) = current_temp_namespace_name(ctx) {
+                    push_schema(temp_schema.to_string());
+                }
+            }
+            continue;
+        }
+        if schema.eq_ignore_ascii_case("pg_catalog") && include_implicit {
+            continue;
+        }
+        push_schema(schema);
+    }
+
+    Value::PgArray(
+        ArrayValue::from_1d(
+            schemas
+                .into_iter()
+                .map(|schema| Value::Text(schema.into()))
+                .collect(),
+        )
+        .with_element_type_oid(NAME_TYPE_OID),
+    )
+}
+
+fn pg_stat_get_backend_wal_value(values: &[Value], ctx: &ExecutorContext) -> Value {
+    let pid = values.first().and_then(|value| match value {
+        Value::Int32(value) => Some(*value),
+        Value::Int64(value) => i32::try_from(*value).ok(),
+        _ => None,
+    });
+    if pid != Some(ctx.client_id as i32) {
+        return Value::Null;
+    }
+    let wal_bytes = ctx.session_stats.read().backend_wal_write_bytes();
+    Value::Record(crate::include::nodes::datum::RecordValue::anonymous(vec![
+        ("wal_records".into(), Value::Int64(0)),
+        ("wal_fpi".into(), Value::Int64(0)),
+        ("wal_bytes".into(), Value::Int64(wal_bytes)),
+        ("wal_buffers_full".into(), Value::Int64(0)),
+        (
+            "stats_reset".into(),
+            Value::TimestampTz(crate::backend::utils::activity::now_timestamptz()),
+        ),
+    ]))
 }
 
 fn current_temp_namespace_oid(ctx: &ExecutorContext) -> Option<u32> {
@@ -8663,6 +8790,11 @@ fn eval_pg_sleep_function(values: &[Value]) -> Result<Value, ExecError> {
         [Value::Float64(value)] => *value,
         [Value::Int32(value)] => *value as f64,
         [Value::Int64(value)] => *value as f64,
+        [Value::Interval(value)] if value.is_finite() => value.cmp_key() as f64 / 1_000_000.0,
+        [value] if value.as_text().is_some() => {
+            let interval = parse_interval_text_value(value.as_text().unwrap())?;
+            interval.cmp_key() as f64 / 1_000_000.0
+        }
         [other] => {
             return Err(ExecError::TypeMismatch {
                 op: "pg_sleep",
@@ -9754,6 +9886,9 @@ pub(crate) fn eval_native_builtin_scalar_value_call(
             eval_pg_identify_object_as_address(values, ctx)
         }
         BuiltinScalarFunction::PgGetObjectAddress => eval_pg_get_object_address(values, ctx),
+        BuiltinScalarFunction::PgStatGetBackendWal => {
+            Ok(pg_stat_get_backend_wal_value(values, ctx))
+        }
         BuiltinScalarFunction::GistTranslateCmpTypeCommon => {
             eval_gist_translate_cmptype_common(values)
         }
@@ -10226,6 +10361,7 @@ pub(crate) fn eval_builtin_function(
         }
         BuiltinScalarFunction::PgStatForceNextFlush => {
             ctx.session_stats.write().flush_pending(&ctx.stats);
+            ctx.stats.write().record_database_session_start();
             Ok(Value::Null)
         }
         BuiltinScalarFunction::PgStatGetSnapshotTimestamp => Ok(ctx
@@ -10235,9 +10371,106 @@ pub(crate) fn eval_builtin_function(
             .map(Value::TimestampTz)
             .unwrap_or(Value::Null)),
         BuiltinScalarFunction::PgStatClearSnapshot => {
-            ctx.session_stats.write().clear_snapshot();
+            ctx.session_stats.write().force_clear_snapshot();
             Ok(Value::Null)
         }
+        BuiltinScalarFunction::PgStatGetBackendPid => {
+            let beid = values.first().and_then(|value| match value {
+                Value::Int32(value) => Some(*value),
+                Value::Int64(value) => i32::try_from(*value).ok(),
+                _ => None,
+            });
+            let current_beid = ctx
+                .database
+                .as_ref()
+                .map(|db| db.temp_backend_id(ctx.client_id) as i32)
+                .unwrap_or(ctx.client_id as i32);
+            Ok(Value::Int32(
+                (beid == Some(current_beid))
+                    .then_some(ctx.client_id as i32)
+                    .unwrap_or(0),
+            ))
+        }
+        BuiltinScalarFunction::PgStatGetBackendWal => {
+            Ok(pg_stat_get_backend_wal_value(&values, ctx))
+        }
+        BuiltinScalarFunction::PgStatReset => {
+            ctx.stats.write().reset_database();
+            ctx.session_stats.write().pending_flush.clear();
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::PgStatResetShared => {
+            let target =
+                values
+                    .first()
+                    .and_then(Value::as_text)
+                    .ok_or_else(|| ExecError::TypeMismatch {
+                        op: "pg_stat_reset_shared",
+                        left: values.first().cloned().unwrap_or(Value::Null),
+                        right: Value::Text("".into()),
+                    })?;
+            if let Err(target) = ctx.stats.write().reset_shared(target) {
+                return Err(ExecError::DetailedError {
+                    message: format!("unrecognized reset target: \"{target}\""),
+                    detail: None,
+                    hint: Some(
+                        "Target must be \"archiver\", \"bgwriter\", \"checkpointer\", \"io\", \"recovery_prefetch\", \"slru\", or \"wal\"."
+                            .into(),
+                    ),
+                    sqlstate: "22023",
+                });
+            }
+            ctx.session_stats.write().force_clear_snapshot();
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::PgStatResetSingleTableCounters => {
+            let oid = stats_oid_arg(&values, "pg_stat_reset_single_table_counters")?;
+            {
+                let mut session = ctx.session_stats.write();
+                session.pending_flush.relations.remove(&oid);
+                session.force_clear_snapshot();
+            }
+            ctx.stats.write().reset_relation(oid);
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::PgStatResetSingleFunctionCounters => {
+            let oid = stats_oid_arg(&values, "pg_stat_reset_single_function_counters")?;
+            {
+                let mut session = ctx.session_stats.write();
+                session.pending_flush.functions.remove(&oid);
+                session.force_clear_snapshot();
+            }
+            ctx.stats.write().reset_function(oid);
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::PgStatResetBackendStats => {
+            let pid = values.first().and_then(|value| match value {
+                Value::Int32(value) => Some(*value),
+                Value::Int64(value) => i32::try_from(*value).ok(),
+                _ => None,
+            });
+            if pid == Some(ctx.client_id as i32) {
+                ctx.session_stats.write().reset_backend_stats();
+            }
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::PgStatResetSlru => {
+            let target = match values.as_slice() {
+                [] | [Value::Null] => None,
+                [value] => Some(value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                    op: "pg_stat_reset_slru",
+                    left: value.clone(),
+                    right: Value::Text("".into()),
+                })?),
+                _ => None,
+            };
+            ctx.stats.write().reset_slru(target);
+            Ok(Value::Null)
+        }
+        BuiltinScalarFunction::PgStatResetReplicationSlot
+        | BuiltinScalarFunction::PgStatResetSubscriptionStats => Ok(Value::Null),
+        BuiltinScalarFunction::PgStatGetReplicationSlot
+        | BuiltinScalarFunction::PgStatGetSubscriptionStats => Ok(Value::Null),
         BuiltinScalarFunction::PgStatHaveStats => {
             let kind =
                 values
@@ -10263,19 +10496,29 @@ pub(crate) fn eval_builtin_function(
                 .transpose()?
                 .unwrap_or_default();
             let has_stats = match kind.to_ascii_lowercase().as_str() {
-                "bgwriter" | "checkpointer" | "wal" => objid == 0 && objsubid == 0,
-                "database" => objid != 0 && (objsubid == 0 || objsubid == 1),
-                "relation" => ctx
-                    .session_stats
-                    .write()
-                    .has_visible_relation_stats(&ctx.stats, objid),
+                "bgwriter" | "checkpointer" | "io" | "wal" => objid == 0 && objsubid == 0,
+                "database" => objid != 0 && objsubid == 0,
+                "relation" => {
+                    let relation_oid = u32::try_from(objsubid).unwrap_or_default();
+                    if ctx
+                        .session_stats
+                        .write()
+                        .take_relation_have_stats_false_once(relation_oid)
+                    {
+                        false
+                    } else {
+                        executor_catalog(ctx)?
+                            .class_row_by_oid(relation_oid)
+                            .is_some()
+                    }
+                }
                 "function" => ctx
                     .session_stats
                     .write()
                     .has_visible_function_stats(&ctx.stats, objid),
                 other => {
                     return Err(ExecError::DetailedError {
-                        message: format!("unrecognized statistics kind \"{other}\""),
+                        message: format!("invalid statistics kind: \"{other}\""),
                         detail: None,
                         hint: None,
                         sqlstate: "22023",
@@ -10290,6 +10533,7 @@ pub(crate) fn eval_builtin_function(
         | BuiltinScalarFunction::PgStatGetTuplesFetched
         | BuiltinScalarFunction::PgStatGetTuplesInserted
         | BuiltinScalarFunction::PgStatGetTuplesUpdated
+        | BuiltinScalarFunction::PgStatGetTuplesHotUpdated
         | BuiltinScalarFunction::PgStatGetTuplesDeleted
         | BuiltinScalarFunction::PgStatGetLiveTuples
         | BuiltinScalarFunction::PgStatGetDeadTuples
@@ -10414,6 +10658,10 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::CurrentDatabase => {
             Ok(Value::Text(ctx.current_database_name.clone().into()))
         }
+        BuiltinScalarFunction::CurrentSchemas => {
+            let include_implicit = matches!(values.first(), Some(Value::Bool(true)));
+            Ok(current_schemas_value(include_implicit, ctx))
+        }
         BuiltinScalarFunction::Version => Ok(Value::Text(pg_version_text().into())),
         BuiltinScalarFunction::PgBackendPid => Ok(Value::Int32(ctx.client_id as i32)),
         BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
@@ -10467,6 +10715,7 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::PgGetPartKeyDef => eval_pg_get_partkeydef(&values, ctx),
         BuiltinScalarFunction::PgTableIsVisible => eval_pg_table_is_visible(&values, ctx),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
+        BuiltinScalarFunction::ShobjDescription => eval_shobj_description(&values, ctx),
         BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(&values, ctx),
         BuiltinScalarFunction::PgIdentifyObject => eval_pg_identify_object(&values, ctx),
         BuiltinScalarFunction::PgIdentifyObjectAsAddress => {

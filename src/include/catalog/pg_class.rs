@@ -114,7 +114,7 @@ pub const fn relam_for_relkind(relkind: char) -> u32 {
     }
 }
 
-pub fn bootstrap_pg_class_rows() -> [PgClassRow; 37] {
+pub fn bootstrap_pg_class_rows() -> [PgClassRow; 38] {
     [
         bootstrap_pg_class_row(BootstrapCatalogKind::PgNamespace),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgType),
@@ -130,6 +130,7 @@ pub fn bootstrap_pg_class_rows() -> [PgClassRow; 37] {
         bootstrap_pg_class_row(BootstrapCatalogKind::PgDatabase),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgTablespace),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgShdepend),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgShdescription),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgReplicationOrigin),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgAm),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgAttrdef),

@@ -2317,11 +2317,6 @@ impl Database {
             push_notice("substituting access method \"gist\" for obsolete method \"rtree\"");
             access_method_name = "gist".into();
         }
-        if access_method_name.eq_ignore_ascii_case("brin") && create_stmt.predicate.is_some() {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "BRIN partial indexes".into(),
-            )));
-        }
         if access_method_name.eq_ignore_ascii_case("brin")
             && create_stmt
                 .columns
@@ -3039,7 +3034,18 @@ impl Database {
             xid,
             cid,
             catalog_effects,
-        )
+        )?;
+        if concurrently {
+            // :HACK: pgrust rebuilds the existing index catalog row for
+            // REINDEX CONCURRENTLY instead of swapping to a freshly assigned
+            // index OID. Make the stale-oid stats probe observe PostgreSQL's
+            // one-step disappearance until concurrent reindex gets full
+            // catalog-swap semantics.
+            self.session_stats_state(client_id)
+                .write()
+                .note_relation_have_stats_false_once(index.relation_oid);
+        }
+        Ok(())
     }
 
     fn reindex_table_indexes_in_transaction(

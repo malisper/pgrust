@@ -90,6 +90,24 @@ pub(crate) struct IoStatsDelta {
 }
 
 impl SessionStatsState {
+    fn note_io_delta(
+        &mut self,
+        backend_type: &str,
+        object: &str,
+        context: &str,
+        update: impl Fn(&mut IoStatsDelta, &mut IoStatsEntry),
+    ) {
+        let key = IoStatsKey::new(backend_type, object, context);
+        let delta = self.pending_flush.io.entry(key.clone()).or_default();
+        let backend_entry = self.backend_io.entry(key).or_default();
+        update(delta, backend_entry);
+        delta.touched = true;
+        if backend_entry.stats_reset.is_none() {
+            backend_entry.stats_reset = Some(now_timestamptz());
+        }
+        self.clear_snapshot();
+    }
+
     pub(crate) fn note_io_read(
         &mut self,
         backend_type: &str,
@@ -97,26 +115,19 @@ impl SessionStatsState {
         context: &str,
         bytes: i64,
     ) {
-        let delta = self
-            .pending_flush
-            .io
-            .entry(IoStatsKey::new(backend_type, object, context))
-            .or_default();
-        delta.reads += 1;
-        delta.read_bytes += bytes;
-        delta.touched = true;
-        self.clear_snapshot();
+        self.note_io_delta(backend_type, object, context, |delta, backend| {
+            delta.reads += 1;
+            delta.read_bytes += bytes;
+            backend.reads += 1;
+            backend.read_bytes += bytes;
+        });
     }
 
     pub(crate) fn note_io_hit(&mut self, backend_type: &str, object: &str, context: &str) {
-        let delta = self
-            .pending_flush
-            .io
-            .entry(IoStatsKey::new(backend_type, object, context))
-            .or_default();
-        delta.hits += 1;
-        delta.touched = true;
-        self.clear_snapshot();
+        self.note_io_delta(backend_type, object, context, |delta, backend| {
+            delta.hits += 1;
+            backend.hits += 1;
+        });
     }
 
     pub(crate) fn note_io_write(
@@ -126,15 +137,48 @@ impl SessionStatsState {
         context: &str,
         bytes: i64,
     ) {
-        let delta = self
-            .pending_flush
-            .io
-            .entry(IoStatsKey::new(backend_type, object, context))
-            .or_default();
-        delta.writes += 1;
-        delta.write_bytes += bytes;
-        delta.touched = true;
-        self.clear_snapshot();
+        self.note_io_delta(backend_type, object, context, |delta, backend| {
+            delta.writes += 1;
+            delta.write_bytes += bytes;
+            backend.writes += 1;
+            backend.write_bytes += bytes;
+        });
+    }
+
+    pub(crate) fn note_io_extend(
+        &mut self,
+        backend_type: &str,
+        object: &str,
+        context: &str,
+        bytes: i64,
+    ) {
+        self.note_io_delta(backend_type, object, context, |delta, backend| {
+            delta.extends += 1;
+            delta.extend_bytes += bytes;
+            backend.extends += 1;
+            backend.extend_bytes += bytes;
+        });
+    }
+
+    pub(crate) fn note_io_fsync(&mut self, backend_type: &str, object: &str, context: &str) {
+        self.note_io_delta(backend_type, object, context, |delta, backend| {
+            delta.fsyncs += 1;
+            backend.fsyncs += 1;
+        });
+    }
+
+    pub(crate) fn note_io_eviction(&mut self, backend_type: &str, object: &str, context: &str) {
+        self.note_io_delta(backend_type, object, context, |delta, backend| {
+            delta.evictions += 1;
+            backend.evictions += 1;
+        });
+    }
+
+    pub(crate) fn note_io_reuse(&mut self, backend_type: &str, object: &str, context: &str) {
+        self.note_io_delta(backend_type, object, context, |delta, backend| {
+            delta.reuses += 1;
+            backend.reuses += 1;
+        });
     }
 }
 

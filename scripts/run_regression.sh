@@ -1059,7 +1059,7 @@ if [[ ! -x "$SERVER_BIN" ]]; then
 fi
 
 # Set up results directory
-mkdir -p "$RESULTS_DIR/output" "$RESULTS_DIR/diff" "$RESULTS_DIR/results"
+mkdir -p "$RESULTS_DIR/output" "$RESULTS_DIR/diff" "$RESULTS_DIR/status" "$RESULTS_DIR/results"
 mkdir -p "$RESULTS_DIR/status"
 echo "Regression results dir: $RESULTS_DIR"
 echo "Regression data dir: $DATA_DIR"
@@ -1731,6 +1731,14 @@ run_one_regression_test() {
         return 1
     fi
 
+    if [[ "$test_name" == "stats" && "$ISOLATED_PARALLEL" != true ]] && ! run_stats_helper_setup; then
+        {
+            echo "ERROR: stats helper dependency setup failed"
+        } > "$output_file"
+        write_test_status "$status_file" "error" "$test_name" 0 0 0 0
+        return 1
+    fi
+
     prepare_test_fixture "$sql_file" "$expected_file" "$test_name"
     sql_file="$PREPARED_SQL_FILE"
     expected_file="$PREPARED_EXPECTED_FILE"
@@ -1892,6 +1900,43 @@ SQL
     return 1
 }
 
+run_stats_helper_setup() {
+    local output_file="$RESULTS_DIR/output/test_setup_dependency_stats_helper.out"
+    local setup_file="$RESULTS_DIR/output/test_setup_dependency_stats_helper.sql"
+
+    cat > "$setup_file" <<'SQL'
+SELECT (to_regprocedure('check_estimated_rows(text)') IS NULL) AS create_stats_helper \gset
+\if :create_stats_helper
+create function check_estimated_rows(text) returns table (estimated int, actual int)
+language plpgsql as
+$$
+declare
+    ln text;
+    tmp text[];
+    first_row bool := true;
+begin
+    for ln in
+        execute format('explain analyze %s', $1)
+    loop
+        if first_row then
+            first_row := false;
+            tmp := regexp_match(ln, 'rows=(\d*) .* rows=(\d*)');
+            return query select tmp[1]::int, tmp[2]::int;
+        end if;
+    end loop;
+end;
+$$;
+\endif
+SQL
+    echo "Dependency setup for stats: check_estimated_rows"
+    if run_psql_file "$TIMEOUT" "$setup_file" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
+        return 0
+    fi
+    echo "ERROR: stats helper dependency setup failed" >&2
+    echo "See: $output_file" >&2
+    return 1
+}
+
 run_one_regression_test_isolated() (
     local sql_file="$1"
     local worker_slot="$2"
@@ -1919,6 +1964,7 @@ run_one_regression_test_isolated() (
     trap stop_server EXIT
     rm -rf "$worker_root"
     mkdir -p "$worker_root/fixtures"
+    mkdir -p "$RESULTS_DIR/output" "$RESULTS_DIR/diff" "$RESULTS_DIR/status"
 
     if test_uses_create_index_base "$test_name" && [[ "$NEEDS_CREATE_INDEX_BASE" == true ]]; then
         base_label="post_create_index"
@@ -1959,6 +2005,16 @@ run_one_regression_test_isolated() (
     if [[ "$test_name" == "select_distinct" ]] && ! run_select_distinct_index_setup; then
         {
             echo "ERROR: isolated worker $worker_name failed select_distinct index dependency setup"
+            echo "port: $PORT"
+            echo "data dir: $DATA_DIR"
+        } > "$output_file"
+        write_test_status "$status_file" "error" "$test_name" 0 0 0 0
+        return 1
+    fi
+
+    if [[ "$test_name" == "stats" ]] && ! run_stats_helper_setup; then
+        {
+            echo "ERROR: isolated worker $worker_name failed stats helper dependency setup"
             echo "port: $PORT"
             echo "data dir: $DATA_DIR"
         } > "$output_file"

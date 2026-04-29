@@ -15559,6 +15559,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_set_not_null_stmt => Ok(Statement::AlterTableSetNotNull(
             build_alter_table_set_not_null(inner)?,
         )),
+        Rule::alter_table_set_tablespace_stmt => Ok(Statement::AlterTableSetTablespace(
+            build_alter_table_set_tablespace(inner)?,
+        )),
         Rule::alter_table_drop_not_null_stmt => Ok(Statement::AlterTableDropNotNull(
             build_alter_table_drop_not_null(inner)?,
         )),
@@ -15575,6 +15578,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_not_of_stmt => {
             Ok(Statement::AlterTableNotOf(build_alter_table_not_of(inner)?))
         }
+        Rule::comment_on_database_stmt => Ok(Statement::CommentOnDatabase(
+            build_comment_on_database(inner)?,
+        )),
         Rule::comment_on_role_stmt => Ok(Statement::CommentOnRole(build_comment_on_role(inner)?)),
         Rule::comment_on_table_stmt => {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
@@ -20775,6 +20781,31 @@ fn build_comment_on_role(pair: Pair<'_, Rule>) -> Result<CommentOnRoleStatement,
     })
 }
 
+fn build_comment_on_database(
+    pair: Pair<'_, Rule>,
+) -> Result<CommentOnDatabaseStatement, ParseError> {
+    let mut database_name = None;
+    let mut comment = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => database_name = Some(build_identifier(part)),
+            Rule::quoted_string_literal
+            | Rule::string_literal
+            | Rule::unicode_string_literal
+            | Rule::escape_string_literal
+            | Rule::dollar_string_literal => {
+                comment = Some(Some(decode_string_literal_pair(part)?))
+            }
+            Rule::kw_null => comment = Some(None),
+            _ => {}
+        }
+    }
+    Ok(CommentOnDatabaseStatement {
+        database_name: database_name.ok_or(ParseError::UnexpectedEof)?,
+        comment: comment.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
 fn build_reloption(pair: Pair<'_, Rule>) -> Result<RelOption, ParseError> {
     let mut name = None;
     let mut value = None;
@@ -20858,6 +20889,9 @@ fn build_table_storage_options(pair: Pair<'_, Rule>) -> Result<Vec<RelOption>, P
             {
                 let option = build_reloption(item)?;
                 let name = option.name.clone();
+                if name != name.to_ascii_lowercase() {
+                    return Err(ParseError::UnrecognizedParameter(name));
+                }
                 if name.eq_ignore_ascii_case("oids")
                     && matches!(
                         option.value.to_ascii_lowercase().as_str(),
@@ -23663,6 +23697,34 @@ fn build_alter_relation_set_schema(
         if_exists,
         relation_name: relation_name.ok_or(ParseError::UnexpectedEof)?,
         schema_name: schema_name.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_set_tablespace(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableSetTablespaceStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut tablespace_name = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier => tablespace_name = Some(build_identifier(part)),
+            _ => {}
+        }
+    }
+    Ok(AlterTableSetTablespaceStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        tablespace_name: tablespace_name.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 
