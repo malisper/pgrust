@@ -8234,6 +8234,22 @@ fn create_index_on_partitioned_table_builds_index_tree() {
         query_rows(
             &db,
             1,
+            "select relname, relispartition \
+               from pg_class \
+              where relname in ('idxpart_a_idx', 'idxpart1_a_idx', 'idxpart2_a_idx', 'idxpart2a_a_idx') \
+              order by relname",
+        ),
+        vec![
+            vec![Value::Text("idxpart1_a_idx".into()), Value::Bool(true)],
+            vec![Value::Text("idxpart2_a_idx".into()), Value::Bool(true)],
+            vec![Value::Text("idxpart2a_a_idx".into()), Value::Bool(true)],
+            vec![Value::Text("idxpart_a_idx".into()), Value::Bool(false)],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
             "select child.relname, parent.relname \
                from pg_inherits i \
                join pg_class child on child.oid = i.inhrelid \
@@ -8321,6 +8337,54 @@ fn create_index_on_partitioned_table_builds_index_tree() {
             "CREATE INDEX idxpart_a_idx ON ONLY public.idxpart USING btree (a)".into(),
         )]]
     );
+
+    session
+        .execute(&db, "create index idxpart_expr_idx on idxpart ((a+b))")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_indexdef(oid) from pg_class where relname = 'idxpart_expr_idx'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE INDEX idxpart_expr_idx ON ONLY public.idxpart USING btree (((a + b)))".into(),
+        )]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table idxpart_txt (a text) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart_txt1 partition of idxpart_txt for values from ('a') to ('m')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create index idxpart_txt_idx on idxpart_txt (a collate \"C\" text_pattern_ops)",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_indexdef(oid) from pg_class where relname = 'idxpart_txt_idx'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE INDEX idxpart_txt_idx ON ONLY public.idxpart_txt USING btree (a COLLATE \"C\" text_pattern_ops)"
+                .into(),
+        )]]
+    );
+    assert_eq!(
+        psql_index_definition(&db, 1, "idxpart_txt", "idxpart_txt_idx"),
+        "CREATE INDEX idxpart_txt_idx ON ONLY idxpart_txt USING btree (a COLLATE \"C\" text_pattern_ops)"
+    );
 }
 
 #[test]
@@ -8390,6 +8454,22 @@ fn create_index_on_partitioned_table_reuses_only_child_without_recursing() {
         .execute(&db, "create index on only idxpart2(a)")
         .unwrap();
     session.execute(&db, "create index on idxpart(a)").unwrap();
+    match session.execute(
+        &db,
+        "alter index idxpart_a_idx attach partition idxpart_a_idx",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        }) if message
+            == "cannot attach index \"idxpart_a_idx\" as a partition of index \"idxpart_a_idx\""
+            && detail
+                == "Index \"idxpart_a_idx\" is not an index on any partition of table \"idxpart\"."
+            && sqlstate == "42809" => {}
+        other => panic!("expected self attach partitioned-index error, got {other:?}"),
+    }
 
     assert_eq!(
         index_summary(&db, "idxpart1_a_idx"),
@@ -8630,6 +8710,62 @@ fn partitioned_key_coverage_checks_fire_for_root_partition_of_and_attach_partiti
                 == "PRIMARY KEY constraint on table \"miss_root\" lacks column \"b\" which is part of the partition key."
             && sqlstate == "0A000" => {}
         other => panic!("expected root partition-key coverage error, got {other:?}"),
+    }
+
+    match session.execute(
+        &db,
+        "create table miss_excl (a int4range, b int4range, exclude using gist (a with =)) partition by range (a, b)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        })) if message
+            == "unique constraint on partitioned table must include all partitioning columns"
+            && detail
+                == "EXCLUDE constraint on table \"miss_excl\" lacks column \"b\" which is part of the partition key."
+            && sqlstate == "0A000" => {}
+        other => panic!("expected EXCLUDE partition-key coverage error, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table include_not_key (a int, b int) partition by list (a)",
+        )
+        .unwrap();
+    match session.execute(
+        &db,
+        "create unique index on include_not_key (b) include (a)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        })) if message
+            == "unique constraint on partitioned table must include all partitioning columns"
+            && detail
+                == "UNIQUE constraint on table \"include_not_key\" lacks column \"a\" which is part of the partition key."
+            && sqlstate == "0A000" => {}
+        other => panic!("expected INCLUDE column to not satisfy coverage, got {other:?}"),
+    }
+
+    match session.execute(
+        &db,
+        "create table expr_pk (a int primary key, b int) partition by range ((b + a))",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        })) if message == "unsupported PRIMARY KEY constraint with partition key definition"
+            && detail
+                == "PRIMARY KEY constraints cannot be used when partition keys include expressions."
+            && sqlstate == "0A000" => {}
+        other => panic!("expected expression partition-key primary-key error, got {other:?}"),
     }
 
     session
@@ -13464,6 +13600,141 @@ fn relation_descriptor_cache_survives_command_id_changes_and_invalidates() {
 }
 
 #[test]
+fn postgres_named_syscache_wrappers_lookup_and_invalidate() {
+    let base = temp_dir("postgres_named_syscache_wrappers");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pg_named_syscache_lookup (id int4)")
+        .unwrap();
+    let relation = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("pg_named_syscache_lookup")
+        .unwrap();
+    let relation_oid = relation.relation_oid;
+    let oid_key = Value::Int64(i64::from(relation_oid));
+
+    let class_rows = crate::backend::utils::cache::syscache::SearchSysCache1(
+        &db,
+        1,
+        None,
+        crate::backend::utils::cache::syscache::SysCacheId::RELOID,
+        oid_key.clone(),
+    )
+    .unwrap();
+    assert_eq!(class_rows.len(), 1);
+    assert_eq!(
+        crate::backend::utils::cache::syscache::SysCacheGetAttr(&class_rows[0], "relname"),
+        Some(Value::Text("pg_named_syscache_lookup".into()))
+    );
+    assert_eq!(
+        crate::backend::utils::cache::syscache::GetSysCacheOid(
+            &db,
+            1,
+            None,
+            crate::backend::utils::cache::syscache::SysCacheId::RELOID,
+            vec![oid_key.clone()],
+        )
+        .unwrap(),
+        Some(relation_oid)
+    );
+
+    let attrs = crate::backend::utils::cache::syscache::SearchSysCacheList1(
+        &db,
+        1,
+        None,
+        crate::backend::utils::cache::syscache::SysCacheId::ATTNUM,
+        oid_key.clone(),
+    )
+    .unwrap();
+    assert!(attrs.iter().any(|tuple| {
+        crate::backend::utils::cache::syscache::SysCacheGetAttr(tuple, "attname")
+            == Some(Value::Text("id".into()))
+    }));
+    assert!(
+        !crate::backend::utils::cache::syscache::SearchSysCacheExists(
+            &db,
+            1,
+            None,
+            crate::backend::utils::cache::syscache::SysCacheId::RELOID,
+            vec![Value::Int64(999_999_999)],
+        )
+        .unwrap()
+    );
+
+    crate::backend::utils::cache::inval::InvalidateSystemCaches(&db, 1);
+    assert!(
+        crate::backend::utils::cache::syscache::SearchSysCacheExists(
+            &db,
+            1,
+            None,
+            crate::backend::utils::cache::syscache::SysCacheId::RELOID,
+            vec![oid_key],
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn postgres_named_relcache_wrappers_lookup_and_invalidate_by_oid() {
+    let base = temp_dir("postgres_named_relcache_wrappers");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pg_named_relcache_lookup (id int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create index pg_named_relcache_lookup_idx on pg_named_relcache_lookup (id)",
+    )
+    .unwrap();
+    let relation = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("pg_named_relcache_lookup")
+        .unwrap();
+    let index_relation = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("pg_named_relcache_lookup_idx")
+        .unwrap();
+
+    let relcache_entry = crate::backend::utils::cache::syscache::RelationIdGetRelation(
+        &db,
+        1,
+        None,
+        relation.relation_oid,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(relcache_entry.relation_oid, relation.relation_oid);
+    assert_eq!(
+        crate::backend::utils::cache::lsyscache::RelationGetIndexList(
+            &db,
+            1,
+            None,
+            relation.relation_oid,
+        ),
+        vec![index_relation.relation_oid]
+    );
+
+    crate::backend::utils::cache::inval::CacheInvalidateRelcache(&db, 1, relation.relation_oid);
+    assert!(
+        !db.backend_cache_states
+            .read()
+            .get(&1)
+            .unwrap()
+            .relation_cache
+            .contains_key(&relation.relation_oid)
+    );
+    let relcache_entry = crate::backend::utils::cache::syscache::RelationIdGetRelation(
+        &db,
+        1,
+        None,
+        relation.relation_oid,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(relcache_entry.relation_oid, relation.relation_oid);
+}
+
+#[test]
 fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
     let base = temp_dir("commit_catalog_invalidation_fanout");
     let db = Database::open(&base, 16).unwrap();
@@ -14961,7 +15232,9 @@ fn comment_on_missing_index_reports_relation_does_not_exist() {
     db.execute(1, "create table items (id int4)").unwrap();
 
     match db.execute(1, "comment on index missing_idx is 'nope'") {
-        Err(ExecError::Parse(ParseError::TableDoesNotExist(name))) if name == "missing_idx" => {}
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == r#"relation "missing_idx" does not exist"# && sqlstate == "42P01" => {}
         other => panic!("expected missing index error, got {:?}", other),
     }
 }
@@ -19671,20 +19944,112 @@ fn alter_table_alter_column_type_allows_foreign_key_columns() {
 }
 
 #[test]
-fn alter_table_alter_column_type_rejects_indexed_target_column() {
-    let base = temp_dir("alter_table_alter_column_type_index_guard");
+fn alter_table_alter_column_type_rebuilds_indexed_target_column() {
+    let base = temp_dir("alter_table_alter_column_type_index_rebuild");
     let db = Database::open(&base, 16).unwrap();
 
     db.execute(1, "create table items (id int4, note int4)")
         .unwrap();
+    db.execute(1, "insert into items values (1, 10), (2, 20)")
+        .unwrap();
     db.execute(1, "create index items_note_idx on items (note)")
         .unwrap();
+    db.execute(1, "alter table items alter column note type int8")
+        .unwrap();
 
-    match db.execute(1, "alter table items alter column note type int8") {
-        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
-            if feature == "ALTER TABLE ALTER COLUMN TYPE with dependent indexes" => {}
-        other => panic!("expected dependent-index rejection, got {other:?}"),
-    }
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where note = 20"),
+        vec![vec![Value::Int64(20)]]
+    );
+}
+
+#[test]
+fn alter_table_alter_column_type_allows_partitioned_table_root() {
+    let base = temp_dir("alter_table_alter_column_type_partitioned_root");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table idxpart (a int4, b int4, c int4) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table idxpart1 partition of idxpart for values from (0) to (100)",
+    )
+    .unwrap();
+    db.execute(1, "insert into idxpart values (1, 2, 3)")
+        .unwrap();
+    db.execute(1, "create index idxpart_idx on idxpart (a, b, c)")
+        .unwrap();
+    db.execute(1, "alter table idxpart alter column c type numeric")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select c from idxpart where a = 1"),
+        vec![vec![Value::Numeric("3".into())]]
+    );
+}
+
+#[test]
+fn attach_partition_validates_rows_after_dropped_column_remap() {
+    let base = temp_dir("attach_partition_dropped_column_remap");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table idxpart1 (drop_1 int4, col_keep int4, drop_2 int4)",
+    )
+    .unwrap();
+    db.execute(1, "alter table idxpart1 drop column drop_1")
+        .unwrap();
+    db.execute(1, "alter table idxpart1 drop column drop_2")
+        .unwrap();
+    db.execute(1, "insert into idxpart1 (col_keep) values (5)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table idxpart (col_keep int4) partition by range (col_keep)",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "alter table idxpart attach partition idxpart1 for values from (0) to (10)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn detached_partition_columns_become_local_for_drop_column() {
+    let base = temp_dir("detach_partition_drop_column");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table idxpart (a int4, b int4, c int4) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(1, "create index on idxpart (c)").unwrap();
+    db.execute(
+        1,
+        "create table idxpart2 partition of idxpart for values from (0) to (100)",
+    )
+    .unwrap();
+    db.execute(1, "alter table idxpart detach partition idxpart2")
+        .unwrap();
+
+    db.execute(1, "alter table idxpart2 drop column c").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attname from pg_attribute \
+             where attrelid = 'idxpart2'::regclass and attnum > 0 and not attisdropped \
+             order by attnum",
+        ),
+        vec![vec![Value::Text("a".into())], vec![Value::Text("b".into())],]
+    );
 }
 
 #[test]

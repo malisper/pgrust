@@ -7,8 +7,7 @@ use crate::backend::executor::expr_reg::{format_regprocedure_oid_optional, forma
 use crate::backend::parser::{parse_type_name, resolve_raw_type_name};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::syscache::{
-    SysCacheId, SysCacheTuple, search_sys_cache_list1_db, search_sys_cache_list2_db,
-    search_sys_cache1_db,
+    SearchSysCache1, SearchSysCacheList1, SearchSysCacheList2, SysCacheId, SysCacheTuple,
 };
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::{
@@ -450,11 +449,11 @@ fn drop_dependents_for_reference(
     txn_ctx: CatalogTxnContext,
     referenced: ObjectAddress,
 ) -> Vec<crate::include::catalog::PgDependRow> {
-    search_sys_cache_list2_db(
+    SearchSysCacheList2(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::DependReference,
+        SysCacheId::DEPENDREFERENCE,
         drop_oid_key(referenced.classid),
         drop_oid_key(referenced.objid),
     )
@@ -476,11 +475,11 @@ fn drop_inheritance_children(
     txn_ctx: CatalogTxnContext,
     parent_oid: u32,
 ) -> Vec<crate::include::catalog::PgInheritsRow> {
-    search_sys_cache_list1_db(
+    SearchSysCacheList1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::InheritsParent,
+        SysCacheId::INHPARENT,
         drop_oid_key(parent_oid),
     )
     .map(|tuples| {
@@ -501,11 +500,11 @@ fn drop_constraint_row_by_oid(
     txn_ctx: CatalogTxnContext,
     oid: u32,
 ) -> Option<PgConstraintRow> {
-    search_sys_cache1_db(
+    SearchSysCache1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::ConstraintOid,
+        SysCacheId::CONSTROID,
         drop_oid_key(oid),
     )
     .ok()?
@@ -522,11 +521,11 @@ fn drop_rewrite_row_by_oid(
     txn_ctx: CatalogTxnContext,
     oid: u32,
 ) -> Option<PgRewriteRow> {
-    search_sys_cache1_db(
+    SearchSysCache1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::RewriteOid,
+        SysCacheId::REWRITEOID,
         drop_oid_key(oid),
     )
     .ok()?

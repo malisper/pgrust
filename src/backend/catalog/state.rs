@@ -1993,7 +1993,7 @@ impl Catalog {
             .get(&name)
             .cloned()
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if old_entry.relkind != 'r' {
+        if !matches!(old_entry.relkind, 'r' | 'p' | 'f') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
         let column_index = relation_column_index(&old_entry.desc, column_name)?;
@@ -2025,7 +2025,7 @@ impl Catalog {
             .get(&name)
             .cloned()
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if old_entry.relkind != 'r' {
+        if !matches!(old_entry.relkind, 'r' | 'p' | 'f') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
         let column_index = old_entry

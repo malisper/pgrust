@@ -2317,6 +2317,8 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::GeoIsClosed
             | BuiltinScalarFunction::GeoHeight
             | BuiltinScalarFunction::GeoWidth
+            | BuiltinScalarFunction::GeoBoxHigh
+            | BuiltinScalarFunction::GeoBoxLow
             | BuiltinScalarFunction::GeoPointX
             | BuiltinScalarFunction::GeoPointY => args.len() == 1,
             BuiltinScalarFunction::GeoBoundBox

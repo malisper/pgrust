@@ -976,6 +976,8 @@ pub enum BuiltinScalarFunction {
     GeoSub,
     GeoMul,
     GeoDiv,
+    GeoBoxHigh,
+    GeoBoxLow,
     GeoPointX,
     GeoPointY,
     RangeConstructor,

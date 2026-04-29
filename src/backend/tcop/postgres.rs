@@ -6233,10 +6233,25 @@ fn psql_index_display_columns(
                             .map(|column| column.name.clone())
                     })
                     .unwrap_or_else(|| format!("column{}", index + 1));
+                let sql_type = base_relation
+                    .as_ref()
+                    .and_then(|relation| {
+                        relation
+                            .desc
+                            .columns
+                            .get((*attnum as usize).saturating_sub(1))
+                            .map(|column| (column.sql_type, column.collation_oid))
+                    })
+                    .or_else(|| {
+                        index_desc
+                            .columns
+                            .get(index)
+                            .map(|column| (column.sql_type, column.collation_oid))
+                    });
                 return PsqlIndexDisplayColumn {
                     display_name: name.clone(),
-                    definition: psql_index_column_definition_with_opclass_options(
-                        index_meta, index, name,
+                    definition: psql_index_column_definition_with_metadata(
+                        db, session, index_meta, index, name, sql_type,
                     ),
                 };
             }
@@ -6263,10 +6278,16 @@ fn psql_index_display_columns(
             }
             PsqlIndexDisplayColumn {
                 display_name: "expr".into(),
-                definition: psql_index_column_definition_with_opclass_options(
+                definition: psql_index_column_definition_with_metadata(
+                    db,
+                    session,
                     index_meta,
                     index,
                     parenthesized_index_expression(&expression_sql),
+                    index_desc
+                        .columns
+                        .get(index)
+                        .map(|column| (column.sql_type, column.collation_oid)),
                 ),
             }
         })
@@ -6413,25 +6434,105 @@ fn split_top_level_commas(input: &str) -> Vec<&str> {
     parts
 }
 
-fn psql_index_column_definition_with_opclass_options(
+fn psql_index_column_definition_with_metadata(
+    db: &Database,
+    session: &Session,
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     index: usize,
-    base: String,
+    mut base: String,
+    column_type_and_collation: Option<(SqlType, u32)>,
 ) -> String {
-    let Some(options) = index_meta
+    if let Some(collation) = psql_index_column_collation_display_name(
+        db,
+        session,
+        index_meta,
+        index,
+        column_type_and_collation,
+    ) {
+        base.push_str(" COLLATE ");
+        base.push_str(&collation);
+    }
+    if let Some(opclass) = psql_index_column_opclass_display_name(
+        db,
+        session,
+        index_meta,
+        index,
+        column_type_and_collation,
+    ) {
+        base.push(' ');
+        base.push_str(&opclass);
+    }
+    if let Some(options) = psql_index_column_opclass_options_display(index_meta, index) {
+        base.push(' ');
+        base.push_str(&options);
+    }
+    base
+}
+
+fn psql_index_column_collation_display_name(
+    db: &Database,
+    session: &Session,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    index: usize,
+    column_type_and_collation: Option<(SqlType, u32)>,
+) -> Option<String> {
+    let collation_oid = *index_meta.indcollation.get(index)?;
+    let column_collation_oid = column_type_and_collation.map(|(_, oid)| oid).unwrap_or(0);
+    if collation_oid == 0
+        || collation_oid == crate::include::catalog::DEFAULT_COLLATION_OID
+        || collation_oid == column_collation_oid
+    {
+        return None;
+    }
+    let _ = (db, session);
+    crate::include::catalog::bootstrap_pg_collation_rows()
+        .into_iter()
+        .find(|row| row.oid == collation_oid)
+        .map(|row| psql_quote_ident_if_needed(&row.collname))
+}
+
+fn psql_index_column_opclass_display_name(
+    db: &Database,
+    session: &Session,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    index: usize,
+    column_type_and_collation: Option<(SqlType, u32)>,
+) -> Option<String> {
+    let opclass_oid = *index_meta.indclass.get(index)?;
+    if opclass_oid == 0 {
+        return None;
+    }
+    if let Some((sql_type, _)) = column_type_and_collation {
+        let type_oid = crate::backend::utils::cache::catcache::sql_type_oid(sql_type);
+        if crate::include::catalog::index_opclass_is_implicit_for_definition(
+            index_meta.am_oid,
+            type_oid,
+            sql_type,
+            opclass_oid,
+            index_meta.indisexclusion,
+        ) && index_meta
+            .indclass_options
+            .get(index)
+            .is_none_or(Vec::is_empty)
+        {
+            return None;
+        }
+    }
+    let _ = (db, session);
+    crate::include::catalog::bootstrap_pg_opclass_rows()
+        .into_iter()
+        .find(|row| row.oid == opclass_oid)
+        .map(|row| psql_quote_ident_if_needed(&row.opcname))
+}
+
+fn psql_index_column_opclass_options_display(
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    index: usize,
+) -> Option<String> {
+    let options = index_meta
         .indclass_options
         .get(index)
-        .filter(|options| !options.is_empty())
-    else {
-        return base;
-    };
-    let Some(opclass_oid) = index_meta.indclass.get(index) else {
-        return base;
-    };
-    let opclass_name = match *opclass_oid {
-        crate::include::catalog::TSVECTOR_GIST_OPCLASS_OID => "tsvector_ops",
-        _ => return base,
-    };
+        .filter(|options| !options.is_empty())?;
     let rendered_options = options
         .iter()
         .map(|(name, value)| {
@@ -6443,7 +6544,7 @@ fn psql_index_column_definition_with_opclass_options(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    format!("{base} {opclass_name} ({rendered_options})")
+    Some(format!("({rendered_options})"))
 }
 
 fn parenthesized_index_expression(expr_sql: &str) -> String {
