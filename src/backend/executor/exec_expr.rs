@@ -1427,6 +1427,35 @@ fn looks_like_function_call(expr: &str) -> bool {
         })
 }
 
+fn format_statistics_expression_text(expr: &str) -> String {
+    let mut out = String::with_capacity(expr.len() + 8);
+    let mut chars = expr.chars().peekable();
+    let mut prev_non_space: Option<char> = None;
+    while let Some(ch) = chars.next() {
+        if matches!(ch, '+' | '*' | '/')
+            || (ch == '-' && statistics_minus_is_binary(prev_non_space))
+        {
+            if !out.ends_with(' ') {
+                out.push(' ');
+            }
+            out.push(ch);
+            if chars.peek().is_some_and(|next| !next.is_whitespace()) {
+                out.push(' ');
+            }
+        } else {
+            out.push(ch);
+        }
+        if !ch.is_whitespace() {
+            prev_non_space = Some(ch);
+        }
+    }
+    out
+}
+
+fn statistics_minus_is_binary(prev_non_space: Option<char>) -> bool {
+    prev_non_space.is_some_and(|ch| !matches!(ch, '(' | '+' | '-' | '*' | '/'))
+}
+
 fn statistics_expression_texts(
     statistics: &crate::include::catalog::PgStatisticExtRow,
 ) -> Vec<String> {
@@ -1473,7 +1502,7 @@ fn statistics_columns_text(
         if looks_like_function_call(&expr) {
             items.push(expr);
         } else {
-            items.push(format!("({expr})"));
+            items.push(format!("({})", format_statistics_expression_text(&expr)));
         }
     }
     Some(items.join(", "))
@@ -2275,7 +2304,19 @@ fn eval_regrole_to_text_function(
 
 fn relation_name_for_regclass_oid(oid: u32, catalog: Option<&dyn CatalogLookup>) -> Option<String> {
     let catalog = catalog?;
-    catalog.class_row_by_oid(oid).map(|row| row.relname)
+    let row = catalog.class_row_by_oid(oid)?;
+    let relname = quote_identifier_if_needed(&row.relname);
+    if row.relnamespace == PG_TOAST_NAMESPACE_OID {
+        let nspname = catalog
+            .namespace_row_by_oid(row.relnamespace)
+            .map(|namespace| namespace.nspname)
+            .unwrap_or_else(|| "pg_toast".into());
+        return Some(format!(
+            "{}.{relname}",
+            quote_identifier_if_needed(&nspname)
+        ));
+    }
+    Some(relname)
 }
 
 fn eval_regclass_to_text_function(
@@ -7347,24 +7388,36 @@ fn eval_bool_expr(
 ) -> Result<Value, ExecError> {
     match bool_expr.boolop {
         BoolExprType::And => {
-            let mut result = Value::Bool(true);
+            let mut saw_null = false;
             for arg in &bool_expr.args {
-                result = eval_and(result, eval_expr(arg, slot, ctx)?)?;
-                if matches!(result, Value::Bool(false)) {
-                    return Ok(result);
+                match eval_expr(arg, slot, ctx)? {
+                    Value::Bool(false) => return Ok(Value::Bool(false)),
+                    Value::Bool(true) => {}
+                    Value::Null => saw_null = true,
+                    other => return Err(ExecError::NonBoolQual(other)),
                 }
             }
-            Ok(result)
+            Ok(if saw_null {
+                Value::Null
+            } else {
+                Value::Bool(true)
+            })
         }
         BoolExprType::Or => {
-            let mut result = Value::Bool(false);
+            let mut saw_null = false;
             for arg in &bool_expr.args {
-                result = eval_or(result, eval_expr(arg, slot, ctx)?)?;
-                if matches!(result, Value::Bool(true)) {
-                    return Ok(result);
+                match eval_expr(arg, slot, ctx)? {
+                    Value::Bool(true) => return Ok(Value::Bool(true)),
+                    Value::Bool(false) => {}
+                    Value::Null => saw_null = true,
+                    other => return Err(ExecError::NonBoolQual(other)),
                 }
             }
-            Ok(result)
+            Ok(if saw_null {
+                Value::Null
+            } else {
+                Value::Bool(false)
+            })
         }
         BoolExprType::Not => match bool_expr.args.as_slice() {
             [inner] => match eval_expr(inner, slot, ctx)? {

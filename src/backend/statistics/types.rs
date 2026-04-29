@@ -114,7 +114,7 @@ pub fn render_pg_ndistinct_text(bytes: &[u8]) -> Result<String, String> {
                 .map(i16::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{{{dims}}}: {}", item.ndistinct)
+            format!("\"{dims}\": {}", item.ndistinct)
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -139,7 +139,7 @@ pub fn render_pg_dependencies_text(bytes: &[u8]) -> Result<String, String> {
                 .map(i16::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{{{from}}} => {{{to}}}: {}", item.degree)
+            format!("\"{from} => {to}\": {:.6}", item.degree)
         })
         .collect::<Vec<_>>()
         .join(", ");

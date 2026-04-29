@@ -49,8 +49,8 @@ use crate::backend::utils::time::timestamp::{
     is_valid_finite_timestamp_usecs, parse_timestamp_text, parse_timestamptz_text,
 };
 use crate::include::catalog::{
-    INT2_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID, UNKNOWN_TYPE_OID, XID8_TYPE_OID,
-    bootstrap_pg_cast_rows, builtin_type_rows, multirange_type_ref_for_sql_type,
+    INT2_TYPE_OID, OID_TYPE_OID, PG_TOAST_NAMESPACE_OID, TEXT_TYPE_OID, UNKNOWN_TYPE_OID,
+    XID8_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows, multirange_type_ref_for_sql_type,
     range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datetime::{
@@ -593,8 +593,24 @@ fn cast_regclass_to_text(
         return Ok(Value::Text("-".into()));
     }
     Ok(catalog
-        .and_then(|catalog| catalog.class_row_by_oid(oid))
-        .map(|row| Value::Text(expr_reg::quote_identifier_if_needed(&row.relname).into()))
+        .and_then(|catalog| {
+            let row = catalog.class_row_by_oid(oid)?;
+            let relname = expr_reg::quote_identifier_if_needed(&row.relname);
+            if row.relnamespace == PG_TOAST_NAMESPACE_OID {
+                let nspname = catalog
+                    .namespace_row_by_oid(row.relnamespace)
+                    .map(|namespace| namespace.nspname)
+                    .unwrap_or_else(|| "pg_toast".into());
+                return Some(Value::Text(
+                    format!(
+                        "{}.{relname}",
+                        expr_reg::quote_identifier_if_needed(&nspname)
+                    )
+                    .into(),
+                ));
+            }
+            Some(Value::Text(relname.into()))
+        })
         .unwrap_or_else(|| Value::Text(oid.to_string().into())))
 }
 
