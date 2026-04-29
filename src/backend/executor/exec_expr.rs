@@ -7611,6 +7611,24 @@ fn eval_bound_tuple_var(
         })
 }
 
+fn whole_row_relation_varno(fields: &[(String, Expr)]) -> Option<usize> {
+    let mut varno = None;
+    for (_, expr) in fields {
+        let Expr::Var(var) = expr else {
+            return None;
+        };
+        if var.varlevelsup != 0 || attrno_index(var.varattno).is_none() {
+            return None;
+        }
+        match varno {
+            Some(existing) if existing != var.varno => return None,
+            Some(_) => {}
+            None => varno = Some(var.varno),
+        }
+    }
+    varno
+}
+
 fn eval_bound_system_var(
     bindings: &[crate::include::nodes::execnodes::SystemVarBinding],
     var: &crate::include::nodes::primnodes::Var,
@@ -7772,15 +7790,33 @@ pub fn eval_expr(
             }
         }
         Expr::Const(value) => Ok(value.clone()),
-        Expr::Row { descriptor, fields } => Ok(Value::Record(
-            crate::include::nodes::datum::RecordValue::from_descriptor(
-                descriptor.clone(),
-                fields
+        Expr::Row { descriptor, fields } => {
+            let values = fields
+                .iter()
+                .map(|(_, expr)| eval_expr(expr, slot, ctx))
+                .collect::<Result<Vec<_>, ExecError>>()?;
+            // :HACK: Whole-row Vars are still represented as Row expressions.  A
+            // null-extended outer-join side expands to all-null attributes, but
+            // PostgreSQL renders the whole-row value as SQL NULL rather than an
+            // all-null composite.  Keep explicit ROW(...) as a composite by
+            // requiring a relation descriptor and a whole-row Var shape.
+            if descriptor.typrelid != 0
+                && values.iter().all(|value| matches!(value, Value::Null))
+                && let Some(varno) = whole_row_relation_varno(fields)
+                && !ctx
+                    .system_bindings
                     .iter()
-                    .map(|(_, expr)| eval_expr(expr, slot, ctx))
-                    .collect::<Result<Vec<_>, ExecError>>()?,
-            ),
-        )),
+                    .any(|binding| binding.varno == varno)
+            {
+                return Ok(Value::Null);
+            }
+            Ok(Value::Record(
+                crate::include::nodes::datum::RecordValue::from_descriptor(
+                    descriptor.clone(),
+                    values,
+                ),
+            ))
+        }
         Expr::FieldSelect { expr, field, .. } => {
             let value = eval_expr(expr, slot, ctx)?;
             eval_record_field(value, field)

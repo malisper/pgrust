@@ -626,6 +626,13 @@ pub struct RangeTblEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableSampleClause {
+    pub method: String,
+    pub args: Vec<Expr>,
+    pub repeatable: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RangeTblEntryKind {
     Result,
     Relation {
@@ -634,6 +641,7 @@ pub enum RangeTblEntryKind {
         relkind: char,
         relispopulated: bool,
         toast: Option<ToastRelationRef>,
+        tablesample: Option<TableSampleClause>,
     },
     Join {
         jointype: JoinType,
@@ -1673,6 +1681,10 @@ pub enum FromItem {
     },
     JsonTable(JsonTableExpr),
     XmlTable(XmlTableExpr),
+    TableSample {
+        source: Box<FromItem>,
+        sample: RawTableSampleClause,
+    },
     Lateral(Box<FromItem>),
     DerivedTable(Box<SelectStatement>),
     Join {
@@ -1687,6 +1699,13 @@ pub enum FromItem {
         column_aliases: AliasColumnSpec,
         preserve_source_names: bool,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawTableSampleClause {
+    pub method: String,
+    pub args: Vec<SqlExpr>,
+    pub repeatable: Option<SqlExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3751,6 +3770,7 @@ pub struct DropIndexStatement {
     pub concurrently: bool,
     pub if_exists: bool,
     pub index_names: Vec<String>,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

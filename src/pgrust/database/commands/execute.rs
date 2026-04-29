@@ -144,7 +144,9 @@ fn reject_restricted_views_in_from_item(
             reject_restricted_views_in_from_item(left, catalog)?;
             reject_restricted_views_in_from_item(right, catalog)
         }
-        FromItem::Alias { source, .. } | FromItem::Lateral(source) => {
+        FromItem::Alias { source, .. }
+        | FromItem::Lateral(source)
+        | FromItem::TableSample { source, .. } => {
             reject_restricted_views_in_from_item(source, catalog)
         }
         FromItem::Values { .. }

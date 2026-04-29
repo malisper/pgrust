@@ -1039,6 +1039,9 @@ fn simplify_bool_expr(
             if args.len() == 1 && !saw_null {
                 return Ok(args.pop().expect("one bool arg"));
             }
+            if and_args_have_contradictory_equalities(&args) {
+                return Ok(Expr::Const(Value::Bool(false)));
+            }
             if saw_null {
                 args.push(Expr::Const(Value::Null));
             }
@@ -1077,6 +1080,39 @@ fn simplify_bool_expr(
                 args,
             })))
         }
+    }
+}
+
+fn and_args_have_contradictory_equalities(args: &[Expr]) -> bool {
+    let mut equalities: Vec<(&Expr, &Value)> = Vec::new();
+    for arg in args {
+        let Some((expr, value)) = equality_to_const(arg) else {
+            continue;
+        };
+        if matches!(value, Value::Null) {
+            continue;
+        }
+        if equalities.iter().any(|(existing_expr, existing_value)| {
+            *existing_expr == expr && *existing_value != value
+        }) {
+            return true;
+        }
+        equalities.push((expr, value));
+    }
+    false
+}
+
+fn equality_to_const(expr: &Expr) -> Option<(&Expr, &Value)> {
+    let Expr::Op(op) = expr else {
+        return None;
+    };
+    if op.op != OpExprKind::Eq || op.args.len() != 2 {
+        return None;
+    }
+    match (&op.args[0], &op.args[1]) {
+        (left, Expr::Const(value)) => Some((left, value)),
+        (Expr::Const(value), right) => Some((right, value)),
+        _ => None,
     }
 }
 

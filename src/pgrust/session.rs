@@ -2192,6 +2192,8 @@ fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
         | "enable_bitmapscan"
         | "enable_hashagg"
         | "enable_sort" => Some("on"),
+        "debug_parallel_query" => Some("off"),
+        "max_parallel_workers_per_gather" => Some("2"),
         _ => None,
     }
 }
@@ -2675,6 +2677,16 @@ impl Session {
                 .get("enable_sort")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
+            force_parallel_gather: self
+                .gucs
+                .get("debug_parallel_query")
+                .map(|value| parse_bool_guc(value).unwrap_or(false))
+                .unwrap_or(false),
+            max_parallel_workers_per_gather: self
+                .gucs
+                .get("max_parallel_workers_per_gather")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(2),
         }
     }
 
@@ -7667,6 +7679,19 @@ impl Session {
                 with_ordinality: *with_ordinality,
             },
             FromItem::JsonTable(_) | FromItem::XmlTable(_) => from.clone(),
+            FromItem::TableSample { source, sample } => {
+                let mut sample = sample.clone();
+                sample.args = Self::substitute_exprs(&sample.args, subst)?;
+                sample.repeatable = sample
+                    .repeatable
+                    .as_ref()
+                    .map(|expr| Self::substitute_sql_expr(expr, subst))
+                    .transpose()?;
+                FromItem::TableSample {
+                    source: Box::new(Self::substitute_from_item(source, subst)?),
+                    sample,
+                }
+            }
             FromItem::Lateral(inner) => {
                 FromItem::Lateral(Box::new(Self::substitute_from_item(inner, subst)?))
             }
@@ -12284,6 +12309,8 @@ impl Session {
                 | "enable_bitmapscan"
                 | "enable_hashagg"
                 | "enable_sort"
+                | "debug_parallel_query"
+                | "max_parallel_workers_per_gather"
                 | "default_text_search_config"
         ) {
             db.plan_cache.invalidate_all();
@@ -14375,8 +14402,14 @@ fn apply_guc_value_to_state(
         | "enable_indexonlyscan"
         | "enable_bitmapscan"
         | "enable_hashagg"
-        | "enable_sort" => {
+        | "enable_sort"
+        | "debug_parallel_query" => {
             parse_bool_guc(value).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
+            })?;
+        }
+        "max_parallel_workers_per_gather" => {
+            value.parse::<usize>().map_err(|_| {
                 ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
             })?;
         }

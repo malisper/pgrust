@@ -5,7 +5,7 @@ use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::parsenodes::{SelectLockingClause, SetOperator};
+use crate::include::nodes::parsenodes::{SelectLockingClause, SetOperator, TableSampleClause};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
     RelationPrivilegeRequirement, SetReturningCall, TargetEntry, ToastRelationRef, WindowClause,
@@ -209,6 +209,7 @@ pub enum Plan {
         relkind: char,
         relispopulated: bool,
         toast: Option<ToastRelationRef>,
+        tablesample: Option<TableSampleClause>,
         desc: RelationDesc,
         disabled: bool,
     },
@@ -281,6 +282,21 @@ pub enum Plan {
         plan_info: PlanEstimate,
         input: Box<Plan>,
         hash_keys: Vec<Expr>,
+    },
+    Materialize {
+        plan_info: PlanEstimate,
+        input: Box<Plan>,
+    },
+    Memoize {
+        plan_info: PlanEstimate,
+        input: Box<Plan>,
+        cache_keys: Vec<Expr>,
+    },
+    Gather {
+        plan_info: PlanEstimate,
+        input: Box<Plan>,
+        workers_planned: usize,
+        single_copy: bool,
     },
     NestedLoopJoin {
         plan_info: PlanEstimate,
@@ -432,6 +448,9 @@ impl Plan {
             | Plan::BitmapOr { plan_info, .. }
             | Plan::BitmapHeapScan { plan_info, .. }
             | Plan::Hash { plan_info, .. }
+            | Plan::Materialize { plan_info, .. }
+            | Plan::Memoize { plan_info, .. }
+            | Plan::Gather { plan_info, .. }
             | Plan::NestedLoopJoin { plan_info, .. }
             | Plan::HashJoin { plan_info, .. }
             | Plan::MergeJoin { plan_info, .. }
@@ -467,6 +486,9 @@ impl Plan {
             | Plan::BitmapOr { plan_info, .. }
             | Plan::BitmapHeapScan { plan_info, .. }
             | Plan::Hash { plan_info, .. }
+            | Plan::Materialize { plan_info, .. }
+            | Plan::Memoize { plan_info, .. }
+            | Plan::Gather { plan_info, .. }
             | Plan::NestedLoopJoin { plan_info, .. }
             | Plan::HashJoin { plan_info, .. }
             | Plan::MergeJoin { plan_info, .. }
@@ -530,7 +552,10 @@ impl Plan {
                     wire_type_oid: None,
                 })
                 .collect(),
-            Plan::Hash { input, .. } => input.columns(),
+            Plan::Hash { input, .. }
+            | Plan::Materialize { input, .. }
+            | Plan::Memoize { input, .. }
+            | Plan::Gather { input, .. } => input.columns(),
             Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
             | Plan::IncrementalSort { input, .. }

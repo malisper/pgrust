@@ -227,7 +227,7 @@ fn expr_contains_tuple_var(expr: &Expr) -> bool {
     }
 }
 
-pub(super) fn relation_may_satisfy_own_partition_bound(
+pub(crate) fn relation_may_satisfy_own_partition_bound(
     catalog: &dyn CatalogLookup,
     relation_oid: u32,
     filter: Option<&Expr>,

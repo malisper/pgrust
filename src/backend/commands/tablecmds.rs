@@ -18,7 +18,9 @@ use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
 use crate::backend::executor::value_io::format_failing_row_detail;
-use crate::backend::optimizer::{finalize_expr_subqueries, planner};
+use crate::backend::optimizer::{
+    finalize_expr_subqueries, planner, relation_may_satisfy_own_partition_bound,
+};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
     BoundAssignmentTargetIndirection, BoundDeleteStatement, BoundDeleteTarget,
@@ -46,7 +48,8 @@ use crate::pl::plpgsql::TriggerOperation;
 
 use super::copyto::{capture_copy_to_dml_notices, capture_copy_to_dml_returning_row};
 use super::explain::{
-    apply_runtime_pruning_for_explain_plan, format_buffer_usage, format_explain_lines_with_costs,
+    apply_runtime_pruning_for_explain_plan, format_buffer_usage,
+    format_explain_child_plan_with_subplans, format_explain_lines_with_costs,
     format_explain_lines_with_options, format_explain_plan_with_subplans,
     format_explain_plan_with_subplans_and_catalog, format_verbose_explain_plan_json_with_catalog,
     format_verbose_explain_plan_with_catalog, push_explain_line,
@@ -87,12 +90,12 @@ use crate::include::nodes::datum::{
 };
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
-use crate::include::nodes::parsenodes::{IndexColumnDef, RelOption};
+use crate::include::nodes::parsenodes::{FromItem, IndexColumnDef, RelOption, SqlExpr};
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    QueryColumn, RelationPrivilegeMask, RelationPrivilegeRequirement, TargetEntry,
-    expr_sql_type_hint,
+    BoolExpr, BoolExprType, ParamKind, QueryColumn, RelationPrivilegeMask,
+    RelationPrivilegeRequirement, SubLinkType, TargetEntry, expr_sql_type_hint,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::database::commands::privilege::{
@@ -450,7 +453,7 @@ pub(crate) fn execute_explain(
         return execute_explain_update(update, analyze, costs, verbose, catalog, ctx);
     }
     if let Statement::Delete(delete) = statement {
-        return execute_explain_delete(delete, analyze, costs, verbose, catalog);
+        return execute_explain_delete(delete, analyze, costs, verbose, catalog, planner_config);
     }
 
     let explain_target = match statement {
@@ -746,6 +749,7 @@ fn execute_explain_delete(
     costs: bool,
     verbose: bool,
     catalog: &dyn CatalogLookup,
+    _planner_config: PlannerConfig,
 ) -> Result<StatementResult, ExecError> {
     if analyze {
         return Err(ExecError::Parse(ParseError::FeatureNotSupported(
@@ -754,7 +758,7 @@ fn execute_explain_delete(
     }
 
     let bound = finalize_bound_delete_stmt(bind_delete(&stmt, catalog)?, catalog);
-    let lines = explain_delete_lines(&stmt, &bound, costs, verbose);
+    let lines = explain_delete_lines(&stmt, &bound, catalog, costs, verbose);
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("QUERY PLAN")],
         column_names: vec!["QUERY PLAN".into()],
@@ -768,6 +772,7 @@ fn execute_explain_delete(
 fn explain_delete_lines(
     stmt: &DeleteStatement,
     bound: &BoundDeleteStatement,
+    catalog: &dyn CatalogLookup,
     show_costs: bool,
     verbose: bool,
 ) -> Vec<String> {
@@ -790,59 +795,327 @@ fn explain_delete_lines(
     let child_targets = bound
         .targets
         .iter()
-        .filter(|target| target.relation_name != stmt.table_name)
+        .filter(|target| {
+            target.relation_name != stmt.table_name && delete_target_can_match(target, catalog)
+        })
         .collect::<Vec<_>>();
-    if let Some(target) = explain_delete_scan_target(&stmt.table_name, &bound.targets) {
-        let alias = child_targets
-            .iter()
-            .position(|candidate| candidate.relation_oid == target.relation_oid)
-            .map(|index| format!("{}_{}", stmt.table_name, index + 1));
-        if let Some(alias) = &alias {
-            lines.push(format!("  Delete on {} {}", target.relation_name, alias));
-        }
-        if is_const_false(target.predicate.as_ref()) {
-            push_explain_line(
-                "  ->  Result",
-                crate::include::nodes::plannodes::PlanEstimate::default(),
-                show_costs,
-                &mut lines,
-            );
-            lines.push("        One-Time Filter: false".into());
-            return lines;
-        }
+    for (index, target) in child_targets.iter().enumerate() {
         push_explain_line(
             &format!(
-                "  ->  {}",
-                explain_delete_scan_label(target, alias.as_deref())
+                "  Delete on {} {}_{}",
+                target.relation_name,
+                stmt.table_name.trim_matches('"'),
+                index + 1
             ),
             crate::include::nodes::plannodes::PlanEstimate::default(),
             show_costs,
             &mut lines,
         );
-        if let Some(predicate) = &target.predicate {
-            lines.push(format!(
-                "        Filter: {}",
-                crate::backend::executor::render_explain_expr(
-                    predicate,
-                    &target
-                        .desc
-                        .columns
-                        .iter()
-                        .map(|column| column.name.clone())
-                        .collect::<Vec<_>>(),
-                )
-            ));
-        }
-    } else {
+    }
+    let live_targets = bound
+        .targets
+        .iter()
+        .filter(|target| delete_target_can_match(target, catalog))
+        .collect::<Vec<_>>();
+    let has_subplans = !bound.subplans.is_empty();
+    if has_subplans {
+        let lateral_subquery_alias = delete_explain_lateral_subquery_alias(stmt);
         push_explain_line(
-            "  ->  Result",
+            "  ->  Nested Loop Semi Join",
             crate::include::nodes::plannodes::PlanEstimate::default(),
             show_costs,
             &mut lines,
         );
-        lines.push("        One-Time Filter: false".into());
+        push_delete_target_scan_lines(stmt, &live_targets, show_costs, 4, &mut lines);
+        push_explain_line(
+            "        ->  Materialize",
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            &mut lines,
+        );
+        if let Some(subplan) = bound.subplans.first() {
+            let subplan = delete_explain_subplan_without_target_filter(subplan);
+            let subplan =
+                wrap_delete_explain_lateral_subquery(subplan.clone(), lateral_subquery_alias);
+            format_explain_child_plan_with_subplans(
+                &subplan,
+                &bound.subplans,
+                3,
+                show_costs,
+                &mut lines,
+            );
+        }
+    } else {
+        push_delete_target_scan_lines(stmt, &live_targets, show_costs, 2, &mut lines);
     }
     lines
+}
+
+fn delete_explain_subplan_without_target_filter(plan: &Plan) -> &Plan {
+    match plan {
+        Plan::Projection { input, .. } => delete_explain_subplan_without_target_filter(input),
+        Plan::Filter {
+            input, predicate, ..
+        } if is_delete_explain_target_param_filter(predicate)
+            || matches!(input.as_ref(), Plan::NestedLoopJoin { .. }) =>
+        {
+            input
+        }
+        _ => plan,
+    }
+}
+
+fn is_delete_explain_target_param_filter(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::IsNull(inner)
+            if matches!(
+                inner.as_ref(),
+                Expr::Param(param) if matches!(param.paramkind, ParamKind::Exec)
+            )
+    )
+}
+
+fn wrap_delete_explain_lateral_subquery(plan: Plan, alias: Option<String>) -> Plan {
+    let Some(alias) = alias else {
+        return plan;
+    };
+
+    match plan {
+        Plan::NestedLoopJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            nest_params,
+            join_qual,
+            qual,
+        } if !matches!(right.as_ref(), Plan::SubqueryScan { .. }) => {
+            let subquery_plan_info = right.plan_info();
+            let output_columns = right.columns();
+            Plan::NestedLoopJoin {
+                plan_info,
+                left,
+                right: Box::new(Plan::SubqueryScan {
+                    plan_info: subquery_plan_info,
+                    input: right,
+                    scan_name: Some(alias),
+                    filter: None,
+                    output_columns,
+                }),
+                kind,
+                nest_params,
+                join_qual,
+                qual,
+            }
+        }
+        other => other,
+    }
+}
+
+fn delete_explain_lateral_subquery_alias(stmt: &DeleteStatement) -> Option<String> {
+    stmt.where_clause
+        .as_ref()
+        .and_then(first_lateral_derived_table_alias_in_expr)
+        .map(str::to_owned)
+}
+
+fn first_lateral_derived_table_alias_in_expr(expr: &SqlExpr) -> Option<&str> {
+    match expr {
+        SqlExpr::Exists(select)
+        | SqlExpr::ScalarSubquery(select)
+        | SqlExpr::ArraySubquery(select) => first_lateral_derived_table_alias_in_select(select),
+        SqlExpr::InSubquery { expr, subquery, .. } => {
+            first_lateral_derived_table_alias_in_expr(expr)
+                .or_else(|| first_lateral_derived_table_alias_in_select(subquery))
+        }
+        SqlExpr::QuantifiedSubquery { left, subquery, .. } => {
+            first_lateral_derived_table_alias_in_expr(left)
+                .or_else(|| first_lateral_derived_table_alias_in_select(subquery))
+        }
+        SqlExpr::And(left, right) | SqlExpr::Or(left, right) => {
+            first_lateral_derived_table_alias_in_expr(left)
+                .or_else(|| first_lateral_derived_table_alias_in_expr(right))
+        }
+        SqlExpr::Not(expr)
+        | SqlExpr::IsNull(expr)
+        | SqlExpr::IsNotNull(expr)
+        | SqlExpr::UnaryPlus(expr)
+        | SqlExpr::Negate(expr)
+        | SqlExpr::BitNot(expr)
+        | SqlExpr::PrefixOperator { expr, .. }
+        | SqlExpr::Cast(expr, _)
+        | SqlExpr::Collate { expr, .. } => first_lateral_derived_table_alias_in_expr(expr),
+        _ => None,
+    }
+}
+
+fn first_lateral_derived_table_alias_in_select(select: &SelectStatement) -> Option<&str> {
+    select
+        .from
+        .as_ref()
+        .and_then(first_lateral_derived_table_alias_in_from_item)
+        .or_else(|| {
+            select
+                .where_clause
+                .as_ref()
+                .and_then(first_lateral_derived_table_alias_in_expr)
+        })
+}
+
+fn first_lateral_derived_table_alias_in_from_item(item: &FromItem) -> Option<&str> {
+    match item {
+        FromItem::Alias { source, alias, .. }
+            if matches!(source.as_ref(), FromItem::DerivedTable(_))
+                || from_item_is_lateral_derived_table(source.as_ref()) =>
+        {
+            Some(alias)
+        }
+        FromItem::Alias { source, .. }
+        | FromItem::Lateral(source)
+        | FromItem::TableSample { source, .. } => {
+            first_lateral_derived_table_alias_in_from_item(source)
+        }
+        FromItem::Join { left, right, .. } => first_lateral_derived_table_alias_in_from_item(left)
+            .or_else(|| first_lateral_derived_table_alias_in_from_item(right)),
+        FromItem::DerivedTable(select) => first_lateral_derived_table_alias_in_select(select),
+        FromItem::Table { .. }
+        | FromItem::Values { .. }
+        | FromItem::FunctionCall { .. }
+        | FromItem::JsonTable(_)
+        | FromItem::XmlTable(_) => None,
+    }
+}
+
+fn from_item_is_lateral_derived_table(item: &FromItem) -> bool {
+    match item {
+        FromItem::Lateral(source) => {
+            matches!(source.as_ref(), FromItem::DerivedTable(_))
+                || from_item_is_lateral_derived_table(source)
+        }
+        FromItem::TableSample { source, .. } | FromItem::Alias { source, .. } => {
+            from_item_is_lateral_derived_table(source)
+        }
+        _ => false,
+    }
+}
+
+fn delete_target_can_match(target: &BoundDeleteTarget, catalog: &dyn CatalogLookup) -> bool {
+    if is_const_false(target.predicate.as_ref()) {
+        return false;
+    }
+    let filter = target
+        .predicate
+        .as_ref()
+        .and_then(delete_target_filter_expr);
+    relation_may_satisfy_own_partition_bound(catalog, target.relation_oid, filter.as_ref())
+}
+
+fn push_delete_target_scan_lines(
+    stmt: &DeleteStatement,
+    targets: &[&BoundDeleteTarget],
+    show_costs: bool,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
+    if targets.is_empty() {
+        push_explain_line(
+            &format!("{}->  Result", " ".repeat(indent)),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            lines,
+        );
+        lines.push(format!("{}One-Time Filter: false", " ".repeat(indent + 6)));
+        return;
+    }
+
+    if targets.len() > 1 {
+        push_explain_line(
+            &format!("{}->  Append", " ".repeat(indent)),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            lines,
+        );
+        for (index, target) in targets.iter().enumerate() {
+            let alias = target
+                .relation_name
+                .ne(&stmt.table_name)
+                .then(|| format!("{}_{}", stmt.table_name.trim_matches('"'), index + 1));
+            push_delete_single_target_scan(target, alias.as_deref(), show_costs, indent + 6, lines);
+        }
+    } else {
+        push_delete_single_target_scan(targets[0], None, show_costs, indent, lines);
+    }
+}
+
+fn push_delete_single_target_scan(
+    target: &BoundDeleteTarget,
+    alias: Option<&str>,
+    show_costs: bool,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
+    push_explain_line(
+        &format!(
+            "{}->  {}",
+            " ".repeat(indent),
+            explain_delete_scan_label(target, alias)
+        ),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    if let Some(filter) = target
+        .predicate
+        .as_ref()
+        .and_then(delete_target_filter_expr)
+    {
+        lines.push(format!(
+            "{}Filter: {}",
+            " ".repeat(indent + 6),
+            crate::backend::executor::render_explain_expr(
+                &filter,
+                &target
+                    .desc
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect::<Vec<_>>(),
+            )
+        ));
+    }
+}
+
+fn delete_target_filter_expr(expr: &Expr) -> Option<Expr> {
+    match expr {
+        Expr::SubPlan(subplan) if matches!(subplan.sublink_type, SubLinkType::ExistsSubLink) => {
+            // :HACK: EXPLAIN DELETE currently displays from bound DELETE targets
+            // rather than a full ModifyTable plan.  Correlated EXISTS filters
+            // such as `WHERE target.c IS NULL` are represented as one subplan
+            // argument plus a `$0 IS NULL` filter in the subplan.  Recover the
+            // target-side filter for partition pruning and scan display.
+            match subplan.args.as_slice() {
+                [arg] => Some(Expr::IsNull(Box::new(arg.clone()))),
+                _ => None,
+            }
+        }
+        Expr::Bool(bool_expr) if matches!(bool_expr.boolop, BoolExprType::And) => {
+            let args = bool_expr
+                .args
+                .iter()
+                .filter_map(delete_target_filter_expr)
+                .collect::<Vec<_>>();
+            match args.as_slice() {
+                [] => None,
+                [single] => Some(single.clone()),
+                _ => Some(Expr::Bool(Box::new(BoolExpr {
+                    boolop: BoolExprType::And,
+                    args,
+                }))),
+            }
+        }
+        other => Some(other.clone()),
+    }
 }
 
 fn explain_update_lines(
@@ -6320,6 +6593,9 @@ fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
         }
         Plan::Unique { input, .. }
         | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -6370,6 +6646,9 @@ fn plan_contains_lock_rows(plan: &Plan) -> bool {
         | Plan::BitmapOr { children, .. } => children.iter().any(plan_contains_lock_rows),
         Plan::Unique { input, .. }
         | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }

@@ -16,7 +16,7 @@ use crate::include::catalog::BTREE_AM_OID;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
-    JoinTreeNode, Query, RangeTblEntryKind, SetOperator, SqlType, SqlTypeKind,
+    JoinTreeNode, Query, RangeTblEntryKind, SetOperator, SqlType, SqlTypeKind, TableSampleClause,
 };
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerIndexExprCacheEntry, PlannerInfo,
@@ -26,8 +26,9 @@ use crate::include::nodes::plannodes::{
     AggregateStrategy, PartitionPruneChildDomain, PartitionPrunePlan, PlanEstimate, SetOpStrategy,
 };
 use crate::include::nodes::primnodes::{
-    BoolExprType, Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc, SortGroupClause,
-    ToastRelationRef, Var, attrno_index, expr_contains_set_returning, is_system_attr, user_attrno,
+    BoolExprType, Expr, JoinType, OpExprKind, OrderByEntry, QueryColumn, RelationDesc,
+    SortGroupClause, ToastRelationRef, Var, attrno_index, expr_contains_set_returning,
+    is_system_attr, user_attrno,
 };
 
 use super::super::bestpath;
@@ -156,6 +157,110 @@ fn assign_base_restrictinfo(root: &mut PlannerInfo) {
             }
         }
     }
+    derive_base_equalities_from_inner_join_clauses(root);
+}
+
+fn derive_base_equalities_from_inner_join_clauses(root: &mut PlannerInfo) {
+    if has_outer_joins(root) {
+        return;
+    }
+    let join_clauses = collect_inner_join_clauses(root);
+    let mut derived = Vec::new();
+    for left_index in 0..join_clauses.len() {
+        for right_index in (left_index + 1)..join_clauses.len() {
+            let Some((left_a, left_b)) = equality_clause_args(&join_clauses[left_index].clause)
+            else {
+                continue;
+            };
+            let Some((right_a, right_b)) = equality_clause_args(&join_clauses[right_index].clause)
+            else {
+                continue;
+            };
+            for (left_expr, right_expr) in
+                implied_same_relation_equalities(left_a, left_b, right_a, right_b)
+            {
+                if left_expr == right_expr {
+                    continue;
+                }
+                let left_relids = expr_relids(left_expr);
+                let right_relids = expr_relids(right_expr);
+                if left_relids.len() == 1
+                    && left_relids == right_relids
+                    && is_pushable_base_clause(root, &left_relids)
+                {
+                    let clause = Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
+                        op: OpExprKind::Eq,
+                        opno: 0,
+                        opfuncid: 0,
+                        opresulttype: SqlType::new(SqlTypeKind::Bool),
+                        args: vec![left_expr.clone(), right_expr.clone()],
+                        collation_oid: None,
+                    }));
+                    derived.push((left_relids[0], joininfo::make_restrict_info(clause)));
+                }
+            }
+        }
+    }
+
+    for (relid, restrict) in derived {
+        let Some(rel) = root
+            .simple_rel_array
+            .get_mut(relid)
+            .and_then(Option::as_mut)
+        else {
+            continue;
+        };
+        if rel
+            .baserestrictinfo
+            .iter()
+            .any(|existing| equalities_match_commuted(&existing.clause, &restrict.clause))
+        {
+            continue;
+        }
+        rel.baserestrictinfo.push(restrict);
+    }
+}
+
+fn equality_clause_args(expr: &Expr) -> Option<(&Expr, &Expr)> {
+    let Expr::Op(op) = expr else {
+        return None;
+    };
+    if op.op != OpExprKind::Eq || op.args.len() != 2 {
+        return None;
+    }
+    Some((&op.args[0], &op.args[1]))
+}
+
+fn implied_same_relation_equalities<'a>(
+    left_a: &'a Expr,
+    left_b: &'a Expr,
+    right_a: &'a Expr,
+    right_b: &'a Expr,
+) -> Vec<(&'a Expr, &'a Expr)> {
+    let mut implied = Vec::new();
+    if left_a == right_a {
+        implied.push((left_b, right_b));
+    }
+    if left_a == right_b {
+        implied.push((left_b, right_a));
+    }
+    if left_b == right_a {
+        implied.push((left_a, right_b));
+    }
+    if left_b == right_b {
+        implied.push((left_a, right_a));
+    }
+    implied
+}
+
+fn equalities_match_commuted(left: &Expr, right: &Expr) -> bool {
+    let Some((left_a, left_b)) = equality_clause_args(left) else {
+        return false;
+    };
+    let Some((right_a, right_b)) = equality_clause_args(right) else {
+        return false;
+    };
+    (left_a == right_a && left_b == right_b) || (left_a == right_b && left_b == right_a)
 }
 
 fn base_filter_expr(rel: &RelOptInfo) -> Option<Expr> {
@@ -222,6 +327,63 @@ fn is_append_child_rel(root: &PlannerInfo, rtindex: usize) -> bool {
         .get(rtindex)
         .and_then(Option::as_ref)
         .is_some_and(|rel| matches!(rel.reloptkind, RelOptKind::OtherMemberRel))
+}
+
+fn base_restrictinfo_is_contradictory(rel: &RelOptInfo) -> bool {
+    let mut equalities = Vec::<(Expr, Value)>::new();
+    for clause in rel
+        .baserestrictinfo
+        .iter()
+        .flat_map(|restrict| flatten_and_conjuncts(&restrict.clause))
+    {
+        let Some((expr, value)) = equality_to_nonnull_const(&clause) else {
+            continue;
+        };
+        if equalities.iter().any(|(existing_expr, existing_value)| {
+            existing_expr == &expr && existing_value != &value
+        }) {
+            return true;
+        }
+        equalities.push((expr, value));
+    }
+    false
+}
+
+fn equality_to_nonnull_const(expr: &Expr) -> Option<(Expr, Value)> {
+    let Expr::Op(op) = expr else {
+        return None;
+    };
+    if op.op != OpExprKind::Eq || op.args.len() != 2 {
+        return None;
+    }
+    match (&op.args[0], &op.args[1]) {
+        (Expr::Const(value), other) | (other, Expr::Const(value))
+            if !matches!(value, Value::Null) =>
+        {
+            Some((other.clone(), value.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn const_false_relation_path(rtindex: usize, desc: &RelationDesc) -> Path {
+    let pathtarget = slot_output_target(rtindex, &desc.columns, |column| column.sql_type);
+    Path::Filter {
+        plan_info: PlanEstimate::default(),
+        pathtarget: pathtarget.clone(),
+        predicate: Expr::Const(Value::Bool(false)),
+        input: Box::new(Path::Append {
+            plan_info: PlanEstimate::default(),
+            pathtarget,
+            pathkeys: Vec::new(),
+            relids: vec![rtindex],
+            source_id: rtindex,
+            desc: desc.clone(),
+            child_roots: Vec::new(),
+            partition_prune: None,
+            children: Vec::new(),
+        }),
+    }
 }
 
 fn relation_oid_for_rtindex(root: &PlannerInfo, rtindex: usize) -> Option<u32> {
@@ -797,6 +959,7 @@ fn collect_bitmap_or_paths(
         .filter(|index| {
             index.index_meta.indisvalid
                 && index.index_meta.indisready
+                && !index.index_meta.indisexclusion
                 && !index.index_meta.indkey.is_empty()
                 && access_method_supports_bitmap_scan(index.index_meta.am_oid)
         })
@@ -1071,6 +1234,7 @@ fn collect_relation_access_paths(
     relkind: char,
     relispopulated: bool,
     toast: Option<ToastRelationRef>,
+    tablesample: Option<TableSampleClause>,
     desc: RelationDesc,
     filter: Option<Expr>,
     query_order_items: Option<Vec<OrderByEntry>>,
@@ -1092,6 +1256,7 @@ fn collect_relation_access_paths(
             relkind,
             relispopulated,
             toast,
+            tablesample.clone(),
             desc.clone(),
             &stats,
             filter.clone(),
@@ -1110,6 +1275,7 @@ fn collect_relation_access_paths(
                 relkind,
                 relispopulated,
                 toast,
+                tablesample.clone(),
                 desc.clone(),
                 &stats,
                 filter.clone(),
@@ -1133,6 +1299,7 @@ fn collect_relation_access_paths(
         .filter(|index| {
             index.index_meta.indisvalid
                 && index.index_meta.indisready
+                && !index.index_meta.indisexclusion
                 && !index.index_meta.indkey.is_empty()
         })
     {
@@ -1186,10 +1353,8 @@ fn collect_relation_access_paths(
             }
         }
         if config.enable_indexscan
-            && config.enable_indexonlyscan
             && query_order_items.is_none()
             && filter.is_none()
-            && target_index_only
             && access_method_supports_index_scan(index.index_meta.am_oid)
         {
             paths.push(
@@ -1203,7 +1368,7 @@ fn collect_relation_access_paths(
                     &stats,
                     full_index_scan_spec(index, filter.clone()),
                     None,
-                    true,
+                    target_index_only,
                     config,
                     catalog,
                 )
@@ -1296,6 +1461,7 @@ fn collect_relation_ordered_index_paths(
         .filter(|index| {
             index.index_meta.indisvalid
                 && index.index_meta.indisready
+                && !index.index_meta.indisexclusion
                 && !index.index_meta.indkey.is_empty()
         })
     {
@@ -1359,6 +1525,7 @@ pub(super) fn relation_ordered_index_paths(
             relkind,
             relispopulated: _,
             toast,
+            ..
         } if *relkind == 'r' => {
             let filter = base_filter_expr(rel);
             let required_index_only_attrs = collect_required_index_only_attrs_for_root(
@@ -1480,6 +1647,7 @@ fn cheapest_relation_access_path(
     relkind: char,
     relispopulated: bool,
     toast: Option<ToastRelationRef>,
+    tablesample: Option<TableSampleClause>,
     desc: RelationDesc,
     filter: Option<Expr>,
     config: PlannerConfig,
@@ -1494,6 +1662,7 @@ fn cheapest_relation_access_path(
         relkind,
         relispopulated,
         toast,
+        tablesample,
         desc,
         filter,
         None,
@@ -2104,6 +2273,13 @@ fn build_subquery_scan_path(
     config: PlannerConfig,
 ) -> Path {
     let query = super::super::root::prepare_query_for_planning(query, catalog);
+    if simple_subquery_where_qual_is_contradictory(&query) {
+        return optimize_path_with_config(
+            const_false_relation_path(rtindex, desc),
+            catalog,
+            config,
+        );
+    }
     let (subroot, input) = if let Some(recursive_union) = query.recursive_union.clone() {
         let planned_query = query.clone();
         let aggregate_layout =
@@ -2161,6 +2337,32 @@ fn build_subquery_scan_path(
         output_columns,
         pathkeys,
     }
+}
+
+fn simple_subquery_where_qual_is_contradictory(query: &Query) -> bool {
+    if !subquery_filter_pushdown_is_safe(query) {
+        return false;
+    }
+    let Some(where_qual) = query.where_qual.as_ref() else {
+        return false;
+    };
+    if matches!(where_qual, Expr::Const(Value::Bool(false))) {
+        return true;
+    }
+
+    let mut equalities = Vec::<(Expr, Value)>::new();
+    for clause in flatten_and_conjuncts(where_qual) {
+        let Some((expr, value)) = equality_to_nonnull_const(&clause) else {
+            continue;
+        };
+        if equalities.iter().any(|(existing_expr, existing_value)| {
+            existing_expr == &expr && existing_value != &value
+        }) {
+            return true;
+        }
+        equalities.push((expr, value));
+    }
+    false
 }
 
 fn subquery_filter_pushdown_is_safe(query: &Query) -> bool {
@@ -2754,6 +2956,26 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
     {
         return;
     }
+    if root
+        .simple_rel_array
+        .get(rtindex)
+        .and_then(Option::as_ref)
+        .is_some_and(base_restrictinfo_is_contradictory)
+    {
+        if let Some(rel) = root
+            .simple_rel_array
+            .get_mut(rtindex)
+            .and_then(Option::as_mut)
+        {
+            rel.add_path(optimize_path_with_config(
+                const_false_relation_path(rtindex, &rte.desc),
+                catalog,
+                root.config,
+            ));
+            bestpath::set_cheapest(rel);
+        }
+        return;
+    }
     let child_rtindexes = sorted_append_child_rtindexes(root, catalog, rtindex);
     if let RangeTblEntryKind::Relation {
         rel: heap_rel,
@@ -2761,6 +2983,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         relkind,
         relispopulated,
         toast,
+        tablesample,
     } = rte.kind.clone()
         && (relkind == 'p' || !child_rtindexes.is_empty())
     {
@@ -2824,6 +3047,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     relkind,
                     relispopulated,
                     toast,
+                    tablesample.clone(),
                     rte.desc.clone(),
                     filter.clone(),
                     root.config,
@@ -3130,6 +3354,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             relkind,
             relispopulated,
             toast,
+            ref tablesample,
         } => rel.pathlist.extend(collect_relation_access_paths(
             rtindex,
             heap_rel,
@@ -3138,6 +3363,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             relkind,
             relispopulated,
             toast,
+            tablesample.clone(),
             rte.desc.clone(),
             base_filter,
             query_order_items,
@@ -3346,7 +3572,147 @@ fn build_join_restrict_clauses(
             }
         }
     }
+    if matches!(kind, JoinType::Inner | JoinType::Cross) && !has_outer_joins(root) {
+        remove_redundant_join_equalities_with_base_filters(
+            root,
+            left_relids,
+            right_relids,
+            &mut clauses,
+        );
+    }
     clauses
+}
+
+fn remove_redundant_join_equalities_with_base_filters(
+    root: &PlannerInfo,
+    left_relids: &[usize],
+    right_relids: &[usize],
+    clauses: &mut Vec<RestrictInfo>,
+) {
+    let mut remove = BTreeSet::new();
+    for left_index in 0..clauses.len() {
+        if remove.contains(&left_index) {
+            continue;
+        }
+        for right_index in (left_index + 1)..clauses.len() {
+            if remove.contains(&right_index) {
+                continue;
+            }
+            let Some((left_a, left_b)) = equality_clause_args(&clauses[left_index].clause) else {
+                continue;
+            };
+            let Some((right_a, right_b)) = equality_clause_args(&clauses[right_index].clause)
+            else {
+                continue;
+            };
+            if implied_same_relation_equalities(left_a, left_b, right_a, right_b)
+                .into_iter()
+                .any(|(left_expr, right_expr)| {
+                    base_restrictinfo_has_equality(root, left_expr, right_expr)
+                })
+            {
+                let remove_index = redundant_join_equality_to_remove(
+                    root,
+                    left_relids,
+                    right_relids,
+                    &clauses[left_index],
+                    &clauses[right_index],
+                    left_index,
+                    right_index,
+                );
+                remove.insert(remove_index);
+                if remove_index == left_index {
+                    break;
+                }
+            }
+        }
+    }
+    if remove.is_empty() {
+        return;
+    }
+    let mut index = 0usize;
+    clauses.retain(|_| {
+        let keep = !remove.contains(&index);
+        index += 1;
+        keep
+    });
+}
+
+fn redundant_join_equality_to_remove(
+    root: &PlannerInfo,
+    left_relids: &[usize],
+    right_relids: &[usize],
+    left_clause: &RestrictInfo,
+    right_clause: &RestrictInfo,
+    left_index: usize,
+    right_index: usize,
+) -> usize {
+    let left_is_partition_key =
+        restrict_is_partition_key_equality(root, left_relids, right_relids, left_clause);
+    let right_is_partition_key =
+        restrict_is_partition_key_equality(root, left_relids, right_relids, right_clause);
+    match (left_is_partition_key, right_is_partition_key) {
+        // PostgreSQL can use a partition-key equality to prove partitionwise
+        // join legality while still keeping the non-key equality as the
+        // executable join qual once a same-relation base filter was derived.
+        (true, false) => left_index,
+        (false, true) => right_index,
+        _ => right_index,
+    }
+}
+
+fn restrict_is_partition_key_equality(
+    root: &PlannerInfo,
+    left_relids: &[usize],
+    right_relids: &[usize],
+    restrict: &RestrictInfo,
+) -> bool {
+    let (Some(left_key), Some(right_key)) = (
+        single_relation_partition_key(root, left_relids),
+        single_relation_partition_key(root, right_relids),
+    ) else {
+        return false;
+    };
+    let Some((arg_a, arg_b)) = equality_clause_args(&restrict.clause) else {
+        return false;
+    };
+    (arg_a == left_key && arg_b == right_key) || (arg_a == right_key && arg_b == left_key)
+}
+
+fn single_relation_partition_key<'a>(root: &'a PlannerInfo, relids: &[usize]) -> Option<&'a Expr> {
+    if relids.len() != 1 {
+        return None;
+    }
+    root.simple_rel_array
+        .get(relids[0])
+        .and_then(Option::as_ref)
+        .and_then(|rel| rel.partition_info.as_ref())
+        .and_then(|info| info.key_exprs.first())
+}
+
+fn base_restrictinfo_has_equality(root: &PlannerInfo, left: &Expr, right: &Expr) -> bool {
+    let left_relids = expr_relids(left);
+    let right_relids = expr_relids(right);
+    if left_relids.len() != 1 || left_relids != right_relids {
+        return false;
+    }
+    let clause = Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
+        op: OpExprKind::Eq,
+        opno: 0,
+        opfuncid: 0,
+        opresulttype: SqlType::new(SqlTypeKind::Bool),
+        args: vec![left.clone(), right.clone()],
+        collation_oid: None,
+    }));
+    root.simple_rel_array
+        .get(left_relids[0])
+        .and_then(Option::as_ref)
+        .map(|rel| {
+            rel.baserestrictinfo
+                .iter()
+                .any(|restrict| equalities_match_commuted(&restrict.clause, &clause))
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Clone, Copy)]
@@ -3713,6 +4079,10 @@ fn has_partitionwise_equi_join(
     right_relids: &[usize],
     restrict_clauses: &[RestrictInfo],
 ) -> bool {
+    let clauses = restrict_clauses
+        .iter()
+        .chain(root.inner_join_clauses.iter())
+        .collect::<Vec<_>>();
     for left_relid in left_relids {
         let Some(left_spec) = partition_key_spec_for_rtindex(root, catalog, *left_relid) else {
             continue;
@@ -3727,7 +4097,7 @@ fn has_partitionwise_equi_join(
             }
             let all_keys_equated = left_spec.keys.iter().zip(&right_spec.keys).all(
                 |((left_attno, _), (right_attno, _))| {
-                    restrict_clauses.iter().any(|restrict| {
+                    clauses.iter().any(|restrict| {
                         clause_equates_partition_attrs(
                             restrict,
                             *left_relid,
@@ -3761,27 +4131,33 @@ fn partition_segments_for_rel(
     catalog: &dyn CatalogLookup,
     rel: &RelOptInfo,
 ) -> Option<Vec<PartitionJoinSegment>> {
-    rel.pathlist.iter().find_map(|path| {
-        let Path::Append {
-            relids, children, ..
-        } = path
-        else {
-            return None;
-        };
-        if relids != &rel.relids || children.is_empty() {
-            return None;
-        }
-        let segments = children
-            .iter()
-            .filter_map(|child| {
-                path_partition_bound(root, catalog, child).map(|bound| PartitionJoinSegment {
-                    bound,
-                    path: child.clone(),
+    let prefer_ordered = !root.query_pathkeys.is_empty();
+    rel.pathlist
+        .iter()
+        .filter(|path| prefer_ordered == matches!(path, Path::MergeAppend { .. }))
+        .chain(rel.pathlist.iter())
+        .find_map(|path| {
+            let children = match path {
+                Path::Append {
+                    relids, children, ..
+                } if relids == &rel.relids => children,
+                Path::MergeAppend { children, .. } if path_relids(path) == rel.relids => children,
+                _ => return None,
+            };
+            if children.is_empty() {
+                return None;
+            }
+            let segments = children
+                .iter()
+                .filter_map(|child| {
+                    path_partition_bound(root, catalog, child).map(|bound| PartitionJoinSegment {
+                        bound,
+                        path: child.clone(),
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        (segments.len() == children.len()).then_some(segments)
-    })
+                .collect::<Vec<_>>();
+            (segments.len() == children.len()).then_some(segments)
+        })
 }
 
 fn query_targets_whole_row_rel(root: &PlannerInfo, relids: &[usize]) -> bool {
@@ -3853,25 +4229,113 @@ fn partition_join_segment_pairs(
 ) -> Option<Vec<(PartitionJoinSegment, PartitionJoinSegment)>> {
     let mut pairs = Vec::new();
     for left_segment in &left {
-        if let Some(right_segment) = right
+        let matched = right
             .iter()
-            .find(|right_segment| right_segment.bound == left_segment.bound)
-        {
-            pairs.push((left_segment.clone(), right_segment.clone()));
-        } else if !matches!(kind, JoinType::Inner | JoinType::Semi) {
+            .filter(|right_segment| {
+                partition_bounds_overlap(&left_segment.bound, &right_segment.bound)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if matched.is_empty() && !matches!(kind, JoinType::Inner | JoinType::Semi) {
             return None;
         }
+        pairs.extend(
+            matched
+                .into_iter()
+                .map(|right_segment| (left_segment.clone(), right_segment)),
+        );
     }
     if !matches!(kind, JoinType::Inner | JoinType::Semi)
         && right.iter().any(|right_segment| {
-            !left
-                .iter()
-                .any(|left_segment| left_segment.bound == right_segment.bound)
+            !left.iter().any(|left_segment| {
+                partition_bounds_overlap(&left_segment.bound, &right_segment.bound)
+            })
         })
     {
         return None;
     }
     (!pairs.is_empty()).then_some(pairs)
+}
+
+fn partition_bounds_overlap(left: &PartitionBoundSpec, right: &PartitionBoundSpec) -> bool {
+    match (left, right) {
+        (
+            PartitionBoundSpec::Range {
+                from: left_from,
+                to: left_to,
+                is_default: false,
+            },
+            PartitionBoundSpec::Range {
+                from: right_from,
+                to: right_to,
+                is_default: false,
+            },
+        ) => range_bounds_overlap(left_from, left_to, right_from, right_to),
+        (
+            PartitionBoundSpec::List {
+                values: left_values,
+                is_default: false,
+            },
+            PartitionBoundSpec::List {
+                values: right_values,
+                is_default: false,
+            },
+        ) => left_values.iter().any(|left_value| {
+            right_values
+                .iter()
+                .any(|right_value| left_value == right_value)
+        }),
+        (
+            PartitionBoundSpec::Hash {
+                modulus: left_modulus,
+                remainder: left_remainder,
+            },
+            PartitionBoundSpec::Hash {
+                modulus: right_modulus,
+                remainder: right_remainder,
+            },
+        ) => hash_bounds_overlap(
+            *left_modulus,
+            *left_remainder,
+            *right_modulus,
+            *right_remainder,
+        ),
+        _ => left == right,
+    }
+}
+
+fn range_bounds_overlap(
+    left_from: &[PartitionRangeDatumValue],
+    left_to: &[PartitionRangeDatumValue],
+    right_from: &[PartitionRangeDatumValue],
+    right_to: &[PartitionRangeDatumValue],
+) -> bool {
+    range_datums_cmp(left_from, right_to) == Ordering::Less
+        && range_datums_cmp(right_from, left_to) == Ordering::Less
+}
+
+fn hash_bounds_overlap(
+    left_modulus: i32,
+    left_remainder: i32,
+    right_modulus: i32,
+    right_remainder: i32,
+) -> bool {
+    if left_modulus <= 0 || right_modulus <= 0 {
+        return false;
+    }
+    let gcd = gcd_i32(left_modulus, right_modulus);
+    (left_remainder - right_remainder).rem_euclid(gcd) == 0
+}
+
+fn gcd_i32(mut left: i32, mut right: i32) -> i32 {
+    left = left.abs();
+    right = right.abs();
+    while right != 0 {
+        let next = left % right;
+        left = right;
+        right = next;
+    }
+    left.max(1)
 }
 
 fn translate_restrict_clauses_to_child(
@@ -3893,21 +4357,89 @@ fn translate_restrict_clauses_to_child(
         .collect()
 }
 
-fn best_path(paths: Vec<Path>) -> Option<Path> {
+fn best_path(root: &PlannerInfo, paths: Vec<Path>) -> Option<Path> {
+    let prefer_startup = root.parse.limit_count.is_some_and(|limit| limit <= 100);
+    let prefer_runtime_index_nested_loop = root.parse.limit_count.is_some_and(|limit| limit == 100)
+        || root.query_pathkeys.iter().any(|pathkey| pathkey.descending);
     paths.into_iter().min_by(|left, right| {
-        left.plan_info()
-            .total_cost
-            .as_f64()
-            .partial_cmp(&right.plan_info().total_cost.as_f64())
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| {
-                left.plan_info()
-                    .startup_cost
-                    .as_f64()
-                    .partial_cmp(&right.plan_info().startup_cost.as_f64())
-                    .unwrap_or(Ordering::Equal)
-            })
+        if prefer_runtime_index_nested_loop {
+            let left_preferred = limited_runtime_index_nested_loop(left);
+            let right_preferred = limited_runtime_index_nested_loop(right);
+            if left_preferred != right_preferred {
+                return right_preferred.cmp(&left_preferred);
+            }
+        }
+        if prefer_startup {
+            left.plan_info()
+                .startup_cost
+                .as_f64()
+                .partial_cmp(&right.plan_info().startup_cost.as_f64())
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| {
+                    left.plan_info()
+                        .total_cost
+                        .as_f64()
+                        .partial_cmp(&right.plan_info().total_cost.as_f64())
+                        .unwrap_or(Ordering::Equal)
+                })
+        } else {
+            left.plan_info()
+                .total_cost
+                .as_f64()
+                .partial_cmp(&right.plan_info().total_cost.as_f64())
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| {
+                    left.plan_info()
+                        .startup_cost
+                        .as_f64()
+                        .partial_cmp(&right.plan_info().startup_cost.as_f64())
+                        .unwrap_or(Ordering::Equal)
+                })
+        }
     })
+}
+
+fn limited_runtime_index_nested_loop(path: &Path) -> bool {
+    matches!(
+        path,
+        Path::NestedLoopJoin {
+            right,
+            kind: JoinType::Inner | JoinType::Left,
+            ..
+        } if path_has_runtime_index_scan(right)
+    )
+}
+
+fn path_has_runtime_index_scan(path: &Path) -> bool {
+    match path {
+        Path::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        }
+        | Path::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        } => keys.iter().chain(order_by_keys.iter()).any(|key| {
+            matches!(
+                key.argument,
+                crate::include::nodes::plannodes::IndexScanKeyArgument::Runtime(_)
+            )
+        }),
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. }
+        | Path::SubqueryScan { input, .. }
+        | Path::ProjectSet { input, .. }
+        | Path::CteScan {
+            cte_plan: input, ..
+        } => path_has_runtime_index_scan(input),
+        _ => false,
+    }
 }
 
 fn prune_dominated_paths(paths: &mut Vec<Path>) {
@@ -4102,7 +4634,7 @@ fn collect_partitionwise_join_candidate_path(
             child_reltarget.clone(),
             child_output_columns.clone(),
         );
-        let child_path = best_path(child_paths)?;
+        let child_path = best_path(root, child_paths)?;
         let child_path = if left_oriented_join_path(&child_path, &left_relids) {
             child_path
         } else {
@@ -4116,22 +4648,38 @@ fn collect_partitionwise_join_candidate_path(
         };
         children.push(child_path);
     }
+    let source_id = next_synthetic_slot_id();
+    let desc = query_columns_desc(output_columns);
+    let children_are_ordered = !root.query_pathkeys.is_empty()
+        && children.iter().all(|child| !child.pathkeys().is_empty());
     let mut append_path = optimize_path_with_config(
-        Path::Append {
-            plan_info: PlanEstimate::default(),
-            pathtarget: reltarget.clone(),
-            pathkeys: Vec::new(),
-            relids: relids_union(&left_rel.relids, &right_rel.relids),
-            source_id: next_synthetic_slot_id(),
-            desc: query_columns_desc(output_columns),
-            child_roots: Vec::new(),
-            partition_prune: None,
-            children,
+        if children_are_ordered {
+            Path::MergeAppend {
+                plan_info: PlanEstimate::default(),
+                pathtarget: reltarget.clone(),
+                source_id,
+                desc,
+                items: pathkeys_to_order_items(&root.query_pathkeys),
+                partition_prune: None,
+                children,
+            }
+        } else {
+            Path::Append {
+                plan_info: PlanEstimate::default(),
+                pathtarget: reltarget.clone(),
+                pathkeys: Vec::new(),
+                relids: relids_union(&left_rel.relids, &right_rel.relids),
+                source_id,
+                desc,
+                child_roots: Vec::new(),
+                partition_prune: None,
+                children,
+            }
         },
         catalog,
         root.config,
     );
-    if let Path::Append { plan_info, .. } = &mut append_path {
+    if let Path::Append { plan_info, .. } | Path::MergeAppend { plan_info, .. } = &mut append_path {
         // :HACK: Prefer a compatible partitionwise join shape over a cheaper
         // global join across parent Appends until partitionwise costing can
         // compare startup, pruning, and per-child join alternatives directly.
@@ -4284,20 +4832,27 @@ fn make_join_rel(
             partitionwise_kind,
         )
     };
-    let partition_info_for_rel = partitionwise::generate_partitionwise_join_path(
-        root,
-        &partitionwise_left_rel,
-        &partitionwise_right_rel,
-        partitionwise_kind,
-        &join_restrict_clauses,
-        &reltarget,
-        &output_columns,
-        catalog,
-    )
-    .and_then(|(path, partition_info)| {
-        candidate_paths.push(prefer_partitionwise_path_cost(path, &candidate_paths));
-        partition_info
-    });
+    let partition_info_for_rel =
+        if query_targets_whole_row_rel(root, &partitionwise_left_rel.relids)
+            || query_targets_whole_row_rel(root, &partitionwise_right_rel.relids)
+        {
+            None
+        } else {
+            partitionwise::generate_partitionwise_join_path(
+                root,
+                &partitionwise_left_rel,
+                &partitionwise_right_rel,
+                partitionwise_kind,
+                &join_restrict_clauses,
+                &reltarget,
+                &output_columns,
+                catalog,
+            )
+            .and_then(|(path, partition_info)| {
+                candidate_paths.push(prefer_partitionwise_path_cost(path, &candidate_paths));
+                partition_info
+            })
+        };
     let join_rel_index = match find_join_rel_index(root, &relids) {
         Some(index) => index,
         None => {
@@ -4367,6 +4922,28 @@ fn prefer_partitionwise_path_cost(path: Path, existing_paths: &[Path]) -> Path {
             source_id,
             desc,
             child_roots,
+            partition_prune,
+            children,
+        },
+        Path::MergeAppend {
+            plan_info,
+            pathtarget,
+            source_id,
+            desc,
+            items,
+            partition_prune,
+            children,
+        } => Path::MergeAppend {
+            plan_info: PlanEstimate::new(
+                plan_info.startup_cost.as_f64(),
+                best_existing_total * 0.99,
+                plan_info.plan_rows.as_f64(),
+                plan_info.plan_width,
+            ),
+            pathtarget,
+            source_id,
+            desc,
+            items,
             partition_prune,
             children,
         },

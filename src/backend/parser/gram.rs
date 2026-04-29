@@ -17878,6 +17878,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             let mut source = None;
             let mut alias = None;
             let mut column_aliases = AliasColumnSpec::None;
+            let mut sample = None;
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::only_table_from_item
@@ -17898,23 +17899,31 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                         }
                         column_aliases = parsed_column_aliases;
                     }
+                    Rule::table_sample_clause => {
+                        sample = Some(build_table_sample_clause(part)?);
+                    }
                     _ => {}
                 }
             }
-            let item = source.ok_or(ParseError::UnexpectedEof)?;
+            let mut item = source.ok_or(ParseError::UnexpectedEof)?;
             if alias.is_none() && !column_aliases.is_empty() {
                 alias = default_alias_for_column_definition_source(&item);
             }
             if let Some(alias) = alias {
-                Ok(FromItem::Alias {
+                item = FromItem::Alias {
                     source: Box::new(item),
                     alias,
                     column_aliases,
                     preserve_source_names: false,
-                })
-            } else {
-                Ok(item)
+                };
             }
+            if let Some(sample) = sample {
+                item = FromItem::TableSample {
+                    source: Box::new(item),
+                    sample,
+                };
+            }
+            Ok(item)
         }
         Rule::only_table_from_item => Ok(FromItem::Table {
             name: build_identifier(
@@ -17977,6 +17986,34 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             actual: raw,
         }),
     }
+}
+
+fn build_table_sample_clause(pair: Pair<'_, Rule>) -> Result<RawTableSampleClause, ParseError> {
+    let mut method = None;
+    let mut args = Vec::new();
+    let mut repeatable = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => {
+                method = Some(build_identifier(part));
+            }
+            Rule::expr_list => {
+                args = part
+                    .into_inner()
+                    .map(build_expr)
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            Rule::expr => {
+                repeatable = Some(build_expr(part)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(RawTableSampleClause {
+        method: method.ok_or(ParseError::UnexpectedEof)?,
+        args,
+        repeatable,
+    })
 }
 
 fn build_qualified_srf_name(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
@@ -21167,11 +21204,13 @@ fn build_drop_index(pair: Pair<'_, Rule>) -> Result<DropIndexStatement, ParseErr
     let concurrently = raw.split_ascii_whitespace().nth(2) == Some("concurrently");
     let mut if_exists = false;
     let mut index_names = Vec::new();
+    let mut cascade = false;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::if_exists_clause => if_exists = true,
             Rule::ident_list => index_names.extend(part.into_inner().map(build_identifier)),
             Rule::identifier => index_names.push(build_identifier(part)),
+            Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
             _ => {}
         }
     }
@@ -21182,6 +21221,7 @@ fn build_drop_index(pair: Pair<'_, Rule>) -> Result<DropIndexStatement, ParseErr
         concurrently,
         if_exists,
         index_names,
+        cascade,
     })
 }
 
