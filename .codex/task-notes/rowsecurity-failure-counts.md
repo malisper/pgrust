@@ -632,3 +632,19 @@ psql permissions visibility bucket:
 - Latest rowsecurity regression result with the requested 120s timeout:
   `721/774` matched, `53` mismatches, `949` diff lines, `50` hunks. New diff
   copied to `/tmp/diffs/rowsecurity.diff`.
+
+psql FK describe visibility bucket:
+- Foreign-key constraint definitions now render referenced relation names under
+  the active session search path, so `REFERENCES category(cid)` is used when the
+  referenced table is visible instead of always qualifying with the schema.
+- Added focused coverage for a foreign key inside a non-public schema with
+  `search_path` set to that schema.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  psql_describe_foreign_key_uses_visible_referenced_name` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  psql_describe_constraint_query` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `721/774` matched, `53` mismatches, `945` diff lines, `50` hunks. New diff
+  copied to `/tmp/diffs/rowsecurity.diff`.

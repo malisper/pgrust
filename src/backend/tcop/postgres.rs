@@ -7833,10 +7833,11 @@ fn foreign_key_constraint_def(
         .collect::<Option<Vec<_>>>()?;
     let referenced_relation =
         db.describe_relation_by_oid(session.client_id, session.catalog_txn_ctx(), row.confrelid)?;
+    let search_path = session.configured_search_path();
     let referenced_relation_name = db.relation_display_name(
         session.client_id,
         session.catalog_txn_ctx(),
-        None,
+        search_path.as_deref(),
         row.confrelid,
     )?;
     let mut referenced_columns = row
@@ -12245,6 +12246,39 @@ mod tests {
             vec![vec![
                 Value::Text("widgets_id_positive".into()),
                 Value::Text("CHECK (id > 0)".into()),
+            ]]
+        );
+    }
+
+    #[test]
+    fn psql_describe_foreign_key_uses_visible_referenced_name() {
+        let db = Database::open(temp_dir("describe_fk_visible_name"), 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create schema app").unwrap();
+        session.execute(&db, "set search_path = app").unwrap();
+        session
+            .execute(&db, "create table parent (id int4 primary key)")
+            .unwrap();
+        session
+            .execute(&db, "create table child (id int4 references parent(id))")
+            .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("child")
+            .unwrap();
+
+        let sql = format!(
+            "select conname, pg_catalog.pg_get_constraintdef(oid, true) as condef \
+                 from pg_catalog.pg_constraint c \
+                 where c.conrelid = '{}' and c.contype = 'f'",
+            entry.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                Value::Text("child_id_fkey".into()),
+                Value::Text("FOREIGN KEY (id) REFERENCES parent(id)".into()),
             ]]
         );
     }
