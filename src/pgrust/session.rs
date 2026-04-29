@@ -9235,6 +9235,18 @@ impl Session {
                         catalog_effects,
                     )
                 }
+                Statement::DropOperatorClass(ref drop_stmt) => {
+                    let search_path = self.configured_search_path();
+                    let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                    db.execute_drop_operator_class_stmt_in_transaction_with_search_path(
+                        client_id,
+                        drop_stmt,
+                        xid,
+                        cid,
+                        search_path.as_deref(),
+                        catalog_effects,
+                    )
+                }
                 Statement::CreateTextSearch(ref create_stmt) => {
                     let search_path = self.configured_search_path();
                     let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;

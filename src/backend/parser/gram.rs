@@ -16156,7 +16156,6 @@ fn build_close_portal(pair: Pair<'_, Rule>) -> Result<ClosePortalStatement, Pars
 
 fn build_prepare_statement(pair: Pair<'_, Rule>) -> Result<PrepareStatement, ParseError> {
     let mut name = None;
-    let mut parameter_types = Vec::new();
     let mut query = None;
     let mut query_sql = None;
     let mut parameter_types = Vec::new();

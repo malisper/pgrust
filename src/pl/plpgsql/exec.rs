@@ -1305,6 +1305,14 @@ fn execute_compiled_function(
                 "2D000",
             ));
         }
+        Ok(FunctionControl::Break) => {
+            ctx.gucs = saved_gucs;
+            return Err(function_runtime_error(
+                "EXIT cannot be used outside a loop",
+                None,
+                "2D000",
+            ));
+        }
         Err(err) => {
             ctx.gucs = saved_gucs;
             return Err(err);
@@ -1568,7 +1576,6 @@ fn exec_do_stmt(
             "SET is only supported inside CREATE FUNCTION".into(),
         ))),
         CompiledStmt::Return { .. }
-        | CompiledStmt::Continue
         | CompiledStmt::ReturnNext { .. }
         | CompiledStmt::ReturnTriggerRow { .. }
         | CompiledStmt::ReturnTriggerNull
@@ -1932,7 +1939,6 @@ fn exec_function_stmt(
             };
             Err(assert_failure(message))
         }
-        CompiledStmt::Continue => Ok(FunctionControl::LoopContinue),
         CompiledStmt::Return { expr } => {
             exec_function_return(expr.as_ref(), compiled, expected_record_shape, state, ctx)
         }
