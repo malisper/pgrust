@@ -9,6 +9,7 @@ use crate::include::catalog::{CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, PgConstraint
 use crate::include::nodes::parsenodes::{AlterTableInheritStatement, AlterTableNoInheritStatement};
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_heap_relation_for_alter_table, lookup_heap_relation_for_ddl,
+    lookup_table_or_partitioned_table_for_alter_table,
 };
 
 fn add_lock_request(
@@ -20,6 +21,43 @@ fn add_lock_request(
         .entry(rel)
         .and_modify(|existing| *existing = existing.strongest(mode))
         .or_insert(mode);
+}
+
+fn reject_regular_inheritance_with_partitioned_relations(
+    relation: &BoundRelation,
+    parent: &BoundRelation,
+    parent_name: &str,
+) -> Result<(), ExecError> {
+    if relation.relkind == 'p' || relation.relispartition {
+        return Err(ExecError::DetailedError {
+            message: if relation.relispartition {
+                "cannot change inheritance of a partition".into()
+            } else {
+                "cannot change inheritance of partitioned table".into()
+            },
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+    if parent.relkind == 'p' {
+        let parent_name = parent_name.rsplit('.').next().unwrap_or(parent_name);
+        return Err(ExecError::DetailedError {
+            message: format!("cannot inherit from partitioned table \"{parent_name}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+    if parent.relispartition {
+        return Err(ExecError::DetailedError {
+            message: "cannot inherit from a partition".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+    Ok(())
 }
 
 fn relation_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
@@ -351,7 +389,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -365,13 +403,34 @@ impl Database {
             .collect::<Vec<_>>();
         let parents = parent_names
             .iter()
-            .map(|parent_name| lookup_heap_relation_for_ddl(&catalog, parent_name))
+            .map(|parent_name| {
+                let parent = lookup_table_or_partitioned_table_for_alter_table(
+                    &catalog,
+                    parent_name,
+                    false,
+                )?
+                .expect("if_exists false returns relation or error");
+                reject_regular_inheritance_with_partitioned_relations(
+                    &relation,
+                    &parent,
+                    parent_name,
+                )?;
+                Ok::<_, ExecError>(parent)
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut requests = BTreeMap::new();
-        add_lock_request(&mut requests, relation.rel, TableLockMode::AccessExclusive);
+        add_lock_request(
+            &mut requests,
+            crate::pgrust::database::relation_lock_tag(&relation),
+            TableLockMode::AccessExclusive,
+        );
         for parent in &parents {
-            add_lock_request(&mut requests, parent.rel, TableLockMode::AccessShare);
+            add_lock_request(
+                &mut requests,
+                crate::pgrust::database::relation_lock_tag(parent),
+                TableLockMode::AccessShare,
+            );
         }
         let requests = requests.into_iter().collect::<Vec<_>>();
         lock_table_requests_interruptible(
@@ -423,7 +482,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -431,7 +490,17 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        let parent = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.parent_name)?;
+        let parent = lookup_table_or_partitioned_table_for_alter_table(
+            &catalog,
+            &alter_stmt.parent_name,
+            false,
+        )?
+        .expect("if_exists false returns relation or error");
+        reject_regular_inheritance_with_partitioned_relations(
+            &relation,
+            &parent,
+            &alter_stmt.parent_name,
+        )?;
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
         ensure_relation_owner(self, client_id, &parent, &alter_stmt.parent_name)?;
         reject_typed_table_ddl(&relation, "change inheritance of")?;

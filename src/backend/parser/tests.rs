@@ -4657,10 +4657,26 @@ fn parse_alter_table_alter_column_type_statement() {
             table_name: "items".into(),
             column_name: "note".into(),
             ty: builtin_type(SqlType::with_char_len(SqlTypeKind::Varchar, 10)),
+            collation: None,
             using_expr: Some(SqlExpr::Cast(
                 Box::new(SqlExpr::Column("note".into())),
                 builtin_type(SqlType::with_char_len(SqlTypeKind::Varchar, 10)),
             )),
+        })
+    );
+
+    let stmt =
+        parse_statement("alter table items alter note type char(2) collate \"POSIX\"").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnType(AlterTableAlterColumnTypeStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            column_name: "note".into(),
+            ty: builtin_type(SqlType::with_char_len(SqlTypeKind::Char, 2)),
+            collation: Some("POSIX".into()),
+            using_expr: None,
         })
     );
 }

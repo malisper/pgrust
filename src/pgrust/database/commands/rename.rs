@@ -6,10 +6,8 @@ use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::include::nodes::parsenodes::AlterRelationSetSchemaStatement;
 use crate::pgrust::database::ddl::{
-    dependent_view_rewrites_for_relation, lookup_heap_relation_for_alter_table,
-    lookup_index_or_partitioned_index_for_alter_index_rename,
-    lookup_table_or_partitioned_table_for_alter_table, relation_kind_name, rewrite_dependent_views,
-    validate_alter_table_rename_column,
+    dependent_view_rewrites_for_relation, lookup_heap_relation_for_alter_table, relation_kind_name,
+    rewrite_dependent_views, validate_alter_table_rename_column,
 };
 
 fn normalize_rename_target_name(name: &str) -> Result<String, ExecError> {
@@ -116,6 +114,26 @@ fn lookup_relation_for_rename(
         Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
             name: relation_name.to_string(),
             expected: relation_kind_name(expected_relkind),
+        })),
+        None if if_exists => Ok(None),
+        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
+            relation_name.to_string(),
+        ))),
+    }
+}
+
+fn lookup_any_relation_for_rename(
+    catalog: &dyn CatalogLookup,
+    relation_name: &str,
+    if_exists: bool,
+) -> Result<Option<BoundRelation>, ExecError> {
+    match catalog.lookup_any_relation(relation_name) {
+        Some(relation) if matches!(relation.relkind, 'r' | 'p' | 'f' | 'i' | 'I' | 'v') => {
+            Ok(Some(relation))
+        }
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: relation_name.to_string(),
+            expected: "relation",
         })),
         None if if_exists => Ok(None),
         None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
@@ -236,7 +254,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_index_or_partitioned_index_for_alter_index_rename(
+        let Some(relation) = lookup_any_relation_for_rename(
             &catalog,
             &rename_stmt.table_name,
             rename_stmt.if_exists,
@@ -245,9 +263,15 @@ impl Database {
             push_relation_missing_notice(&rename_stmt.table_name);
             return Ok(StatementResult::AffectedRows(0));
         };
+        let lock_mode = if matches!(relation.relkind, 'i' | 'I') {
+            TableLockMode::ShareUpdateExclusive
+        } else {
+            TableLockMode::AccessExclusive
+        };
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
-            relation.rel,
-            TableLockMode::AccessExclusive,
+            lock_tag,
+            lock_mode,
             client_id,
             interrupts.as_ref(),
         )?;
@@ -264,7 +288,7 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(lock_tag, client_id);
         result
     }
 
@@ -279,7 +303,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_index_or_partitioned_index_for_alter_index_rename(
+        let Some(relation) = lookup_any_relation_for_rename(
             &catalog,
             &rename_stmt.table_name,
             rename_stmt.if_exists,
@@ -305,6 +329,7 @@ impl Database {
             .write()
             .rename_relation_mvcc(relation.relation_oid, &new_name, &visible_type_rows, &ctx)
             .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
     }
@@ -317,16 +342,18 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+        let Some(relation) = lookup_any_relation_for_rename(
             &catalog,
             &rename_stmt.table_name,
             rename_stmt.if_exists,
         )?
         else {
+            push_relation_missing_notice(&rename_stmt.table_name);
             return Ok(StatementResult::AffectedRows(0));
         };
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            lock_tag,
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -346,7 +373,7 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects, &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(lock_tag, client_id);
         result
     }
 
@@ -362,12 +389,13 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+        let Some(relation) = lookup_any_relation_for_rename(
             &catalog,
             &rename_stmt.table_name,
             rename_stmt.if_exists,
         )?
         else {
+            push_relation_missing_notice(&rename_stmt.table_name);
             return Ok(StatementResult::AffectedRows(0));
         };
         let new_table_name = normalize_rename_target_name(&rename_stmt.new_table_name)?;

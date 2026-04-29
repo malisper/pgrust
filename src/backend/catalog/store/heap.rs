@@ -3887,7 +3887,58 @@ impl CatalogStore {
         expect_detach_pending: Option<bool>,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let current_inherits = relation_inherits_mvcc(self, ctx, relation_oid)?;
+        let child_relation = self
+            .relation_id_get_relation(ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if !matches!(child_relation.relkind, 'r' | 'p') {
+            let current_inherits = relation_inherits_mvcc(self, ctx, relation_oid)?;
+            let removed_inherit = current_inherits
+                .iter()
+                .find(|row| row.inhparent == parent_oid)
+                .cloned()
+                .ok_or_else(|| CatalogError::UnknownTable(parent_oid.to_string()))?;
+            if let Some(expected) = expect_detach_pending
+                && removed_inherit.inhdetachpending != expected
+            {
+                return Err(CatalogError::UnknownTable(parent_oid.to_string()));
+            }
+            let removed_depends =
+                depend_rows_for_object_mvcc(self, ctx, PG_CLASS_RELATION_OID, relation_oid)?
+                    .into_iter()
+                    .filter(|row| {
+                        row.classid == PG_CLASS_RELATION_OID
+                            && row.objid == relation_oid
+                            && row.refclassid == PG_CLASS_RELATION_OID
+                            && row.refobjid == parent_oid
+                            && row.refobjsubid == 0
+                            && row.deptype == DEPENDENCY_NORMAL
+                    })
+                    .collect::<Vec<_>>();
+
+            let rows_to_delete = PhysicalCatalogRows {
+                inherits: vec![removed_inherit],
+                depends: removed_depends,
+                ..PhysicalCatalogRows::default()
+            };
+            let kinds = vec![
+                BootstrapCatalogKind::PgDepend,
+                BootstrapCatalogKind::PgInherits,
+            ];
+            self.invalidate_relcache_init_for_kinds(&kinds);
+            delete_catalog_rows_subset_mvcc(ctx, &rows_to_delete, self.scope_db_oid(), &kinds)?;
+
+            let mut effect = CatalogMutationEffect::default();
+            effect_record_catalog_kinds(&mut effect, &kinds);
+            effect_record_oid(&mut effect.relation_oids, relation_oid);
+            effect_record_oid(&mut effect.relation_oids, parent_oid);
+            return Ok(effect);
+        }
+        let _parent_relation = self
+            .relation_id_get_relation(ctx, parent_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(parent_oid.to_string()))?;
+
+        let mut current_inherits = relation_inherits_mvcc(self, ctx, relation_oid)?;
+        crate::include::catalog::sort_pg_inherits_rows(&mut current_inherits);
         let removed_inherit = current_inherits
             .iter()
             .find(|row| row.inhparent == parent_oid)
@@ -3898,6 +3949,108 @@ impl CatalogStore {
         {
             return Err(CatalogError::UnknownTable(parent_oid.to_string()));
         }
+        let remaining_inherits = current_inherits
+            .iter()
+            .filter(|row| row.inhparent != parent_oid)
+            .cloned()
+            .collect::<Vec<_>>();
+        let current_parent_relations = current_inherits
+            .iter()
+            .map(|row| {
+                self.relation_id_get_relation(ctx, row.inhparent)?
+                    .ok_or_else(|| CatalogError::UnknownTable(row.inhparent.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let remaining_parent_relations = remaining_inherits
+            .iter()
+            .map(|row| {
+                self.relation_id_get_relation(ctx, row.inhparent)?
+                    .ok_or_else(|| CatalogError::UnknownTable(row.inhparent.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let child_class = class_row_by_oid_mvcc(self, ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let child_name = child_class.relname.clone();
+        let old_child_entry = catalog_entry_from_relation_row(&child_class, &child_relation);
+        let mut new_child_entry = old_child_entry.clone();
+
+        for column in &mut new_child_entry.desc.columns {
+            if column.dropped {
+                continue;
+            }
+
+            let current_parent_match_count =
+                inherited_parent_column_match_count(&current_parent_relations, &column.name);
+            let remaining_parent_match_count =
+                inherited_parent_column_match_count(&remaining_parent_relations, &column.name);
+            let had_local_column_definition =
+                column.attislocal && column.attinhcount == current_parent_match_count as i16;
+            column.attinhcount = remaining_parent_match_count as i16;
+            column.attislocal = had_local_column_definition || remaining_parent_match_count == 0;
+
+            if column.storage.nullable {
+                continue;
+            }
+
+            let current_parent_not_null_count =
+                inherited_parent_not_null_match_count(&current_parent_relations, &column.name);
+            let remaining_parent_not_null_count =
+                inherited_parent_not_null_match_count(&remaining_parent_relations, &column.name);
+            let had_local_not_null_definition = column.not_null_constraint_is_local
+                && column.not_null_constraint_inhcount == current_parent_not_null_count as i16;
+            column.not_null_constraint_is_local =
+                had_local_not_null_definition || remaining_parent_not_null_count == 0;
+            column.not_null_constraint_inhcount = remaining_parent_not_null_count as i16;
+            if !had_local_not_null_definition {
+                column.not_null_constraint_no_inherit = false;
+            }
+        }
+
+        let mut preserved_constraints = relation_constraints_mvcc(self, ctx, relation_oid)?
+            .into_iter()
+            .filter(|row| row.contype != CONSTRAINT_NOTNULL)
+            .map(|mut row| {
+                if row.contype == CONSTRAINT_CHECK {
+                    let current_parent_match_count = inherited_parent_check_match_count_mvcc(
+                        self,
+                        ctx,
+                        &current_parent_relations,
+                        &row,
+                    )?;
+                    let remaining_parent_match_count = inherited_parent_check_match_count_mvcc(
+                        self,
+                        ctx,
+                        &remaining_parent_relations,
+                        &row,
+                    )?;
+                    let had_local_definition =
+                        row.conislocal && row.coninhcount == current_parent_match_count as i16;
+                    row.coninhcount = remaining_parent_match_count as i16;
+                    row.conislocal = had_local_definition || remaining_parent_match_count == 0;
+                    if !had_local_definition {
+                        row.connoinherit = false;
+                    }
+                }
+                Ok(row)
+            })
+            .collect::<Result<Vec<_>, CatalogError>>()?;
+        sort_pg_constraint_rows(&mut preserved_constraints);
+
+        let mut new_constraints = derived_pg_constraint_rows(
+            relation_oid,
+            relation_object_name(&child_name),
+            child_relation.namespace_oid,
+            &new_child_entry.desc,
+        );
+        new_constraints.extend(preserved_constraints);
+        sort_pg_constraint_rows(&mut new_constraints);
+
+        let type_lookup = CatalogStoreTypeLookup { store: &*self, ctx };
+        let new_attributes =
+            rows_for_new_relation_entry(&type_lookup, &child_name, &new_child_entry)?.attributes;
+        let old_attributes = relation_attributes_mvcc(self, ctx, relation_oid)?;
+        let old_constraints = relation_constraints_mvcc(self, ctx, relation_oid)?;
         let removed_depends =
             depend_rows_for_object_mvcc(self, ctx, PG_CLASS_RELATION_OID, relation_oid)?
                 .into_iter()
@@ -3910,65 +4063,23 @@ impl CatalogStore {
                         && row.deptype == DEPENDENCY_NORMAL
                 })
                 .collect::<Vec<_>>();
-        let remaining_inherits = current_inherits
-            .iter()
-            .filter(|row| row.inhparent != parent_oid)
-            .cloned()
-            .collect::<Vec<_>>();
-        let current_parent_relations = current_inherits
-            .iter()
-            .map(|row| {
-                self.RelationIdGetRelation(ctx, row.inhparent)?
-                    .ok_or_else(|| CatalogError::UnknownTable(row.inhparent.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let remaining_parent_relations = remaining_inherits
-            .iter()
-            .map(|row| {
-                self.RelationIdGetRelation(ctx, row.inhparent)?
-                    .ok_or_else(|| CatalogError::UnknownTable(row.inhparent.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let child_relation = self
-            .RelationIdGetRelation(ctx, relation_oid)?
-            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        let child_class = class_row_by_oid_mvcc(self, ctx, relation_oid)?
-            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        let child_name = child_class.relname.clone();
-        let old_child_entry = catalog_entry_from_relation_row(&child_class, &child_relation);
-        let mut new_child_entry = old_child_entry.clone();
-        for column in &mut new_child_entry.desc.columns {
-            if column.dropped {
-                continue;
-            }
-            let current_parent_match_count =
-                inherited_parent_column_match_count(&current_parent_relations, &column.name);
-            let remaining_parent_match_count =
-                inherited_parent_column_match_count(&remaining_parent_relations, &column.name);
-            let had_local_column_definition =
-                column.attislocal && column.attinhcount == current_parent_match_count as i16;
-            column.attinhcount = remaining_parent_match_count as i16;
-            column.attislocal = had_local_column_definition || remaining_parent_match_count == 0;
-        }
-        let old_attributes = relation_attributes_mvcc(self, ctx, relation_oid)?;
-        let new_attributes = {
-            let type_lookup = CatalogStoreTypeLookup { store: &*self, ctx };
-            rows_for_new_relation_entry(&type_lookup, &child_name, &new_child_entry)?.attributes
-        };
 
         let rows_to_delete = PhysicalCatalogRows {
+            attributes: old_attributes,
+            constraints: old_constraints,
             inherits: vec![removed_inherit],
             depends: removed_depends,
-            attributes: old_attributes,
             ..PhysicalCatalogRows::default()
         };
         let rows_to_insert = PhysicalCatalogRows {
             attributes: new_attributes,
+            constraints: new_constraints,
             ..PhysicalCatalogRows::default()
         };
 
         let mut kinds = vec![
             BootstrapCatalogKind::PgAttribute,
+            BootstrapCatalogKind::PgConstraint,
             BootstrapCatalogKind::PgDepend,
             BootstrapCatalogKind::PgInherits,
         ];
@@ -5960,7 +6071,7 @@ impl CatalogStore {
         let constraint_name = constraint_name.into();
         let (old_entry, _new_entry, constraint_oid, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, control| {
-                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f' | 'v') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -6002,7 +6113,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, _new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f' | 'v') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -7192,7 +7303,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, control| {
-                if !matches!(entry.relkind, 'r' | 'p' | 'f') {
+                if !matches!(entry.relkind, 'r' | 'p' | 'f' | 'v') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;
@@ -7208,13 +7319,19 @@ impl CatalogStore {
                     column.attrdef_oid = None;
                     column.missing_default_value = None;
                 }
-                Ok((
-                    (),
+                let kinds = if entry.relkind == 'v' {
+                    // :HACK: View rewrite dependencies are not yet preserved
+                    // correctly through the relation-entry rewrite helper, but
+                    // ALTER VIEW/ALTER TABLE view SET DEFAULT only needs to
+                    // replace pg_attrdef rows for SQL-visible behavior.
+                    vec![BootstrapCatalogKind::PgAttrdef]
+                } else {
                     vec![
                         BootstrapCatalogKind::PgDepend,
                         BootstrapCatalogKind::PgAttrdef,
-                    ],
-                ))
+                    ]
+                };
+                Ok(((), kinds))
             })?;
 
         let mut effect = CatalogMutationEffect::default();

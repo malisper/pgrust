@@ -23,6 +23,37 @@ fn relation_basename(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
+fn lookup_table_partitioned_or_view_for_alter_table(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    if_exists: bool,
+) -> Result<Option<crate::backend::parser::BoundRelation>, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'f' | 'v') => Ok(Some(entry)),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table",
+        })),
+        None if if_exists => {
+            push_notice(format!(r#"relation "{name}" does not exist, skipping"#));
+            Ok(None)
+        }
+        None => Err(ExecError::Parse(ParseError::UnknownTable(name.to_string()))),
+    }
+}
+
+fn unsupported_view_alter_action(action: &str, relation_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "ALTER action {action} cannot be performed on relation \"{}\"",
+            relation_basename(relation_name)
+        ),
+        detail: Some("This operation is not supported for views.".into()),
+        hint: None,
+        sqlstate: "42809",
+    }
+}
+
 fn reject_constraint_with_dependent_rule(
     db: &Database,
     client_id: ClientId,
@@ -334,13 +365,13 @@ pub(super) fn validate_not_null_rows(
     Ok(())
 }
 
-pub(super) fn validate_check_rows(
+pub(super) fn validate_check_rows<C: CatalogLookup + Clone + 'static>(
     db: &Database,
     relation: &crate::backend::parser::BoundRelation,
     relation_name: &str,
     constraint_name: &str,
     expr_sql: &str,
-    catalog: &dyn CatalogLookup,
+    catalog: &C,
     client_id: ClientId,
     xid: TransactionId,
     cid: CommandId,
@@ -371,10 +402,12 @@ pub(super) fn validate_check_rows(
         &datetime_config,
         interrupts,
     )?;
+    ctx.catalog = Some(crate::backend::executor::executor_catalog(catalog.clone()));
     let rows =
         collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
     for (_, values) in rows {
-        let mut slot = TupleSlot::virtual_row(values.clone());
+        let mut slot =
+            TupleSlot::virtual_row_with_metadata(values, None, Some(relation.relation_oid));
         match eval_expr(&check.expr, &mut slot, &mut ctx)? {
             Value::Null | Value::Bool(true) => {}
             Value::Bool(false) => {
@@ -1967,7 +2000,7 @@ impl Database {
                     &catalog,
                 )
                 .map_err(ExecError::Parse)?;
-                if !action.not_valid {
+                if action.enforced && !action.not_valid {
                     validate_check_rows(
                         self,
                         &relation,
@@ -2880,7 +2913,7 @@ impl Database {
                 &catalog,
             )
             .map_err(ExecError::Parse)?;
-            if !action.not_valid {
+            if action.enforced && !action.not_valid {
                 validate_check_rows(
                     self,
                     &child_relation,
@@ -3599,7 +3632,7 @@ impl Database {
                         ),
                         detail: None,
                         hint: None,
-                        sqlstate: "0A000",
+                        sqlstate: "42P16",
                     });
                 }
                 if row.contype == CONSTRAINT_FOREIGN {
@@ -3664,22 +3697,22 @@ impl Database {
                         ),
                         detail: None,
                         hint: None,
-                        sqlstate: "0A000",
+                        sqlstate: "42P16",
                     });
                 }
                 let attnum = *attnums_from_constraint(&row)?
                     .first()
                     .expect("not null attnum");
-                if let Some(primary) = primary_constraint_for_attnum(&rows, attnum) {
+                let column_index = column_index_for_attnum(&relation, attnum)?;
+                if primary_constraint_for_attnum(&rows, attnum).is_some() {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "droppable NOT NULL constraint",
                         actual: format!(
-                            "column is required by PRIMARY KEY constraint \"{}\"",
-                            primary.conname
+                            "column \"{}\" is in a primary key",
+                            relation.desc.columns[column_index].name
                         ),
                     }));
                 }
-                let column_index = column_index_for_attnum(&relation, attnum)?;
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -3722,7 +3755,7 @@ impl Database {
                         ),
                         detail: None,
                         hint: None,
-                        sqlstate: "0A000",
+                        sqlstate: "42P16",
                     });
                 }
                 reject_constraint_with_dependent_rule(
@@ -3847,7 +3880,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+        let Some(relation) = lookup_table_partitioned_or_view_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -3855,8 +3888,9 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            lock_tag,
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -3874,7 +3908,7 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(lock_tag, client_id);
         result
     }
 
@@ -3889,7 +3923,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+        let Some(relation) = lookup_table_partitioned_or_view_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -3897,6 +3931,12 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        if relation.relkind == 'v' {
+            return Err(unsupported_view_alter_action(
+                "ALTER COLUMN ... SET NOT NULL",
+                &alter_stmt.table_name,
+            ));
+        }
         ensure_constraint_relation(self, client_id, &relation, &alter_stmt.table_name)?;
         if is_system_column_name(&alter_stmt.column_name) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -4047,7 +4087,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+        let Some(relation) = lookup_table_partitioned_or_view_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -4055,8 +4095,9 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            lock_tag,
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -4074,7 +4115,7 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(lock_tag, client_id);
         result
     }
 
@@ -4089,7 +4130,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+        let Some(relation) = lookup_table_partitioned_or_view_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -4097,6 +4138,12 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        if relation.relkind == 'v' {
+            return Err(unsupported_view_alter_action(
+                "ALTER COLUMN ... DROP NOT NULL",
+                &alter_stmt.table_name,
+            ));
+        }
         ensure_constraint_relation(self, client_id, &relation, &alter_stmt.table_name)?;
         if is_system_column_name(&alter_stmt.column_name) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -4146,8 +4193,8 @@ impl Database {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "droppable NOT NULL column",
                 actual: format!(
-                    "column is required by PRIMARY KEY constraint \"{}\"",
-                    primary.conname
+                    "column \"{}\" is in a primary key",
+                    relation.desc.columns[column_index].name
                 ),
             }));
         }
@@ -4171,7 +4218,7 @@ impl Database {
                 ),
                 detail: None,
                 hint: None,
-                sqlstate: "0A000",
+                sqlstate: "42P16",
             });
         }
         let ctx = CatalogWriteContext {
@@ -4416,6 +4463,89 @@ impl Database {
                     cid,
                     std::sync::Arc::clone(&interrupts),
                 )?;
+                if !row.connoinherit {
+                    let inheritors = catalog.find_all_inheritors(relation.relation_oid);
+                    if alter_stmt.only && inheritors.iter().any(|oid| *oid != relation.relation_oid)
+                    {
+                        return Err(ExecError::DetailedError {
+                            message: "constraint must be validated on child tables too".into(),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42P16",
+                        });
+                    }
+                    for child_oid in inheritors {
+                        if child_oid == relation.relation_oid {
+                            continue;
+                        }
+                        let child = catalog.lookup_relation_by_oid(child_oid).ok_or_else(|| {
+                            ExecError::Parse(ParseError::UnknownTable(child_oid.to_string()))
+                        })?;
+                        let child_row = catalog
+                            .constraint_rows_for_relation(child.relation_oid)
+                            .into_iter()
+                            .find(|child_row| {
+                                child_row.contype == CONSTRAINT_CHECK
+                                    && child_row.conname.eq_ignore_ascii_case(&row.conname)
+                            })
+                            .ok_or_else(|| {
+                                ExecError::Parse(ParseError::UnexpectedToken {
+                                    expected: "inherited CHECK constraint",
+                                    actual: format!(
+                                        "constraint \"{}\" of relation \"{}\" does not exist",
+                                        row.conname, child_oid
+                                    ),
+                                })
+                            })?;
+                        if child_row.convalidated {
+                            continue;
+                        }
+                        let child_expr_sql = child_row.conbin.clone().ok_or_else(|| {
+                            ExecError::Parse(ParseError::UnexpectedToken {
+                                expected: "stored CHECK constraint expression",
+                                actual: format!(
+                                    "missing expression for constraint {}",
+                                    child_row.conname
+                                ),
+                            })
+                        })?;
+                        let child_name = catalog
+                            .class_row_by_oid(child.relation_oid)
+                            .map(|row| row.relname)
+                            .unwrap_or_else(|| child.relation_oid.to_string());
+                        validate_check_rows(
+                            self,
+                            &child,
+                            &child_name,
+                            &child_row.conname,
+                            &child_expr_sql,
+                            &catalog,
+                            client_id,
+                            xid,
+                            cid,
+                            std::sync::Arc::clone(&interrupts),
+                        )?;
+                        let ctx = CatalogWriteContext {
+                            pool: self.pool.clone(),
+                            txns: self.txns.clone(),
+                            xid,
+                            cid,
+                            client_id,
+                            waiter: None,
+                            interrupts: std::sync::Arc::clone(&interrupts),
+                        };
+                        let effect = self
+                            .catalog
+                            .write()
+                            .validate_check_constraint_mvcc(
+                                child.relation_oid,
+                                &child_row.conname,
+                                &ctx,
+                            )
+                            .map_err(map_catalog_error)?;
+                        catalog_effects.push(effect);
+                    }
+                }
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),

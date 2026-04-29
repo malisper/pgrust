@@ -73,6 +73,7 @@ pub struct BoundUpdateTarget {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
     pub relkind: char,
+    pub partition_update_root_oid: Option<u32>,
     pub allow_partition_routing: bool,
     pub toast: Option<ToastRelationRef>,
     pub toast_index: Option<BoundIndexRelation>,
@@ -1792,6 +1793,7 @@ fn build_update_target(
     parent_assignments: &[BoundAssignment],
     parent_predicate: Option<&Expr>,
     parent_rls_write_checks: &[RlsWriteCheck],
+    partition_update_root_oid: Option<u32>,
     allow_partition_routing: bool,
     child: &BoundRelation,
     catalog: &dyn CatalogLookup,
@@ -1844,6 +1846,7 @@ fn build_update_target(
         rel: child.rel,
         relation_oid: child.relation_oid,
         relkind: child.relkind,
+        partition_update_root_oid,
         allow_partition_routing,
         toast: child.toast,
         toast_index: first_toast_index(catalog, child.toast),
@@ -1874,6 +1877,7 @@ fn build_update_target_from_joined_input(
     parent_assignments: &[BoundAssignment],
     parent_predicate: Option<&Expr>,
     parent_rls_write_checks: &[RlsWriteCheck],
+    partition_update_root_oid: Option<u32>,
     allow_partition_routing: bool,
     child: &BoundRelation,
     catalog: &dyn CatalogLookup,
@@ -1914,6 +1918,7 @@ fn build_update_target_from_joined_input(
         rel: child.rel,
         relation_oid: child.relation_oid,
         relkind: child.relkind,
+        partition_update_root_oid,
         allow_partition_routing,
         toast: child.toast,
         toast_index: first_toast_index(catalog, child.toast),
@@ -2974,6 +2979,8 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         .into_iter()
         .map(|child| {
             let allow_partition_routing = resolved.base_relation.relkind == 'p';
+            let partition_update_root_oid =
+                allow_partition_routing.then_some(resolved.base_relation.relation_oid);
             if stmt.input_plan.is_some() {
                 build_update_target_from_joined_input(
                     &relation_name,
@@ -2981,6 +2988,7 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
                     &assignments,
                     predicate.as_ref(),
                     &target.rls_write_checks,
+                    partition_update_root_oid,
                     allow_partition_routing,
                     &child,
                     catalog,
@@ -2992,6 +3000,7 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
                     &assignments,
                     predicate.as_ref(),
                     &target.rls_write_checks,
+                    partition_update_root_oid,
                     allow_partition_routing,
                     &child,
                     catalog,
@@ -3916,6 +3925,8 @@ fn bind_simple_update(
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
 
+    let partition_update_root_oid =
+        (entry.relkind == 'p' && !stmt.only).then_some(entry.relation_oid);
     let targets = partitioned_update_target_oids(catalog, &entry, stmt.only)
         .into_iter()
         .map(|relation_oid| {
@@ -3928,6 +3939,7 @@ fn bind_simple_update(
                 &assignments,
                 predicate.as_ref(),
                 &target_rls.write_checks,
+                partition_update_root_oid,
                 entry.relkind == 'p' && !stmt.only,
                 &child,
                 catalog,
@@ -4106,6 +4118,8 @@ fn bind_update_from(
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
         .map(|query| crate::backend::optimizer::planner(query, catalog))??;
 
+    let partition_update_root_oid =
+        (entry.relkind == 'p' && !stmt.only).then_some(entry.relation_oid);
     let targets = if stmt.only {
         vec![entry.relation_oid]
     } else {
@@ -4122,6 +4136,7 @@ fn bind_update_from(
             &assignments,
             predicate.as_ref(),
             &target_rls.write_checks,
+            partition_update_root_oid,
             entry.relkind == 'p' && !stmt.only,
             &child,
             catalog,
