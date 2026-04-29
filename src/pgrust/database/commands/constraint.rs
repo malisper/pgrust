@@ -2052,8 +2052,7 @@ impl Database {
                         action.constraint_name
                     ));
                     let conenforced = existing.conenforced || action.enforced;
-                    let convalidated = conenforced
-                        && (existing.convalidated || (action.enforced && !action.not_valid));
+                    let convalidated = conenforced && (existing.convalidated || action.enforced);
                     let effect = self
                         .catalog
                         .write()
@@ -2992,8 +2991,7 @@ impl Database {
                     action.constraint_name
                 ));
                 let conenforced = existing.conenforced || action.enforced;
-                let convalidated = conenforced
-                    && (existing.convalidated || (action.enforced && !action.not_valid));
+                let convalidated = conenforced && (existing.convalidated || action.enforced);
                 let effect = self
                     .catalog
                     .write()

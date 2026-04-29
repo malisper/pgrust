@@ -1718,7 +1718,7 @@ fn recursive_union_distinct_rejects_varbit_columns() {
             detail,
             ..
         }) => {
-            assert_eq!(sqlstate, "0A000");
+            assert_eq!(sqlstate, "42P16");
             assert_eq!(message, "could not implement recursive UNION");
             assert_eq!(
                 detail.as_deref(),
@@ -9692,7 +9692,7 @@ fn alter_table_add_check_merges_inherited_constraint_as_local() {
                 message,
                 "cannot drop inherited constraint \"f1_pos\" of relation \"c1\""
             );
-            assert_eq!(sqlstate, "0A000");
+            assert_eq!(sqlstate, "42P16");
         }
         other => panic!("expected inherited check drop rejection, got {other:?}"),
     }
