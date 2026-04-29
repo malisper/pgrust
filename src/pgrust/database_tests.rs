@@ -4523,6 +4523,62 @@ fn update_returning_tableoid_projects_inherited_parent_columns() {
 }
 
 #[test]
+fn create_view_defers_recursive_rls_policy_expansion_until_use() {
+    let dir = temp_dir("create_view_defers_recursive_rls");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role recursive_view_reader")
+        .unwrap();
+    session
+        .execute(&db, "create table recursive_view_base (x int4, y int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy recursive_view_policy on recursive_view_base
+             using (x = (select r.x from recursive_view_base r where y = r.y))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table recursive_view_base enable row level security",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant select on recursive_view_base to recursive_view_reader",
+        )
+        .unwrap();
+    session
+        .execute(&db, "set session authorization recursive_view_reader")
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "create view recursive_view_base_v as select * from recursive_view_base",
+        )
+        .unwrap();
+
+    match session.execute(&db, "select * from recursive_view_base_v") {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(sqlstate, "42P17");
+            assert_eq!(
+                message,
+                "infinite recursion detected in policy for relation \"recursive_view_base\""
+            );
+        }
+        other => panic!("expected recursive RLS error, got {other:?}"),
+    }
+}
+
+#[test]
 fn update_from_applies_source_relation_rls() {
     let dir = temp_dir("update_from_source_rls");
     let db = Database::open(&dir, 128).unwrap();
@@ -43939,6 +43995,150 @@ fn create_policy_with_exists_subquery_on_rls_table_returns() {
             Value::Text("exists (select 1 from ref_tbl)".into()),
         ]]
     );
+}
+
+#[test]
+fn policy_relation_dependencies_block_and_cascade_drop() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table dependee (a int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table dependent (a int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy d1 on dependent using (a in (select a from dependee))",
+        )
+        .unwrap();
+
+    match session.execute(&db, "drop table dependee").unwrap_err() {
+        ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => {
+            assert_eq!(
+                message,
+                "cannot drop table dependee because other objects depend on it"
+            );
+            assert_eq!(
+                detail.as_deref(),
+                Some("policy d1 on table dependent depends on table dependee")
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("Use DROP ... CASCADE to drop the dependent objects too.")
+            );
+            assert_eq!(sqlstate, "2BP01");
+        }
+        other => panic!("expected dependency error, got {other:?}"),
+    }
+
+    clear_backend_notices();
+    session.execute(&db, "drop table dependee cascade").unwrap();
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(
+        notices[0].message,
+        "drop cascades to policy d1 on table dependent"
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_policy where polname = 'd1'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn policy_dependency_catalog_queries_complete() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role policy_dep_bob nologin")
+        .unwrap();
+    session
+        .execute(&db, "create role policy_dep_carol nologin")
+        .unwrap();
+    session.execute(&db, "create table dep1 (c1 int)").unwrap();
+    session.execute(&db, "create table dep2 (c1 int)").unwrap();
+    session
+        .execute(
+            &db,
+            "create policy dep_p1 on dep1 to policy_dep_bob using (c1 > (select max(dep2.c1) from dep2))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter policy dep_p1 on dep1 to policy_dep_bob, policy_dep_carol",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) = 1 from pg_depend
+             where objid = (select oid from pg_policy where polname = 'dep_p1')
+               and refobjid = (select oid from pg_class where relname = 'dep2')",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn drop_view_cascade_removes_policies_that_reference_views() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table rec1 (a int4)").unwrap();
+    session.execute(&db, "create table rec2 (a int4)").unwrap();
+    session
+        .execute(&db, "create view rec1v as select a from rec1")
+        .unwrap();
+    session
+        .execute(&db, "create view rec2v as select a from rec2")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy r1 on rec1 using (exists (select 1 from rec1v))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy r2 on rec2 using (exists (select 1 from rec2v))",
+        )
+        .unwrap();
+
+    clear_backend_notices();
+    session
+        .execute(&db, "drop view rec1v, rec2v cascade")
+        .unwrap();
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].message, "drop cascades to 2 other objects");
+    assert_eq!(
+        notices[0].detail.as_deref(),
+        Some("drop cascades to policy r1 on table rec1\ndrop cascades to policy r2 on table rec2")
+    );
+
+    session
+        .execute(&db, "create policy r1 on rec1 using (true)")
+        .unwrap();
+    session
+        .execute(&db, "create policy r2 on rec2 using (true)")
+        .unwrap();
 }
 
 #[test]

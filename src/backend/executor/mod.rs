@@ -204,6 +204,7 @@ pub(crate) use permissions::relation_values_visible_for_error_detail;
 #[derive(Debug, Clone, Default)]
 pub struct ExprEvalBindings {
     pub exec_params: HashMap<usize, Value>,
+    pub initplan_values: HashMap<usize, Value>,
     pub outer_tuple: Option<Vec<Value>>,
     pub outer_system_bindings: Vec<SystemVarBinding>,
     pub inner_tuple: Option<Vec<Value>>,

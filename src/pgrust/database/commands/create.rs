@@ -4821,7 +4821,6 @@ impl Database {
             &[],
         )?;
         let constraint_oids = analyzed_query.constraint_deps.clone();
-        let plan = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?.plan_tree;
         let canonical_sql = if create_stmt.query.with.is_empty() {
             render_view_query_sql(&analyzed_query, &catalog)
         } else {
@@ -4836,11 +4835,10 @@ impl Database {
         };
         let canonical_query_sql = append_view_check_option(canonical_sql, create_stmt.check_option);
         let mut desc = crate::backend::executor::RelationDesc {
-            columns: plan
-                .column_names()
+            columns: analyzed_query
+                .columns()
                 .into_iter()
-                .zip(plan.columns())
-                .map(|(name, column)| column_desc(name, column.sql_type, true))
+                .map(|column| column_desc(column.name, column.sql_type, true))
                 .collect(),
         };
         apply_create_view_column_names(&mut desc, &create_stmt.column_names)?;

@@ -219,6 +219,28 @@ EXPLAIN DELETE bucket:
   RLS filters.
 - Focused EXPLAIN DELETE test passed.
 
+CREATE VIEW / policy-dependency bucket:
+- `CREATE VIEW` now derives the stored view descriptor from the analyzed query
+  columns instead of planning the query, so recursive RLS policy expansion is
+  deferred until the view is used.
+- View SQL deparse now renders `LIKE` and `SIMILAR` expressions instead of Rust
+  debug text, fixing policy subqueries that reference stored views.
+- DROP dependency planning now treats `pg_policy` rows as dependent objects for
+  relation expression dependencies. `DROP ... RESTRICT` reports policy blockers,
+  and `DROP ... CASCADE` removes dependent policies before dropping referenced
+  tables/views.
+- Uncorrelated scalar subplans are cached per statement as initplan values, so
+  catalog checks like the `pg_depend` policy dependency count do not rerun
+  scalar subqueries for every scanned catalog row.
+- Focused tests passed for deferred recursive RLS view expansion, policy
+  dependency restrict/cascade, view cascade policy cleanup, and policy
+  dependency catalog queries.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `709/774` matched, `65` mismatches, `1148` diff lines. New diff copied to
+  `/tmp/diffs/rowsecurity.diff`.
+
 SQL function/GUC bucket:
 - SQL-language functions now accept single-statement `WITH` bodies and
   SQL-standard `BEGIN ATOMIC ... END` bodies.

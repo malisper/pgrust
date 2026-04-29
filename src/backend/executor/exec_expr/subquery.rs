@@ -451,8 +451,14 @@ pub(super) fn eval_scalar_subquery(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    if subplan.par_param.is_empty()
+        && let Some(value) = ctx.expr_bindings.initplan_values.get(&subplan.plan_id)
+    {
+        return Ok(value.clone());
+    }
+
     let plan = planned_subquery_plan(subplan, ctx)?.clone();
-    with_scoped_subquery_runtime(ctx, |ctx| {
+    let result = with_scoped_subquery_runtime(ctx, |ctx| {
         bind_subplan_params(subplan, slot, ctx)?;
         let mut state = executor_start(plan);
         let mut first_value = None;
@@ -474,7 +480,13 @@ pub(super) fn eval_scalar_subquery(
             first_value = Some(values[0].clone());
         }
         Ok(first_value.unwrap_or(Value::Null))
-    })
+    })?;
+    if subplan.par_param.is_empty() {
+        ctx.expr_bindings
+            .initplan_values
+            .insert(subplan.plan_id, result.clone());
+    }
+    Ok(result)
 }
 
 fn record_value_from_row(values: Vec<Value>) -> Value {
