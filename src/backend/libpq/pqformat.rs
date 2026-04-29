@@ -1178,6 +1178,11 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
                 buf.extend_from_slice(text.as_bytes());
             }
+            Value::Tid(v) => {
+                let text = crate::backend::executor::value_io::render_tid_text(v);
+                buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
+                buf.extend_from_slice(text.as_bytes());
+            }
             Value::Interval(v) => {
                 let text = render_interval_text_with_config(*v, &float_format.datetime_config);
                 buf.extend_from_slice(&(text.len() as i32).to_be_bytes());

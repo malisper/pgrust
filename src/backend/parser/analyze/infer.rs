@@ -339,8 +339,14 @@ fn infer_visible_outer_aggregate_type(
             )
         })
         .collect::<Vec<_>>();
-    if !direct_args.is_empty() {
-        resolve_hypothetical_aggregate_call(name).map(|resolved| resolved.result_type)
+    if !direct_args.is_empty()
+        && let Some(resolved) = resolve_hypothetical_aggregate_call(name)
+    {
+        Some(resolved.result_type)
+    } else if !direct_args.is_empty()
+        && let Some(resolved) = resolve_ordered_set_aggregate_call(name, &arg_types)
+    {
+        Some(resolved.result_type)
     } else {
         resolve_aggregate_call(catalog, name, &arg_types, func_variadic)
             .map(|resolved| resolved.result_type)
@@ -441,6 +447,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Bit(v)) => SqlType::with_bit_len(SqlTypeKind::VarBit, v.bit_len),
         SqlExpr::Const(Value::Bytea(_)) => SqlType::new(SqlTypeKind::Bytea),
         SqlExpr::Const(Value::Uuid(_)) => SqlType::new(SqlTypeKind::Uuid),
+        SqlExpr::Const(Value::Tid(_)) => SqlType::new(SqlTypeKind::Tid),
         SqlExpr::Const(Value::Inet(_)) => SqlType::new(SqlTypeKind::Inet),
         SqlExpr::Const(Value::Cidr(_)) => SqlType::new(SqlTypeKind::Cidr),
         SqlExpr::Const(Value::MacAddr(_)) => SqlType::new(SqlTypeKind::MacAddr),
@@ -862,6 +869,12 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 .collect::<Vec<_>>();
             if within_group.is_some()
                 && let Some(resolved) = resolve_hypothetical_aggregate_call(name)
+            {
+                return resolved.result_type;
+            }
+            if within_group.is_some()
+                && let Some(resolved) =
+                    resolve_ordered_set_aggregate_call(name, &aggregate_arg_types)
             {
                 return resolved.result_type;
             }

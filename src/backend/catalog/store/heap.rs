@@ -6754,6 +6754,53 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn set_index_clustered_mvcc(
+        &mut self,
+        relation_oid: u32,
+        index_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let old_indexes = index_rows_for_relation_mvcc(self, ctx, relation_oid)?;
+        if old_indexes.iter().all(|row| row.indexrelid != index_oid) {
+            return Err(CatalogError::UnknownTable(index_oid.to_string()));
+        }
+        let mut new_indexes = old_indexes.clone();
+        for row in &mut new_indexes {
+            row.indisclustered = row.indexrelid == index_oid;
+        }
+
+        let control = self.control_state()?;
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+        let kinds = vec![BootstrapCatalogKind::PgIndex];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                indexes: old_indexes,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                indexes: new_indexes.clone(),
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        self.control = control;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        for row in new_indexes {
+            effect_record_oid(&mut effect.relation_oids, row.indexrelid);
+        }
+        Ok(effect)
+    }
+
     pub fn set_index_entry_ready_valid_mvcc(
         &mut self,
         old_entry: &CatalogEntry,

@@ -312,6 +312,7 @@ mod tests {
 pub enum Statement {
     Do(DoStatement),
     Explain(ExplainStatement),
+    Cluster(ClusterStatement),
     Show(ShowStatement),
     Select(SelectStatement),
     Values(ValuesStatement),
@@ -539,6 +540,12 @@ pub struct LoadStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterStatement {
+    pub table_name: String,
+    pub index_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscardStatement {
     pub target: DiscardTarget,
 }
@@ -575,6 +582,7 @@ pub struct Query {
     pub limit_count: Option<usize>,
     pub limit_offset: usize,
     pub locking_clause: Option<SelectLockingClause>,
+    pub locking_targets: Vec<String>,
     pub row_marks: Vec<QueryRowMark>,
     pub has_target_srfs: bool,
     pub recursive_union: Option<Box<RecursiveUnionQuery>>,
@@ -1567,6 +1575,7 @@ pub struct SelectStatement {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub locking_clause: Option<SelectLockingClause>,
+    pub locking_targets: Vec<String>,
     pub set_operation: Option<Box<SetOperationStatement>>,
 }
 
@@ -2285,7 +2294,7 @@ pub struct CreateTableAsStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateTableAsQuery {
     Select(SelectStatement),
-    Execute { name: String, args: Vec<SqlExpr> },
+    Execute(ExecuteStatement),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2311,7 +2320,7 @@ pub enum PreparedStatementQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecuteStatement {
     pub name: String,
-    pub args: Vec<SqlExpr>,
+    pub args_sql: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4813,6 +4822,7 @@ pub struct DeleteStatement {
     pub with: Vec<CommonTableExpr>,
     pub table_name: String,
     pub only: bool,
+    pub using: Option<FromItem>,
     pub where_clause: Option<SqlExpr>,
     pub returning: Vec<SelectItem>,
 }

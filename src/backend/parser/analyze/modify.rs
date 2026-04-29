@@ -112,6 +112,7 @@ pub struct BoundDeleteTarget {
     pub desc: RelationDesc,
     pub referenced_by_foreign_keys: Vec<BoundReferencedByForeignKey>,
     pub row_source: BoundModifyRowSource,
+    pub parent_visible_exprs: Vec<Expr>,
     pub predicate: Option<Expr>,
 }
 
@@ -119,6 +120,11 @@ pub struct BoundDeleteTarget {
 pub struct BoundDeleteStatement {
     pub targets: Vec<BoundDeleteTarget>,
     pub returning: Vec<TargetEntry>,
+    pub input_plan: Option<PlannedStmt>,
+    pub target_visible_count: usize,
+    pub visible_column_count: usize,
+    pub target_ctid_index: usize,
+    pub target_tableoid_index: usize,
     pub required_privileges: Vec<RelationPrivilegeRequirement>,
     pub subplans: Vec<Plan>,
 }
@@ -1034,9 +1040,9 @@ fn with_merge_target_ctid(from: AnalyzedFrom, target_desc: &RelationDesc) -> (An
                 varno: 1,
                 varattno: SELF_ITEM_POINTER_ATTR_NO,
                 varlevelsup: 0,
-                vartype: SqlType::new(SqlTypeKind::Text),
+                vartype: SqlType::new(SqlTypeKind::Tid),
             }),
-            SqlType::new(SqlTypeKind::Text),
+            SqlType::new(SqlTypeKind::Tid),
             ctid_resno,
         )
         .with_input_resno(ctid_resno),
@@ -1184,6 +1190,7 @@ fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>
         limit_count: None,
         limit_offset: 0,
         locking_clause: None,
+        locking_targets: Vec::new(),
         row_marks: Vec::new(),
         has_target_srfs: false,
         recursive_union: None,
@@ -1608,7 +1615,7 @@ pub fn plan_merge(
         TargetEntry::new(
             merge_hidden_ctid_name(),
             joined_output_exprs[target_visible_count].clone(),
-            SqlType::new(SqlTypeKind::Text),
+            SqlType::new(SqlTypeKind::Tid),
             projection_targets.len() + 1,
         )
         .with_input_resno(target_visible_count + 1),
@@ -2299,6 +2306,7 @@ fn rewrite_auto_view_scan_plan(
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             join_qual,
             qual,
         } => Plan::MergeJoin {
@@ -2321,6 +2329,7 @@ fn rewrite_auto_view_scan_plan(
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             join_qual,
             qual,
         },
@@ -3106,6 +3115,11 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
             &resolved.visible_output_exprs,
             &resolved.base_relation.desc,
         ),
+        input_plan: None,
+        target_visible_count: resolved.base_relation.desc.columns.len(),
+        visible_column_count: resolved.base_relation.desc.columns.len(),
+        target_ctid_index: resolved.base_relation.desc.columns.len(),
+        target_tableoid_index: resolved.base_relation.desc.columns.len() + 1,
         required_privileges,
         subplans: stmt.subplans,
     })
@@ -3170,6 +3184,7 @@ fn build_delete_target(
             catalog,
         )?,
         row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
+        parent_visible_exprs: translation_exprs,
         predicate,
     })
 }
@@ -4260,6 +4275,9 @@ pub(crate) fn bind_delete_with_outer_scopes(
         &[],
     )?;
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
+    if stmt.using.is_some() {
+        return bind_delete_using(stmt, catalog, outer_scopes, &local_ctes, &entry);
+    }
     let scope = scope_for_relation_with_generated(Some(&stmt.table_name), &entry.desc, catalog)?;
     let returning_scope = scope_with_returning_pseudo_rows(scope.clone(), &entry.desc);
     let predicate = stmt
@@ -4313,7 +4331,159 @@ pub(crate) fn bind_delete_with_outer_scopes(
     Ok(BoundDeleteStatement {
         targets,
         returning,
+        input_plan: None,
+        target_visible_count: entry.desc.columns.len(),
+        visible_column_count: entry.desc.columns.len(),
+        target_ctid_index: entry.desc.columns.len(),
+        target_tableoid_index: entry.desc.columns.len() + 1,
         required_privileges: vec![delete_privilege_requirement(&entry, &stmt.table_name)],
         subplans: Vec::new(),
+    })
+}
+
+fn bind_delete_using(
+    stmt: &DeleteStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    local_ctes: &[BoundCte],
+    entry: &BoundRelation,
+) -> Result<BoundDeleteStatement, ParseError> {
+    let target_scope = scope_for_base_relation_with_generated(
+        &stmt.table_name,
+        &entry.desc,
+        Some(entry.relation_oid),
+        catalog,
+    )?;
+    let source_stmt = stmt.using.as_ref().expect("checked above");
+    let (source_from, source_scope_raw) =
+        bind_from_item_with_ctes(source_stmt, catalog, outer_scopes, None, local_ctes, &[])?;
+
+    let mut target_base = AnalyzedFrom::relation(
+        stmt.table_name.clone(),
+        entry.rel,
+        entry.relation_oid,
+        entry.relkind,
+        entry.relispopulated,
+        entry.toast,
+        !stmt.only && entry.relkind == 'r',
+        entry.desc.clone(),
+    );
+    target_base.output_exprs = generated_relation_output_exprs(&entry.desc, catalog)?;
+    let (target_from, _, _) = with_update_target_identity(target_base, &entry.desc);
+    let source_scope = shift_scope_rtindexes(source_scope_raw, target_from.rtable.len());
+    let source_visible_count = source_scope.desc.columns.len();
+    let joined = AnalyzedFrom::join(
+        target_from,
+        source_from,
+        JoinType::Cross,
+        Expr::Const(Value::Bool(true)),
+        None,
+    );
+    let target_visible_count = entry.desc.columns.len();
+    let visible_column_count = target_visible_count + source_visible_count;
+    let projection =
+        update_from_projection_targets(&joined, target_visible_count, source_visible_count);
+    let projected = joined.with_projection(projection);
+    let mut eval_scope = combine_scopes(&target_scope, &source_scope);
+    eval_scope.output_exprs = projected.output_exprs[..visible_column_count].to_vec();
+    let returning_scope = scope_with_returning_pseudo_rows(eval_scope.clone(), &entry.desc);
+
+    let target_rls = build_target_relation_row_security(
+        &stmt.table_name,
+        entry.relation_oid,
+        &entry.desc,
+        PolicyCommand::Delete,
+        true,
+        false,
+        catalog,
+    )?;
+    let predicate = stmt
+        .where_clause
+        .as_ref()
+        .map(|expr| {
+            bind_expr_with_outer_and_ctes(
+                expr,
+                &eval_scope,
+                catalog,
+                outer_scopes,
+                None,
+                local_ctes,
+            )
+        })
+        .transpose()?;
+    let predicate = match (predicate, target_rls.visibility_qual) {
+        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(predicate, visibility_qual)),
+        (Some(predicate), None) => Some(predicate),
+        (None, Some(visibility_qual)) => Some(visibility_qual),
+        (None, None) => None,
+    };
+    let returning = bind_returning_targets(
+        &stmt.returning,
+        &returning_scope,
+        catalog,
+        outer_scopes,
+        local_ctes,
+    )?;
+    let query = query_from_projection_with_qual(projected, predicate.clone());
+    let input_plan = crate::backend::optimizer::fold_query_constants(query)
+        .map(|query| crate::backend::optimizer::planner(query, catalog))??;
+
+    let targets = partitioned_update_target_oids(catalog, &entry, stmt.only)
+        .into_iter()
+        .map(|relation_oid| {
+            let child = catalog
+                .relation_by_oid(relation_oid)
+                .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
+            build_delete_target_from_joined_input(
+                &stmt.table_name,
+                &entry.desc,
+                predicate.as_ref(),
+                &child,
+                catalog,
+            )
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+
+    Ok(BoundDeleteStatement {
+        targets,
+        returning,
+        input_plan: Some(input_plan),
+        target_visible_count,
+        visible_column_count,
+        target_ctid_index: visible_column_count,
+        target_tableoid_index: visible_column_count + 1,
+        required_privileges: vec![delete_privilege_requirement(&entry, &stmt.table_name)],
+        subplans: Vec::new(),
+    })
+}
+
+fn build_delete_target_from_joined_input(
+    base_relation_name: &str,
+    parent_desc: &RelationDesc,
+    parent_predicate: Option<&Expr>,
+    child: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundDeleteTarget, ParseError> {
+    let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
+    let translation_exprs = inheritance_translation_exprs(
+        &child.desc,
+        &inheritance_translation_indexes(parent_desc, &child.desc),
+        catalog,
+    )?;
+    Ok(BoundDeleteTarget {
+        relation_name,
+        rel: child.rel,
+        relation_oid: child.relation_oid,
+        relkind: child.relkind,
+        toast: child.toast,
+        desc: child.desc.clone(),
+        referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
+            child.relation_oid,
+            &child.desc,
+            catalog,
+        )?,
+        row_source: BoundModifyRowSource::Heap,
+        parent_visible_exprs: translation_exprs,
+        predicate: parent_predicate.cloned(),
     })
 }

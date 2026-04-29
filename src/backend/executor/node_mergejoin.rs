@@ -4,7 +4,7 @@ use super::mergejoin::{MergeJoinBufferedRow, MergeKey};
 use crate::backend::commands::explain::format_explain_lines_with_costs;
 use crate::backend::executor::exec_expr::eval_expr;
 use crate::backend::executor::expr_ops::compare_order_values;
-use crate::backend::executor::nodes::render_explain_join_expr;
+use crate::backend::executor::nodes::{render_explain_expr, render_explain_join_expr};
 use crate::backend::executor::{ExecError, ExecutorContext};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
@@ -110,17 +110,27 @@ fn merge_clause_collation(clause: &Expr) -> Option<u32> {
 
 fn compare_merge_keys(
     clauses: &[Expr],
+    descending: &[bool],
     left: &[Value],
     right: &[Value],
 ) -> Result<Ordering, ExecError> {
-    for ((left_value, right_value), clause) in left.iter().zip(right.iter()).zip(clauses.iter()) {
-        let ordering = compare_order_values(
+    for (index, ((left_value, right_value), clause)) in left
+        .iter()
+        .zip(right.iter())
+        .zip(clauses.iter())
+        .enumerate()
+    {
+        let descending = descending.get(index).copied().unwrap_or(false);
+        let mut ordering = compare_order_values(
             left_value,
             right_value,
             merge_clause_collation(clause),
             Some(false),
             false,
         )?;
+        if descending {
+            ordering = ordering.reverse();
+        }
         if ordering != Ordering::Equal {
             return Ok(ordering);
         }
@@ -150,7 +160,7 @@ fn materialize_keyed_rows(
 }
 
 fn same_merge_key(clauses: &[Expr], left: &MergeKey, right: &MergeKey) -> Result<bool, ExecError> {
-    Ok(compare_merge_keys(clauses, left, right)? == Ordering::Equal)
+    Ok(compare_merge_keys(clauses, &[], left, right)? == Ordering::Equal)
 }
 
 fn group_end(
@@ -365,7 +375,12 @@ fn build_outputs(
             continue;
         };
 
-        match compare_merge_keys(&state.merge_clauses, left_key, right_key)? {
+        match compare_merge_keys(
+            &state.merge_clauses,
+            &state.merge_key_descending,
+            left_key,
+            right_key,
+        )? {
             Ordering::Less => {
                 let left_end = group_end(
                     state.left_rows.as_ref().unwrap(),
@@ -514,8 +529,8 @@ impl PlanNode for MergeJoinState {
         lines: &mut Vec<String>,
     ) {
         let prefix = "  ".repeat(indent + 1);
+        let (left_names, right_names) = self.combined_names.split_at(self.left_width);
         if !self.merge_clauses.is_empty() {
-            let (left_names, right_names) = self.combined_names.split_at(self.left_width);
             lines.push(format!(
                 "{prefix}Merge Cond: {}",
                 render_explain_join_expr(
@@ -524,9 +539,23 @@ impl PlanNode for MergeJoinState {
                     right_names,
                 )
             ));
+        } else if !self.outer_merge_keys.is_empty() {
+            let rendered = self
+                .outer_merge_keys
+                .iter()
+                .zip(self.inner_merge_keys.iter())
+                .map(|(outer_key, inner_key)| {
+                    format!(
+                        "{} = {}",
+                        render_explain_expr(outer_key, left_names),
+                        render_explain_expr(inner_key, right_names)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            lines.push(format!("{prefix}Merge Cond: ({rendered})"));
         }
         if !self.join_qual.is_empty() {
-            let (left_names, right_names) = self.combined_names.split_at(self.left_width);
             lines.push(format!(
                 "{prefix}Join Filter: {}",
                 render_explain_join_expr(

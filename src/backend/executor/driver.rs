@@ -2,10 +2,10 @@ use super::{
     Catalog, ExecError, ExecutorContext, ParseError, Plan, PlannedStmt, QueryDesc, Statement,
     StatementResult, TransactionId, TupleSlot, Value, bind_delete, bind_insert, bind_update,
     check_planned_stmt_select_for_update_privileges, check_planned_stmt_select_privileges,
-    create_query_desc, eval_expr, execute_analyze, execute_create_index, execute_create_table,
-    execute_delete, execute_drop_table, execute_explain, execute_insert, execute_merge,
-    execute_truncate_table, execute_update, execute_vacuum, executor_start, parse_statement,
-    pg_plan_query, pg_plan_values_query,
+    clear_subquery_eval_cache, create_query_desc, eval_expr, execute_analyze, execute_create_index,
+    execute_create_table, execute_delete, execute_drop_table, execute_explain, execute_insert,
+    execute_merge, execute_truncate_table, execute_update, execute_vacuum, executor_start,
+    parse_statement, pg_plan_query, pg_plan_values_query,
 };
 use crate::backend::parser::{
     CatalogLookup, UnsupportedStatement, pg_plan_query_with_config,
@@ -33,6 +33,7 @@ pub fn execute_query_desc(
     query_desc: QueryDesc,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
+    clear_subquery_eval_cache();
     let columns = query_desc.columns();
     let column_names = query_desc.column_names();
     let planned_stmt = query_desc.planned_stmt;
@@ -92,6 +93,7 @@ pub fn execute_query_desc(
     })();
     ctx.scalar_function_cache = saved_scalar_function_cache;
     ctx.subplans = saved_subplans;
+    clear_subquery_eval_cache();
     result
 }
 
@@ -654,6 +656,10 @@ fn execute_statement_with_source(
                 actual: "REFRESH MATERIALIZED VIEW".into(),
             }))
         }
+        Statement::Cluster(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CLUSTER handled by database/session layer",
+            actual: "CLUSTER".into(),
+        })),
         Statement::DropMaterializedView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP MATERIALIZED VIEW handled by database/session layer",
             actual: "DROP MATERIALIZED VIEW".into(),
@@ -1019,6 +1025,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::CreateRule(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE RULE".into(),
+        })),
+        Statement::Cluster(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CLUSTER".into(),
         })),
         Statement::Vacuum(stmt) => execute_vacuum(stmt, catalog, ctx),
         Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {

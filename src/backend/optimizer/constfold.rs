@@ -17,7 +17,7 @@ use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, Aggref, BoolExpr, BoolExprType, BuiltinScalarFunction, CaseExpr, CaseWhen,
     Expr, ExprArraySubscript, FuncExpr, OpExpr, OpExprKind, OrderByEntry, ScalarFunctionImpl,
     SetReturningCall, SortGroupClause, SqlJsonQueryFunction, SqlJsonTableBehavior,
-    SqlJsonTablePassingArg, TargetEntry, WindowClause, WindowFrame, WindowFrameBound,
+    SqlJsonTablePassingArg, SubLinkType, TargetEntry, WindowClause, WindowFrame, WindowFrameBound,
     WindowFuncExpr, WindowFuncKind, XmlExpr,
 };
 
@@ -96,6 +96,7 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
         limit_count: query.limit_count,
         limit_offset: query.limit_offset,
         locking_clause: query.locking_clause,
+        locking_targets: query.locking_targets,
         row_marks: query.row_marks,
         has_target_srfs: query.has_target_srfs,
         recursive_union: query
@@ -107,6 +108,17 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
             .map(|query| simplify_set_operation(*query).map(Box::new))
             .transpose()?,
     })
+}
+
+fn simple_query_where_qual_is_empty(query: &Query) -> bool {
+    matches!(
+        query.where_qual.as_ref(),
+        Some(Expr::Const(Value::Bool(false)) | Expr::Const(Value::Null))
+    ) && query.accumulators.is_empty()
+        && query.group_by.is_empty()
+        && query.having_qual.is_none()
+        && query.set_operation.is_none()
+        && query.recursive_union.is_none()
 }
 
 fn simplify_rte(rte: RangeTblEntry) -> Result<RangeTblEntry, ParseError> {
@@ -647,16 +659,25 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
                 ..*srf
             },
         ))),
-        Expr::SubLink(sublink) => Ok(Expr::SubLink(Box::new(
-            crate::include::nodes::primnodes::SubLink {
-                testexpr: sublink
-                    .testexpr
-                    .map(|expr| simplify_expr(*expr, case_test_value).map(Box::new))
-                    .transpose()?,
-                subselect: Box::new(simplify_query(*sublink.subselect)?),
-                ..*sublink
-            },
-        ))),
+        Expr::SubLink(sublink) => {
+            let testexpr = sublink
+                .testexpr
+                .map(|expr| simplify_expr(*expr, case_test_value).map(Box::new))
+                .transpose()?;
+            let subselect = simplify_query(*sublink.subselect)?;
+            if matches!(sublink.sublink_type, SubLinkType::ExistsSubLink)
+                && simple_query_where_qual_is_empty(&subselect)
+            {
+                return Ok(Expr::Const(Value::Bool(false)));
+            }
+            Ok(Expr::SubLink(Box::new(
+                crate::include::nodes::primnodes::SubLink {
+                    testexpr,
+                    subselect: Box::new(subselect),
+                    ..*sublink
+                },
+            )))
+        }
         Expr::SubPlan(subplan) => Ok(Expr::SubPlan(Box::new(
             crate::include::nodes::primnodes::SubPlan {
                 testexpr: subplan

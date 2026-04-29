@@ -18,10 +18,10 @@ use crate::include::nodes::plannodes::{
     PartitionPrunePlan, Plan, PlanEstimate, PlanRowMark,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, OUTER_VAR, OpExpr,
-    OrderByEntry, Param, ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry, Var,
-    WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index, is_executor_special_varno,
-    is_system_attr, set_returning_call_exprs, user_attrno,
+    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, JoinType, OUTER_VAR,
+    OpExpr, OrderByEntry, Param, ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry,
+    Var, WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
+    is_executor_special_varno, is_system_attr, set_returning_call_exprs, user_attrno,
 };
 use std::collections::BTreeSet;
 
@@ -1519,6 +1519,7 @@ fn path_single_relid(path: &Path) -> Option<usize> {
         | Path::IndexScan { source_id, .. }
         | Path::BitmapIndexScan { source_id, .. }
         | Path::BitmapHeapScan { source_id, .. } => Some(*source_id),
+        Path::Values { slot_id, .. } => rte_slot_varno(*slot_id),
         Path::BitmapOr { .. } => None,
         Path::Unique { input, .. }
         | Path::Filter { input, .. }
@@ -1773,6 +1774,90 @@ fn rewrite_appendrel_expr_for_input_path(root: &PlannerInfo, expr: Expr, path: &
         .unwrap_or(expr)
 }
 
+fn fix_executor_join_var_for_input(expr: &Expr, input: &Path) -> Option<Expr> {
+    let Expr::Var(var) = expr else {
+        return None;
+    };
+    if var.varlevelsup > 0 || !is_executor_special_varno(var.varno) || is_system_attr(var.varattno)
+    {
+        return None;
+    }
+    let index = attrno_index(var.varattno)?;
+    match input {
+        Path::NestedLoopJoin { left, kind, .. }
+        | Path::HashJoin { left, kind, .. }
+        | Path::MergeJoin { left, kind, .. } => {
+            let left_width = left.output_vars().len();
+            let physical_index = if var.varno == OUTER_VAR {
+                index
+            } else if matches!(kind, JoinType::Semi | JoinType::Anti) {
+                return None;
+            } else {
+                left_width + index
+            };
+            (physical_index < input.output_vars().len())
+                .then(|| special_slot_var(OUTER_VAR, physical_index, var.vartype))
+        }
+        Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. } => fix_executor_join_var_for_input(expr, input),
+        _ => None,
+    }
+}
+
+fn fix_semantic_output_expr_for_input(
+    root: Option<&PlannerInfo>,
+    expr: &Expr,
+    input: &Path,
+) -> Option<Expr> {
+    input
+        .semantic_output_target()
+        .exprs
+        .iter()
+        .enumerate()
+        .find_map(|(index, candidate)| {
+            let direct = exprs_equivalent(root, candidate, expr);
+            let flattened = root.is_some_and(|root| {
+                exprs_equivalent(
+                    Some(root),
+                    &flatten_join_alias_vars(root, candidate.clone()),
+                    &flatten_join_alias_vars(root, expr.clone()),
+                )
+            });
+            (direct || flattened).then(|| special_slot_var(OUTER_VAR, index, expr_sql_type(expr)))
+        })
+}
+
+fn fix_join_rte_var_for_input(
+    root: Option<&PlannerInfo>,
+    expr: &Expr,
+    input: &Path,
+) -> Option<Expr> {
+    let (Some(root), Expr::Var(var)) = (root, expr) else {
+        return None;
+    };
+    if var.varlevelsup > 0 || is_executor_special_varno(var.varno) || is_system_attr(var.varattno) {
+        return None;
+    }
+    let index = attrno_index(var.varattno)?;
+    if path_single_relid(input) == Some(var.varno) {
+        return (index < input.output_vars().len())
+            .then(|| special_slot_var(OUTER_VAR, index, var.vartype));
+    }
+    if !root
+        .parse
+        .rtable
+        .get(var.varno.saturating_sub(1))
+        .is_some_and(|rte| matches!(rte.kind, RangeTblEntryKind::Join { .. }))
+    {
+        return None;
+    }
+    (index < input.output_vars().len()).then(|| special_slot_var(OUTER_VAR, index, var.vartype))
+}
+
 fn fix_upper_expr_for_input(
     root: Option<&PlannerInfo>,
     expr: Expr,
@@ -1781,6 +1866,9 @@ fn fix_upper_expr_for_input(
 ) -> Expr {
     let rewritten = fix_upper_expr(root, expr.clone(), input_tlist);
     if rewritten != expr {
+        if let Some(fixed) = fix_executor_join_var_for_input(&rewritten, input) {
+            return fixed;
+        }
         return rewritten;
     }
     if let Some(root) = root {
@@ -1788,11 +1876,23 @@ fn fix_upper_expr_for_input(
         if translated != expr {
             let translated_rewritten = fix_upper_expr(Some(root), translated.clone(), input_tlist);
             if translated_rewritten != translated {
+                if let Some(fixed) = fix_executor_join_var_for_input(&translated_rewritten, input) {
+                    return fixed;
+                }
                 return translated_rewritten;
             }
         }
     }
     if let Some(rewritten) = fix_immediate_subquery_output_expr(root, &expr, input, input_tlist) {
+        return rewritten;
+    }
+    if let Some(rewritten) = fix_executor_join_var_for_input(&expr, input) {
+        return rewritten;
+    }
+    if let Some(rewritten) = fix_join_rte_var_for_input(root, &expr, input) {
+        return rewritten;
+    }
+    if let Some(rewritten) = fix_semantic_output_expr_for_input(root, &expr, input) {
         return rewritten;
     }
     expr
@@ -1974,6 +2074,13 @@ fn inline_exec_params(expr: Expr, params: &[ExecParamSource], consumed: &mut Vec
         ),
         other => other,
     }
+}
+
+fn can_bind_as_nest_param(rebased_expr: &Expr, fixed_expr: &Expr) -> bool {
+    expr_contains_local_semantic_var(rebased_expr)
+        && fixed_expr != rebased_expr
+        && expr_sql_type(fixed_expr) == expr_sql_type(rebased_expr)
+        && (!expr_contains_local_semantic_var(fixed_expr) || expr_is_local_system_var(fixed_expr))
 }
 
 fn decrement_outer_expr_levels(expr: Expr) -> Expr {
@@ -2644,6 +2751,7 @@ fn lower_sublink(
         .target_list
         .first()
         .map(|target| target.sql_type);
+    let target_width = sublink.subselect.target_list.len();
     let config = ctx.root.map(|root| root.config).unwrap_or_default();
     let (planned_stmt, next_param_id) =
         planner_with_param_base_and_config(*sublink.subselect, catalog, ctx.next_param_id, config)
@@ -2697,6 +2805,7 @@ fn lower_sublink(
             .testexpr
             .map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
         first_col_type,
+        target_width,
         plan_id,
         par_param,
         args,
@@ -2709,7 +2818,17 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
     }
     match expr {
         Expr::Var(var) if var.varlevelsup > 0 => exec_param_for_outer_expr(ctx, Expr::Var(var)),
-        Expr::Var(var) if is_executor_special_varno(var.varno) => Expr::Var(var),
+        Expr::Var(var) if is_executor_special_varno(var.varno) => {
+            let expr = Expr::Var(var);
+            if let LowerMode::Input {
+                path: Some(input), ..
+            } = mode
+                && let Some(rewritten) = fix_executor_join_var_for_input(&expr, input)
+            {
+                return rewritten;
+            }
+            expr
+        }
         Expr::Var(var) => {
             if is_system_attr(var.varattno) {
                 Expr::Var(var)
@@ -2797,6 +2916,7 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
                 .testexpr
                 .map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
             first_col_type: subplan.first_col_type,
+            target_width: subplan.target_width,
             plan_id: subplan.plan_id,
             par_param: subplan.par_param,
             args: subplan
@@ -3122,6 +3242,451 @@ fn expr_array_subscript_uses_only_index_keys(
 
 fn exec_param_sources(params: &[ExecParamSource]) -> BTreeSet<usize> {
     params.iter().map(|param| param.paramid).collect()
+}
+
+fn expr_contains_exec_param_id(expr: &Expr, target_paramid: usize) -> bool {
+    match expr {
+        Expr::Param(Param {
+            paramkind: ParamKind::Exec,
+            paramid,
+            ..
+        }) => *paramid == target_paramid,
+        Expr::Param(_) => false,
+        Expr::Aggref(aggref) => aggref_contains_exec_param_id(aggref, target_paramid),
+        Expr::WindowFunc(window_func) => {
+            window_func_contains_exec_param_id(window_func, target_paramid)
+        }
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|arg| expr_contains_exec_param_id(arg, target_paramid)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| expr_contains_exec_param_id(arg, target_paramid)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|arg| expr_contains_exec_param_id(arg, target_paramid))
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_exec_param_id(&arm.expr, target_paramid)
+                        || expr_contains_exec_param_id(&arm.result, target_paramid)
+                })
+                || expr_contains_exec_param_id(&case_expr.defresult, target_paramid)
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|arg| expr_contains_exec_param_id(arg, target_paramid)),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(|child| expr_contains_exec_param_id(child, target_paramid)),
+        Expr::SetReturning(srf) => {
+            set_returning_call_contains_exec_param_id(&srf.call, target_paramid)
+        }
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_ref()
+            .is_some_and(|testexpr| expr_contains_exec_param_id(testexpr, target_paramid)),
+        Expr::SubPlan(subplan) => {
+            subplan.par_param.contains(&target_paramid)
+                || subplan
+                    .testexpr
+                    .as_ref()
+                    .is_some_and(|testexpr| expr_contains_exec_param_id(testexpr, target_paramid))
+                || subplan
+                    .args
+                    .iter()
+                    .any(|arg| expr_contains_exec_param_id(arg, target_paramid))
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_exec_param_id(&saop.left, target_paramid)
+                || expr_contains_exec_param_id(&saop.right, target_paramid)
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(|child| expr_contains_exec_param_id(child, target_paramid)),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            expr_contains_exec_param_id(inner, target_paramid)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_exec_param_id(expr, target_paramid)
+                || expr_contains_exec_param_id(pattern, target_paramid)
+                || escape
+                    .as_ref()
+                    .is_some_and(|escape| expr_contains_exec_param_id(escape, target_paramid))
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            expr_contains_exec_param_id(inner, target_paramid)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_exec_param_id(left, target_paramid)
+                || expr_contains_exec_param_id(right, target_paramid)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|element| expr_contains_exec_param_id(element, target_paramid)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_exec_param_id(expr, target_paramid)),
+        Expr::FieldSelect { expr, .. } => expr_contains_exec_param_id(expr, target_paramid),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_exec_param_id(array, target_paramid)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|lower| expr_contains_exec_param_id(lower, target_paramid))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|upper| expr_contains_exec_param_id(upper, target_paramid))
+                })
+        }
+        Expr::Var(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn order_by_contains_exec_param_id(item: &OrderByEntry, target_paramid: usize) -> bool {
+    expr_contains_exec_param_id(&item.expr, target_paramid)
+}
+
+fn aggref_contains_exec_param_id(aggref: &Aggref, target_paramid: usize) -> bool {
+    aggref
+        .direct_args
+        .iter()
+        .any(|arg| expr_contains_exec_param_id(arg, target_paramid))
+        || aggref
+            .args
+            .iter()
+            .any(|arg| expr_contains_exec_param_id(arg, target_paramid))
+        || aggref
+            .aggorder
+            .iter()
+            .any(|item| order_by_contains_exec_param_id(item, target_paramid))
+        || aggref
+            .aggfilter
+            .as_ref()
+            .is_some_and(|filter| expr_contains_exec_param_id(filter, target_paramid))
+}
+
+fn agg_accum_contains_exec_param_id(accum: &AggAccum, target_paramid: usize) -> bool {
+    accum
+        .direct_args
+        .iter()
+        .any(|arg| expr_contains_exec_param_id(arg, target_paramid))
+        || accum
+            .args
+            .iter()
+            .any(|arg| expr_contains_exec_param_id(arg, target_paramid))
+        || accum
+            .order_by
+            .iter()
+            .any(|item| order_by_contains_exec_param_id(item, target_paramid))
+        || accum
+            .filter
+            .as_ref()
+            .is_some_and(|filter| expr_contains_exec_param_id(filter, target_paramid))
+}
+
+fn window_func_contains_exec_param_id(window_func: &WindowFuncExpr, target_paramid: usize) -> bool {
+    window_func
+        .args
+        .iter()
+        .any(|arg| expr_contains_exec_param_id(arg, target_paramid))
+        || match &window_func.kind {
+            WindowFuncKind::Aggregate(aggref) => {
+                aggref_contains_exec_param_id(aggref, target_paramid)
+            }
+            WindowFuncKind::Builtin(_) => false,
+        }
+}
+
+fn window_clause_contains_exec_param_id(clause: &WindowClause, target_paramid: usize) -> bool {
+    clause
+        .spec
+        .partition_by
+        .iter()
+        .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+        || clause
+            .spec
+            .order_by
+            .iter()
+            .any(|item| order_by_contains_exec_param_id(item, target_paramid))
+        || clause
+            .functions
+            .iter()
+            .any(|func| window_func_contains_exec_param_id(func, target_paramid))
+}
+
+fn set_returning_call_contains_exec_param_id(
+    call: &crate::include::nodes::primnodes::SetReturningCall,
+    target_paramid: usize,
+) -> bool {
+    set_returning_call_exprs(call)
+        .iter()
+        .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+}
+
+fn index_scan_keys_contain_exec_param_id(keys: &[IndexScanKey], target_paramid: usize) -> bool {
+    keys.iter().any(|key| {
+        matches!(
+            &key.argument,
+            IndexScanKeyArgument::Runtime(expr)
+                if expr_contains_exec_param_id(expr, target_paramid)
+        )
+    })
+}
+
+fn plan_contains_exec_param_id(plan: &Plan, target_paramid: usize) -> bool {
+    match plan {
+        Plan::Result { .. } | Plan::SeqScan { .. } | Plan::WorkTableScan { .. } => false,
+        Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::SetOp { children, .. } => children
+            .iter()
+            .any(|child| plan_contains_exec_param_id(child, target_paramid)),
+        Plan::MergeAppend {
+            items, children, ..
+        } => {
+            items
+                .iter()
+                .any(|item| order_by_contains_exec_param_id(item, target_paramid))
+                || children
+                    .iter()
+                    .any(|child| plan_contains_exec_param_id(child, target_paramid))
+        }
+        Plan::Unique { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Gather { input, .. } => plan_contains_exec_param_id(input, target_paramid),
+        Plan::Memoize {
+            input, cache_keys, ..
+        } => {
+            plan_contains_exec_param_id(input, target_paramid)
+                || cache_keys
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+        }
+        Plan::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        }
+        | Plan::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        } => {
+            index_scan_keys_contain_exec_param_id(keys, target_paramid)
+                || index_scan_keys_contain_exec_param_id(order_by_keys, target_paramid)
+        }
+        Plan::BitmapIndexScan {
+            keys, index_quals, ..
+        } => {
+            index_scan_keys_contain_exec_param_id(keys, target_paramid)
+                || index_quals
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+        }
+        Plan::BitmapHeapScan {
+            bitmapqual,
+            recheck_qual,
+            filter_qual,
+            ..
+        } => {
+            plan_contains_exec_param_id(bitmapqual, target_paramid)
+                || recheck_qual
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+                || filter_qual
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+        }
+        Plan::Hash {
+            input, hash_keys, ..
+        } => {
+            plan_contains_exec_param_id(input, target_paramid)
+                || hash_keys
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+        }
+        Plan::NestedLoopJoin {
+            left,
+            right,
+            nest_params,
+            join_qual,
+            qual,
+            ..
+        } => {
+            plan_contains_exec_param_id(left, target_paramid)
+                || plan_contains_exec_param_id(right, target_paramid)
+                || nest_params
+                    .iter()
+                    .any(|param| expr_contains_exec_param_id(&param.expr, target_paramid))
+                || join_qual
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+                || qual
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+        }
+        Plan::HashJoin {
+            left,
+            right,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            plan_contains_exec_param_id(left, target_paramid)
+                || plan_contains_exec_param_id(right, target_paramid)
+                || hash_clauses
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+                || hash_keys
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+                || join_qual
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+                || qual
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+        }
+        Plan::MergeJoin {
+            left,
+            right,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            plan_contains_exec_param_id(left, target_paramid)
+                || plan_contains_exec_param_id(right, target_paramid)
+                || merge_clauses
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+                || outer_merge_keys
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+                || inner_merge_keys
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+                || join_qual
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+                || qual
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+        }
+        Plan::Filter {
+            input, predicate, ..
+        } => {
+            expr_contains_exec_param_id(predicate, target_paramid)
+                || plan_contains_exec_param_id(input, target_paramid)
+        }
+        Plan::OrderBy { input, items, .. } | Plan::IncrementalSort { input, items, .. } => {
+            items
+                .iter()
+                .any(|item| order_by_contains_exec_param_id(item, target_paramid))
+                || plan_contains_exec_param_id(input, target_paramid)
+        }
+        Plan::Projection { input, targets, .. } => {
+            targets
+                .iter()
+                .any(|target| expr_contains_exec_param_id(&target.expr, target_paramid))
+                || plan_contains_exec_param_id(input, target_paramid)
+        }
+        Plan::Aggregate {
+            input,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            having,
+            ..
+        } => {
+            group_by
+                .iter()
+                .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+                || passthrough_exprs
+                    .iter()
+                    .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+                || accumulators
+                    .iter()
+                    .any(|accum| agg_accum_contains_exec_param_id(accum, target_paramid))
+                || having
+                    .as_ref()
+                    .is_some_and(|having| expr_contains_exec_param_id(having, target_paramid))
+                || plan_contains_exec_param_id(input, target_paramid)
+        }
+        Plan::WindowAgg { input, clause, .. } => {
+            window_clause_contains_exec_param_id(clause, target_paramid)
+                || plan_contains_exec_param_id(input, target_paramid)
+        }
+        Plan::FunctionScan { call, .. } => {
+            set_returning_call_contains_exec_param_id(call, target_paramid)
+        }
+        Plan::SubqueryScan { input, filter, .. } => {
+            filter
+                .as_ref()
+                .is_some_and(|filter| expr_contains_exec_param_id(filter, target_paramid))
+                || plan_contains_exec_param_id(input, target_paramid)
+        }
+        Plan::CteScan { cte_plan, .. } => plan_contains_exec_param_id(cte_plan, target_paramid),
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            plan_contains_exec_param_id(anchor, target_paramid)
+                || plan_contains_exec_param_id(recursive, target_paramid)
+        }
+        Plan::Values { rows, .. } => rows.iter().any(|row| {
+            row.iter()
+                .any(|expr| expr_contains_exec_param_id(expr, target_paramid))
+        }),
+        Plan::ProjectSet { input, targets, .. } => {
+            targets.iter().any(|target| match target {
+                crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
+                    expr_contains_exec_param_id(&entry.expr, target_paramid)
+                }
+                crate::include::nodes::primnodes::ProjectSetTarget::Set { call, .. } => {
+                    set_returning_call_contains_exec_param_id(call, target_paramid)
+                }
+            }) || plan_contains_exec_param_id(input, target_paramid)
+        }
+    }
 }
 
 fn validate_executable_index_scan_keys(
@@ -4848,10 +5413,7 @@ fn set_nested_loop_join_references(
                 );
                 let fixed_expr =
                     fix_upper_expr_for_input(ctx.root, rebased_expr.clone(), &left, &left_tlist);
-                if expr_contains_local_semantic_var(&rebased_expr)
-                    && (!expr_contains_local_semantic_var(&fixed_expr)
-                        || expr_is_local_system_var(&fixed_expr))
-                {
+                if can_bind_as_nest_param(&rebased_expr, &fixed_expr) {
                     consumed_parent_params.extend(param_consumed_parent_params);
                     params.push(ExecParamSource {
                         paramid: param.paramid,
@@ -4877,8 +5439,39 @@ fn set_nested_loop_join_references(
             (plan, params)
         }
     };
-    right_plan = maybe_wrap_nested_loop_inner_plan(ctx.root, kind, &nest_params, right_plan);
+    let left_for_late_params = left.clone();
     let left_plan = set_plan_refs(ctx, *left);
+    let mut nest_params = nest_params;
+    let mut retained_ext_params = Vec::new();
+    for param in std::mem::take(&mut ctx.ext_params) {
+        if !plan_contains_exec_param_id(&right_plan, param.paramid) {
+            retained_ext_params.push(param);
+            continue;
+        }
+        let fixed_expr = fix_upper_expr_for_input(
+            ctx.root,
+            param.expr.clone(),
+            &left_for_late_params,
+            &left_tlist,
+        );
+        if can_bind_as_nest_param(&param.expr, &fixed_expr) {
+            nest_params.push(ExecParamSource {
+                paramid: param.paramid,
+                expr: lower_expr(
+                    ctx,
+                    fixed_expr,
+                    LowerMode::Input {
+                        path: Some(&left_for_late_params),
+                        tlist: &left_tlist,
+                    },
+                ),
+            });
+        } else {
+            retained_ext_params.push(param);
+        }
+    }
+    ctx.ext_params = retained_ext_params;
+    right_plan = maybe_wrap_nested_loop_inner_plan(ctx.root, kind, &nest_params, right_plan);
     Plan::NestedLoopJoin {
         plan_info,
         left: Box::new(left_plan),
@@ -5097,6 +5690,7 @@ fn set_merge_join_references(
     merge_clauses: Vec<RestrictInfo>,
     outer_merge_keys: Vec<Expr>,
     inner_merge_keys: Vec<Expr>,
+    merge_key_descending: Vec<bool>,
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Plan {
     let left_tlist = build_path_tlist(ctx.root, &left);
@@ -5176,6 +5770,7 @@ fn set_merge_join_references(
         merge_clauses: lowered_merge_clauses,
         outer_merge_keys,
         inner_merge_keys,
+        merge_key_descending,
         join_qual,
         qual,
     }
@@ -6030,6 +6625,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             restrict_clauses,
             ..
         } => set_merge_join_references(
@@ -6041,6 +6637,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             restrict_clauses,
         ),
         Path::Projection {

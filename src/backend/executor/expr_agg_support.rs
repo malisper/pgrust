@@ -15,7 +15,7 @@ use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{
     BPCHAR_HASH_OPCLASS_OID, INT8_TYPE_OID, PG_LANGUAGE_SQL_OID,
     builtin_aggregate_function_for_proc_oid, builtin_hypothetical_aggregate_function_for_proc_oid,
-    builtin_scalar_function_for_proc_oid,
+    builtin_ordered_set_aggregate_function_for_proc_oid, builtin_scalar_function_for_proc_oid,
 };
 use crate::include::nodes::datum::{ArrayValue, NumericValue, Value};
 use crate::include::nodes::primnodes::{
@@ -39,6 +39,9 @@ pub(crate) fn build_aggregate_runtime(
     }
     if let Some(func) = builtin_hypothetical_aggregate_function_for_proc_oid(accum.aggfnoid) {
         return Ok(AggregateRuntime::Hypothetical { func });
+    }
+    if let Some(func) = builtin_ordered_set_aggregate_function_for_proc_oid(accum.aggfnoid) {
+        return Ok(AggregateRuntime::OrderedSet { func });
     }
 
     let catalog = ctx

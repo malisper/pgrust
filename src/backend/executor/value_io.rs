@@ -97,6 +97,10 @@ pub fn render_uuid_text(value: &[u8; 16]) -> String {
     out
 }
 
+pub fn render_tid_text(value: &crate::include::access::itemptr::ItemPointerData) -> String {
+    format!("({},{})", value.block_number, value.offset_number)
+}
+
 pub(crate) fn format_record_text(record: &crate::include::nodes::datum::RecordValue) -> String {
     format_record_text_with_options(record, &FloatFormatOptions::default())
 }
@@ -181,6 +185,7 @@ pub(crate) fn format_record_text_with_options(
                             Value::Xml(v) => {
                                 crate::backend::executor::render_xml_output_text(v).to_string()
                             }
+                            Value::Tid(v) => render_tid_text(v),
                             Value::Null => String::new(),
                             _ => format!("{other:?}"),
                         })
@@ -368,6 +373,7 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
         Value::TsVector(vector) => crate::backend::executor::render_tsvector_text(vector),
         Value::TsQuery(query) => crate::backend::executor::render_tsquery_text(query),
         Value::PgLsn(value) => render_pg_lsn_text(*value),
+        Value::Tid(value) => render_tid_text(value),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)
@@ -1059,6 +1065,10 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
         Value::PgLsn(v) => {
             out.push(INTERNAL_VALUE_TAG_PG_LSN);
             out.extend_from_slice(&v.to_le_bytes());
+        }
+        Value::Tid(v) => {
+            out.push(INTERNAL_VALUE_TAG_TEXT);
+            encode_internal_text(render_tid_text(&v).as_bytes(), &mut out);
         }
         Value::Text(v) => {
             out.push(INTERNAL_VALUE_TAG_TEXT);
@@ -1889,6 +1899,9 @@ pub(crate) fn coerce_assignment_value_with_config(
         }
         Value::PgLsn(v) => {
             cast_text_value_with_config(&render_pg_lsn_text(*v), target, false, datetime_config)
+        }
+        Value::Tid(v) => {
+            cast_text_value_with_config(&render_tid_text(v), target, false, datetime_config)
         }
         Value::Money(v) => cast_text_value_with_config(
             &crate::backend::executor::money_format_text(*v),

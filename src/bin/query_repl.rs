@@ -566,6 +566,7 @@ fn run_statement(
         | Statement::CreateTextSearch(_)
         | Statement::AlterTextSearch(_)
         | Statement::RefreshMaterializedView(_)
+        | Statement::Cluster(_)
         | Statement::DropMaterializedView(_)
         | Statement::DropPolicy(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableOwner(stmt) => {

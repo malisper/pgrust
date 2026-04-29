@@ -627,7 +627,10 @@ direct_test_dependencies() {
         aggregates)
             echo "create_aggregate"
             ;;
-        join|select_parallel|with)
+        join)
+            echo "create_index create_misc"
+            ;;
+        select_parallel|with)
             echo "create_misc"
             ;;
         psql|event_trigger)
@@ -1056,7 +1059,18 @@ start_server() {
         echo "ERROR: port $PORT is already in use; refusing to treat another server as ready."
         return 1
     fi
-    "$SERVER_BIN" "$DATA_DIR" "$PORT" &
+    # Cap virtual address space per pgrust_server so a runaway test allocates
+    # itself into a clean per-process OOM instead of triggering a host-level
+    # runner shutdown signal. Production runs have observed pgrust_server
+    # spike from ~2GB to 90GB on workloads that upstream PG handles in MB —
+    # these are pgrust memory regressions we want surfaced as failed tests,
+    # not silent infrastructure kills. 12GB leaves headroom above legitimate
+    # peaks while staying well under the 128GB runner budget when 4 workers
+    # are active concurrently.
+    local server_vmem_cap_kb="${PGRUST_SERVER_VMEM_CAP_KB:-12582912}"
+    # macOS bash often refuses RLIMIT_AS via ulimit -v; on Linux runners it
+    # takes effect. Either way, exec proceeds.
+    ( ulimit -v "$server_vmem_cap_kb" 2>/dev/null || true; exec "$SERVER_BIN" "$DATA_DIR" "$PORT" ) &
     SERVER_PID=$!
 
     if ! wait_for_server_ready "$SERVER_PID"; then
@@ -2143,6 +2157,42 @@ SQL
     return 1
 }
 
+sample_pgrust_peak_rss_kb() {
+    # Background sampler: poll the given pid's RSS once a second, persist the
+    # rolling peak to $out_file. Each new max is rewritten so a SIGTERM mid-loop
+    # still leaves the latest peak on disk.
+    local pid="$1"
+    local out_file="$2"
+    local interval="${3:-1}"
+    local peak=0
+    local rss=""
+    while kill -0 "$pid" 2>/dev/null; do
+        if [[ -r "/proc/$pid/status" ]]; then
+            rss=$(awk '/^VmRSS:/ {print $2; exit}' "/proc/$pid/status" 2>/dev/null || echo 0)
+            if [[ -n "$rss" && "$rss" =~ ^[0-9]+$ && "$rss" -gt "$peak" ]]; then
+                peak="$rss"
+                printf '%d\n' "$peak" > "$out_file"
+            fi
+        fi
+        sleep "$interval"
+    done
+}
+
+append_memory_peak_record() {
+    # Append one JSONL row to the shard-level memory_peaks.jsonl. Concurrent
+    # workers append independently; each printf is a single write under
+    # PIPE_BUF on Linux, so interleaving is line-atomic.
+    local test_name="$1"
+    local worker_slot="$2"
+    local peak_kb="$3"
+    local duration_sec="$4"
+    local out_file="$RESULTS_DIR/memory_peaks.jsonl"
+    [[ -n "$peak_kb" && "$peak_kb" =~ ^[0-9]+$ ]] || peak_kb=0
+    [[ -n "$duration_sec" && "$duration_sec" =~ ^[0-9]+$ ]] || duration_sec=0
+    printf '{"test":"%s","worker":%s,"peak_rss_kb":%s,"duration_sec":%s}\n' \
+        "$test_name" "$worker_slot" "$peak_kb" "$duration_sec" >> "$out_file"
+}
+
 run_one_regression_test_isolated() (
     local sql_file="$1"
     local worker_slot="$2"
@@ -2228,7 +2278,29 @@ run_one_regression_test_isolated() (
         return 1
     fi
 
+    local peak_rss_file="$worker_root/peak_rss_kb.txt"
+    echo 0 > "$peak_rss_file"
+    local sampler_pid=""
+    if [[ -n "$SERVER_PID" ]]; then
+        sample_pgrust_peak_rss_kb "$SERVER_PID" "$peak_rss_file" 1 &
+        sampler_pid=$!
+    fi
+
+    local test_start_ts test_end_ts test_duration peak_rss_kb
+    test_start_ts=$(date +%s)
     run_one_regression_test "$sql_file"
+    local test_rc=$?
+    test_end_ts=$(date +%s)
+    test_duration=$(( test_end_ts - test_start_ts ))
+
+    if [[ -n "$sampler_pid" ]]; then
+        kill "$sampler_pid" 2>/dev/null || true
+        wait "$sampler_pid" 2>/dev/null || true
+    fi
+    peak_rss_kb=$(cat "$peak_rss_file" 2>/dev/null || echo 0)
+    append_memory_peak_record "$test_name" "$worker_slot" "$peak_rss_kb" "$test_duration"
+
+    return $test_rc
 )
 
 collect_test_status() {

@@ -225,6 +225,29 @@ fn project_set_target_uses_outer_columns(
     }
 }
 
+fn expr_is_never_true(expr: &Expr) -> bool {
+    match expr {
+        Expr::Const(crate::include::nodes::datum::Value::Bool(false))
+        | Expr::Const(crate::include::nodes::datum::Value::Null) => true,
+        Expr::Bool(bool_expr)
+            if bool_expr.boolop == crate::include::nodes::primnodes::BoolExprType::And =>
+        {
+            bool_expr.args.iter().any(expr_is_never_true)
+        }
+        Expr::Bool(bool_expr)
+            if bool_expr.boolop == crate::include::nodes::primnodes::BoolExprType::Or =>
+        {
+            !bool_expr.args.is_empty() && bool_expr.args.iter().all(expr_is_never_true)
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => expr_is_never_true(inner),
+        _ => false,
+    }
+}
+
+fn qual_list_is_never_true(quals: &[Expr]) -> bool {
+    quals.iter().any(expr_is_never_true)
+}
+
 fn plan_uses_outer_columns(plan: &Plan) -> bool {
     match plan {
         Plan::Result { .. }
@@ -296,6 +319,7 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending: _,
             join_qual,
             qual,
             ..
@@ -540,6 +564,9 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 order_by_keys,
                 direction,
                 scan: None,
+                pending_array_scan_keys: Vec::new(),
+                array_scan_seen_tids: Default::default(),
+                array_scan_keys_initialized: false,
                 scan_exhausted: false,
                 vm_buf: None,
                 slot,
@@ -598,6 +625,9 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 direction,
                 index_only,
                 scan: None,
+                pending_array_scan_keys: Vec::new(),
+                array_scan_seen_tids: Default::default(),
+                array_scan_keys_initialized: false,
                 scan_exhausted: false,
                 slot,
                 qual: None,
@@ -777,6 +807,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 right_plan: right_uses_outer.then_some(right_plan),
                 kind,
                 nest_params,
+                join_qual_never_matches: qual_list_is_never_true(&join_qual),
                 join_qual,
                 qual,
                 combined_names,
@@ -883,6 +914,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             join_qual,
             qual,
         } => {
@@ -913,6 +945,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 merge_clauses,
                 outer_merge_keys,
                 inner_merge_keys,
+                merge_key_descending,
                 join_qual,
                 qual,
                 combined_names,
@@ -1048,6 +1081,9 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 order_by_keys,
                 direction,
                 scan: None,
+                pending_array_scan_keys: Vec::new(),
+                array_scan_seen_tids: Default::default(),
+                array_scan_keys_initialized: false,
                 scan_exhausted: false,
                 vm_buf: None,
                 slot,
@@ -1115,6 +1151,9 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 direction,
                 index_only,
                 scan: None,
+                pending_array_scan_keys: Vec::new(),
+                array_scan_seen_tids: Default::default(),
+                array_scan_keys_initialized: false,
                 scan_exhausted: false,
                 slot,
                 qual: Some(qual),

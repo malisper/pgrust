@@ -197,7 +197,7 @@ jobs:
           rm -rf "$REGRESS_ARTIFACT_DIR"
           mkdir -p "$REGRESS_ARTIFACT_DIR"
 
-          for file in summary.json summary.md exit_code.txt; do
+          for file in summary.json summary.md exit_code.txt memory_peaks.jsonl; do
             if [[ -f "$REGRESS_RESULTS_DIR/$file" ]]; then
               cp "$REGRESS_RESULTS_DIR/$file" "$REGRESS_ARTIFACT_DIR/$file"
             fi
@@ -214,7 +214,7 @@ jobs:
             echo "Compact regression shard artifact bundle."
             echo "Shard: ${{ matrix.shard }}/$REGRESS_SHARD_TOTAL"
             echo "Source results dir: $REGRESS_RESULTS_DIR"
-            echo "Included: summary.json, summary.md, exit_code.txt, output/, diff/, status/, fixtures/"
+            echo "Included: summary.json, summary.md, exit_code.txt, memory_peaks.jsonl, output/, diff/, status/, fixtures/"
             echo "Excluded: base/, workers/, and tablespaces/ database state"
             echo
             if [[ -d "$REGRESS_RESULTS_DIR" ]]; then
