@@ -2895,13 +2895,8 @@ impl CatalogStore {
             ));
         }
         row.oid = old_visible.oid;
-        let old_depends = trigger_depend_rows(
-            old_visible.oid,
-            old_visible.tgrelid,
-            old_visible.tgfoid,
-            &old_visible.tgattr,
-            old_visible.tgconstraint,
-        );
+        let old_depends =
+            depend_rows_for_object_mvcc(self, ctx, PG_TRIGGER_RELATION_OID, old_visible.oid)?;
         let new_depends = trigger_depend_rows(
             row.oid,
             row.tgrelid,
@@ -3000,15 +2995,11 @@ impl CatalogStore {
             BootstrapCatalogKind::PgTrigger,
             BootstrapCatalogKind::PgDepend,
         ];
+        let old_depends =
+            depend_rows_for_object_mvcc(self, ctx, PG_TRIGGER_RELATION_OID, old_trigger.oid)?;
         let mut delete_rows = PhysicalCatalogRows {
             triggers: vec![old_trigger.clone()],
-            depends: trigger_depend_rows(
-                old_trigger.oid,
-                old_trigger.tgrelid,
-                old_trigger.tgfoid,
-                &old_trigger.tgattr,
-                old_trigger.tgconstraint,
-            ),
+            depends: old_depends,
             ..PhysicalCatalogRows::default()
         };
         if old_class.relhastriggers != has_remaining {
@@ -11276,6 +11267,7 @@ fn constraint_depend_rows_mvcc(
         constraint_oid,
     )?);
     sort_pg_depend_rows(&mut rows);
+    rows.dedup();
     Ok(rows)
 }
 
