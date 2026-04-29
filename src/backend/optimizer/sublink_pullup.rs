@@ -289,7 +289,7 @@ fn simple_exists_query(query: &Query) -> bool {
         && query.having_qual.is_none()
         && query.sort_clause.is_empty()
         && query.limit_count.is_none()
-        && query.limit_offset == 0
+        && query.limit_offset.is_none()
         && query.locking_clause.is_none()
         && query.row_marks.is_empty()
         && !query.has_target_srfs

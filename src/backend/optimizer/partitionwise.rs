@@ -1,5 +1,6 @@
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::parser::CatalogLookup;
+use crate::include::nodes::parsenodes::RangeTblEntryKind;
 use crate::include::nodes::pathnodes::{
     AppendRelInfo, PartitionInfo, PartitionMember, Path, PathTarget, PlannerInfo, RelOptInfo,
     RelOptKind, RestrictInfo,
@@ -171,21 +172,38 @@ fn query_accumulators_whole_row_rel(root: &PlannerInfo, relids: &[usize]) -> boo
 
 fn expr_is_whole_row_rel(root: &PlannerInfo, expr: &Expr, relids: &[usize]) -> bool {
     match expr {
-        Expr::Row { fields, .. } => relids.iter().any(|relid| {
-            let Some(rte) = root.parse.rtable.get(relid.saturating_sub(1)) else {
-                return false;
-            };
-            fields.len() == rte.desc.columns.len()
-                && fields.iter().enumerate().all(|(index, (_, expr))| {
-                    matches!(
-                        expr,
-                        Expr::Var(var)
-                            if var.varno == *relid
-                                && var.varlevelsup == 0
-                                && var.varattno == user_attrno(index)
-                    )
+        Expr::Row {
+            descriptor, fields, ..
+        } => {
+            row_type_targets_rel(root, descriptor.typrelid, relids)
+                || relids.iter().any(|relid| {
+                    let Some(rte) = root.parse.rtable.get(relid.saturating_sub(1)) else {
+                        return false;
+                    };
+                    fields.len() == rte.desc.columns.len()
+                        && fields.iter().enumerate().all(|(index, (_, expr))| {
+                            matches!(
+                                expr,
+                                Expr::Var(var)
+                                    if var.varno == *relid
+                                        && var.varlevelsup == 0
+                                        && var.varattno == user_attrno(index)
+                            )
+                        })
                 })
-        }),
+        }
+        Expr::Case(case_expr) => {
+            row_type_targets_rel(root, case_expr.casetype.typrelid, relids)
+                || case_expr
+                    .arg
+                    .as_deref()
+                    .is_some_and(|arg| expr_is_whole_row_rel(root, arg, relids))
+                || case_expr.args.iter().any(|arm| {
+                    expr_is_whole_row_rel(root, &arm.expr, relids)
+                        || expr_is_whole_row_rel(root, &arm.result, relids)
+                })
+                || expr_is_whole_row_rel(root, &case_expr.defresult, relids)
+        }
         Expr::Op(op) => op
             .args
             .iter()
@@ -209,6 +227,19 @@ fn expr_is_whole_row_rel(root: &PlannerInfo, expr: &Expr, relids: &[usize]) -> b
         }
         _ => false,
     }
+}
+
+fn row_type_targets_rel(root: &PlannerInfo, typrelid: u32, relids: &[usize]) -> bool {
+    typrelid != 0
+        && relids.iter().any(|relid| {
+            root.parse
+                .rtable
+                .get(relid.saturating_sub(1))
+                .is_some_and(|rte| match &rte.kind {
+                    RangeTblEntryKind::Relation { relation_oid, .. } => *relation_oid == typrelid,
+                    _ => false,
+                })
+        })
 }
 
 fn ensure_child_join_rel(

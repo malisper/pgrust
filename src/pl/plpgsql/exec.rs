@@ -15,8 +15,8 @@ use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
     TupleSlot, Value, cast_value, cast_value_with_config,
     cast_value_with_source_type_catalog_and_config, compare_order_values, eval_expr,
-    eval_plpgsql_expr, execute_planned_stmt, execute_readonly_statement, executor_start,
-    render_interval_text,
+    eval_plpgsql_expr, execute_planned_stmt, execute_readonly_statement_with_config,
+    executor_start, render_interval_text,
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::libpq::pqformat::{format_exec_error, format_exec_error_hint};
@@ -24,8 +24,9 @@ use crate::backend::parser::analyze::sql_type_name;
 use crate::backend::parser::{
     Catalog, CatalogLookup, ParseError, PreparedExternalParam, SqlType, SqlTypeKind, Statement,
     TriggerLevel, TriggerTiming, bind_scalar_expr_in_named_slot_scope, parse_statement,
-    pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
-    resolve_raw_type_name, with_external_param_types,
+    pg_plan_query_with_outer_scopes_and_ctes_config,
+    pg_plan_values_query_with_outer_scopes_and_ctes_config, resolve_raw_type_name,
+    with_external_param_types,
 };
 use crate::backend::utils::misc::notices::push_notice;
 use crate::backend::utils::record::{
@@ -40,6 +41,7 @@ use crate::include::catalog::{
 use crate::include::executor::execdesc::create_query_desc;
 use crate::include::nodes::datum::{RecordDescriptor, RecordValue};
 use crate::include::nodes::execnodes::{MaterializedCteTable, MaterializedRow, SystemVarBinding};
+use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::{
     OpExprKind, QueryColumn, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, Var, expr_sql_type_hint,
 };
@@ -4023,6 +4025,7 @@ fn execute_dynamic_sql_statement(
             "0A000",
         )
     })?;
+    let planner_config = planner_config_from_executor_gucs(&ctx.gucs);
 
     let result = execute_function_query_with_bindings(compiled, state, ctx, false, |ctx| {
         let stmt = parse_statement(&sql).map_err(ExecError::Parse)?;
@@ -4032,21 +4035,23 @@ fn execute_dynamic_sql_statement(
         install_dynamic_external_params(&external_bindings, ctx)?;
         with_external_param_types(&external_types, || match stmt {
             crate::backend::parser::Statement::Select(stmt) => execute_planned_stmt(
-                pg_plan_query_with_outer_scopes_and_ctes(
+                pg_plan_query_with_outer_scopes_and_ctes_config(
                     &stmt,
                     catalog.as_ref(),
                     &[],
                     &compiled.local_ctes,
+                    planner_config,
                 )
                 .map_err(ExecError::Parse)?,
                 ctx,
             ),
             crate::backend::parser::Statement::Values(stmt) => execute_planned_stmt(
-                pg_plan_values_query_with_outer_scopes_and_ctes(
+                pg_plan_values_query_with_outer_scopes_and_ctes_config(
                     &stmt,
                     catalog.as_ref(),
                     &[],
                     &compiled.local_ctes,
+                    planner_config,
                 )
                 .map_err(ExecError::Parse)?,
                 ctx,
@@ -4142,7 +4147,9 @@ fn execute_dynamic_sql_statement(
             crate::backend::parser::Statement::Do(stmt) => {
                 super::execute_do_with_context_preserving_notices(&stmt, catalog.as_ref(), ctx)
             }
-            other => execute_readonly_statement(other, catalog.as_ref(), ctx),
+            other => {
+                execute_readonly_statement_with_config(other, catalog.as_ref(), ctx, planner_config)
+            }
         })
     });
     result
@@ -4151,6 +4158,52 @@ fn execute_dynamic_sql_statement(
             context: format!("SQL statement \"{sql}\""),
         })
         .map_err(|err| with_sql_statement_context(err, Some(sql)))
+}
+
+fn planner_config_from_executor_gucs(gucs: &HashMap<String, String>) -> PlannerConfig {
+    PlannerConfig {
+        enable_partitionwise_join: bool_executor_guc(gucs, "enable_partitionwise_join", false),
+        enable_partitionwise_aggregate: bool_executor_guc(
+            gucs,
+            "enable_partitionwise_aggregate",
+            false,
+        ),
+        enable_seqscan: bool_executor_guc(gucs, "enable_seqscan", true),
+        enable_indexscan: bool_executor_guc(gucs, "enable_indexscan", true),
+        enable_indexonlyscan: bool_executor_guc(gucs, "enable_indexonlyscan", true),
+        enable_bitmapscan: bool_executor_guc(gucs, "enable_bitmapscan", true),
+        enable_nestloop: bool_executor_guc(gucs, "enable_nestloop", true),
+        enable_hashjoin: bool_executor_guc(gucs, "enable_hashjoin", true),
+        enable_mergejoin: bool_executor_guc(gucs, "enable_mergejoin", true),
+        enable_memoize: bool_executor_guc(gucs, "enable_memoize", true),
+        enable_material: bool_executor_guc(gucs, "enable_material", true),
+        retain_partial_index_filters: false,
+        enable_hashagg: bool_executor_guc(gucs, "enable_hashagg", true),
+        enable_sort: bool_executor_guc(gucs, "enable_sort", true),
+        force_parallel_gather: bool_executor_guc(gucs, "debug_parallel_query", false),
+        max_parallel_workers_per_gather: usize_executor_guc(
+            gucs,
+            "max_parallel_workers_per_gather",
+            2,
+        ),
+        fold_constants: true,
+    }
+}
+
+fn bool_executor_guc(gucs: &HashMap<String, String>, name: &str, default: bool) -> bool {
+    gucs.get(name)
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "on" | "true" | "yes" | "1" | "t" => Some(true),
+            "off" | "false" | "no" | "0" | "f" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(default)
+}
+
+fn usize_executor_guc(gucs: &HashMap<String, String>, name: &str, default: usize) -> usize {
+    gucs.get(name)
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default)
 }
 
 fn resolve_dynamic_prepared_statement(
@@ -4242,17 +4295,19 @@ fn execute_literal_query_result(
             "0A000",
         )
     })?;
+    let planner_config = planner_config_from_executor_gucs(&ctx.gucs);
 
     execute_function_query_with_bindings(compiled, state, ctx, false, |ctx| {
         let stmt = parse_statement(&sql).map_err(ExecError::Parse)?;
         match stmt {
             crate::backend::parser::Statement::Select(stmt) => {
                 execute_planned_query_result_with_bindings(
-                    pg_plan_query_with_outer_scopes_and_ctes(
+                    pg_plan_query_with_outer_scopes_and_ctes_config(
                         &stmt,
                         catalog.as_ref(),
                         &[],
                         &compiled.local_ctes,
+                        planner_config,
                     )
                     .map_err(ExecError::Parse)?,
                     ctx,
@@ -4260,11 +4315,12 @@ fn execute_literal_query_result(
             }
             crate::backend::parser::Statement::Values(stmt) => statement_result_to_query_result(
                 execute_planned_stmt(
-                    pg_plan_values_query_with_outer_scopes_and_ctes(
+                    pg_plan_values_query_with_outer_scopes_and_ctes_config(
                         &stmt,
                         catalog.as_ref(),
                         &[],
                         &compiled.local_ctes,
+                        planner_config,
                     )
                     .map_err(ExecError::Parse)?,
                     ctx,
@@ -4272,7 +4328,12 @@ fn execute_literal_query_result(
                 "cursor query did not produce rows",
             ),
             other => statement_result_to_query_result(
-                execute_readonly_statement(other, catalog.as_ref(), ctx)?,
+                execute_readonly_statement_with_config(
+                    other,
+                    catalog.as_ref(),
+                    ctx,
+                    planner_config,
+                )?,
                 "cursor query did not produce rows",
             ),
         }

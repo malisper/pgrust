@@ -51,6 +51,7 @@ impl PlanEstimate {
 pub struct ExecParamSource {
     pub paramid: usize,
     pub expr: Expr,
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +96,7 @@ pub struct IndexScanKey {
     pub strategy: u16,
     pub argument: IndexScanKeyArgument,
     pub display_expr: Option<Expr>,
+    pub runtime_label: Option<String>,
 }
 
 impl IndexScanKey {
@@ -104,11 +106,17 @@ impl IndexScanKey {
             strategy,
             argument,
             display_expr: None,
+            runtime_label: None,
         }
     }
 
     pub fn with_display_expr(mut self, display_expr: Option<Expr>) -> Self {
         self.display_expr = display_expr;
+        self
+    }
+
+    pub fn with_runtime_label(mut self, runtime_label: Option<String>) -> Self {
+        self.runtime_label = runtime_label;
         self
     }
 
@@ -291,6 +299,12 @@ pub enum Plan {
         plan_info: PlanEstimate,
         input: Box<Plan>,
         cache_keys: Vec<Expr>,
+        cache_key_labels: Vec<String>,
+        key_paramids: Vec<usize>,
+        dependent_paramids: Vec<usize>,
+        binary_mode: bool,
+        single_row: bool,
+        est_entries: usize,
     },
     Gather {
         plan_info: PlanEstimate,
