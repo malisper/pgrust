@@ -483,7 +483,7 @@ fn applicable_policies(
             restrictive.push(policy);
         }
     }
-    permissive.sort_by(|left, right| left.polname.cmp(&right.polname));
+    permissive.sort_by(|left, right| right.polname.cmp(&left.polname));
     restrictive.sort_by(|left, right| left.polname.cmp(&right.polname));
     (permissive, restrictive)
 }

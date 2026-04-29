@@ -687,3 +687,17 @@ Runtime current-user index key bucket:
 - Remaining in this InitPlan area is mostly subplan placement/reuse display:
   partitioned scans still duplicate the policy InitPlan per child where
   PostgreSQL hoists one InitPlan above the Append.
+
+Permissive policy OR ordering bucket:
+- Applicable permissive policies are now combined in descending policy-name
+  order, matching the remaining PostgreSQL OR display order in `rowsecurity`
+  (`p3 OR p2 OR p1`) while restrictive policies remain ascending by name.
+- Added focused rewrite coverage for three permissive policies combining to OR
+  terms in descending-name order.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  rewrite_row_security_orders_permissive_or_by_descending_name` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `732/774` matched, `42` mismatches, `804` diff lines, `40` hunks. New diff
+  copied to `/tmp/diffs/rowsecurity.diff`.

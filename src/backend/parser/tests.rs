@@ -2191,6 +2191,51 @@ fn rewrite_row_security_orders_restrictive_before_permissive_and_dedupes() {
 }
 
 #[test]
+fn rewrite_row_security_orders_permissive_or_by_descending_name() {
+    let mut base = Catalog::default();
+    base.insert(
+        "rls_items",
+        row_security_entry(
+            15121,
+            RelationDesc {
+                columns: vec![column_desc("a", SqlType::new(SqlTypeKind::Int4), false)],
+            },
+        ),
+    );
+    let relation_oid = base.get("rls_items").unwrap().relation_oid;
+    for (oid, name, qual) in [
+        (71104, "p1", "a > 2"),
+        (71105, "p2", "a > 3"),
+        (71106, "p3", "a > 4"),
+    ] {
+        base.add_policy_row(PgPolicyRow {
+            oid,
+            polname: name.into(),
+            polrelid: relation_oid,
+            polcmd: PolicyCommand::Select,
+            polpermissive: true,
+            polroles: vec![0],
+            polqual: Some(qual.into()),
+            polwithcheck: None,
+        });
+    }
+    let catalog = row_security_test_catalog(base, 71111);
+
+    let stmt = parse_select("select a from rls_items").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
+    let rewritten = crate::backend::rewrite::pg_rewrite_query(query, &catalog)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let quals = &rewritten.rtable[0].security_quals;
+
+    assert_eq!(quals.len(), 1);
+    assert_eq!(collected_op_rhs_ints(&quals[0]), vec![4, 3, 2]);
+}
+
+#[test]
 fn rewrite_row_security_applies_once_to_nested_query_nodes() {
     let mut base = Catalog::default();
     base.insert(
