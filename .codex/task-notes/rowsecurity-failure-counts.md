@@ -599,3 +599,22 @@ EXPLAIN const-false RLS filter bucket:
   `/tmp/diffs/rowsecurity.diff`; the previous `false AND proc_...` EXPLAIN hunk
   is gone, but this run still timed out at the same match point and the diff
   includes a timeout tail instead of the normal cleanup section.
+
+psql describe policy bucket:
+- psql's table-description `pg_policy` detail query now returns policy rows
+  instead of an empty shortcut result, so `\d document`/`\d part_document` show
+  `Policies:` rather than `Policies (row security enabled): (none)`.
+- Added focused coverage for the six-column psql policy query shape, including
+  permissive/restrictive flags, target roles, USING, WITH CHECK, and command
+  display.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  psql_describe_policy_query_returns_policy_rows` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `721/774` matched, `53` mismatches, `975` diff lines, `50` hunks. New diff
+  copied to `/tmp/diffs/rowsecurity.diff`.
+- Remaining in this bucket is expression deparse parity: pgrust still stores
+  readable SQL in `pg_policy.polqual`/`polwithcheck`, while PostgreSQL's
+  `pg_get_expr` output retains PostgreSQL parenthesization and subquery
+  formatting.

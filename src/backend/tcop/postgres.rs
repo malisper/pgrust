@@ -5415,7 +5415,7 @@ fn execute_psql_describe_query(
     if lower.contains("from pg_catalog.pg_policy pol")
         && (lower.contains("pol.polroles") || lower.contains("polroles"))
     {
-        return Some((vec![QueryColumn::text("Policies")], Vec::new()));
+        return Some(psql_describe_policy_query(db, session, sql));
     }
     if lower.contains("pg_catalog.pg_statistic_ext")
         && lower.contains("stxrelid")
@@ -5545,6 +5545,90 @@ fn psql_describe_permissions_query(
 
     rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
     (columns, rows.into_iter().map(|(_, _, row)| row).collect())
+}
+
+fn psql_describe_policy_query(
+    db: &Database,
+    session: &Session,
+    sql: &str,
+) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
+    let columns = vec![
+        QueryColumn::text("polname"),
+        QueryColumn {
+            name: "polpermissive".into(),
+            sql_type: SqlType::new(SqlTypeKind::Bool),
+            wire_type_oid: None,
+        },
+        QueryColumn::text("array_to_string"),
+        QueryColumn::text("pg_get_expr"),
+        QueryColumn::text("pg_get_expr"),
+        QueryColumn::text("cmd"),
+    ];
+    let Some(relation_oid) = extract_single_quoted_literal_after(sql, "where pol.polrelid =")
+        .and_then(|value| value.parse::<u32>().ok())
+    else {
+        return (columns, Vec::new());
+    };
+    let Ok(catcache) = backend_catcache(db, session.client_id, session.catalog_txn_ctx()) else {
+        return (columns, Vec::new());
+    };
+    let role_names = catcache
+        .authid_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.rolname))
+        .collect::<HashMap<_, _>>();
+    let mut policies = catcache.policy_rows_for_relation(relation_oid);
+    policies.sort_by(|left, right| {
+        left.polname
+            .cmp(&right.polname)
+            .then(left.oid.cmp(&right.oid))
+    });
+    let rows = policies
+        .into_iter()
+        .map(|policy| {
+            let roles = if policy.polroles.as_slice() == [0] {
+                Value::Null
+            } else {
+                let mut names = policy
+                    .polroles
+                    .iter()
+                    .map(|oid| {
+                        role_names
+                            .get(oid)
+                            .cloned()
+                            .unwrap_or_else(|| oid.to_string())
+                    })
+                    .collect::<Vec<_>>();
+                names.sort();
+                Value::Text(names.join(",").into())
+            };
+            vec![
+                Value::Text(policy.polname.into()),
+                Value::Bool(policy.polpermissive),
+                roles,
+                optional_text_query_value(policy.polqual),
+                optional_text_query_value(policy.polwithcheck),
+                psql_describe_policy_command_value(policy.polcmd),
+            ]
+        })
+        .collect();
+    (columns, rows)
+}
+
+fn optional_text_query_value(value: Option<String>) -> Value {
+    value
+        .map(|text| Value::Text(text.into()))
+        .unwrap_or(Value::Null)
+}
+
+fn psql_describe_policy_command_value(command: crate::include::catalog::PolicyCommand) -> Value {
+    match command {
+        crate::include::catalog::PolicyCommand::All => Value::Null,
+        crate::include::catalog::PolicyCommand::Select => Value::Text("SELECT".into()),
+        crate::include::catalog::PolicyCommand::Insert => Value::Text("INSERT".into()),
+        crate::include::catalog::PolicyCommand::Update => Value::Text("UPDATE".into()),
+        crate::include::catalog::PolicyCommand::Delete => Value::Text("DELETE".into()),
+    }
 }
 
 fn psql_permissions_relkind_name(relkind: char) -> &'static str {
@@ -12268,6 +12352,71 @@ ORDER BY 1, 2;";
             }
             other => panic!("expected policies text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn psql_describe_policy_query_returns_policy_rows() {
+        let db = Database::open(temp_dir("describe_policy_rows"), 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create role app_role nologin")
+            .unwrap();
+        session
+            .execute(&db, "create table widgets (id int4 not null)")
+            .unwrap();
+        session
+            .execute(&db, "create policy p1 on widgets using (id > 0)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create policy p2 on widgets as restrictive for update to app_role using (id > 1) with check (id < 10)",
+            )
+            .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
+        let sql = format!(
+            "SELECT pol.polname, pol.polpermissive,
+  CASE WHEN pol.polroles = '{{0}}' THEN NULL ELSE pg_catalog.array_to_string(array(select rolname from pg_catalog.pg_roles where oid = any (pol.polroles) order by 1),',') END,
+  pg_catalog.pg_get_expr(pol.polqual, pol.polrelid),
+  pg_catalog.pg_get_expr(pol.polwithcheck, pol.polrelid),
+  CASE pol.polcmd
+    WHEN 'r' THEN 'SELECT'
+    WHEN 'a' THEN 'INSERT'
+    WHEN 'w' THEN 'UPDATE'
+    WHEN 'd' THEN 'DELETE'
+    END AS cmd
+FROM pg_catalog.pg_policy pol
+WHERE pol.polrelid = '{}' ORDER BY 1;",
+            entry.relation_oid
+        );
+
+        let (columns, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+
+        assert_eq!(columns.len(), 6);
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    Value::Text("p1".into()),
+                    Value::Bool(true),
+                    Value::Null,
+                    Value::Text("id > 0".into()),
+                    Value::Null,
+                    Value::Null,
+                ],
+                vec![
+                    Value::Text("p2".into()),
+                    Value::Bool(false),
+                    Value::Text("app_role".into()),
+                    Value::Text("id > 1".into()),
+                    Value::Text("id < 10".into()),
+                    Value::Text("UPDATE".into()),
+                ],
+            ]
+        );
     }
 
     #[test]
