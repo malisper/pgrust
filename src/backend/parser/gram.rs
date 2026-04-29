@@ -704,6 +704,84 @@ fn try_parse_alter_table_multi_action_statement(
             },
         )));
     }
+    if !parsed_statements.is_empty()
+        && parsed_statements
+            .iter()
+            .all(|stmt| matches!(stmt, Statement::AlterTableInherit(_)))
+    {
+        let mut if_exists = false;
+        let mut only = false;
+        let mut table_name = None;
+        let mut parent_names = Vec::with_capacity(parsed_statements.len());
+        for stmt in &parsed_statements {
+            let Statement::AlterTableInherit(inherit) = stmt else {
+                unreachable!("all parsed statements are INHERIT");
+            };
+            if let Some(table_name) = &table_name {
+                if inherit.if_exists != if_exists
+                    || inherit.only != only
+                    || inherit.table_name != *table_name
+                {
+                    return Ok(Some(Statement::AlterTableMulti(statements)));
+                }
+            } else {
+                if_exists = inherit.if_exists;
+                only = inherit.only;
+                table_name = Some(inherit.table_name.clone());
+            }
+            parent_names.push(inherit.parent_name.clone());
+            parent_names.extend(inherit.additional_parent_names.iter().cloned());
+        }
+        let mut parent_names = parent_names.into_iter();
+        return Ok(Some(Statement::AlterTableInherit(
+            AlterTableInheritStatement {
+                if_exists,
+                only,
+                table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+                parent_name: parent_names.next().ok_or(ParseError::UnexpectedEof)?,
+                additional_parent_names: parent_names.collect(),
+            },
+        )));
+    }
+    if !parsed_statements.is_empty()
+        && parsed_statements
+            .iter()
+            .all(|stmt| matches!(stmt, Statement::AlterTableNoInherit(_)))
+    {
+        let mut if_exists = false;
+        let mut only = false;
+        let mut table_name = None;
+        let mut parent_names = Vec::with_capacity(parsed_statements.len());
+        for stmt in &parsed_statements {
+            let Statement::AlterTableNoInherit(inherit) = stmt else {
+                unreachable!("all parsed statements are NO INHERIT");
+            };
+            if let Some(table_name) = &table_name {
+                if inherit.if_exists != if_exists
+                    || inherit.only != only
+                    || inherit.table_name != *table_name
+                {
+                    return Ok(Some(Statement::AlterTableMulti(statements)));
+                }
+            } else {
+                if_exists = inherit.if_exists;
+                only = inherit.only;
+                table_name = Some(inherit.table_name.clone());
+            }
+            parent_names.push(inherit.parent_name.clone());
+            parent_names.extend(inherit.additional_parent_names.iter().cloned());
+        }
+        let mut parent_names = parent_names.into_iter();
+        return Ok(Some(Statement::AlterTableNoInherit(
+            AlterTableNoInheritStatement {
+                if_exists,
+                only,
+                table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+                parent_name: parent_names.next().ok_or(ParseError::UnexpectedEof)?,
+                additional_parent_names: parent_names.collect(),
+            },
+        )));
+    }
     if parsed_statements
         .iter()
         .any(alter_table_action_can_run_as_compound)
@@ -15559,6 +15637,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_set_not_null_stmt => Ok(Statement::AlterTableSetNotNull(
             build_alter_table_set_not_null(inner)?,
         )),
+        Rule::alter_table_set_tablespace_stmt => Ok(Statement::AlterTableSetTablespace(
+            build_alter_table_set_tablespace(inner)?,
+        )),
         Rule::alter_table_drop_not_null_stmt => Ok(Statement::AlterTableDropNotNull(
             build_alter_table_drop_not_null(inner)?,
         )),
@@ -15575,6 +15656,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_not_of_stmt => {
             Ok(Statement::AlterTableNotOf(build_alter_table_not_of(inner)?))
         }
+        Rule::comment_on_database_stmt => Ok(Statement::CommentOnDatabase(
+            build_comment_on_database(inner)?,
+        )),
         Rule::comment_on_role_stmt => Ok(Statement::CommentOnRole(build_comment_on_role(inner)?)),
         Rule::comment_on_table_stmt => {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
@@ -18716,9 +18800,12 @@ fn build_merge_action(pair: Pair<'_, Rule>) -> Result<MergeAction, ParseError> {
         Rule::merge_update_action => Ok(MergeAction::Update {
             assignments: pair
                 .into_inner()
-                .filter(|part| part.as_rule() == Rule::assignment)
-                .map(build_assignment)
-                .collect::<Result<Vec<_>, _>>()?,
+                .filter(|part| part.as_rule() == Rule::assignment_item)
+                .map(build_assignment_item)
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .collect(),
         }),
         Rule::merge_delete_action => Ok(MergeAction::Delete),
         Rule::merge_do_nothing_action => Ok(MergeAction::DoNothing),
@@ -18783,7 +18870,7 @@ fn build_on_conflict_clause(pair: Pair<'_, Rule>) -> Result<OnConflictClause, Pa
                 }
             }
             Rule::on_conflict_target => *target = Some(build_on_conflict_target(part)?),
-            Rule::assignment => assignments.push(build_assignment(part)?),
+            Rule::assignment_item => assignments.extend(build_assignment_item(part)?),
             Rule::expr => *where_clause = Some(build_expr(part)?),
             _ => {}
         }
@@ -19812,16 +19899,39 @@ fn build_exclusion_constraint_body(
             }
             Rule::exclusion_element => {
                 let mut column = None;
+                let mut expr_sql = None;
                 let mut operator = None;
                 for inner in part.into_inner() {
                     match inner.as_rule() {
-                        Rule::identifier => column = Some(build_identifier(inner)),
+                        Rule::create_index_target => {
+                            let target =
+                                inner.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+                            match target.as_rule() {
+                                Rule::identifier => column = Some(build_identifier(target)),
+                                Rule::create_index_expression => {
+                                    let expr = target
+                                        .into_inner()
+                                        .find(|inner| inner.as_rule() == Rule::expr)
+                                        .ok_or(ParseError::UnexpectedEof)?;
+                                    expr_sql = Some(expr.as_str().to_string());
+                                }
+                                Rule::create_index_function_expression => {
+                                    expr_sql = Some(target.as_str().to_string());
+                                }
+                                _ => {}
+                            }
+                        }
                         Rule::operator_token => operator = Some(inner.as_str().to_string()),
                         _ => {}
                     }
                 }
+                let column = column.unwrap_or_default();
+                if column.is_empty() && expr_sql.is_none() {
+                    return Err(ParseError::UnexpectedEof);
+                }
                 elements.push(ExclusionElement {
-                    column: column.ok_or(ParseError::UnexpectedEof)?,
+                    column,
+                    expr_sql,
                     operator: operator.ok_or(ParseError::UnexpectedEof)?,
                 });
             }
@@ -19839,7 +19949,7 @@ fn build_exclusion_constraint_body(
         return Err(ParseError::UnexpectedEof);
     }
     Ok((
-        using_method.ok_or(ParseError::UnexpectedEof)?,
+        using_method.unwrap_or_else(|| "gist".into()),
         elements,
         include_columns,
     ))
@@ -20746,6 +20856,31 @@ fn build_comment_on_role(pair: Pair<'_, Rule>) -> Result<CommentOnRoleStatement,
     })
 }
 
+fn build_comment_on_database(
+    pair: Pair<'_, Rule>,
+) -> Result<CommentOnDatabaseStatement, ParseError> {
+    let mut database_name = None;
+    let mut comment = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => database_name = Some(build_identifier(part)),
+            Rule::quoted_string_literal
+            | Rule::string_literal
+            | Rule::unicode_string_literal
+            | Rule::escape_string_literal
+            | Rule::dollar_string_literal => {
+                comment = Some(Some(decode_string_literal_pair(part)?))
+            }
+            Rule::kw_null => comment = Some(None),
+            _ => {}
+        }
+    }
+    Ok(CommentOnDatabaseStatement {
+        database_name: database_name.ok_or(ParseError::UnexpectedEof)?,
+        comment: comment.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
 fn build_reloption(pair: Pair<'_, Rule>) -> Result<RelOption, ParseError> {
     let mut name = None;
     let mut value = None;
@@ -20829,6 +20964,9 @@ fn build_table_storage_options(pair: Pair<'_, Rule>) -> Result<Vec<RelOption>, P
             {
                 let option = build_reloption(item)?;
                 let name = option.name.clone();
+                if name != name.to_ascii_lowercase() {
+                    return Err(ParseError::UnrecognizedParameter(name));
+                }
                 if name.eq_ignore_ascii_case("oids")
                     && matches!(
                         option.value.to_ascii_lowercase().as_str(),
@@ -21336,7 +21474,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
                 only = parsed_only;
             }
             Rule::from_item => from = Some(build_from_item(part)?),
-            Rule::assignment => assignments.push(build_assignment(part)?),
+            Rule::assignment_item => assignments.extend(build_assignment_item(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
             Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
@@ -22280,6 +22418,73 @@ fn build_assignment(pair: Pair<'_, Rule>) -> Result<Assignment, ParseError> {
         target: build_assignment_target(inner.next().ok_or(ParseError::UnexpectedEof)?)?,
         expr: build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?,
     })
+}
+
+fn build_assignment_item(pair: Pair<'_, Rule>) -> Result<Vec<Assignment>, ParseError> {
+    match pair.as_rule() {
+        Rule::assignment_item => {
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            build_assignment_item(inner)
+        }
+        Rule::assignment => Ok(vec![build_assignment(pair)?]),
+        Rule::row_assignment => build_row_assignment(pair),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "assignment",
+            actual: pair.as_str().to_string(),
+        }),
+    }
+}
+
+fn build_row_assignment(pair: Pair<'_, Rule>) -> Result<Vec<Assignment>, ParseError> {
+    let mut targets = None;
+    let mut expr = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::assignment_target_list => targets = Some(build_assignment_target_list(part)?),
+            Rule::expr => expr = Some(build_expr(part)?),
+            _ => {}
+        }
+    }
+    let targets = targets.ok_or(ParseError::UnexpectedEof)?;
+    let exprs = split_row_assignment_expr(expr.ok_or(ParseError::UnexpectedEof)?, targets.len())?;
+    Ok(targets
+        .into_iter()
+        .zip(exprs)
+        .map(|(target, expr)| Assignment { target, expr })
+        .collect())
+}
+
+fn split_row_assignment_expr(expr: SqlExpr, arity: usize) -> Result<Vec<SqlExpr>, ParseError> {
+    match expr {
+        SqlExpr::Row(items) if items.len() == arity => Ok(items),
+        SqlExpr::Row(items) => Err(ParseError::UnexpectedToken {
+            expected: "matching row assignment values",
+            actual: format!("{} values", items.len()),
+        }),
+        SqlExpr::ScalarSubquery(select) => {
+            if select.set_operation.is_some() || select.targets.len() != arity {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "matching row assignment columns",
+                    actual: format!("{} columns", select.targets.len()),
+                });
+            }
+            let select = *select;
+            Ok(select
+                .targets
+                .iter()
+                .map(|target| {
+                    let mut projected = select.clone();
+                    projected.targets = vec![target.clone()];
+                    SqlExpr::ScalarSubquery(Box::new(projected))
+                })
+                .collect())
+        }
+        other if arity == 1 => Ok(vec![other]),
+        other => Err(ParseError::UnexpectedToken {
+            expected: "row assignment source",
+            actual: format!("{other:?}"),
+        }),
+    }
 }
 
 fn build_assignment_target_list(pair: Pair<'_, Rule>) -> Result<Vec<AssignmentTarget>, ParseError> {
@@ -23376,6 +23581,7 @@ fn build_alter_table_no_inherit(
         only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         parent_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        additional_parent_names: parts.collect(),
     })
 }
 
@@ -23404,6 +23610,7 @@ fn build_alter_table_inherit(
         only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         parent_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        additional_parent_names: parts.collect(),
     })
 }
 
@@ -23631,6 +23838,34 @@ fn build_alter_relation_set_schema(
         if_exists,
         relation_name: relation_name.ok_or(ParseError::UnexpectedEof)?,
         schema_name: schema_name.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_set_tablespace(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableSetTablespaceStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut tablespace_name = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier => tablespace_name = Some(build_identifier(part)),
+            _ => {}
+        }
+    }
+    Ok(AlterTableSetTablespaceStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        tablespace_name: tablespace_name.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 

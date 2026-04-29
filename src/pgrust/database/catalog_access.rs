@@ -22,8 +22,7 @@ impl Database {
         TEMP_TOAST_NAMESPACE_OID_BASE.saturating_add(temp_backend_id)
     }
 
-    #[cfg(test)]
-    pub(super) fn has_active_temp_namespace(&self, client_id: ClientId) -> bool {
+    pub(crate) fn has_active_temp_namespace(&self, client_id: ClientId) -> bool {
         self.temp_relations
             .read()
             .contains_key(&self.temp_backend_id(client_id))

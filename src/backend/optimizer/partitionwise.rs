@@ -62,6 +62,7 @@ pub(super) fn generate_partitionwise_join_path(
         Path::Append {
             plan_info: PlanEstimate::default(),
             pathtarget: reltarget.clone(),
+            pathkeys: Vec::new(),
             relids: relids_union(&left_rel.relids, &right_rel.relids),
             source_id: next_synthetic_slot_id(),
             desc,

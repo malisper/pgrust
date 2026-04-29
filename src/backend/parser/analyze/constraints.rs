@@ -6,7 +6,7 @@ use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{PgConstraintRow, bootstrap_pg_cast_rows};
 use crate::include::nodes::parsenodes::{
     ColumnConstraint, ConstraintAttributes, CreateTableStatement, ForeignKeyAction,
-    ForeignKeyMatchType, TableConstraint, TablePersistence,
+    ForeignKeyMatchType, IndexColumnDef, TableConstraint, TablePersistence,
 };
 use crate::include::nodes::primnodes::{Expr, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO};
 
@@ -17,6 +17,7 @@ pub struct IndexBackedConstraintAction {
     pub constraint_name: Option<String>,
     pub existing_index_name: Option<String>,
     pub columns: Vec<String>,
+    pub index_columns: Vec<IndexColumnDef>,
     pub include_columns: Vec<String>,
     pub primary: bool,
     pub exclusion: bool,
@@ -199,6 +200,7 @@ struct PendingIndexConstraint {
     existing_index_name: Option<String>,
     generated_base: GeneratedConstraintName,
     columns: Vec<String>,
+    index_columns: Vec<IndexColumnDef>,
     include_columns: Vec<String>,
     primary: bool,
     exclusion: bool,
@@ -208,6 +210,40 @@ struct PendingIndexConstraint {
     exclusion_operators: Vec<String>,
     deferrable: bool,
     initially_deferred: bool,
+}
+
+fn index_columns_from_names(columns: &[String]) -> Vec<IndexColumnDef> {
+    columns.iter().cloned().map(IndexColumnDef::from).collect()
+}
+
+fn exclusion_index_columns(
+    elements: &[crate::include::nodes::parsenodes::ExclusionElement],
+    resolved_columns: &[String],
+) -> Vec<IndexColumnDef> {
+    let mut resolved_iter = resolved_columns.iter();
+    elements
+        .iter()
+        .map(|element| {
+            if let Some(expr_sql) = element.expr_sql.as_ref() {
+                IndexColumnDef {
+                    name: String::new(),
+                    expr_sql: Some(expr_sql.clone()),
+                    expr_type: None,
+                    collation: None,
+                    opclass: None,
+                    opclass_options: Vec::new(),
+                    descending: false,
+                    nulls_first: None,
+                }
+            } else {
+                resolved_iter
+                    .next()
+                    .cloned()
+                    .map(IndexColumnDef::from)
+                    .unwrap_or_else(|| IndexColumnDef::from(element.column.clone()))
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +301,273 @@ impl GeneratedConstraintName {
             label: label.to_string(),
         }
     }
+}
+
+fn check_constraint_name_column(expr_sql: &str, relation_columns: &[String]) -> Option<String> {
+    let expr = parse_expr(expr_sql).ok()?;
+    let relation_column_names = relation_columns
+        .iter()
+        .map(|column| column.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let mut user_columns = BTreeSet::new();
+    let mut system_columns = BTreeSet::new();
+    collect_check_expr_column_names(
+        &expr,
+        &relation_column_names,
+        &mut user_columns,
+        &mut system_columns,
+    );
+    (user_columns.len() == 1 && system_columns.is_empty())
+        .then(|| user_columns.into_iter().next().expect("one column"))
+}
+
+fn collect_check_expr_column_names(
+    expr: &SqlExpr,
+    relation_columns: &BTreeSet<String>,
+    user_columns: &mut BTreeSet<String>,
+    system_columns: &mut BTreeSet<String>,
+) {
+    match expr {
+        SqlExpr::Column(name) => {
+            let column_name = name.rsplit('.').next().unwrap_or(name).to_ascii_lowercase();
+            if relation_columns.contains(&column_name) {
+                user_columns.insert(column_name);
+            } else if is_system_column_name_for_check(&column_name) {
+                system_columns.insert(column_name);
+            }
+        }
+        SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::Overlaps(left, right)
+        | SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right) => {
+            collect_check_expr_column_names(left, relation_columns, user_columns, system_columns);
+            collect_check_expr_column_names(right, relation_columns, user_columns, system_columns);
+        }
+        SqlExpr::BinaryOperator { left, right, .. }
+        | SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            collect_check_expr_column_names(left, relation_columns, user_columns, system_columns);
+            collect_check_expr_column_names(right, relation_columns, user_columns, system_columns);
+        }
+        SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
+        | SqlExpr::PrefixOperator { expr: inner, .. }
+        | SqlExpr::Cast(inner, _)
+        | SqlExpr::Collate { expr: inner, .. }
+        | SqlExpr::Not(inner)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::FieldSelect { expr: inner, .. }
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. } => {
+            collect_check_expr_column_names(inner, relation_columns, user_columns, system_columns);
+        }
+        SqlExpr::Subscript { expr, .. } => {
+            collect_check_expr_column_names(expr, relation_columns, user_columns, system_columns);
+        }
+        SqlExpr::AtTimeZone { expr, zone } => {
+            collect_check_expr_column_names(expr, relation_columns, user_columns, system_columns);
+            collect_check_expr_column_names(zone, relation_columns, user_columns, system_columns);
+        }
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_check_expr_column_names(expr, relation_columns, user_columns, system_columns);
+            collect_check_expr_column_names(
+                pattern,
+                relation_columns,
+                user_columns,
+                system_columns,
+            );
+            if let Some(escape) = escape {
+                collect_check_expr_column_names(
+                    escape,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
+            }
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            if let Some(arg) = arg {
+                collect_check_expr_column_names(
+                    arg,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
+            }
+            for when in args {
+                collect_check_expr_column_names(
+                    &when.expr,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
+                collect_check_expr_column_names(
+                    &when.result,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
+            }
+            if let Some(defresult) = defresult {
+                collect_check_expr_column_names(
+                    defresult,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
+            }
+        }
+        SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => {
+            for element in elements {
+                collect_check_expr_column_names(
+                    element,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
+            }
+        }
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            collect_check_expr_column_names(array, relation_columns, user_columns, system_columns);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_check_expr_column_names(
+                        lower,
+                        relation_columns,
+                        user_columns,
+                        system_columns,
+                    );
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_check_expr_column_names(
+                        upper,
+                        relation_columns,
+                        user_columns,
+                        system_columns,
+                    );
+                }
+            }
+        }
+        SqlExpr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                collect_check_expr_column_names(
+                    child,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
+            }
+        }
+        SqlExpr::JsonQueryFunction(func) => {
+            for child in func.child_exprs() {
+                collect_check_expr_column_names(
+                    child,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
+            }
+        }
+        SqlExpr::FuncCall {
+            args,
+            order_by,
+            within_group,
+            filter,
+            ..
+        } => {
+            for arg in args.args() {
+                collect_check_expr_column_names(
+                    &arg.value,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
+            }
+            for item in order_by {
+                collect_check_expr_column_names(
+                    &item.expr,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
+            }
+            if let Some(within_group) = within_group {
+                for item in within_group {
+                    collect_check_expr_column_names(
+                        &item.expr,
+                        relation_columns,
+                        user_columns,
+                        system_columns,
+                    );
+                }
+            }
+            if let Some(filter) = filter {
+                collect_check_expr_column_names(
+                    filter,
+                    relation_columns,
+                    user_columns,
+                    system_columns,
+                );
+            }
+        }
+        SqlExpr::InSubquery { expr, .. }
+        | SqlExpr::QuantifiedArray { left: expr, .. }
+        | SqlExpr::QuantifiedSubquery { left: expr, .. } => {
+            collect_check_expr_column_names(expr, relation_columns, user_columns, system_columns);
+        }
+        _ => {}
+    }
+}
+
+fn is_system_column_name_for_check(name: &str) -> bool {
+    matches!(
+        name,
+        "tableoid" | "ctid" | "xmin" | "xmax" | "cmin" | "cmax"
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -368,6 +671,7 @@ pub fn normalize_create_table_constraints(
                             "pkey",
                         ),
                         columns: vec![column.name.clone()],
+                        index_columns: vec![IndexColumnDef::from(column.name.clone())],
                         include_columns: Vec::new(),
                         primary: true,
                         exclusion: false,
@@ -391,6 +695,7 @@ pub fn normalize_create_table_constraints(
                             "key",
                         ),
                         columns: vec![column.name.clone()],
+                        index_columns: vec![IndexColumnDef::from(column.name.clone())],
                         include_columns: Vec::new(),
                         primary: false,
                         exclusion: false,
@@ -465,7 +770,11 @@ pub fn normalize_create_table_constraints(
                 validate_check_attributes(attributes)?;
                 check_constraints.push(PendingCheckConstraint {
                     explicit_name: attributes.name.clone(),
-                    generated_base: GeneratedConstraintName::new(&stmt.table_name, None, "check"),
+                    generated_base: GeneratedConstraintName::new(
+                        &stmt.table_name,
+                        check_constraint_name_column(expr_sql, &relation_columns),
+                        "check",
+                    ),
                     expr_sql: expr_sql.clone(),
                     not_valid: attributes.not_valid,
                     no_inherit: attributes.no_inherit,
@@ -495,11 +804,13 @@ pub fn normalize_create_table_constraints(
                 )?;
                 let resolved_include =
                     resolve_constraint_columns(include_columns, &columns, &column_lookup)?;
+                let index_columns = index_columns_from_names(&resolved);
                 index_constraints.push(PendingIndexConstraint {
                     explicit_name: attributes.name.clone(),
                     existing_index_name: None,
                     generated_base: GeneratedConstraintName::new(&stmt.table_name, None, "pkey"),
                     columns: resolved,
+                    index_columns,
                     include_columns: resolved_include,
                     primary: true,
                     exclusion: false,
@@ -539,6 +850,7 @@ pub fn normalize_create_table_constraints(
                     .chain(resolved_include.iter())
                     .cloned()
                     .collect::<Vec<_>>();
+                let index_columns = index_columns_from_names(&resolved);
                 index_constraints.push(PendingIndexConstraint {
                     explicit_name: attributes.name.clone(),
                     existing_index_name: None,
@@ -548,6 +860,7 @@ pub fn normalize_create_table_constraints(
                         "key",
                     ),
                     columns: resolved,
+                    index_columns,
                     include_columns: resolved_include,
                     primary: false,
                     exclusion: false,
@@ -569,15 +882,22 @@ pub fn normalize_create_table_constraints(
                     validate_key_attributes(attributes, "EXCLUDE")?;
                 let key_columns = elements
                     .iter()
+                    .filter(|element| element.expr_sql.is_none())
                     .map(|element| element.column.clone())
                     .collect::<Vec<_>>();
                 let resolved = resolve_constraint_columns(&key_columns, &columns, &column_lookup)?;
                 let resolved_include =
                     resolve_constraint_columns(include_columns, &columns, &column_lookup)?;
-                let generated_columns = resolved
+                let index_columns = exclusion_index_columns(elements, &resolved);
+                let generated_columns = index_columns
                     .iter()
-                    .chain(resolved_include.iter())
-                    .cloned()
+                    .map(|column| {
+                        column
+                            .expr_sql
+                            .clone()
+                            .unwrap_or_else(|| column.name.clone())
+                    })
+                    .chain(resolved_include.iter().cloned())
                     .collect::<Vec<_>>();
                 index_constraints.push(PendingIndexConstraint {
                     explicit_name: attributes.name.clone(),
@@ -588,6 +908,7 @@ pub fn normalize_create_table_constraints(
                         "excl",
                     ),
                     columns: resolved,
+                    index_columns,
                     include_columns: resolved_include,
                     primary: false,
                     nulls_not_distinct: false,
@@ -755,6 +1076,7 @@ pub fn normalize_create_table_constraints(
             })),
             existing_index_name: constraint.existing_index_name,
             columns: constraint.columns,
+            index_columns: constraint.index_columns,
             include_columns: constraint.include_columns,
             primary: constraint.primary,
             exclusion: constraint.exclusion,
@@ -1036,6 +1358,46 @@ pub(crate) fn bind_exclusion_constraint(
             expected: "exclusion constraint columns",
             actual: format!("missing conkey for constraint {}", row.conname),
         })?;
+    let operator_proc_oids = operator_oids
+        .iter()
+        .map(|operator_oid| {
+            catalog
+                .operator_by_oid(*operator_oid)
+                .map(|operator| operator.oprcode)
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "exclusion constraint operator",
+                    actual: format!("unknown operator oid {operator_oid}"),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if conkey
+        .iter()
+        .take(operator_oids.len())
+        .any(|attnum| *attnum <= 0)
+    {
+        let column_names =
+            exclusion_expression_key_names(row.conrelid, row.conindid, &conkey, desc, catalog)
+                .unwrap_or_else(|| {
+                    conkey
+                        .iter()
+                        .take(operator_oids.len())
+                        .enumerate()
+                        .map(|(index, _)| format!("expr{}", index + 1))
+                        .collect()
+                });
+        return Ok(BoundExclusionConstraint {
+            constraint_oid: row.oid,
+            constraint_name: row.conname,
+            column_names,
+            column_indexes: Vec::new(),
+            operator_oids,
+            operator_proc_oids,
+            // :HACK: Expression exclusion keys are represented in pg_index, but
+            // the executor conflict checker is still column-based. Keep DDL and
+            // catalog behavior working without crashing row writes.
+            enforced: false,
+        });
+    }
     let mut column_names = Vec::with_capacity(operator_oids.len());
     let mut column_indexes = Vec::with_capacity(operator_oids.len());
     for attnum in conkey.iter().take(operator_oids.len()) {
@@ -1073,18 +1435,6 @@ pub(crate) fn bind_exclusion_constraint(
             ),
         });
     }
-    let operator_proc_oids = operator_oids
-        .iter()
-        .map(|operator_oid| {
-            catalog
-                .operator_by_oid(*operator_oid)
-                .map(|operator| operator.oprcode)
-                .ok_or_else(|| ParseError::UnexpectedToken {
-                    expected: "exclusion constraint operator",
-                    actual: format!("unknown operator oid {operator_oid}"),
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     Ok(BoundExclusionConstraint {
         constraint_oid: row.oid,
         constraint_name: row.conname,
@@ -1106,6 +1456,43 @@ fn is_referenced_side_foreign_key_clone(
     catalog
         .constraint_row_by_oid(row.conparentid)
         .is_some_and(|parent| parent.conrelid == row.conrelid)
+}
+
+fn exclusion_expression_key_names(
+    relation_oid: u32,
+    index_oid: u32,
+    conkey: &[i16],
+    desc: &RelationDesc,
+    catalog: &dyn super::CatalogLookup,
+) -> Option<Vec<String>> {
+    let index = catalog
+        .index_relations_for_heap(relation_oid)
+        .into_iter()
+        .find(|index| index.relation_oid == index_oid)?;
+    let expression_sqls = index
+        .index_meta
+        .indexprs
+        .as_deref()
+        .and_then(|sql| serde_json::from_str::<Vec<String>>(sql).ok())
+        .unwrap_or_default();
+    let mut expression_index = 0usize;
+    conkey
+        .iter()
+        .map(|attnum| {
+            if *attnum > 0 {
+                return desc
+                    .columns
+                    .get((*attnum as usize).saturating_sub(1))
+                    .map(|column| column.name.clone());
+            }
+            let rendered = expression_sqls
+                .get(expression_index)
+                .cloned()
+                .unwrap_or_else(|| format!("expr{}", expression_index + 1));
+            expression_index += 1;
+            Some(rendered)
+        })
+        .collect()
 }
 
 pub fn bind_referenced_by_foreign_keys(
@@ -1282,9 +1669,57 @@ pub fn normalize_alter_table_add_constraint(
             expr_sql,
         } => {
             validate_check_attributes(attributes)?;
+            if let Some(requested_name) = attributes.name.as_deref()
+                && let Some(existing) = existing_constraints.iter().find(|row| {
+                    row.conname.eq_ignore_ascii_case(requested_name)
+                        && row.contype == crate::include::catalog::CONSTRAINT_CHECK
+                        && (row.coninhcount > 0 || !row.conislocal)
+                        && row.conbin.as_deref().is_some_and(|conbin| {
+                            conbin.trim().eq_ignore_ascii_case(expr_sql.trim())
+                        })
+                })
+            {
+                if attributes.no_inherit {
+                    return Err(ParseError::DetailedError {
+                        message: format!(
+                            "constraint \"{requested_name}\" conflicts with inherited constraint on relation \"{table_name}\""
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P17",
+                    });
+                }
+                if existing.conenforced && !attributes.enforced.unwrap_or(true) {
+                    return Err(ParseError::DetailedError {
+                        message: format!(
+                            "constraint \"{requested_name}\" conflicts with NOT ENFORCED constraint on relation \"{table_name}\""
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P17",
+                    });
+                }
+                return Ok(NormalizedAlterTableConstraint::Check(
+                    CheckConstraintAction {
+                        constraint_name: existing.conname.clone(),
+                        expr_sql: expr_sql.clone(),
+                        not_valid: attributes.not_valid,
+                        no_inherit: false,
+                        enforced: attributes.enforced.unwrap_or(true),
+                        parent_constraint_oid: (existing.conparentid != 0)
+                            .then_some(existing.conparentid),
+                        is_local: true,
+                        inhcount: existing.coninhcount,
+                    },
+                ));
+            }
             let constraint_name = assign_constraint_name(
                 attributes.name.clone(),
-                GeneratedConstraintName::new(table_name, None, "check"),
+                GeneratedConstraintName::new(
+                    table_name,
+                    check_constraint_name_column(expr_sql, &relation_columns),
+                    "check",
+                ),
                 &mut used_names,
             )?;
             Ok(NormalizedAlterTableConstraint::Check(
@@ -1336,11 +1771,13 @@ pub fn normalize_alter_table_add_constraint(
             )?;
             let resolved_include =
                 resolve_relation_constraint_columns(include_columns, desc, &column_lookup)?;
+            let index_columns = index_columns_from_names(&resolved);
             Ok(NormalizedAlterTableConstraint::IndexBacked(
                 IndexBackedConstraintAction {
                     constraint_name: Some(constraint_name),
                     existing_index_name: None,
                     columns: resolved,
+                    index_columns,
                     include_columns: resolved_include,
                     primary: true,
                     exclusion: false,
@@ -1379,6 +1816,7 @@ pub fn normalize_alter_table_add_constraint(
                 .chain(resolved_include.iter())
                 .cloned()
                 .collect::<Vec<_>>();
+            let index_columns = index_columns_from_names(&resolved);
             let constraint_name = assign_constraint_name(
                 attributes.name.clone(),
                 GeneratedConstraintName::new(table_name, Some(generated_columns.join("_")), "key"),
@@ -1389,6 +1827,7 @@ pub fn normalize_alter_table_add_constraint(
                     constraint_name: Some(constraint_name),
                     existing_index_name: None,
                     columns: resolved,
+                    index_columns,
                     include_columns: resolved_include,
                     primary: false,
                     exclusion: false,
@@ -1410,15 +1849,22 @@ pub fn normalize_alter_table_add_constraint(
             let (deferrable, initially_deferred) = validate_key_attributes(attributes, "EXCLUDE")?;
             let key_columns = elements
                 .iter()
+                .filter(|element| element.expr_sql.is_none())
                 .map(|element| element.column.clone())
                 .collect::<Vec<_>>();
             let resolved = resolve_relation_constraint_columns(&key_columns, desc, &column_lookup)?;
             let resolved_include =
                 resolve_relation_constraint_columns(include_columns, desc, &column_lookup)?;
-            let generated_columns = resolved
+            let index_columns = exclusion_index_columns(elements, &resolved);
+            let generated_columns = index_columns
                 .iter()
-                .chain(resolved_include.iter())
-                .cloned()
+                .map(|column| {
+                    column
+                        .expr_sql
+                        .clone()
+                        .unwrap_or_else(|| column.name.clone())
+                })
+                .chain(resolved_include.iter().cloned())
                 .collect::<Vec<_>>();
             let constraint_name = assign_constraint_name(
                 attributes.name.clone(),
@@ -1430,6 +1876,7 @@ pub fn normalize_alter_table_add_constraint(
                     constraint_name: Some(constraint_name),
                     existing_index_name: None,
                     columns: resolved,
+                    index_columns,
                     include_columns: resolved_include,
                     primary: false,
                     nulls_not_distinct: false,
@@ -1487,6 +1934,7 @@ pub fn normalize_alter_table_add_constraint(
                 IndexBackedConstraintAction {
                     constraint_name: Some(constraint_name),
                     existing_index_name: Some(index_name.clone()),
+                    index_columns: index_columns_from_names(&columns),
                     columns,
                     include_columns,
                     primary: true,
@@ -1526,6 +1974,7 @@ pub fn normalize_alter_table_add_constraint(
                 IndexBackedConstraintAction {
                     constraint_name: Some(constraint_name),
                     existing_index_name: Some(index_name.clone()),
+                    index_columns: index_columns_from_names(&columns),
                     columns,
                     include_columns,
                     primary: false,

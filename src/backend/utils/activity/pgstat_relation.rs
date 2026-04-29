@@ -15,6 +15,7 @@ pub(crate) struct RelationStatsEntry {
     pub tuples_fetched: i64,
     pub tuples_inserted: i64,
     pub tuples_updated: i64,
+    pub tuples_hot_updated: i64,
     pub tuples_deleted: i64,
     pub live_tuples: i64,
     pub dead_tuples: i64,
@@ -44,6 +45,7 @@ impl RelationStatsEntry {
         self.tuples_fetched += delta.tuples_fetched;
         self.tuples_inserted += delta.tuples_inserted;
         self.tuples_updated += delta.tuples_updated;
+        self.tuples_hot_updated += delta.tuples_hot_updated;
         self.tuples_deleted += delta.tuples_deleted;
         self.live_tuples += delta.live_tuples;
         self.dead_tuples += delta.dead_tuples;
@@ -128,6 +130,7 @@ impl RelationStatsEntry {
             tuples_fetched: after.tuples_fetched - before.tuples_fetched,
             tuples_inserted: after.tuples_inserted - before.tuples_inserted,
             tuples_updated: after.tuples_updated - before.tuples_updated,
+            tuples_hot_updated: after.tuples_hot_updated - before.tuples_hot_updated,
             tuples_deleted: after.tuples_deleted - before.tuples_deleted,
             live_tuples: after.live_tuples - before.live_tuples,
             dead_tuples: after.dead_tuples - before.dead_tuples,
@@ -173,6 +176,7 @@ pub(crate) struct RelationStatsDelta {
     pub tuples_fetched: i64,
     pub tuples_inserted: i64,
     pub tuples_updated: i64,
+    pub tuples_hot_updated: i64,
     pub tuples_deleted: i64,
     pub live_tuples: i64,
     pub dead_tuples: i64,
@@ -202,6 +206,7 @@ impl RelationStatsDelta {
         self.tuples_fetched += other.tuples_fetched;
         self.tuples_inserted += other.tuples_inserted;
         self.tuples_updated += other.tuples_updated;
+        self.tuples_hot_updated += other.tuples_hot_updated;
         self.tuples_deleted += other.tuples_deleted;
         self.live_tuples += other.live_tuples;
         self.dead_tuples += other.dead_tuples;
@@ -284,6 +289,10 @@ impl SessionStatsState {
     }
 
     pub(crate) fn note_relation_insert(&mut self, oid: u32) {
+        self.note_relation_insert_with_persistence(oid, 'p');
+    }
+
+    pub(crate) fn note_relation_insert_with_persistence(&mut self, oid: u32, relpersistence: char) {
         if self.xact_active {
             let current = &mut self.relation_xact.entry(oid).or_default().current;
             current.tuples_inserted += 1;
@@ -297,6 +306,14 @@ impl SessionStatsState {
             pending.mod_since_analyze += 1;
             pending.ins_since_vacuum += 1;
         }
+        if relpersistence == 't' {
+            self.note_io_extend("client backend", "temp relation", "normal", 8192);
+            self.note_io_write("client backend", "temp relation", "normal", 8192);
+            self.note_io_eviction("client backend", "temp relation", "normal");
+        } else {
+            self.note_io_extend("client backend", "relation", "normal", 8192);
+            self.note_io_write("client backend", "wal", "normal", 8192);
+        }
         self.clear_snapshot();
     }
 
@@ -304,14 +321,18 @@ impl SessionStatsState {
         if self.xact_active {
             let current = &mut self.relation_xact.entry(oid).or_default().current;
             current.tuples_updated += 1;
+            current.tuples_hot_updated += 1;
             current.dead_tuples += 1;
             current.mod_since_analyze += 1;
         } else {
             let pending = self.pending_flush.relations.entry(oid).or_default();
             pending.tuples_updated += 1;
+            pending.tuples_hot_updated += 1;
             pending.dead_tuples += 1;
             pending.mod_since_analyze += 1;
         }
+        self.note_io_write("client backend", "relation", "normal", 8192);
+        self.note_io_write("client backend", "wal", "normal", 8192);
         self.clear_snapshot();
     }
 
@@ -329,6 +350,8 @@ impl SessionStatsState {
             pending.dead_tuples += 1;
             pending.mod_since_analyze += 1;
         }
+        self.note_io_write("client backend", "relation", "normal", 8192);
+        self.note_io_write("client backend", "wal", "normal", 8192);
         self.clear_snapshot();
     }
 

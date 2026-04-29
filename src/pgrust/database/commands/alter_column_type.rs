@@ -190,9 +190,7 @@ fn reject_inherited_type_change_conflicts(
                 message: format!(
                     "cannot alter inherited column \"{column_name}\" of relation \"{relation_name}\""
                 ),
-                detail: Some(format!(
-                    "child table \"{relation_name}\" has conflicting inherited definition for column \"{column_name}\""
-                )),
+                detail: None,
                 hint: None,
                 sqlstate: "0A000",
             });
@@ -299,11 +297,7 @@ fn collect_alter_column_type_targets(
             &target_relation.desc,
             &alter_stmt.column_name,
             &alter_stmt.ty,
-            if *relation_oid == relation.relation_oid {
-                alter_stmt.using_expr.as_ref()
-            } else {
-                None
-            },
+            alter_stmt.using_expr.as_ref(),
         )?;
         reject_column_type_change_with_rule_dependencies(
             db,
