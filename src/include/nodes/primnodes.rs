@@ -697,9 +697,12 @@ pub enum BuiltinScalarFunction {
     ArrayToString,
     ArrayLength,
     Cardinality,
+    ArrayIn,
     ArrayAppend,
     ArrayPrepend,
     ArrayCat,
+    AnyRangeIn,
+    ArrayLarger,
     ArrayPosition,
     ArrayPositions,
     ArrayRemove,
@@ -2317,7 +2320,14 @@ pub struct FuncExpr {
     pub funcresulttype: Option<SqlType>,
     pub funcvariadic: bool,
     pub implementation: ScalarFunctionImpl,
+    pub display_args: Option<Vec<FuncCallDisplayArg>>,
     pub args: Vec<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FuncCallDisplayArg {
+    pub name: Option<String>,
+    pub expr: Expr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2590,6 +2600,7 @@ impl Expr {
             funcresulttype,
             funcvariadic,
             implementation,
+            display_args: None,
             args,
         }))
     }

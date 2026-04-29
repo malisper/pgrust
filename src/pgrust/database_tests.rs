@@ -11,10 +11,10 @@ use crate::backend::utils::misc::notices::{
 };
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    BootstrapCatalogKind, CSTRING_TYPE_OID, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
-    PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID,
-    PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
-    TEXT_TYPE_OID,
+    BootstrapCatalogKind, CSTRING_TYPE_OID, FLOAT8_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
+    INT4RANGE_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
+    PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
+    PG_TYPE_RELATION_OID, POINT_ARRAY_TYPE_OID, PgAggregateRow, TEXT_TYPE_OID,
 };
 use crate::include::nodes::datum::{ArrayValue, IntervalValue, RecordValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
@@ -1747,10 +1747,13 @@ fn pg_typeof_reports_bound_expression_types() {
 
     match result {
         StatementResult::Query { columns, rows, .. } => {
-            assert_eq!(columns[1].sql_type, SqlType::new(SqlTypeKind::Text));
+            assert_eq!(columns[1].sql_type, SqlType::new(SqlTypeKind::RegType));
             assert_eq!(
                 rows,
-                vec![vec![Value::Text("foo".into()), Value::Text("text".into())]]
+                vec![vec![
+                    Value::Text("foo".into()),
+                    Value::Int64(i64::from(TEXT_TYPE_OID))
+                ]]
             );
         }
         other => panic!("expected query result, got {:?}", other),
@@ -1776,9 +1779,12 @@ fn pg_typeof_tracks_recursive_cte_output_type() {
 
     match result {
         StatementResult::Query { columns, rows, .. } => {
-            assert_eq!(columns[1].sql_type, SqlType::new(SqlTypeKind::Text));
-            assert_eq!(rows[0][1], Value::Text("text".into()));
-            assert!(rows.iter().all(|row| row[1] == Value::Text("text".into())));
+            assert_eq!(columns[1].sql_type, SqlType::new(SqlTypeKind::RegType));
+            assert_eq!(rows[0][1], Value::Int64(i64::from(TEXT_TYPE_OID)));
+            assert!(
+                rows.iter()
+                    .all(|row| row[1] == Value::Int64(i64::from(TEXT_TYPE_OID)))
+            );
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -11480,8 +11486,8 @@ fn create_view_finalizes_explicit_unknown_and_null_outputs_to_text() {
             "select pg_typeof(u2), pg_typeof(n), u2, n from unspecified_types",
         ),
         vec![vec![
-            Value::Text("text".into()),
-            Value::Text("text".into()),
+            Value::Int64(i64::from(TEXT_TYPE_OID)),
+            Value::Int64(i64::from(TEXT_TYPE_OID)),
             Value::Text("foo".into()),
             Value::Null,
         ]]
@@ -15551,11 +15557,15 @@ fn custom_aggregate_window_execution_is_rejected() {
     create_plain_test_aggregates(&db);
     create_plain_test_aggregate_inputs(&db);
 
-    match db.execute(1, "select newcnt(four) over () from agg_input") {
-        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
-            if feature == "window execution for custom aggregate newcnt" => {}
-        other => panic!("expected custom aggregate window rejection, got {other:?}"),
-    }
+    assert_eq!(
+        query_rows(&db, 1, "select newcnt(four) over () from agg_input"),
+        vec![
+            vec![Value::Int64(3)],
+            vec![Value::Int64(3)],
+            vec![Value::Int64(3)],
+            vec![Value::Int64(3)],
+        ]
+    );
 }
 
 #[test]
@@ -41065,8 +41075,8 @@ fn plpgsql_polymorphic_out_arguments_compile_concrete_types() {
             "select pg_typeof(x), pg_typeof(y) from poly_out(11, array[1, 2], 42, 34.5)"
         ),
         vec![vec![
-            Value::Text("integer[]".into()),
-            Value::Text("numeric[]".into()),
+            Value::Int64(i64::from(INT4_ARRAY_TYPE_OID)),
+            Value::Int64(i64::from(NUMERIC_ARRAY_TYPE_OID)),
         ]]
     );
     assert_eq!(
@@ -41076,8 +41086,8 @@ fn plpgsql_polymorphic_out_arguments_compile_concrete_types() {
             "select pg_typeof(x), pg_typeof(y) from poly_out(11, '{1,2}', point(1,2), '(3,4)')"
         ),
         vec![vec![
-            Value::Text("integer[]".into()),
-            Value::Text("point[]".into()),
+            Value::Int64(i64::from(INT4_ARRAY_TYPE_OID)),
+            Value::Int64(i64::from(POINT_ARRAY_TYPE_OID)),
         ]]
     );
     match db.execute(1, "select x from poly_out(11, array[1, 2.2], 42, 34.5)") {

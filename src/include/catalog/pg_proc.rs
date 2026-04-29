@@ -3526,7 +3526,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
         proc_row(
             6601,
             "pg_typeof",
-            TEXT_TYPE_OID,
+            REGTYPE_TYPE_OID,
             &oid_argtypes(&[ANYOID]),
             "pg_typeof",
             1,
@@ -8365,6 +8365,12 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
         ),
         (751, "array_out", CSTRING_TYPE_OID, vec![ANYARRAYOID]),
         (
+            515,
+            "array_larger",
+            ANYARRAYOID,
+            vec![ANYARRAYOID, ANYARRAYOID],
+        ),
+        (
             2400,
             "array_recv",
             ANYARRAYOID,
@@ -8423,7 +8429,12 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             CSTRING_TYPE_OID,
             vec![ANYMULTIRANGEOID],
         ),
-        (3832, "anyrange_in", ANYRANGEOID, vec![CSTRING_TYPE_OID]),
+        (
+            3832,
+            "anyrange_in",
+            ANYRANGEOID,
+            vec![CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
+        ),
         (3833, "anyrange_out", CSTRING_TYPE_OID, vec![ANYRANGEOID]),
         (1242, "boolin", BOOL_TYPE_OID, vec![CSTRING_TYPE_OID]),
         (1243, "boolout", CSTRING_TYPE_OID, vec![BOOL_TYPE_OID]),
@@ -11126,13 +11137,44 @@ pub fn proc_oid_for_builtin_window_function(func: BuiltinWindowFunction) -> Opti
 }
 
 pub fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
+    let builtin_by_src = builtin_scalar_function_for_proc_src(&row.prosrc);
+    if row.pronamespace != PG_CATALOG_NAMESPACE_OID {
+        return builtin_by_src.filter(|func| is_dynamic_range_scalar_function(*func));
+    }
     if row.proname.eq_ignore_ascii_case("timestamptz")
         && matches!(row.proargtypes.trim(), "1082 1083" | "1082 1266")
     {
         return Some(BuiltinScalarFunction::TimestampTzConstructor);
     }
-    builtin_scalar_function_for_proc_src(&row.prosrc)
-        .or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
+    builtin_by_src.or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
+}
+
+fn is_dynamic_range_scalar_function(func: BuiltinScalarFunction) -> bool {
+    matches!(
+        func,
+        BuiltinScalarFunction::RangeConstructor
+            | BuiltinScalarFunction::RangeIsEmpty
+            | BuiltinScalarFunction::RangeLower
+            | BuiltinScalarFunction::RangeUpper
+            | BuiltinScalarFunction::RangeLowerInc
+            | BuiltinScalarFunction::RangeUpperInc
+            | BuiltinScalarFunction::RangeLowerInf
+            | BuiltinScalarFunction::RangeUpperInf
+            | BuiltinScalarFunction::RangeContains
+            | BuiltinScalarFunction::RangeContainedBy
+            | BuiltinScalarFunction::RangeOverlap
+            | BuiltinScalarFunction::RangeStrictLeft
+            | BuiltinScalarFunction::RangeStrictRight
+            | BuiltinScalarFunction::RangeOverLeft
+            | BuiltinScalarFunction::RangeOverRight
+            | BuiltinScalarFunction::RangeAdjacent
+            | BuiltinScalarFunction::RangeUnion
+            | BuiltinScalarFunction::RangeIntersect
+            | BuiltinScalarFunction::RangeDifference
+            | BuiltinScalarFunction::RangeMerge
+            | BuiltinScalarFunction::PgRustInternalBinaryCoercible
+            | BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid
+    )
 }
 
 fn builtin_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarFunction> {
@@ -12517,6 +12559,9 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("array_lower", BuiltinScalarFunction::ArrayLower),
         ("array_upper", BuiltinScalarFunction::ArrayUpper),
         ("array_fill", BuiltinScalarFunction::ArrayFill),
+        ("array_in", BuiltinScalarFunction::ArrayIn),
+        ("anyrange_in", BuiltinScalarFunction::AnyRangeIn),
+        ("array_larger", BuiltinScalarFunction::ArrayLarger),
         ("string_to_array", BuiltinScalarFunction::StringToArray),
         ("array_to_string", BuiltinScalarFunction::ArrayToString),
         ("array_length", BuiltinScalarFunction::ArrayLength),

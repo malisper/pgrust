@@ -732,20 +732,11 @@ fn drop_function_arg_type_oid(
     catalog: &dyn crate::backend::parser::CatalogLookup,
 ) -> Result<Option<u32>, ParseError> {
     let mut text = arg.trim();
-    let lower = text.to_ascii_lowercase();
-    for (mode, callable) in [
-        ("inout", true),
-        ("variadic", true),
-        ("in", true),
-        ("out", false),
-    ] {
-        if lower == mode || lower.starts_with(&format!("{mode} ")) {
-            if !callable {
-                return Ok(None);
-            }
-            text = text[mode.len()..].trim_start();
-            break;
+    if let Some((rest, callable)) = strip_drop_function_arg_mode(text) {
+        if !callable {
+            return Ok(None);
         }
+        text = rest;
     }
 
     let raw_type = match parse_type_name(text).and_then(|raw_type| {
@@ -756,6 +747,9 @@ fn drop_function_arg_type_oid(
             let Some(rest) = strip_leading_sql_word(text) else {
                 return Err(first_err);
             };
+            let rest = strip_drop_function_arg_mode(rest)
+                .map(|(rest, _)| rest)
+                .unwrap_or(rest);
             parse_type_name(rest)?
         }
     };
@@ -768,6 +762,22 @@ fn drop_function_arg_type_oid(
         })
         .map(Some)
         .ok_or_else(|| ParseError::UnsupportedType(arg.to_string()))
+}
+
+fn strip_drop_function_arg_mode(text: &str) -> Option<(&str, bool)> {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    for (mode, callable) in [
+        ("inout", true),
+        ("variadic", true),
+        ("in", true),
+        ("out", false),
+    ] {
+        if lower == mode || lower.starts_with(&format!("{mode} ")) {
+            return Some((trimmed[mode.len()..].trim_start(), callable));
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -794,19 +804,10 @@ fn drop_routine_arg_spec(
     catalog: &dyn crate::backend::parser::CatalogLookup,
 ) -> Result<DropRoutineArgSpec, ParseError> {
     let mut text = arg.trim();
-    let lower = text.to_ascii_lowercase();
     let mut parsed_mode = None;
-    for (mode, code) in [
-        ("inout", b'b'),
-        ("variadic", b'v'),
-        ("in", b'i'),
-        ("out", b'o'),
-    ] {
-        if lower == mode || lower.starts_with(&format!("{mode} ")) {
-            parsed_mode = Some(code);
-            text = text[mode.len()..].trim_start();
-            break;
-        }
+    if let Some((rest, mode)) = strip_drop_routine_arg_mode(text) {
+        parsed_mode = Some(mode);
+        text = rest;
     }
 
     let raw_type = match parse_type_name(text).and_then(|raw_type| {
@@ -816,6 +817,12 @@ fn drop_routine_arg_spec(
         Err(first_err) => {
             let Some(rest) = strip_leading_sql_word(text) else {
                 return Err(first_err);
+            };
+            let rest = if let Some((rest, mode)) = strip_drop_routine_arg_mode(rest) {
+                parsed_mode = Some(mode);
+                rest
+            } else {
+                rest
             };
             parse_type_name(rest)?
         }
@@ -832,6 +839,22 @@ fn drop_routine_arg_spec(
         mode: parsed_mode,
         type_oid,
     })
+}
+
+fn strip_drop_routine_arg_mode(text: &str) -> Option<(&str, u8)> {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    for (mode, code) in [
+        ("inout", b'b'),
+        ("variadic", b'v'),
+        ("in", b'i'),
+        ("out", b'o'),
+    ] {
+        if lower == mode || lower.starts_with(&format!("{mode} ")) {
+            return Some((trimmed[mode.len()..].trim_start(), code));
+        }
+    }
+    None
 }
 
 fn drop_table_direct_dependencies(

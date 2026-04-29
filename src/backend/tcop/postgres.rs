@@ -18,11 +18,11 @@ use crate::backend::libpq::pqformat::{
     infer_command_tag, infer_dml_returning_command_tag, send_auth_ok, send_backend_key_data,
     send_bind_complete, send_close_complete, send_command_complete, send_copy_data, send_copy_done,
     send_copy_in_response, send_copy_out_response, send_empty_query, send_error,
-    send_error_with_fields, send_error_with_hint, send_no_data, send_notice, send_notice_with_hint,
-    send_notice_with_severity, send_notification_response, send_parameter_description,
-    send_parameter_status, send_parse_complete, send_portal_suspended, send_query_result,
-    send_ready_for_query, send_row_description, send_row_description_with_formats,
-    send_typed_data_row, validate_binary_result_formats,
+    send_error_with_hint, send_error_with_internal_fields, send_no_data, send_notice,
+    send_notice_with_hint, send_notice_with_severity, send_notification_response,
+    send_parameter_description, send_parameter_status, send_parse_complete, send_portal_suspended,
+    send_query_result, send_ready_for_query, send_row_description,
+    send_row_description_with_formats, send_typed_data_row, validate_binary_result_formats,
 };
 use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
@@ -58,7 +58,8 @@ use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices}
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
     match e {
-        ExecError::WithContext { source, .. } => exec_error_sqlstate(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => exec_error_sqlstate(source),
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
             exec_error_sqlstate(&ExecError::Parse((**source).clone()))
         }
@@ -192,7 +193,8 @@ fn protocol_copy_io_error(err: io::Error) -> ExecError {
 
 fn exec_error_detail(e: &ExecError) -> Option<&str> {
     match e {
-        ExecError::WithContext { source, .. } => exec_error_detail(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => exec_error_detail(source),
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
             exec_error_detail_parse(source)
         }
@@ -233,7 +235,8 @@ fn exec_error_detail_parse(e: &crate::backend::parser::ParseError) -> Option<&st
 
 fn exec_error_hint(e: &ExecError) -> Option<&str> {
     match e {
-        ExecError::WithContext { source, .. } => exec_error_hint(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => exec_error_hint(source),
         ExecError::Regex(err) => err.hint.as_deref(),
         ExecError::DetailedError { hint, .. } => hint.as_deref(),
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
@@ -259,9 +262,31 @@ fn exec_error_context(e: &ExecError) -> Option<String> {
             Some(inner) => Some(format!("{inner}\n{context}")),
             None => Some(context.clone()),
         },
+        ExecError::WithInternalQueryContext {
+            source, context, ..
+        } => match exec_error_context(source) {
+            Some(inner) => Some(format!("{inner}\n{context}")),
+            None => Some(context.clone()),
+        },
         ExecError::JsonInput { context, .. } => context.clone(),
         ExecError::XmlInput { context, .. } => context.clone(),
         ExecError::Regex(err) => err.context.clone(),
+        _ => None,
+    }
+}
+
+fn exec_error_internal_query(e: &ExecError) -> Option<String> {
+    match e {
+        ExecError::WithInternalQueryContext { query, .. } => Some(query.clone()),
+        ExecError::WithContext { source, .. } => exec_error_internal_query(source),
+        _ => None,
+    }
+}
+
+fn exec_error_internal_position(e: &ExecError) -> Option<usize> {
+    match e {
+        ExecError::WithInternalQueryContext { position, .. } => *position,
+        ExecError::WithContext { source, .. } => exec_error_internal_position(source),
         _ => None,
     }
 }
@@ -274,6 +299,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             return Some(position);
         }
         return exec_error_position(sql, source);
+    }
+    if let ExecError::WithInternalQueryContext { .. } = e {
+        return None;
     }
     if let ExecError::Parse(parse_error) = e
         && let Some(position) = parse_error.position()
@@ -336,6 +364,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         {
             return extract_at_or_near_token(actual)
                 .and_then(|value| find_error_value_position(sql, value));
+        }
+        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            actual, ..
+        }) if actual == "positional argument cannot follow named argument" => {
+            return find_positional_after_named_arg_position(sql);
         }
         ExecError::Parse(crate::backend::parser::ParseError::UnsupportedType(name)) => {
             return find_case_insensitive_token_position(sql, name);
@@ -492,6 +525,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return None;
             }
             if let Some(position) = find_routine_error_position(sql, message) {
+                return Some(position);
+            }
+            if let Some(position) = function_from_return_type_error_position(sql, message) {
+                return Some(position);
+            }
+            if let Some(position) = duplicate_argument_name_error_position(sql, message) {
                 return Some(position);
             }
             if let Some(position) = trigger_when_error_position(sql, message) {
@@ -715,6 +754,12 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return None;
             }
             if let Some(position) = find_routine_error_position(sql, message) {
+                return Some(position);
+            }
+            if let Some(position) = function_from_return_type_error_position(sql, message) {
+                return Some(position);
+            }
+            if let Some(position) = duplicate_argument_name_error_position(sql, message) {
                 return Some(position);
             }
             if let Some(position) = trigger_when_error_position(sql, message) {
@@ -2071,11 +2116,39 @@ fn find_routine_error_position(sql: &str, message: &str) -> Option<usize> {
     find_case_insensitive_token_position(sql, name)
 }
 
+fn select_function_call_name(sql: &str) -> Option<String> {
+    let lower = sql.trim_start().to_ascii_lowercase();
+    if !lower.starts_with("select ") {
+        return None;
+    }
+    let select_offset = sql.len() - sql.trim_start().len();
+    let mut index = select_offset + "select".len();
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    let start = index;
+    while index < bytes.len() && is_sql_identifier_byte(bytes[index]) {
+        index += 1;
+    }
+    if start == index || bytes.get(index) != Some(&b'(') {
+        return None;
+    }
+    Some(sql[start..index].to_string())
+}
+
 fn routine_definition_error_position(sql: &str, message: &str) -> Option<usize> {
     match message {
         "invalid attribute in procedure definition" => {
             find_case_insensitive_token_position(sql, "WINDOW")
                 .or_else(|| find_case_insensitive_token_position(sql, "STRICT"))
+        }
+        "input parameters after one with a default value must also have defaults" => {
+            find_parameter_after_keyword_position(sql, "DEFAULT")
+                .or_else(|| find_parameter_after_default_marker_position(sql))
+        }
+        "only input parameters can have default values" => {
+            find_case_insensitive_token_position(sql, "OUT")
         }
         "VARIADIC parameter must be the last parameter" => {
             find_parameter_after_keyword_position(sql, "VARIADIC")
@@ -2087,10 +2160,79 @@ fn routine_definition_error_position(sql: &str, message: &str) -> Option<usize> 
     }
 }
 
+fn function_from_return_type_error_position(sql: &str, message: &str) -> Option<usize> {
+    let name = message
+        .strip_prefix("function \"")?
+        .split_once("\" in FROM has unsupported return type")?
+        .0;
+    find_case_insensitive_token_position(sql, name)
+}
+
+fn duplicate_argument_name_error_position(sql: &str, message: &str) -> Option<usize> {
+    let name = message
+        .strip_prefix("argument name \"")
+        .or_else(|| message.strip_prefix("parameter name \""))?
+        .split_once("\" used more than once")?
+        .0;
+    find_nth_identifier_position(sql, name, 2)
+}
+
+fn find_positional_after_named_arg_position(sql: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let named_operator = lower.find(":=").or_else(|| lower.find("=>"))?;
+    let comma = sql[named_operator..].find(',')? + named_operator;
+    let mut index = comma + 1;
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    (index < bytes.len()).then_some(index + 1)
+}
+
+fn find_nth_identifier_position(sql: &str, ident: &str, nth: usize) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let ident = ident.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let ident_bytes = ident.as_bytes();
+    let mut index = 0usize;
+    let mut seen = 0usize;
+    while index + ident_bytes.len() <= bytes.len() {
+        if bytes[index..].starts_with(ident_bytes)
+            && (index == 0 || !is_identifier_byte(bytes[index - 1]))
+            && (index + ident_bytes.len() == bytes.len()
+                || !is_identifier_byte(bytes[index + ident_bytes.len()]))
+        {
+            seen += 1;
+            if seen == nth {
+                return Some(index + 1);
+            }
+            index += ident_bytes.len();
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
 fn find_parameter_after_keyword_position(sql: &str, keyword: &str) -> Option<usize> {
     let lower = sql.to_ascii_lowercase();
     let keyword_position = lower.find(&keyword.to_ascii_lowercase())?;
     let comma_position = sql[keyword_position..].find(',')? + keyword_position;
+    let after_comma = &sql[comma_position + 1..];
+    let whitespace = after_comma
+        .bytes()
+        .take_while(|byte| byte.is_ascii_whitespace())
+        .count();
+    Some(comma_position + 1 + whitespace + 1)
+}
+
+fn find_parameter_after_default_marker_position(sql: &str) -> Option<usize> {
+    let marker = sql.find('=')?;
+    let comma_position = sql[marker..].find(',')? + marker;
     let after_comma = &sql[comma_position + 1..];
     let whitespace = after_comma
         .bytes()
@@ -2388,6 +2530,8 @@ struct ExecErrorResponse {
     hint: Option<String>,
     context: Option<String>,
     position: Option<usize>,
+    internal_query: Option<String>,
+    internal_position: Option<usize>,
 }
 
 struct SessionActivityGuard<'a> {
@@ -2423,6 +2567,8 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
         hint: None,
         context: exec_error_context(e),
         position: exec_error_position(sql, e),
+        internal_query: exec_error_internal_query(e),
+        internal_position: exec_error_internal_position(e),
     };
     if sql.to_ascii_lowercase().contains("pg_input_is_valid(")
         && response
@@ -2430,6 +2576,12 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
             .starts_with("invalid input syntax for type ")
     {
         response.position = None;
+    }
+    if response.message == "return type anyarray is not supported for SQL functions"
+        && response.context.is_none()
+        && let Some(function_name) = select_function_call_name(sql)
+    {
+        response.context = Some(format!("SQL function \"{function_name}\" during inlining"));
     }
     apply_errors_regression_syntax_compat(sql, &mut response);
 
@@ -2505,7 +2657,10 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
 
 fn invalid_from_clause_reference_table(e: &ExecError) -> Option<&str> {
     match e {
-        ExecError::WithContext { source, .. } => invalid_from_clause_reference_table(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => {
+            invalid_from_clause_reference_table(source)
+        }
         ExecError::Parse(parse_error) => match parse_error.unpositioned() {
             crate::backend::parser::ParseError::InvalidFromClauseReference(name) => Some(name),
             _ => None,
@@ -2888,7 +3043,7 @@ fn send_exec_error(stream: &mut impl Write, sql: &str, e: &ExecError) -> io::Res
     if response.hint.is_none() {
         response.hint = format_exec_error_hint(e);
     }
-    send_error_with_fields(
+    send_error_with_internal_fields(
         stream,
         exec_error_sqlstate(e),
         &response.message,
@@ -2896,6 +3051,8 @@ fn send_exec_error(stream: &mut impl Write, sql: &str, e: &ExecError) -> io::Res
         response.hint.as_deref(),
         response.context.as_deref(),
         response.position,
+        response.internal_query.as_deref(),
+        response.internal_position,
     )
 }
 

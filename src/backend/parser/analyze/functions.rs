@@ -3,9 +3,10 @@ use crate::backend::parser::gram::{SQL_JSON_ARRAYAGG_FUNC, SQL_JSON_OBJECTAGG_FU
 use crate::backend::parser::parse_expr;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{
-    ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
-    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
-    TEXT_TYPE_OID, bootstrap_pg_proc_rows_ref,
+    ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
+    ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID, ANYOID,
+    ANYRANGEOID, CSTRING_TYPE_OID, OID_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_SQL_OID,
+    TEXT_TYPE_OID, UNKNOWN_TYPE_OID, bootstrap_pg_proc_rows_ref,
     builtin_hypothetical_aggregate_function_for_proc_oid, builtin_type_name_for_oid,
     builtin_type_rows, builtin_window_function_for_proc_oid,
 };
@@ -157,8 +158,15 @@ pub(crate) fn resolve_function_call(
         });
     }
 
-    best.map(|(resolved, _, _, _)| resolved)
-        .ok_or_else(|| undefined_function_error(catalog, name, actual_types))
+    best.map(|(resolved, _, _, _)| resolved).ok_or_else(|| {
+        polymorphic_resolution_error_for_candidates(
+            catalog,
+            lookup_name,
+            namespace_oid,
+            actual_types,
+        )
+        .unwrap_or_else(|| undefined_function_error(catalog, name, actual_types))
+    })
 }
 
 fn resolved_function_call_for_candidate(
@@ -230,9 +238,6 @@ pub(crate) fn resolve_function_call_with_arg_defaults(
         else {
             continue;
         };
-        if !args.iter().any(|arg| arg.name.is_some()) && !normalized.used_defaults {
-            continue;
-        }
         let Some(candidate) = match_proc_signature(
             catalog,
             &row,
@@ -278,8 +283,15 @@ pub(crate) fn resolve_function_call_with_arg_defaults(
     if ambiguous {
         return Err(ambiguous_function_error(catalog, name, actual_types));
     }
-    best.map(|(resolved, _, _, _)| resolved)
-        .ok_or_else(|| undefined_function_error(catalog, name, actual_types))
+    best.map(|(resolved, _, _, _)| resolved).ok_or_else(|| {
+        polymorphic_resolution_error_for_candidates(
+            catalog,
+            lookup_name,
+            namespace_oid,
+            actual_types,
+        )
+        .unwrap_or_else(|| undefined_function_call_error(catalog, name, args, actual_types))
+    })
 }
 
 fn validate_function_call_arg_order(args: &[SqlFunctionArg]) -> Result<(), ParseError> {
@@ -299,7 +311,7 @@ fn validate_function_call_arg_order(args: &[SqlFunctionArg]) -> Result<(), Parse
         } else if saw_named {
             return Err(ParseError::UnexpectedToken {
                 expected: "named arguments after positional arguments",
-                actual: "positional argument after named argument".into(),
+                actual: "positional argument cannot follow named argument".into(),
             });
         }
     }
@@ -403,8 +415,6 @@ fn default_proc_arg_type(
     scope: &BoundScope,
     outer_scopes: &[BoundScope],
 ) -> SqlType {
-    let inferred =
-        super::infer::infer_sql_expr_type(default_expr, scope, catalog, outer_scopes, None);
     if matches!(
         target_oid,
         ANYOID
@@ -414,12 +424,22 @@ fn default_proc_arg_type(
             | ANYRANGEOID
             | ANYMULTIRANGEOID
             | ANYCOMPATIBLEOID
+            | ANYCOMPATIBLENONARRAYOID
             | ANYCOMPATIBLEARRAYOID
             | ANYCOMPATIBLERANGEOID
             | ANYCOMPATIBLEMULTIRANGEOID
     ) {
-        inferred
+        super::infer::infer_sql_expr_function_arg_type_with_ctes(
+            default_expr,
+            scope,
+            catalog,
+            outer_scopes,
+            None,
+            &[],
+        )
     } else {
+        let inferred =
+            super::infer::infer_sql_expr_type(default_expr, scope, catalog, outer_scopes, None);
         catalog
             .type_by_oid(target_oid)
             .map(|row| row.sql_type)
@@ -492,11 +512,26 @@ fn undefined_function_error(
     name: &str,
     actual_types: &[SqlType],
 ) -> ParseError {
+    undefined_function_error_with_signature(function_signature_text(catalog, name, actual_types))
+}
+
+fn undefined_function_call_error(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    args: &[SqlFunctionArg],
+    actual_types: &[SqlType],
+) -> ParseError {
+    undefined_function_error_with_signature(function_call_signature_text(
+        catalog,
+        name,
+        args,
+        actual_types,
+    ))
+}
+
+fn undefined_function_error_with_signature(signature: String) -> ParseError {
     ParseError::DetailedError {
-        message: format!(
-            "function {} does not exist",
-            function_signature_text(catalog, name, actual_types)
-        ),
+        message: format!("function {signature} does not exist"),
         detail: None,
         hint: Some(
             "No function matches the given name and argument types. You might need to add explicit type casts."
@@ -504,6 +539,177 @@ fn undefined_function_error(
         ),
         sqlstate: "42883",
     }
+}
+
+pub(crate) fn sql_function_anyarray_return_resolution_error(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    actual_types: &[SqlType],
+) -> Option<ParseError> {
+    let (lookup_name, namespace_oid) = function_lookup_name_and_namespace(catalog, name)?;
+    for row in catalog.proc_rows_by_name(lookup_name) {
+        if namespace_oid.is_some_and(|oid| row.pronamespace != oid) {
+            continue;
+        }
+        if row.prokind != 'f' || row.prolang != PG_LANGUAGE_SQL_OID || row.prorettype != ANYARRAYOID
+        {
+            continue;
+        }
+        let Some(declared_oids) = parse_proc_argtype_oids(&row.proargtypes) else {
+            continue;
+        };
+        if declared_oids.len() != actual_types.len() {
+            continue;
+        }
+        if declared_oids
+            .iter()
+            .copied()
+            .zip(actual_types.iter().copied())
+            .any(|(declared_oid, actual_type)| {
+                declared_oid == ANYARRAYOID
+                    && (matches!(actual_type.kind, SqlTypeKind::AnyArray)
+                        || actual_type.type_oid == ANYARRAYOID)
+            })
+        {
+            return Some(ParseError::DetailedError {
+                message: "return type anyarray is not supported for SQL functions".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+    }
+    None
+}
+
+fn is_unknown_sql_type(ty: SqlType) -> bool {
+    ty.type_oid == UNKNOWN_TYPE_OID
+}
+
+fn polymorphic_resolution_error_for_candidates(
+    catalog: &dyn CatalogLookup,
+    lookup_name: &str,
+    namespace_oid: Option<u32>,
+    actual_types: &[SqlType],
+) -> Option<ParseError> {
+    let saw_unknown = actual_types.iter().copied().any(is_unknown_sql_type);
+    for row in catalog.proc_rows_by_name(lookup_name) {
+        if namespace_oid.is_some_and(|oid| row.pronamespace != oid) {
+            continue;
+        }
+        let Some(declared_oids) = parse_proc_argtype_oids(&row.proargtypes) else {
+            continue;
+        };
+        if declared_oids.len() != actual_types.len() {
+            continue;
+        }
+        if let Some(err) = anyarray_pseudotype_resolution_error(&row, &declared_oids, actual_types)
+        {
+            return Some(err);
+        }
+        if saw_unknown
+            && let Some(err) =
+                unknown_polymorphic_resolution_error(&row, &declared_oids, actual_types)
+        {
+            return Some(err);
+        }
+    }
+    None
+}
+
+fn anyarray_pseudotype_resolution_error(
+    row: &crate::include::catalog::PgProcRow,
+    declared_oids: &[u32],
+    actual_types: &[SqlType],
+) -> Option<ParseError> {
+    let has_anyarray_argument = declared_oids
+        .iter()
+        .copied()
+        .zip(actual_types.iter().copied())
+        .any(|(declared_oid, actual_type)| {
+            declared_oid == ANYARRAYOID
+                && (matches!(actual_type.kind, SqlTypeKind::AnyArray)
+                    || actual_type.type_oid == ANYARRAYOID)
+        });
+    if has_anyarray_argument && matches!(row.prorettype, ANYELEMENTOID | ANYARRAYOID) {
+        return Some(ParseError::DetailedError {
+            message: "cannot determine element type of \"anyarray\" argument".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+    None
+}
+
+fn unknown_polymorphic_resolution_error(
+    row: &crate::include::catalog::PgProcRow,
+    declared_oids: &[u32],
+    actual_types: &[SqlType],
+) -> Option<ParseError> {
+    for (declared_oid, actual_type) in declared_oids
+        .iter()
+        .copied()
+        .zip(actual_types.iter().copied())
+    {
+        if !is_unknown_sql_type(actual_type) {
+            continue;
+        }
+        let type_name = match declared_oid {
+            ANYCOMPATIBLERANGEOID => Some("anycompatiblerange"),
+            ANYCOMPATIBLEMULTIRANGEOID if row.prorettype == ANYCOMPATIBLERANGEOID => {
+                Some("anycompatiblerange")
+            }
+            ANYCOMPATIBLEMULTIRANGEOID => Some("anycompatiblemultirange"),
+            ANYCOMPATIBLEARRAYOID => Some("anycompatiblearray"),
+            ANYRANGEOID | ANYMULTIRANGEOID => None,
+            ANYARRAYOID => Some("anyarray"),
+            ANYELEMENTOID | ANYOID | ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => None,
+            _ => continue,
+        };
+        let message = if let Some(type_name) = type_name {
+            format!(
+                "could not determine polymorphic type {type_name} because input has type unknown"
+            )
+        } else {
+            "could not determine polymorphic type because input has type unknown".into()
+        };
+        if matches!(
+            row.prorettype,
+            ANYOID
+                | ANYELEMENTOID
+                | ANYARRAYOID
+                | ANYRANGEOID
+                | ANYMULTIRANGEOID
+                | ANYCOMPATIBLEOID
+                | ANYCOMPATIBLENONARRAYOID
+                | ANYCOMPATIBLEARRAYOID
+                | ANYCOMPATIBLERANGEOID
+                | ANYCOMPATIBLEMULTIRANGEOID
+        ) || declared_oids.iter().copied().any(|oid| {
+            matches!(
+                oid,
+                ANYOID
+                    | ANYELEMENTOID
+                    | ANYARRAYOID
+                    | ANYRANGEOID
+                    | ANYMULTIRANGEOID
+                    | ANYCOMPATIBLEOID
+                    | ANYCOMPATIBLENONARRAYOID
+                    | ANYCOMPATIBLEARRAYOID
+                    | ANYCOMPATIBLERANGEOID
+                    | ANYCOMPATIBLEMULTIRANGEOID
+            )
+        }) {
+            return Some(ParseError::DetailedError {
+                message,
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+    }
+    None
 }
 
 fn ambiguous_function_error(
@@ -538,6 +744,28 @@ fn function_signature_text(
     format!("{name}({signature})")
 }
 
+fn function_call_signature_text(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    args: &[SqlFunctionArg],
+    actual_types: &[SqlType],
+) -> String {
+    let signature = args
+        .iter()
+        .zip(actual_types.iter())
+        .map(|(arg, ty)| {
+            let type_name = function_signature_type_name(catalog, *ty);
+            if let Some(name) = arg.name.as_ref() {
+                format!("{name} => {type_name}")
+            } else {
+                type_name
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({signature})")
+}
+
 fn function_signature_type_name(catalog: &dyn CatalogLookup, ty: SqlType) -> String {
     if !ty.is_array
         && ty.type_oid != 0
@@ -552,15 +780,17 @@ fn polymorphic_candidate_is_consistent(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
 ) -> bool {
-    let Some(declared_oids) = parse_proc_argtype_oids(&row.proargtypes) else {
+    if row.proname.eq_ignore_ascii_case("array_larger") {
+        return true;
+    }
+    let Some(declared_oids) = candidate_declared_arg_oids(row, candidate) else {
         return false;
     };
     let mut ordinary_base = None;
     let mut saw_ordinary = false;
     let mut saw_compatible = false;
     for (declared_oid, actual_type) in declared_oids
-        .iter()
-        .copied()
+        .into_iter()
         .zip(candidate.declared_arg_types.iter().copied())
     {
         if matches!(
@@ -569,6 +799,9 @@ fn polymorphic_candidate_is_consistent(
         ) {
             saw_ordinary = true;
             let Some(base) = ordinary_polymorphic_base_type(declared_oid, actual_type) else {
+                if is_unknown_sql_type(actual_type) {
+                    continue;
+                }
                 if declared_oid == ANYARRAYOID && is_text_like_type(actual_type) {
                     continue;
                 }
@@ -584,6 +817,7 @@ fn polymorphic_candidate_is_consistent(
         if matches!(
             declared_oid,
             ANYCOMPATIBLEOID
+                | ANYCOMPATIBLENONARRAYOID
                 | ANYCOMPATIBLEARRAYOID
                 | ANYCOMPATIBLERANGEOID
                 | ANYCOMPATIBLEMULTIRANGEOID
@@ -621,7 +855,7 @@ fn concrete_declared_arg_types_for_candidate(
                 ANYARRAYOID => anyarray.unwrap_or(actual_type),
                 ANYRANGEOID => anyrange.unwrap_or(actual_type),
                 ANYMULTIRANGEOID => anymultirange.unwrap_or(actual_type),
-                ANYCOMPATIBLEOID => anycompatible.unwrap_or(actual_type),
+                ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => anycompatible.unwrap_or(actual_type),
                 ANYCOMPATIBLEARRAYOID => anycompatiblearray.unwrap_or(actual_type),
                 ANYCOMPATIBLERANGEOID => anycompatiblerange.unwrap_or(actual_type),
                 ANYCOMPATIBLEMULTIRANGEOID => anycompatiblemultirange.unwrap_or(actual_type),
@@ -636,7 +870,7 @@ fn candidate_declared_arg_oids(
     candidate: &CandidateMatch,
 ) -> Option<Vec<u32>> {
     let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
-    if row.provariadic == 0 || candidate.declared_arg_types.len() <= declared_oids.len() {
+    if row.provariadic == 0 || candidate.nvargs == 0 {
         return Some(declared_oids);
     }
 
@@ -651,6 +885,9 @@ fn candidate_declared_arg_oids(
 }
 
 fn ordinary_polymorphic_base_type(declared_oid: u32, actual_type: SqlType) -> Option<SqlType> {
+    if is_unknown_sql_type(actual_type) {
+        return None;
+    }
     match declared_oid {
         ANYELEMENTOID => Some(actual_type),
         ANYARRAYOID if actual_type.is_array => Some(actual_type.element_type()),
@@ -830,13 +1067,42 @@ pub(super) fn normalize_builtin_function_name(name: &str) -> &str {
 }
 
 fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
+    let builtin_by_src = builtin_scalar_function_for_proc_src(&row.prosrc);
+    if row.pronamespace != PG_CATALOG_NAMESPACE_OID {
+        return builtin_by_src.filter(|func| is_dynamic_range_scalar_function(*func));
+    }
     if row.proname.eq_ignore_ascii_case("timestamptz")
         && matches!(row.proargtypes.trim(), "1082 1083" | "1082 1266")
     {
         return Some(BuiltinScalarFunction::TimestampTzConstructor);
     }
-    builtin_scalar_function_for_proc_src(&row.prosrc)
-        .or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
+    builtin_by_src.or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
+}
+
+fn is_dynamic_range_scalar_function(func: BuiltinScalarFunction) -> bool {
+    matches!(
+        func,
+        BuiltinScalarFunction::RangeConstructor
+            | BuiltinScalarFunction::RangeIsEmpty
+            | BuiltinScalarFunction::RangeLower
+            | BuiltinScalarFunction::RangeUpper
+            | BuiltinScalarFunction::RangeLowerInc
+            | BuiltinScalarFunction::RangeUpperInc
+            | BuiltinScalarFunction::RangeLowerInf
+            | BuiltinScalarFunction::RangeUpperInf
+            | BuiltinScalarFunction::RangeContains
+            | BuiltinScalarFunction::RangeContainedBy
+            | BuiltinScalarFunction::RangeOverlap
+            | BuiltinScalarFunction::RangeStrictLeft
+            | BuiltinScalarFunction::RangeStrictRight
+            | BuiltinScalarFunction::RangeOverLeft
+            | BuiltinScalarFunction::RangeOverRight
+            | BuiltinScalarFunction::RangeAdjacent
+            | BuiltinScalarFunction::RangeUnion
+            | BuiltinScalarFunction::RangeIntersect
+            | BuiltinScalarFunction::RangeDifference
+            | BuiltinScalarFunction::RangeMerge
+    )
 }
 
 fn builtin_srf_impl_for_proc_row(row: &PgProcRow) -> Option<ResolvedSrfImpl> {
@@ -886,7 +1152,7 @@ fn match_proc_signature(
             cost += arg_cost;
             declared_arg_types.push(target_type);
         }
-        if !polymorphic_signature_matches(&row.proargtypes, &declared_arg_types) {
+        if !polymorphic_signature_matches_declared(&declared_oids, &declared_arg_types) {
             return None;
         }
         return Some(CandidateMatch {
@@ -901,7 +1167,6 @@ fn match_proc_signature(
     if actual_types.len() < fixed_prefix_len {
         return None;
     }
-
     let mut declared_arg_types = Vec::with_capacity(actual_types.len());
     let mut cost = 0usize;
     for (actual_type, declared_oid) in actual_types
@@ -922,7 +1187,7 @@ fn match_proc_signature(
             match_explicit_variadic_arg(catalog, *actual_types.last()?, row.provariadic)?;
         cost += arg_cost;
         declared_arg_types.push(target_type);
-        if !polymorphic_signature_matches(&row.proargtypes, &declared_arg_types) {
+        if !polymorphic_signature_matches_declared(&declared_oids, &declared_arg_types) {
             return None;
         }
         return Some(CandidateMatch {
@@ -941,7 +1206,10 @@ fn match_proc_signature(
         declared_arg_types.push(target_type);
     }
 
-    if !polymorphic_signature_matches(&row.proargtypes, &declared_arg_types) {
+    let mut expanded_declared_oids = Vec::with_capacity(declared_arg_types.len());
+    expanded_declared_oids.extend_from_slice(&declared_oids[..fixed_prefix_len]);
+    expanded_declared_oids.extend(std::iter::repeat_n(row.provariadic, nvargs));
+    if !polymorphic_signature_matches_declared(&expanded_declared_oids, &declared_arg_types) {
         return None;
     }
 
@@ -963,22 +1231,30 @@ fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
         .collect()
 }
 
-fn polymorphic_signature_matches(proargtypes: &str, actual_types: &[SqlType]) -> bool {
-    let Some(declared_oids) = parse_proc_argtype_oids(proargtypes) else {
-        return false;
-    };
+fn polymorphic_signature_matches_declared(declared_oids: &[u32], actual_types: &[SqlType]) -> bool {
     let mut exact_subtype = None;
     let mut compatible_range_anchor = None;
     let mut compatible_other_subtypes = Vec::new();
 
-    for (declared_oid, actual_type) in declared_oids.into_iter().zip(actual_types.iter().copied()) {
+    for (declared_oid, actual_type) in declared_oids
+        .iter()
+        .copied()
+        .zip(actual_types.iter().copied())
+    {
         match declared_oid {
-            ANYOID | ANYELEMENTOID => {
+            ANYELEMENTOID => {
+                if is_unknown_sql_type(actual_type) {
+                    continue;
+                }
                 if !merge_exact_polymorphic_subtype(&mut exact_subtype, actual_type) {
                     return false;
                 }
             }
+            ANYOID => {}
             ANYARRAYOID if actual_type.is_array => {
+                if is_unknown_sql_type(actual_type) {
+                    continue;
+                }
                 if !merge_exact_polymorphic_subtype(&mut exact_subtype, actual_type.element_type())
                 {
                     return false;
@@ -1003,9 +1279,23 @@ fn polymorphic_signature_matches(proargtypes: &str, actual_types: &[SqlType]) ->
                     return false;
                 }
             }
-            ANYCOMPATIBLEOID => compatible_other_subtypes.push(actual_type),
+            ANYCOMPATIBLEOID => {
+                if !is_unknown_sql_type(actual_type) {
+                    compatible_other_subtypes.push(actual_type);
+                }
+            }
+            ANYCOMPATIBLENONARRAYOID => {
+                if actual_type.is_array {
+                    return false;
+                }
+                if !is_unknown_sql_type(actual_type) {
+                    compatible_other_subtypes.push(actual_type);
+                }
+            }
             ANYCOMPATIBLEARRAYOID if actual_type.is_array => {
-                compatible_other_subtypes.push(actual_type.element_type());
+                if !is_unknown_sql_type(actual_type) {
+                    compatible_other_subtypes.push(actual_type.element_type());
+                }
             }
             ANYCOMPATIBLERANGEOID => {
                 let Some(range_type) = range_type_ref_for_sql_type(actual_type) else {
@@ -1118,6 +1408,9 @@ fn match_proc_arg_type(
     if declared_oid == ANYCOMPATIBLEOID {
         return Some((2, actual_type));
     }
+    if declared_oid == ANYCOMPATIBLENONARRAYOID {
+        return (!actual_type.is_array).then_some((2, actual_type));
+    }
     if declared_oid == ANYCOMPATIBLEARRAYOID {
         return (actual_type.is_array || actual_type.kind == SqlTypeKind::AnyCompatibleArray)
             .then_some((2, actual_type));
@@ -1132,6 +1425,33 @@ fn match_proc_arg_type(
             .then_some((2, actual_type));
     }
     let declared_type = catalog.type_by_oid(declared_oid)?.sql_type;
+    if is_reg_oid_alias_type(declared_type)
+        && matches!(
+            actual_type.kind,
+            SqlTypeKind::Oid
+                | SqlTypeKind::Int4
+                | SqlTypeKind::Int8
+                | SqlTypeKind::RegClass
+                | SqlTypeKind::RegType
+                | SqlTypeKind::RegProc
+                | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegOper
+                | SqlTypeKind::RegOperator
+        )
+    {
+        return Some((1, declared_type));
+    }
+    if declared_oid == CSTRING_TYPE_OID && is_text_like_type(actual_type) {
+        return Some((3, declared_type));
+    }
+    if declared_oid == OID_TYPE_OID
+        && matches!(
+            actual_type.kind,
+            SqlTypeKind::Oid | SqlTypeKind::RegType | SqlTypeKind::Int4 | SqlTypeKind::Int8
+        )
+    {
+        return Some((1, declared_type));
+    }
     if let Some(cost) = arg_type_match_cost(actual_type, declared_type) {
         return Some((cost, declared_type));
     }
@@ -1186,18 +1506,42 @@ fn inherited_composite_arg_can_coerce_to(
     false
 }
 
+fn is_reg_oid_alias_type(ty: SqlType) -> bool {
+    !ty.is_array
+        && matches!(
+            ty.kind,
+            SqlTypeKind::RegClass
+                | SqlTypeKind::RegType
+                | SqlTypeKind::RegProc
+                | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegOper
+                | SqlTypeKind::RegOperator
+        )
+}
+
 fn resolve_proc_result_type(
     catalog: &dyn CatalogLookup,
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
 ) -> Option<SqlType> {
+    if row.proname.eq_ignore_ascii_case("array_in") && row.prorettype == ANYARRAYOID {
+        return Some(SqlType::new(SqlTypeKind::AnyArray));
+    }
+    if row.proname.eq_ignore_ascii_case("anyrange_in") && row.prorettype == ANYRANGEOID {
+        return Some(SqlType::new(SqlTypeKind::AnyRange));
+    }
+    if row.proname.eq_ignore_ascii_case("array_larger") && row.prorettype == ANYARRAYOID {
+        return Some(SqlType::new(SqlTypeKind::AnyArray));
+    }
     match row.prorettype {
         ANYOID | ANYELEMENTOID => resolve_anyelement_result_type(row, candidate),
         ANYENUMOID => resolve_anyenum_result_type(row, candidate),
         ANYARRAYOID => resolve_anyarray_result_type(row, candidate),
         ANYRANGEOID => resolve_anyrange_result_type(row, candidate),
         ANYMULTIRANGEOID => resolve_anymultirange_result_type(row, candidate),
-        ANYCOMPATIBLEOID => resolve_anycompatible_element_type(row, candidate),
+        ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => {
+            resolve_anycompatible_element_type(row, candidate)
+        }
         ANYCOMPATIBLEARRAYOID => {
             resolve_anycompatible_element_type(row, candidate).map(SqlType::array_of)
         }
@@ -1291,7 +1635,9 @@ fn resolve_polymorphic_output_type(
         ANYARRAYOID => resolve_anyarray_result_type(row, candidate),
         ANYRANGEOID => resolve_anyrange_result_type(row, candidate),
         ANYMULTIRANGEOID => resolve_anymultirange_result_type(row, candidate),
-        ANYCOMPATIBLEOID => resolve_anycompatible_element_type(row, candidate),
+        ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => {
+            resolve_anycompatible_element_type(row, candidate)
+        }
         ANYCOMPATIBLEARRAYOID => {
             resolve_anycompatible_element_type(row, candidate).map(SqlType::array_of)
         }
@@ -1305,13 +1651,14 @@ fn resolve_anyelement_result_type(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
 ) -> Option<SqlType> {
-    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    let declared_oids = candidate_declared_arg_oids(row, candidate)?;
     let mut resolved = None;
     for (declared_oid, actual_type) in declared_oids
         .into_iter()
         .zip(candidate.declared_arg_types.iter().copied())
     {
         let inferred = match declared_oid {
+            _ if is_unknown_sql_type(actual_type) => None,
             ANYOID | ANYELEMENTOID => Some(actual_type),
             ANYENUMOID if matches!(actual_type.kind, SqlTypeKind::Enum) => Some(actual_type),
             ANYARRAYOID if actual_type.is_array => Some(actual_type.element_type()),
@@ -1339,7 +1686,7 @@ fn resolve_anyenum_result_type(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
 ) -> Option<SqlType> {
-    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    let declared_oids = candidate_declared_arg_oids(row, candidate)?;
     declared_oids
         .into_iter()
         .zip(candidate.declared_arg_types.iter().copied())
@@ -1353,13 +1700,14 @@ fn resolve_anyarray_result_type(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
 ) -> Option<SqlType> {
-    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    let declared_oids = candidate_declared_arg_oids(row, candidate)?;
     let mut resolved = None;
     for (declared_oid, actual_type) in declared_oids
         .into_iter()
         .zip(candidate.declared_arg_types.iter().copied())
     {
         let inferred = match declared_oid {
+            _ if is_unknown_sql_type(actual_type) => None,
             ANYARRAYOID if actual_type.is_array => Some(actual_type),
             ANYENUMOID if matches!(actual_type.kind, SqlTypeKind::Enum) => {
                 Some(SqlType::array_of(actual_type))
@@ -1392,7 +1740,7 @@ fn resolve_anyrange_result_type(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
 ) -> Option<SqlType> {
-    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    let declared_oids = candidate_declared_arg_oids(row, candidate)?;
     let mut resolved = None;
     for (declared_oid, actual_type) in declared_oids
         .into_iter()
@@ -1424,7 +1772,7 @@ fn resolve_anymultirange_result_type(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
 ) -> Option<SqlType> {
-    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    let declared_oids = candidate_declared_arg_oids(row, candidate)?;
     let mut resolved = None;
     for (declared_oid, actual_type) in declared_oids
         .into_iter()
@@ -1463,9 +1811,10 @@ fn resolve_anycompatible_element_type(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
 ) -> Option<SqlType> {
-    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    let declared_oids = candidate_declared_arg_oids(row, candidate)?;
     let mut anchor = None;
     let mut loose = Vec::new();
+    let mut saw_anycompatible_scalar = false;
     for (declared_oid, actual_type) in declared_oids
         .into_iter()
         .zip(candidate.declared_arg_types.iter().copied())
@@ -1486,10 +1835,15 @@ fn resolve_anycompatible_element_type(
                 )?;
             }
             ANYCOMPATIBLEARRAYOID if actual_type.is_array => {
-                loose.push(canonical_polymorphic_type(actual_type.element_type()));
+                if !is_unknown_sql_type(actual_type) {
+                    loose.push(canonical_polymorphic_type(actual_type.element_type()));
+                }
             }
-            ANYCOMPATIBLEOID => {
-                loose.push(canonical_polymorphic_type(actual_type));
+            ANYCOMPATIBLEOID | ANYCOMPATIBLENONARRAYOID => {
+                saw_anycompatible_scalar = true;
+                if !is_unknown_sql_type(actual_type) {
+                    loose.push(canonical_polymorphic_type(actual_type));
+                }
             }
             _ => {}
         }
@@ -1500,6 +1854,9 @@ fn resolve_anycompatible_element_type(
             .all(|ty| can_coerce_to_compatible_anchor(*ty, anchor))
             .then_some(anchor);
     }
+    if loose.is_empty() && saw_anycompatible_scalar {
+        return Some(SqlType::new(SqlTypeKind::Text));
+    }
     loose
         .into_iter()
         .try_fold(None, merge_loose_compatible_type)?
@@ -1509,7 +1866,7 @@ fn resolve_anycompatible_range_result_type(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
 ) -> Option<SqlType> {
-    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    let declared_oids = candidate_declared_arg_oids(row, candidate)?;
     for (declared_oid, actual_type) in declared_oids
         .into_iter()
         .zip(candidate.declared_arg_types.iter().copied())
@@ -1530,7 +1887,7 @@ fn resolve_anycompatible_multirange_result_type(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
 ) -> Option<SqlType> {
-    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    let declared_oids = candidate_declared_arg_oids(row, candidate)?;
     for (declared_oid, actual_type) in declared_oids
         .into_iter()
         .zip(candidate.declared_arg_types.iter().copied())
@@ -1652,7 +2009,10 @@ fn match_variadic_element_type(
     actual_type: SqlType,
     variadic_oid: u32,
 ) -> Option<(usize, SqlType)> {
-    if variadic_oid == ANYOID {
+    if matches!(
+        variadic_oid,
+        ANYOID | ANYELEMENTOID | ANYCOMPATIBLEOID | ANYENUMOID
+    ) {
         return Some((2, actual_type));
     }
     let declared_type = catalog.type_by_oid(variadic_oid)?.sql_type;
@@ -1664,8 +2024,13 @@ fn match_explicit_variadic_arg(
     actual_type: SqlType,
     variadic_oid: u32,
 ) -> Option<(usize, SqlType)> {
-    if variadic_oid == ANYOID {
+    if matches!(variadic_oid, ANYOID | ANYELEMENTOID | ANYCOMPATIBLEOID) {
         return actual_type.is_array.then_some((2, actual_type));
+    }
+    if variadic_oid == ANYENUMOID {
+        return (actual_type.is_array
+            && matches!(actual_type.element_type().kind, SqlTypeKind::Enum))
+        .then_some((2, actual_type));
     }
     if !actual_type.is_array {
         return None;
@@ -1697,8 +2062,8 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
     {
         return Some(1);
     }
-    if is_numeric_family(actual_type) && is_numeric_family(target_type) {
-        return Some(1);
+    if let Some(cost) = numeric_type_match_cost(actual_type.kind, target_type.kind) {
+        return Some(cost);
     }
     if is_builtin_text_like_type(actual_type) && is_builtin_text_like_type(target_type) {
         return Some(1);
@@ -1713,6 +2078,18 @@ fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usi
         return Some(2);
     }
     None
+}
+
+fn numeric_type_match_cost(actual: SqlTypeKind, target: SqlTypeKind) -> Option<usize> {
+    use SqlTypeKind::*;
+    Some(match (actual, target) {
+        (Int2, Int4) | (Int4, Int8) | (Int8, Numeric) | (Float4, Float8) => 1,
+        (Int2, Int8) | (Int4, Numeric) | (Int8, Float4) | (Numeric, Float4) => 2,
+        (Int2, Numeric) | (Int4, Float4) | (Int8, Float8) | (Numeric, Float8) => 3,
+        (Int2, Float4) | (Int4, Float8) => 4,
+        (Int2, Float8) => 5,
+        _ => return None,
+    })
 }
 
 pub(super) fn validate_scalar_function_arity(
@@ -2175,6 +2552,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::GetBit => args.len() == 2,
             BuiltinScalarFunction::SetBit => args.len() == 3,
             BuiltinScalarFunction::ArrayFill => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::ArrayIn => args.len() == 3,
+            BuiltinScalarFunction::AnyRangeIn => args.len() == 3,
+            BuiltinScalarFunction::ArrayLarger => args.len() == 2,
             BuiltinScalarFunction::StringToArray
             | BuiltinScalarFunction::ArrayToString
             | BuiltinScalarFunction::ArrayAppend
@@ -2696,7 +3076,7 @@ fn lower_named_function_args(
         } else if saw_named {
             return Err(ParseError::UnexpectedToken {
                 expected: "named arguments after positional arguments",
-                actual: "positional argument after named argument".into(),
+                actual: "positional argument cannot follow named argument".into(),
             });
         } else {
             positional_count += 1;
@@ -4189,6 +4569,9 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("array_lower", BuiltinScalarFunction::ArrayLower),
         ("array_upper", BuiltinScalarFunction::ArrayUpper),
         ("array_fill", BuiltinScalarFunction::ArrayFill),
+        ("array_in", BuiltinScalarFunction::ArrayIn),
+        ("anyrange_in", BuiltinScalarFunction::AnyRangeIn),
+        ("array_larger", BuiltinScalarFunction::ArrayLarger),
         ("string_to_array", BuiltinScalarFunction::StringToArray),
         ("array_to_string", BuiltinScalarFunction::ArrayToString),
         ("array_length", BuiltinScalarFunction::ArrayLength),

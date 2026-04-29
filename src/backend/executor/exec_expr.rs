@@ -29,7 +29,8 @@ use super::expr_bool::{eval_booland_statefunc, eval_booleq, eval_boolne, eval_bo
 use super::expr_casts::{
     cast_value, cast_value_with_config, cast_value_with_source_type_and_config,
     cast_value_with_source_type_catalog_and_config, parse_interval_text_value,
-    parse_text_array_literal_with_op, soft_input_error_info_with_catalog_and_config,
+    parse_text_array_literal_with_catalog_and_op, parse_text_array_literal_with_op,
+    soft_input_error_info_with_catalog_and_config,
 };
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
@@ -367,6 +368,73 @@ fn oid_arg_to_u32(value: &Value, op: &'static str) -> Result<u32, ExecError> {
             left: value.clone(),
             right: Value::Int64(i64::from(crate::include::catalog::OID_TYPE_OID)),
         }),
+    }
+}
+
+fn eval_array_in_function(
+    values: &[Value],
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let [raw, element_oid, _typmod] = values else {
+        return Err(ExecError::DetailedError {
+            message: "array_in expects exactly three arguments".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        });
+    };
+    if matches!(raw, Value::Null) || matches!(element_oid, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let raw = raw.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "array_in",
+        left: raw.clone(),
+        right: Value::Text("{}".into()),
+    })?;
+    let element_oid = oid_arg_to_u32(element_oid, "array_in")?;
+    let catalog = catalog_lookup(ctx).ok_or_else(|| ExecError::DetailedError {
+        message: "array_in requires executor catalog context".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    })?;
+    let element_type = catalog
+        .type_by_oid(element_oid)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("cache lookup failed for type {element_oid}"),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        })?
+        .sql_type;
+    parse_text_array_literal_with_catalog_and_op(raw, element_type, "array_in", Some(catalog))
+}
+
+fn anyrange_input_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot accept a value of type anyrange".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn eval_array_larger_function(values: &[Value]) -> Result<Value, ExecError> {
+    let [left, right] = values else {
+        return Err(ExecError::DetailedError {
+            message: "array_larger expects exactly two arguments".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        });
+    };
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    if compare_order_values(left, right, None, None, false)? == Ordering::Less {
+        Ok(right.clone())
+    } else {
+        Ok(left.clone())
     }
 }
 
@@ -1015,7 +1083,7 @@ fn format_function_arg(
     parts.push(type_identity_text(catalog, type_oid));
     if let Some(default) = default {
         parts.push("DEFAULT".into());
-        parts.push(default.into());
+        parts.push(format_function_default_text(default, type_oid, catalog));
     }
     parts.join(" ")
 }
@@ -1033,6 +1101,21 @@ fn function_result_text(
     } else {
         result
     })
+}
+
+fn format_function_default_text(
+    default: &str,
+    type_oid: u32,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let compact = default
+        .split_whitespace()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if compact.starts_with("array[]::") && compact.ends_with("[]") {
+        return format!("ARRAY[]::{}", type_identity_text(catalog, type_oid));
+    }
+    default.to_string()
 }
 
 fn function_definition_text(
@@ -9010,6 +9093,9 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::ArrayToString => eval_array_to_string_function(&values),
         BuiltinScalarFunction::ArrayLength => eval_array_length_function(&values),
         BuiltinScalarFunction::Cardinality => eval_cardinality_function(&values),
+        BuiltinScalarFunction::ArrayIn => eval_array_in_function(&values, None),
+        BuiltinScalarFunction::AnyRangeIn => Err(anyrange_input_error()),
+        BuiltinScalarFunction::ArrayLarger => eval_array_larger_function(&values),
         BuiltinScalarFunction::ArrayAppend => eval_array_append_function(&values),
         BuiltinScalarFunction::ArrayPrepend => eval_array_prepend_function(&values),
         BuiltinScalarFunction::ArrayCat => eval_array_cat_function(&values),
@@ -10427,10 +10513,15 @@ pub(crate) fn eval_builtin_function(
         };
     }
     if matches!(func, BuiltinScalarFunction::PgTypeof) {
-        let ty = args
-            .first()
-            .and_then(expr_sql_type_hint)
-            .unwrap_or(SqlType::new(SqlTypeKind::Text));
+        let ty = match args.first() {
+            Some(Expr::Const(Value::Null | Value::Text(_) | Value::TextRef(_, _))) => {
+                SqlType::new(SqlTypeKind::Text)
+                    .with_identity(crate::include::catalog::UNKNOWN_TYPE_OID, 0)
+            }
+            arg => arg
+                .and_then(expr_sql_type_hint)
+                .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        };
         return Ok(Value::Text(sql_type_name(ty).into()));
     }
     let values = args
@@ -11077,6 +11168,9 @@ pub(crate) fn eval_builtin_function(
         BuiltinScalarFunction::ArrayToString => eval_array_to_string_function(&values),
         BuiltinScalarFunction::ArrayLength => eval_array_length_function(&values),
         BuiltinScalarFunction::Cardinality => eval_cardinality_function(&values),
+        BuiltinScalarFunction::ArrayIn => eval_array_in_function(&values, Some(ctx)),
+        BuiltinScalarFunction::AnyRangeIn => Err(anyrange_input_error()),
+        BuiltinScalarFunction::ArrayLarger => eval_array_larger_function(&values),
         BuiltinScalarFunction::ArrayAppend => eval_array_append_function(&values),
         BuiltinScalarFunction::ArrayPrepend => eval_array_prepend_function(&values),
         BuiltinScalarFunction::ArrayCat => eval_array_cat_function(&values),
