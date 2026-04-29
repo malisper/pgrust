@@ -1842,9 +1842,15 @@ fn fix_join_rte_var_for_input(
         return None;
     }
     let index = attrno_index(var.varattno)?;
+    if input
+        .output_vars()
+        .get(index)
+        .is_none_or(|output| expr_sql_type(output) != var.vartype)
+    {
+        return None;
+    }
     if path_single_relid(input) == Some(var.varno) {
-        return (index < input.output_vars().len())
-            .then(|| special_slot_var(OUTER_VAR, index, var.vartype));
+        return Some(special_slot_var(OUTER_VAR, index, var.vartype));
     }
     if !root
         .parse
@@ -1854,7 +1860,7 @@ fn fix_join_rte_var_for_input(
     {
         return None;
     }
-    (index < input.output_vars().len()).then(|| special_slot_var(OUTER_VAR, index, var.vartype))
+    Some(special_slot_var(OUTER_VAR, index, var.vartype))
 }
 
 fn fix_upper_expr_for_input(
@@ -5402,43 +5408,37 @@ fn set_nested_loop_join_references(
     let left_for_late_params = left.clone();
     let left_plan = set_plan_refs(ctx, *left);
     let mut nest_params = nest_params;
-    if !matches!(
-        kind,
-        crate::include::nodes::primnodes::JoinType::Right
-            | crate::include::nodes::primnodes::JoinType::Full
-    ) {
-        let mut retained_ext_params = Vec::new();
-        for param in std::mem::take(&mut ctx.ext_params) {
-            if !plan_contains_exec_param_id(&right_plan, param.paramid) {
-                retained_ext_params.push(param);
-                continue;
-            }
-            let fixed_expr = fix_upper_expr_for_input(
-                ctx.root,
-                param.expr.clone(),
-                &left_for_late_params,
-                &left_tlist,
-            );
-            if can_bind_as_nest_param(&param.expr, &fixed_expr) {
-                let label = label_for_expr(ctx, &param.expr).or(param.label.clone());
-                nest_params.push(ExecParamSource {
-                    paramid: param.paramid,
-                    expr: lower_expr(
-                        ctx,
-                        fixed_expr,
-                        LowerMode::Input {
-                            path: Some(&left_for_late_params),
-                            tlist: &left_tlist,
-                        },
-                    ),
-                    label,
-                });
-            } else {
-                retained_ext_params.push(param);
-            }
+    let mut retained_ext_params = Vec::new();
+    for param in std::mem::take(&mut ctx.ext_params) {
+        if !plan_contains_exec_param_id(&right_plan, param.paramid) {
+            retained_ext_params.push(param);
+            continue;
         }
-        ctx.ext_params = retained_ext_params;
+        let fixed_expr = fix_upper_expr_for_input(
+            ctx.root,
+            param.expr.clone(),
+            &left_for_late_params,
+            &left_tlist,
+        );
+        if can_bind_as_nest_param(&param.expr, &fixed_expr) {
+            let label = label_for_expr(ctx, &param.expr).or(param.label.clone());
+            nest_params.push(ExecParamSource {
+                paramid: param.paramid,
+                expr: lower_expr(
+                    ctx,
+                    fixed_expr,
+                    LowerMode::Input {
+                        path: Some(&left_for_late_params),
+                        tlist: &left_tlist,
+                    },
+                ),
+                label,
+            });
+        } else {
+            retained_ext_params.push(param);
+        }
     }
+    ctx.ext_params = retained_ext_params;
     right_plan =
         maybe_wrap_nested_loop_inner_plan(ctx.root, kind, right_plan, &nest_params, left_rows);
     Plan::NestedLoopJoin {

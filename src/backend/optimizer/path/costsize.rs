@@ -2540,6 +2540,8 @@ fn build_join_paths_internal(
     let whole_row_targeted = root.is_some_and(|root| {
         query_targets_whole_row_rel(root, left_relids)
             || query_targets_whole_row_rel(root, right_relids)
+            || query_targets_whole_row_path(root, &left)
+            || query_targets_whole_row_path(root, &right)
     });
     let mut paths = Vec::new();
     let mut disabled_paths = Vec::new();
@@ -2783,23 +2785,71 @@ fn query_targets_whole_row_rel(root: &PlannerInfo, relids: &[usize]) -> bool {
     })
 }
 
+fn query_targets_whole_row_path(root: &PlannerInfo, path: &Path) -> bool {
+    match path {
+        Path::Append {
+            source_id, relids, ..
+        } => {
+            query_targets_whole_row_rel(root, &[*source_id])
+                || query_targets_whole_row_rel(root, relids)
+        }
+        Path::MergeAppend { source_id, .. }
+        | Path::SeqScan { source_id, .. }
+        | Path::IndexOnlyScan { source_id, .. }
+        | Path::IndexScan { source_id, .. }
+        | Path::BitmapIndexScan { source_id, .. }
+        | Path::BitmapHeapScan { source_id, .. } => {
+            query_targets_whole_row_rel(root, &[*source_id])
+        }
+        Path::SubqueryScan { rtindex, .. } => query_targets_whole_row_rel(root, &[*rtindex]),
+        Path::Unique { input, .. }
+        | Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Aggregate { input, .. }
+        | Path::WindowAgg { input, .. }
+        | Path::ProjectSet { input, .. } => query_targets_whole_row_path(root, input),
+        _ => false,
+    }
+}
+
 fn expr_is_whole_row_rel(root: &PlannerInfo, expr: &Expr, relids: &[usize]) -> bool {
     match expr {
-        Expr::Row { fields, .. } => relids.iter().any(|relid| {
-            let Some(rte) = root.parse.rtable.get(relid.saturating_sub(1)) else {
-                return false;
-            };
-            fields.len() == rte.desc.columns.len()
-                && fields.iter().enumerate().all(|(index, (_, expr))| {
-                    matches!(
-                        expr,
-                        Expr::Var(var)
-                            if var.varno == *relid
-                                && var.varlevelsup == 0
-                                && var.varattno == user_attrno(index)
-                    )
+        Expr::Row {
+            descriptor, fields, ..
+        } => {
+            row_type_targets_rel(root, descriptor.typrelid, relids)
+                || relids.iter().any(|relid| {
+                    let Some(rte) = root.parse.rtable.get(relid.saturating_sub(1)) else {
+                        return false;
+                    };
+                    fields.len() == rte.desc.columns.len()
+                        && fields.iter().enumerate().all(|(index, (_, expr))| {
+                            matches!(
+                                expr,
+                                Expr::Var(var)
+                                    if var.varno == *relid
+                                        && var.varlevelsup == 0
+                                        && var.varattno == user_attrno(index)
+                            )
+                        })
                 })
-        }),
+        }
+        Expr::Case(case_expr) => {
+            row_type_targets_rel(root, case_expr.casetype.typrelid, relids)
+                || case_expr
+                    .arg
+                    .as_deref()
+                    .is_some_and(|arg| expr_is_whole_row_rel(root, arg, relids))
+                || case_expr.args.iter().any(|arm| {
+                    expr_is_whole_row_rel(root, &arm.expr, relids)
+                        || expr_is_whole_row_rel(root, &arm.result, relids)
+                })
+                || expr_is_whole_row_rel(root, &case_expr.defresult, relids)
+        }
         Expr::Op(op) => op
             .args
             .iter()
@@ -2823,6 +2873,19 @@ fn expr_is_whole_row_rel(root: &PlannerInfo, expr: &Expr, relids: &[usize]) -> b
         }
         _ => false,
     }
+}
+
+fn row_type_targets_rel(root: &PlannerInfo, typrelid: u32, relids: &[usize]) -> bool {
+    typrelid != 0
+        && relids.iter().any(|relid| {
+            root.parse
+                .rtable
+                .get(relid.saturating_sub(1))
+                .is_some_and(|rte| match &rte.kind {
+                    RangeTblEntryKind::Relation { relation_oid, .. } => *relation_oid == typrelid,
+                    _ => false,
+                })
+        })
 }
 
 fn parameterized_inner_index_path(
