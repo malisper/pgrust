@@ -81,7 +81,7 @@ use crate::include::catalog::{
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID, HASH_AM_OID,
     PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
     PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow, PgPublicationRelRow, PgPublicationRow,
-    SPGIST_AM_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_am_rows,
+    RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_am_rows,
     builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
@@ -94,7 +94,7 @@ use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, ParamKind, QueryColumn, RelationPrivilegeMask,
-    RelationPrivilegeRequirement, SubLinkType, TargetEntry, expr_sql_type_hint,
+    RelationPrivilegeRequirement, SubLinkType, TargetEntry, Var, expr_sql_type_hint, user_attrno,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::database::commands::privilege::{
@@ -363,6 +363,9 @@ fn finalize_bound_delete(
             ..target
         })
         .collect();
+    if let Some(input_plan) = &mut stmt.input_plan {
+        input_plan.subplans = subplans.clone();
+    }
     stmt.subplans = subplans;
     stmt
 }
@@ -457,6 +460,7 @@ pub(crate) fn execute_explain(
 
     let explain_target = match statement {
         Statement::Select(select) => EitherExplainTarget::Select(select),
+        Statement::DeclareCursor(declare) => EitherExplainTarget::Select(declare.query),
         Statement::Insert(_) => {
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "EXPLAIN INSERT".into(),
@@ -475,7 +479,7 @@ pub(crate) fn execute_explain(
         }
         _ => {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "SELECT, UPDATE, or MERGE statement after EXPLAIN",
+                expected: "SELECT, UPDATE, MERGE, or DECLARE CURSOR statement after EXPLAIN",
                 actual: "unsupported statement".into(),
             }));
         }
@@ -517,9 +521,12 @@ pub(crate) fn execute_explain(
                         crate::include::nodes::parsenodes::CreateTableAsQuery::Select(query) => {
                             query
                         }
-                        crate::include::nodes::parsenodes::CreateTableAsQuery::Execute(name) => {
+                        crate::include::nodes::parsenodes::CreateTableAsQuery::Execute(execute) => {
                             return Err(ExecError::Parse(ParseError::DetailedError {
-                                message: format!("prepared statement \"{name}\" does not exist"),
+                                message: format!(
+                                    "prepared statement \"{}\" does not exist",
+                                    execute.name
+                                ),
                                 detail: None,
                                 hint: None,
                                 sqlstate: "26000",
@@ -3497,7 +3504,7 @@ fn constraint_columns(
         .collect()
 }
 
-fn collect_matching_rows_index(
+pub(crate) fn collect_matching_rows_index(
     rel: crate::backend::storage::smgr::RelFileLocator,
     desc: &RelationDesc,
     toast: Option<ToastRelationRef>,
@@ -4610,6 +4617,20 @@ fn apply_inbound_foreign_key_actions_on_delete(
                         )?
                         .1,
                         row_source: BoundModifyRowSource::Heap,
+                        parent_visible_exprs: constraint
+                            .child_desc
+                            .columns
+                            .iter()
+                            .enumerate()
+                            .map(|(index, column)| {
+                                Expr::Var(Var {
+                                    varno: 1,
+                                    varattno: user_attrno(index),
+                                    varlevelsup: 0,
+                                    vartype: column.sql_type,
+                                })
+                            })
+                            .collect(),
                         predicate: None,
                     };
                     let _ = apply_base_delete_row(
@@ -5133,6 +5154,8 @@ fn opclass_accepts_type(opclass: &PgOpclassRow, type_oid: u32, sql_type: SqlType
             && (sql_type.is_multirange() || multirange_type_ref_for_sql_type(sql_type).is_some()))
         || (opclass.opcintype == ANYENUMOID
             && matches!(sql_type.element_type().kind, SqlTypeKind::Enum))
+        || (opclass.opcintype == RECORD_TYPE_OID
+            && matches!(sql_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite))
 }
 
 fn default_opclass_for_catalog_type(
@@ -6160,6 +6183,7 @@ fn remap_child_row_to_parent(
 fn parse_tid_text(value: &Value) -> Result<Option<ItemPointerData>, ExecError> {
     let text = match value {
         Value::Null => return Ok(None),
+        Value::Tid(tid) => return Ok(Some(*tid)),
         Value::Text(text) => text.as_str(),
         Value::TextRef(_, _) => {
             return Err(ExecError::DetailedError {
@@ -7580,6 +7604,7 @@ fn execute_insert_project_set_row(
         limit_count: None,
         limit_offset: 0,
         locking_clause: None,
+        locking_targets: Vec::new(),
         row_marks: Vec::new(),
         has_target_srfs: true,
         recursive_union: None,
@@ -10049,6 +10074,354 @@ fn execute_update_from_joined_input(
     result
 }
 
+fn fetch_delete_target_values(
+    target: &BoundDeleteTarget,
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let desc = Rc::new(target.desc.clone());
+    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+    let tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, tid)?;
+    let mut slot = TupleSlot::from_heap_tuple(desc, attr_descs, tid, tuple);
+    slot.toast = slot_toast_context(target.toast, ctx);
+    slot.into_values()
+}
+
+fn project_delete_target_visible_values(
+    target: &BoundDeleteTarget,
+    row_values: &[Value],
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let mut slot = TupleSlot::virtual_row_with_metadata(
+        row_values.to_vec(),
+        Some(tid),
+        Some(target.relation_oid),
+    );
+    let mut values = target
+        .parent_visible_exprs
+        .iter()
+        .map(|expr| eval_expr(expr, &mut slot, ctx).map(|value| value.to_owned_value()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Value::materialize_all(&mut values);
+    Ok(values)
+}
+
+fn build_delete_using_eval_row(
+    target: &BoundDeleteTarget,
+    old_values: &[Value],
+    source_values: &[Value],
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let mut values = project_delete_target_visible_values(target, old_values, tid, ctx)?;
+    values.extend(source_values.iter().cloned());
+    Ok(values)
+}
+
+fn delete_using_predicate_matches(
+    target: &BoundDeleteTarget,
+    old_values: &[Value],
+    source_values: &[Value],
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    let Some(predicate) = &target.predicate else {
+        return Ok(true);
+    };
+    let eval_row = build_delete_using_eval_row(target, old_values, source_values, tid, ctx)?;
+    let mut eval_slot =
+        TupleSlot::virtual_row_with_metadata(eval_row, Some(tid), Some(target.relation_oid));
+    Ok(matches!(
+        eval_expr(predicate, &mut eval_slot, ctx)?,
+        Value::Bool(true)
+    ))
+}
+
+fn project_delete_using_returning_row(
+    stmt: &BoundDeleteStatement,
+    target: &BoundDeleteTarget,
+    old_values: &[Value],
+    source_values: &[Value],
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let mut visible_values = project_delete_target_visible_values(target, old_values, tid, ctx)?;
+    visible_values.extend(source_values.iter().cloned());
+    project_returning_row_with_old_new(
+        &stmt.returning,
+        &visible_values,
+        Some(tid),
+        Some(target.relation_oid),
+        Some(old_values),
+        None,
+        ctx,
+    )
+}
+
+fn execute_delete_from_joined_input(
+    stmt: &BoundDeleteStatement,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+) -> Result<StatementResult, ExecError> {
+    let input_plan = stmt.input_plan.as_ref().ok_or(ExecError::DetailedError {
+        message: "DELETE ... USING is missing its input plan".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let target_indexes = stmt
+        .targets
+        .iter()
+        .enumerate()
+        .map(|(index, target)| (target.relation_oid, index))
+        .collect::<HashMap<_, _>>();
+    let mut triggers = stmt
+        .targets
+        .iter()
+        .map(|target| {
+            ctx.catalog
+                .as_deref()
+                .map(|catalog| {
+                    RuntimeTriggers::load(
+                        catalog,
+                        target.relation_oid,
+                        &target.relation_name,
+                        &target.desc,
+                        TriggerOperation::Delete,
+                        &[],
+                        ctx.session_replication_role,
+                    )
+                })
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for trigger in triggers.iter().flatten() {
+        trigger.before_statement(ctx)?;
+    }
+    if let Some(catalog) = ctx.catalog.as_deref() {
+        for target in &stmt.targets {
+            let namespace_oid = catalog
+                .class_row_by_oid(target.relation_oid)
+                .map(|row| row.relnamespace)
+                .unwrap_or(0);
+            let indexes = catalog.index_relations_for_heap(target.relation_oid);
+            enforce_publication_replica_identity(
+                &target.relation_name,
+                target.relation_oid,
+                namespace_oid,
+                &target.desc,
+                &indexes,
+                catalog,
+                PublicationDmlAction::Delete,
+                true,
+            )?;
+        }
+    }
+    let mut transition_captures = triggers
+        .iter()
+        .map(|trigger| {
+            trigger
+                .as_ref()
+                .map(|trigger| trigger.new_transition_capture())
+        })
+        .collect::<Vec<_>>();
+
+    let result = (|| {
+        let mut state = executor_start(input_plan.plan_tree.clone());
+        let mut affected_rows = 0usize;
+        let mut returned_rows = Vec::new();
+        let mut pending_no_action_checks = Vec::new();
+        let snapshot = ctx.snapshot.clone();
+
+        while let Some(slot) = state.exec_proc_node(ctx)? {
+            ctx.check_for_interrupts()?;
+            let mut row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+            Value::materialize_all(&mut row_values);
+            let target_tid = row_values
+                .get(stmt.target_ctid_index)
+                .ok_or(ExecError::DetailedError {
+                    message: "delete input row is missing target ctid marker".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })
+                .and_then(parse_tid_text)?
+                .ok_or(ExecError::DetailedError {
+                    message: "delete input row is missing target ctid marker".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+            let target_tableoid = row_values
+                .get(stmt.target_tableoid_index)
+                .ok_or(ExecError::DetailedError {
+                    message: "delete input row is missing target tableoid marker".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })
+                .and_then(parse_update_tableoid)?;
+            let target_index =
+                *target_indexes
+                    .get(&target_tableoid)
+                    .ok_or(ExecError::DetailedError {
+                        message: format!(
+                            "delete input row referenced unexpected target relation OID {target_tableoid}"
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "XX000",
+                    })?;
+            let target = &stmt.targets[target_index];
+            let source_values =
+                row_values[stmt.target_visible_count..stmt.visible_column_count].to_vec();
+            let mut current_tid = target_tid;
+            let mut current_values = fetch_delete_target_values(target, current_tid, ctx)?;
+
+            loop {
+                ctx.check_for_interrupts()?;
+                if let Some(trigger) = triggers[target_index].as_ref()
+                    && !trigger.before_row_delete(&current_values, ctx)?
+                {
+                    break;
+                }
+                capture_copy_to_dml_notices();
+                apply_inbound_foreign_key_actions_on_delete(
+                    &target.relation_name,
+                    &target.referenced_by_foreign_keys,
+                    &current_values,
+                    ForeignKeyActionPhase::BeforeParentWrite,
+                    ctx,
+                    xid,
+                    waiter,
+                )?;
+                let old_tuple = if target.toast.is_some() {
+                    Some(heap_fetch(
+                        &*ctx.pool,
+                        ctx.client_id,
+                        target.rel,
+                        current_tid,
+                    )?)
+                } else {
+                    None
+                };
+                match heap_delete_with_waiter(
+                    &*ctx.pool,
+                    ctx.client_id,
+                    target.rel,
+                    &ctx.txns,
+                    xid,
+                    current_tid,
+                    &snapshot,
+                    waiter,
+                ) {
+                    Ok(()) => {
+                        if let (Some(toast), Some(old_tuple)) = (target.toast, old_tuple.as_ref()) {
+                            delete_external_from_tuple(ctx, toast, &target.desc, old_tuple, xid)?;
+                        }
+                        let pending_set_default_rechecks =
+                            apply_inbound_foreign_key_actions_on_delete(
+                                &target.relation_name,
+                                &target.referenced_by_foreign_keys,
+                                &current_values,
+                                ForeignKeyActionPhase::AfterParentWrite,
+                                ctx,
+                                xid,
+                                waiter,
+                            )?;
+                        validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
+                        pending_no_action_checks.extend(collect_no_action_checks_on_delete(
+                            &target.relation_name,
+                            &target.referenced_by_foreign_keys,
+                            &current_values,
+                            ctx,
+                        )?);
+                        ctx.session_stats
+                            .write()
+                            .note_relation_delete(target.relation_oid);
+                        if !stmt.returning.is_empty() {
+                            let row = project_delete_using_returning_row(
+                                stmt,
+                                target,
+                                &current_values,
+                                &source_values,
+                                current_tid,
+                                ctx,
+                            )?;
+                            capture_copy_to_dml_returning_row(row.clone());
+                            returned_rows.push(row);
+                        }
+                        if let Some(trigger) = triggers[target_index].as_ref() {
+                            if let Some(capture) = transition_captures[target_index].as_mut() {
+                                trigger.capture_delete_row(capture, &current_values);
+                            }
+                            trigger.after_row_delete(&current_values, ctx)?;
+                            capture_copy_to_dml_notices();
+                        }
+                        affected_rows += 1;
+                        break;
+                    }
+                    Err(HeapError::TupleAlreadyModified(_)) => {
+                        if ctx.uses_transaction_snapshot() {
+                            return Err(serialization_failure_due_to_concurrent_delete());
+                        }
+                        break;
+                    }
+                    Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+                        if ctx.uses_transaction_snapshot() {
+                            return Err(serialization_failure_due_to_concurrent_update());
+                        }
+                        let new_values = fetch_delete_target_values(target, new_ctid, ctx)?;
+                        if !delete_using_predicate_matches(
+                            target,
+                            &new_values,
+                            &source_values,
+                            new_ctid,
+                            ctx,
+                        )? {
+                            break;
+                        }
+                        current_values = new_values;
+                        current_tid = new_ctid;
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
+
+        validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
+
+        if stmt.returning.is_empty() {
+            Ok(StatementResult::AffectedRows(affected_rows))
+        } else {
+            Ok(build_returning_result(
+                returning_result_columns(&stmt.returning),
+                returned_rows,
+            ))
+        }
+    })();
+
+    if result.is_ok() {
+        for (trigger, capture) in triggers.iter_mut().zip(transition_captures.iter()) {
+            if let Some(trigger) = trigger {
+                if let Some(capture) = capture.as_ref() {
+                    trigger.after_transition_rows(capture, ctx)?;
+                    trigger.after_statement(Some(capture), ctx)?;
+                } else {
+                    trigger.after_statement(None, ctx)?;
+                }
+            }
+        }
+    }
+    result
+}
+
 pub(crate) fn execute_delete(
     stmt: BoundDeleteStatement,
     catalog: &dyn CatalogLookup,
@@ -10070,12 +10443,23 @@ pub fn execute_delete_with_waiter(
     )>,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_delete(stmt, catalog);
+    let target_oids = stmt
+        .targets
+        .iter()
+        .map(|target| target.relation_oid)
+        .collect::<BTreeSet<_>>();
     check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
     for subplan in &stmt.subplans {
         check_plan_relation_privileges(subplan, ctx, 'r')?;
     }
+    if let Some(input_plan) = &stmt.input_plan {
+        check_planned_stmt_relation_privileges_except(input_plan, ctx, &target_oids)?;
+    }
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
+        if stmt.input_plan.is_some() {
+            return execute_delete_from_joined_input(&stmt, ctx, xid, waiter);
+        }
         let mut affected_rows = 0;
         let mut returned_rows = Vec::new();
         for target in &stmt.targets {
@@ -10677,6 +11061,9 @@ pub(crate) fn materialize_delete_row_events(
     stmt: &BoundDeleteStatement,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<DeleteRowEvent>, ExecError> {
+    if stmt.input_plan.is_some() {
+        return materialize_delete_from_joined_input_events(stmt, ctx);
+    }
     let mut events = Vec::new();
     for target in &stmt.targets {
         let rows = match &target.row_source {
@@ -10704,6 +11091,73 @@ pub(crate) fn materialize_delete_row_events(
                 old_values,
             });
         }
+    }
+    Ok(events)
+}
+
+fn materialize_delete_from_joined_input_events(
+    stmt: &BoundDeleteStatement,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<DeleteRowEvent>, ExecError> {
+    let input_plan = stmt.input_plan.as_ref().ok_or(ExecError::DetailedError {
+        message: "DELETE ... USING is missing its input plan".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let target_indexes = stmt
+        .targets
+        .iter()
+        .enumerate()
+        .map(|(index, target)| (target.relation_oid, index))
+        .collect::<HashMap<_, _>>();
+    let mut state = executor_start(input_plan.plan_tree.clone());
+    let mut events = Vec::new();
+    while let Some(slot) = state.exec_proc_node(ctx)? {
+        ctx.check_for_interrupts()?;
+        let mut row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+        Value::materialize_all(&mut row_values);
+        let tid = row_values
+            .get(stmt.target_ctid_index)
+            .ok_or(ExecError::DetailedError {
+                message: "delete input row is missing target ctid marker".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })
+            .and_then(parse_tid_text)?
+            .ok_or(ExecError::DetailedError {
+                message: "delete input row is missing target ctid marker".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        let relation_oid = row_values
+            .get(stmt.target_tableoid_index)
+            .ok_or(ExecError::DetailedError {
+                message: "delete input row is missing target tableoid marker".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })
+            .and_then(parse_update_tableoid)?;
+        let target_index = *target_indexes
+            .get(&relation_oid)
+            .ok_or(ExecError::DetailedError {
+                message: format!(
+                    "delete input row referenced unexpected target relation OID {relation_oid}"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        let target = &stmt.targets[target_index];
+        let old_values = fetch_delete_target_values(target, tid, ctx)?;
+        events.push(DeleteRowEvent {
+            target: target.clone(),
+            tid,
+            old_values,
+        });
     }
     Ok(events)
 }

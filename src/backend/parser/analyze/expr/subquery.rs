@@ -1,6 +1,7 @@
 use super::*;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
-use crate::include::nodes::primnodes::{SubLink, SubLinkType};
+use crate::include::nodes::datum::Value;
+use crate::include::nodes::primnodes::{SubLink, SubLinkType, TargetEntry};
 
 fn child_outer_scopes(scope: &BoundScope, outer_scopes: &[BoundScope]) -> Vec<BoundScope> {
     let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
@@ -28,6 +29,17 @@ fn bind_subquery_query(
         &[],
     )?;
     Ok(query)
+}
+
+pub(in crate::backend::parser::analyze) fn exists_subquery_query(mut query: Query) -> Query {
+    query.target_list = vec![TargetEntry::new(
+        "?column?",
+        Expr::Const(Value::Int32(1)),
+        SqlType::new(SqlTypeKind::Int4),
+        1,
+    )];
+    query.has_target_srfs = false;
+    query
 }
 
 fn comparison_operator_for_quantified_array(op: SubqueryComparisonOp) -> Option<&'static str> {
@@ -190,7 +202,7 @@ pub(super) fn bind_exists_subquery_expr(
     Ok(Expr::SubLink(Box::new(SubLink {
         sublink_type: SubLinkType::ExistsSubLink,
         testexpr: None,
-        subselect: Box::new({
+        subselect: Box::new(exists_subquery_query({
             let child_visible_agg_scope = child_visible_aggregate_scope();
             bind_subquery_query(
                 select,
@@ -200,7 +212,7 @@ pub(super) fn bind_exists_subquery_expr(
                 child_visible_agg_scope.as_ref(),
                 ctes,
             )?
-        }),
+        })),
     })))
 }
 

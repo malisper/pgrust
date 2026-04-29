@@ -4,12 +4,16 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::*;
 use crate::include::nodes::primnodes::{
     AggFunc, BuiltinScalarFunction, BuiltinWindowFunction, HashFunctionKind, HypotheticalAggFunc,
+    OrderedSetAggFunc,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{OnceLock, RwLock};
 
 const VOID_TYPE_OID: u32 = 2278;
 const INTERNAL_TYPE_OID: u32 = 2281;
+pub const ORDERED_SET_TRANSITION_PROC_OID: u32 = 3970;
+pub const PERCENTILE_DISC_AGG_PROC_OID: u32 = 3972;
+pub const PERCENTILE_DISC_FINAL_PROC_OID: u32 = 3973;
 
 pub const CAST_PROC_INT4_INT2_OID: u32 = 313;
 pub const CAST_PROC_INT8_INT2_OID: u32 = 754;
@@ -9510,7 +9514,7 @@ fn aggregate_support_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
-            3970,
+            ORDERED_SET_TRANSITION_PROC_OID,
             "ordered_set_transition",
             INTERNAL_TYPE_OID,
             &oid_argtypes(&[INTERNAL_TYPE_OID, ANYOID]),
@@ -9522,7 +9526,19 @@ fn aggregate_support_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
-            3973,
+            PERCENTILE_DISC_AGG_PROC_OID,
+            "percentile_disc",
+            ANYELEMENTOID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID, ANYELEMENTOID]),
+            "aggregate_dummy",
+            2,
+            false,
+            false,
+            'a',
+            'i',
+        ),
+        proc_row(
+            PERCENTILE_DISC_FINAL_PROC_OID,
             "percentile_disc_final",
             ANYELEMENTOID,
             &oid_argtypes(&[INTERNAL_TYPE_OID, FLOAT8_TYPE_OID, ANYELEMENTOID]),
@@ -11173,6 +11189,16 @@ pub fn proc_oid_for_builtin_hypothetical_aggregate_function(
     bootstrap_hypothetical_aggregate_proc_oids()
         .iter()
         .find_map(|(candidate, oid)| (*candidate == func).then_some(*oid))
+}
+
+pub fn builtin_ordered_set_aggregate_function_for_proc_oid(oid: u32) -> Option<OrderedSetAggFunc> {
+    (oid == PERCENTILE_DISC_AGG_PROC_OID).then_some(OrderedSetAggFunc::PercentileDisc)
+}
+
+pub fn proc_oid_for_builtin_ordered_set_aggregate_function(func: OrderedSetAggFunc) -> Option<u32> {
+    match func {
+        OrderedSetAggFunc::PercentileDisc => Some(PERCENTILE_DISC_AGG_PROC_OID),
+    }
 }
 
 pub fn proc_oid_for_builtin_window_function(func: BuiltinWindowFunction) -> Option<u32> {

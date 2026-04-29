@@ -1,13 +1,16 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use super::super::expand_join_rte_vars;
 use crate::RelFileLocator;
 use crate::backend::executor::{
     Value, cast_value, compare_order_values, network_btree_upper_bound, network_prefix,
 };
 use crate::backend::parser::analyze::predicate_implies_index_predicate;
 use crate::backend::parser::analyze::{bind_expr_with_outer_and_ctes, scope_for_relation};
-use crate::backend::parser::{BoundIndexRelation, CatalogLookup, ParseError, SqlType, SqlTypeKind};
+use crate::backend::parser::{
+    BoundIndexRelation, CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
+};
 use crate::backend::statistics::types::{
     PgDependencyItem, PgMcvItem, PgMcvListPayload, decode_pg_dependencies_payload,
     decode_pg_mcv_list_payload, decode_pg_ndistinct_payload, statistics_value_key,
@@ -33,7 +36,9 @@ use crate::include::nodes::datetime::{TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND};
 use crate::include::nodes::datum::{
     ArrayValue, IntervalValue, NumericValue, RecordValue, Value as DatumValue,
 };
-use crate::include::nodes::parsenodes::TableSampleClause;
+use crate::include::nodes::parsenodes::{
+    JoinTreeNode, Query, RangeTblEntryKind, TableSampleClause,
+};
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, RestrictInfo,
 };
@@ -893,6 +898,7 @@ pub(super) fn optimize_path_with_config(
                     restrict_clauses,
                     pathtarget,
                     output_columns,
+                    config,
                 )
             }
             Path::HashJoin {
@@ -937,6 +943,7 @@ pub(super) fn optimize_path_with_config(
                 merge_clauses,
                 outer_merge_keys,
                 inner_merge_keys,
+                merge_key_descending,
                 restrict_clauses,
                 ..
             } => {
@@ -957,6 +964,7 @@ pub(super) fn optimize_path_with_config(
                     merge_clauses,
                     outer_merge_keys,
                     inner_merge_keys,
+                    merge_key_descending,
                     join_clauses,
                     restrict_clauses,
                 )
@@ -2299,10 +2307,14 @@ fn choose_join_plan(
     restrict_clauses: Vec<RestrictInfo>,
     pathtarget: PathTarget,
     output_columns: Vec<QueryColumn>,
+    config: PlannerConfig,
 ) -> Path {
     let left_relids = path_relids(&left);
     let right_relids = path_relids(&right);
-    select_best_join_path(build_join_paths(
+    select_best_join_path(build_join_paths_internal(
+        Some(config),
+        None,
+        None,
         left,
         right,
         &left_relids,
@@ -2325,6 +2337,7 @@ pub(super) fn build_join_paths(
     output_columns: Vec<QueryColumn>,
 ) -> Vec<Path> {
     build_join_paths_internal(
+        None,
         None,
         None,
         left,
@@ -2351,6 +2364,7 @@ pub(super) fn build_join_paths_with_root(
     output_columns: Vec<QueryColumn>,
 ) -> Vec<Path> {
     build_join_paths_internal(
+        Some(root.config),
         Some(root),
         Some(catalog),
         left,
@@ -2365,6 +2379,7 @@ pub(super) fn build_join_paths_with_root(
 }
 
 fn build_join_paths_internal(
+    config_override: Option<PlannerConfig>,
     root: Option<&PlannerInfo>,
     catalog: Option<&dyn CatalogLookup>,
     left: Path,
@@ -2376,32 +2391,51 @@ fn build_join_paths_internal(
     pathtarget: PathTarget,
     output_columns: Vec<QueryColumn>,
 ) -> Vec<Path> {
-    let config = root
-        .map(|root| root.config)
-        .unwrap_or_else(PlannerConfig::default);
     let left_uses_immediate_outer = path_uses_immediate_outer_columns(&left);
     let right_uses_immediate_outer = path_uses_immediate_outer_columns(&right);
-    let lateral_orientation_locked = left_uses_immediate_outer ^ right_uses_immediate_outer;
-    let allow_default_orientation = !left_uses_immediate_outer || !lateral_orientation_locked;
+    let check_lateral_relid_dependencies = !matches!(kind, JoinType::Full);
+    let left_depends_on_right =
+        check_lateral_relid_dependencies && path_uses_outer_relids(&left, right_relids);
+    let right_depends_on_left =
+        check_lateral_relid_dependencies && path_uses_outer_relids(&right, left_relids);
+    let immediate_orientation_locked =
+        !matches!(kind, JoinType::Full) && (left_uses_immediate_outer ^ right_uses_immediate_outer);
+    let lateral_orientation_locked =
+        left_depends_on_right || right_depends_on_left || immediate_orientation_locked;
+    let allow_default_orientation = !left_depends_on_right
+        && (!left_uses_immediate_outer
+            || !lateral_orientation_locked
+            || matches!(kind, JoinType::Right));
     let allow_base_cross_swap = matches!(kind, JoinType::Cross)
         && !lateral_orientation_locked
         && path_relids(&left).len() == 1
         && path_relids(&right).len() == 1;
     let allow_swapped_orientation = matches!(kind, JoinType::Inner)
+        && !right_depends_on_left
         && (!right_uses_immediate_outer || !lateral_orientation_locked)
         || allow_base_cross_swap;
+    let config = config_override
+        .or_else(|| root.map(|root| root.config))
+        .unwrap_or_default();
 
     let mut paths = Vec::new();
-    if config.enable_nestloop && allow_default_orientation {
-        paths.push(estimate_nested_loop_join_internal(
-            root,
-            left.clone(),
-            right.clone(),
-            kind,
-            restrict_clauses.clone(),
-            pathtarget.clone(),
-            output_columns.clone(),
-        ));
+    let mut disabled_paths = Vec::new();
+    if allow_default_orientation {
+        push_join_path(
+            &mut paths,
+            &mut disabled_paths,
+            config.enable_nestloop,
+            estimate_nested_loop_join_internal(
+                root,
+                left.clone(),
+                right.clone(),
+                kind,
+                restrict_clauses.clone(),
+                pathtarget.clone(),
+                output_columns.clone(),
+                config.enable_material,
+            ),
+        );
         if let Some((inner, remaining_restrict_clauses)) = parameterized_inner_index_path(
             root,
             catalog,
@@ -2410,28 +2444,40 @@ fn build_join_paths_internal(
             right_relids,
             &restrict_clauses,
         ) {
-            paths.push(estimate_nested_loop_join_internal(
-                root,
-                left.clone(),
-                inner,
-                kind,
-                remaining_restrict_clauses,
-                pathtarget.clone(),
-                output_columns.clone(),
-            ));
+            push_join_path(
+                &mut paths,
+                &mut disabled_paths,
+                config.enable_nestloop,
+                estimate_nested_loop_join_internal(
+                    root,
+                    left.clone(),
+                    inner,
+                    kind,
+                    remaining_restrict_clauses,
+                    pathtarget.clone(),
+                    output_columns.clone(),
+                    config.enable_material,
+                ),
+            );
         }
     }
 
-    if config.enable_nestloop && allow_swapped_orientation {
-        paths.push(estimate_nested_loop_join_internal(
-            root,
-            right.clone(),
-            left.clone(),
-            kind,
-            restrict_clauses.clone(),
-            pathtarget.clone(),
-            output_columns.clone(),
-        ));
+    if allow_swapped_orientation {
+        push_join_path(
+            &mut paths,
+            &mut disabled_paths,
+            config.enable_nestloop,
+            estimate_nested_loop_join_internal(
+                root,
+                right.clone(),
+                left.clone(),
+                kind,
+                restrict_clauses.clone(),
+                pathtarget.clone(),
+                output_columns.clone(),
+                config.enable_material,
+            ),
+        );
         if let Some((inner, remaining_restrict_clauses)) = parameterized_inner_index_path(
             root,
             catalog,
@@ -2440,105 +2486,146 @@ fn build_join_paths_internal(
             left_relids,
             &restrict_clauses,
         ) {
-            paths.push(estimate_nested_loop_join_internal(
-                root,
-                right.clone(),
-                inner,
-                kind,
-                remaining_restrict_clauses,
-                pathtarget.clone(),
-                output_columns.clone(),
-            ));
+            push_join_path(
+                &mut paths,
+                &mut disabled_paths,
+                config.enable_nestloop,
+                estimate_nested_loop_join_internal(
+                    root,
+                    right.clone(),
+                    inner,
+                    kind,
+                    remaining_restrict_clauses,
+                    pathtarget.clone(),
+                    output_columns.clone(),
+                    config.enable_material,
+                ),
+            );
         }
     }
 
     if !lateral_orientation_locked
-        && config.enable_hashjoin
         && !matches!(kind, JoinType::Cross)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, left_relids, right_relids)
     {
-        paths.push(estimate_hash_join_internal(
-            root,
-            catalog,
-            left.clone(),
-            right.clone(),
-            kind,
-            pathtarget.clone(),
-            output_columns.clone(),
-            hash_join.hash_clauses,
-            hash_join.outer_hash_keys,
-            hash_join.inner_hash_keys,
-            hash_join.join_clauses,
-            restrict_clauses.clone(),
-        ));
+        push_join_path(
+            &mut paths,
+            &mut disabled_paths,
+            config.enable_hashjoin,
+            estimate_hash_join_internal(
+                root,
+                catalog,
+                left.clone(),
+                right.clone(),
+                kind,
+                pathtarget.clone(),
+                output_columns.clone(),
+                hash_join.hash_clauses,
+                hash_join.outer_hash_keys,
+                hash_join.inner_hash_keys,
+                hash_join.join_clauses,
+                restrict_clauses.clone(),
+            ),
+        );
     }
 
     if !lateral_orientation_locked
-        && config.enable_mergejoin
         && !matches!(kind, JoinType::Cross)
         && let Some(merge_join) =
             extract_merge_join_clauses(&restrict_clauses, left_relids, right_relids)
     {
-        paths.push(estimate_merge_join_internal(
-            root,
-            left.clone(),
-            right.clone(),
-            kind,
-            pathtarget.clone(),
-            output_columns.clone(),
-            merge_join.merge_clauses,
-            merge_join.outer_merge_keys,
-            merge_join.inner_merge_keys,
-            merge_join.join_clauses,
-            restrict_clauses.clone(),
-        ));
+        push_join_path(
+            &mut paths,
+            &mut disabled_paths,
+            config.enable_mergejoin,
+            estimate_merge_join_internal(
+                root,
+                left.clone(),
+                right.clone(),
+                kind,
+                pathtarget.clone(),
+                output_columns.clone(),
+                merge_join.merge_clauses,
+                merge_join.outer_merge_keys,
+                merge_join.inner_merge_keys,
+                None,
+                merge_join.join_clauses,
+                restrict_clauses.clone(),
+            ),
+        );
     }
 
     if !lateral_orientation_locked
-        && config.enable_hashjoin
         && matches!(kind, JoinType::Inner)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, right_relids, left_relids)
     {
-        paths.push(estimate_hash_join_internal(
-            root,
-            catalog,
-            right.clone(),
-            left.clone(),
-            kind,
-            pathtarget.clone(),
-            output_columns.clone(),
-            hash_join.hash_clauses,
-            hash_join.outer_hash_keys,
-            hash_join.inner_hash_keys,
-            hash_join.join_clauses,
-            restrict_clauses.clone(),
-        ));
+        push_join_path(
+            &mut paths,
+            &mut disabled_paths,
+            config.enable_hashjoin,
+            estimate_hash_join_internal(
+                root,
+                catalog,
+                right.clone(),
+                left.clone(),
+                kind,
+                pathtarget.clone(),
+                output_columns.clone(),
+                hash_join.hash_clauses,
+                hash_join.outer_hash_keys,
+                hash_join.inner_hash_keys,
+                hash_join.join_clauses,
+                restrict_clauses.clone(),
+            ),
+        );
     }
 
     if !lateral_orientation_locked
-        && config.enable_mergejoin
         && matches!(kind, JoinType::Inner)
         && let Some(merge_join) =
             extract_merge_join_clauses(&restrict_clauses, right_relids, left_relids)
     {
-        paths.push(estimate_merge_join_internal(
-            root,
-            right,
-            left,
-            kind,
-            pathtarget,
-            output_columns,
-            merge_join.merge_clauses,
-            merge_join.outer_merge_keys,
-            merge_join.inner_merge_keys,
-            merge_join.join_clauses,
-            restrict_clauses,
-        ));
+        push_join_path(
+            &mut paths,
+            &mut disabled_paths,
+            config.enable_mergejoin,
+            estimate_merge_join_internal(
+                root,
+                right,
+                left,
+                kind,
+                pathtarget,
+                output_columns,
+                merge_join.merge_clauses,
+                merge_join.outer_merge_keys,
+                merge_join.inner_merge_keys,
+                None,
+                merge_join.join_clauses,
+                restrict_clauses,
+            ),
+        );
     }
 
-    paths
+    if paths.is_empty() {
+        disabled_paths
+    } else {
+        paths
+    }
+}
+
+fn push_join_path(
+    paths: &mut Vec<Path>,
+    disabled_paths: &mut Vec<Path>,
+    enabled: bool,
+    path: Path,
+) {
+    if enabled {
+        paths.push(path);
+    } else {
+        disabled_paths.push(path);
+    }
 }
 
 fn parameterized_inner_index_path(
@@ -2685,7 +2772,10 @@ fn parameterized_inner_index_path(
         if !restrict_clause_can_parameterize(restrict, outer_relids, inner_relids) {
             continue;
         }
-        let clause = parameterize_outer_vars(restrict.clause.clone(), outer_relids);
+        let clause = parameterized_or_clause_to_scalar_array(parameterize_outer_vars(
+            restrict.clause.clone(),
+            outer_relids,
+        ));
         if expr_contains_runtime_input(&clause) {
             parameterized_clauses.push(clause);
             parameterized_indexes.push(index);
@@ -2773,6 +2863,73 @@ fn restrict_clause_can_parameterize(
             .all(|relid| outer_relids.contains(relid) || inner_relids.contains(relid))
 }
 
+fn parameterized_or_clause_to_scalar_array(expr: Expr) -> Expr {
+    let original = expr.clone();
+    let mut args = Vec::new();
+    flatten_or_args(&expr, &mut args);
+    if args.len() < 2 {
+        return original;
+    }
+
+    let mut key_expr: Option<Expr> = None;
+    let mut elements = Vec::with_capacity(args.len());
+    let mut collation_oid = None;
+    for arg in args {
+        let Expr::Op(op) = strip_casts(&arg) else {
+            return original;
+        };
+        if op.op != OpExprKind::Eq || op.args.len() != 2 {
+            return original;
+        }
+        let left_has_runtime = expr_contains_runtime_input(&op.args[0]);
+        let right_has_runtime = expr_contains_runtime_input(&op.args[1]);
+        let (key, element) = match (left_has_runtime, right_has_runtime) {
+            (false, true) => (strip_casts(&op.args[0]).clone(), op.args[1].clone()),
+            (true, false) => (strip_casts(&op.args[1]).clone(), op.args[0].clone()),
+            _ => return original,
+        };
+        if let Some(existing) = &key_expr {
+            if strip_casts(existing) != strip_casts(&key) {
+                return original;
+            }
+        } else {
+            key_expr = Some(key);
+            collation_oid = op.collation_oid;
+        }
+        elements.push(element);
+    }
+
+    let Some(key_expr) = key_expr else {
+        return original;
+    };
+    let Some(first_element) = elements.first() else {
+        return original;
+    };
+    let array_type = SqlType::array_of(expr_sql_type(first_element));
+    Expr::scalar_array_op_with_collation(
+        SubqueryComparisonOp::Eq,
+        true,
+        key_expr,
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        },
+        collation_oid,
+    )
+}
+
+fn flatten_or_args<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    if let Expr::Bool(bool_expr) = expr
+        && bool_expr.boolop == BoolExprType::Or
+    {
+        for arg in &bool_expr.args {
+            flatten_or_args(arg, out);
+        }
+        return;
+    }
+    out.push(expr);
+}
+
 fn parameterize_outer_vars(expr: Expr, outer_relids: &[usize]) -> Expr {
     match expr {
         Expr::Var(mut var) if var.varlevelsup == 0 && outer_relids.contains(&var.varno) => {
@@ -2838,6 +2995,16 @@ fn parameterize_outer_vars(expr: Expr, outer_relids: &[usize]) -> Expr {
             saop.right = Box::new(parameterize_outer_vars(*saop.right, outer_relids));
             Expr::ScalarArrayOp(saop)
         }
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| parameterize_outer_vars(element, outer_relids))
+                .collect(),
+            array_type,
+        },
         other => other,
     }
 }
@@ -2857,6 +3024,11 @@ fn path_contains_runtime_index_arg(path: &Path) -> bool {
             .iter()
             .chain(order_by_keys.iter())
             .any(|key| matches!(key.argument, IndexScanKeyArgument::Runtime(_))),
+        Path::BitmapIndexScan { keys, .. } => keys
+            .iter()
+            .any(|key| matches!(key.argument, IndexScanKeyArgument::Runtime(_))),
+        Path::BitmapOr { children, .. } => children.iter().any(path_contains_runtime_index_arg),
+        Path::BitmapHeapScan { bitmapqual, .. } => path_contains_runtime_index_arg(bitmapqual),
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
@@ -3318,6 +3490,484 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
     }
 }
 
+fn expr_uses_outer_relids(expr: &Expr, relids: &[usize]) -> bool {
+    expr_uses_outer_relids_at_level(expr, relids, 0)
+}
+
+fn var_uses_outer_relids_at_level(var: &Var, relids: &[usize], sublevels_up: usize) -> bool {
+    if sublevels_up == 0 {
+        var.varlevelsup > 1 && relids.contains(&var.varno)
+    } else {
+        var.varlevelsup == sublevels_up + 1 && relids.contains(&var.varno)
+    }
+}
+
+fn target_entry_uses_outer_relids_at_level(
+    target: &crate::include::nodes::primnodes::TargetEntry,
+    relids: &[usize],
+    sublevels_up: usize,
+) -> bool {
+    expr_uses_outer_relids_at_level(&target.expr, relids, sublevels_up)
+}
+
+fn order_by_uses_outer_relids_at_level(
+    item: &OrderByEntry,
+    relids: &[usize],
+    sublevels_up: usize,
+) -> bool {
+    expr_uses_outer_relids_at_level(&item.expr, relids, sublevels_up)
+}
+
+fn sort_group_uses_outer_relids_at_level(
+    item: &crate::include::nodes::primnodes::SortGroupClause,
+    relids: &[usize],
+    sublevels_up: usize,
+) -> bool {
+    expr_uses_outer_relids_at_level(&item.expr, relids, sublevels_up)
+}
+
+fn agg_accum_uses_outer_relids_at_level(
+    accum: &crate::include::nodes::primnodes::AggAccum,
+    relids: &[usize],
+    sublevels_up: usize,
+) -> bool {
+    accum
+        .direct_args
+        .iter()
+        .any(|arg| expr_uses_outer_relids_at_level(arg, relids, sublevels_up))
+        || accum
+            .args
+            .iter()
+            .any(|arg| expr_uses_outer_relids_at_level(arg, relids, sublevels_up))
+        || accum
+            .order_by
+            .iter()
+            .any(|item| order_by_uses_outer_relids_at_level(item, relids, sublevels_up))
+        || accum
+            .filter
+            .as_ref()
+            .is_some_and(|filter| expr_uses_outer_relids_at_level(filter, relids, sublevels_up))
+}
+
+fn window_clause_uses_outer_relids_at_level(
+    clause: &crate::include::nodes::primnodes::WindowClause,
+    relids: &[usize],
+    sublevels_up: usize,
+) -> bool {
+    clause
+        .spec
+        .partition_by
+        .iter()
+        .any(|expr| expr_uses_outer_relids_at_level(expr, relids, sublevels_up))
+        || clause
+            .spec
+            .order_by
+            .iter()
+            .any(|item| order_by_uses_outer_relids_at_level(item, relids, sublevels_up))
+        || clause.functions.iter().any(|func| {
+            func.args
+                .iter()
+                .any(|arg| expr_uses_outer_relids_at_level(arg, relids, sublevels_up))
+                || match &func.kind {
+                    crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => {
+                        expr_uses_outer_relids_at_level(
+                            &Expr::Aggref(Box::new(aggref.clone())),
+                            relids,
+                            sublevels_up,
+                        )
+                    }
+                    crate::include::nodes::primnodes::WindowFuncKind::Builtin(_) => false,
+                }
+        })
+}
+
+fn jointree_uses_outer_relids_at_level(
+    node: &JoinTreeNode,
+    relids: &[usize],
+    sublevels_up: usize,
+) -> bool {
+    match node {
+        JoinTreeNode::RangeTblRef(_) => false,
+        JoinTreeNode::JoinExpr {
+            left, right, quals, ..
+        } => {
+            expr_uses_outer_relids_at_level(quals, relids, sublevels_up)
+                || jointree_uses_outer_relids_at_level(left, relids, sublevels_up)
+                || jointree_uses_outer_relids_at_level(right, relids, sublevels_up)
+        }
+    }
+}
+
+fn query_uses_outer_relids_at_level(query: &Query, relids: &[usize], sublevels_up: usize) -> bool {
+    query
+        .target_list
+        .iter()
+        .any(|target| target_entry_uses_outer_relids_at_level(target, relids, sublevels_up))
+        || query
+            .where_qual
+            .as_ref()
+            .is_some_and(|qual| expr_uses_outer_relids_at_level(qual, relids, sublevels_up))
+        || query
+            .group_by
+            .iter()
+            .any(|expr| expr_uses_outer_relids_at_level(expr, relids, sublevels_up))
+        || query
+            .accumulators
+            .iter()
+            .any(|accum| agg_accum_uses_outer_relids_at_level(accum, relids, sublevels_up))
+        || query
+            .window_clauses
+            .iter()
+            .any(|clause| window_clause_uses_outer_relids_at_level(clause, relids, sublevels_up))
+        || query
+            .having_qual
+            .as_ref()
+            .is_some_and(|having| expr_uses_outer_relids_at_level(having, relids, sublevels_up))
+        || query
+            .sort_clause
+            .iter()
+            .any(|item| sort_group_uses_outer_relids_at_level(item, relids, sublevels_up))
+        || query.jointree.as_ref().is_some_and(|jointree| {
+            jointree_uses_outer_relids_at_level(jointree, relids, sublevels_up)
+        })
+        || query.rtable.iter().any(|rte| match &rte.kind {
+            RangeTblEntryKind::Join { joinaliasvars, .. } => joinaliasvars
+                .iter()
+                .any(|expr| expr_uses_outer_relids_at_level(expr, relids, sublevels_up)),
+            RangeTblEntryKind::Values { rows, .. } => rows.iter().any(|row| {
+                row.iter()
+                    .any(|expr| expr_uses_outer_relids_at_level(expr, relids, sublevels_up))
+            }),
+            RangeTblEntryKind::Function { call } => set_returning_call_exprs(call)
+                .into_iter()
+                .any(|expr| expr_uses_outer_relids_at_level(expr, relids, sublevels_up)),
+            RangeTblEntryKind::Cte { query, .. } | RangeTblEntryKind::Subquery { query } => {
+                query_uses_outer_relids_at_level(query, relids, sublevels_up + 1)
+            }
+            RangeTblEntryKind::Result
+            | RangeTblEntryKind::Relation { .. }
+            | RangeTblEntryKind::WorkTable { .. } => false,
+        })
+}
+
+fn expr_uses_outer_relids_at_level(expr: &Expr, relids: &[usize], sublevels_up: usize) -> bool {
+    match expr {
+        Expr::Var(var) => var_uses_outer_relids_at_level(var, relids, sublevels_up),
+        Expr::Param(_) => false,
+        Expr::Aggref(aggref) => {
+            aggref
+                .direct_args
+                .iter()
+                .any(|arg| expr_uses_outer_relids_at_level(arg, relids, sublevels_up))
+                || aggref
+                    .args
+                    .iter()
+                    .any(|arg| expr_uses_outer_relids_at_level(arg, relids, sublevels_up))
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|item| order_by_uses_outer_relids_at_level(item, relids, sublevels_up))
+                || aggref.aggfilter.as_ref().is_some_and(|filter| {
+                    expr_uses_outer_relids_at_level(filter, relids, sublevels_up)
+                })
+        }
+        Expr::WindowFunc(window_func) => {
+            window_func
+                .args
+                .iter()
+                .any(|arg| expr_uses_outer_relids_at_level(arg, relids, sublevels_up))
+                || match &window_func.kind {
+                    crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => {
+                        expr_uses_outer_relids_at_level(
+                            &Expr::Aggref(Box::new(aggref.clone())),
+                            relids,
+                            sublevels_up,
+                        )
+                    }
+                    crate::include::nodes::primnodes::WindowFuncKind::Builtin(_) => false,
+                }
+        }
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|arg| expr_uses_outer_relids_at_level(arg, relids, sublevels_up)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| expr_uses_outer_relids_at_level(arg, relids, sublevels_up)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(|arg| expr_uses_outer_relids_at_level(arg, relids, sublevels_up))
+                || case_expr.args.iter().any(|arm| {
+                    expr_uses_outer_relids_at_level(&arm.expr, relids, sublevels_up)
+                        || expr_uses_outer_relids_at_level(&arm.result, relids, sublevels_up)
+                })
+                || expr_uses_outer_relids_at_level(&case_expr.defresult, relids, sublevels_up)
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|arg| expr_uses_outer_relids_at_level(arg, relids, sublevels_up)),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(|child| expr_uses_outer_relids_at_level(child, relids, sublevels_up)),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(|arg| expr_uses_outer_relids_at_level(arg, relids, sublevels_up)),
+        Expr::SubLink(sublink) => {
+            sublink.testexpr.as_deref().is_some_and(|testexpr| {
+                expr_uses_outer_relids_at_level(testexpr, relids, sublevels_up)
+            }) || query_uses_outer_relids_at_level(&sublink.subselect, relids, sublevels_up + 1)
+        }
+        Expr::SubPlan(subplan) => {
+            subplan.testexpr.as_deref().is_some_and(|testexpr| {
+                expr_uses_outer_relids_at_level(testexpr, relids, sublevels_up)
+            }) || subplan
+                .args
+                .iter()
+                .any(|arg| expr_uses_outer_relids_at_level(arg, relids, sublevels_up))
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_uses_outer_relids_at_level(&saop.left, relids, sublevels_up)
+                || expr_uses_outer_relids_at_level(&saop.right, relids, sublevels_up)
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => {
+            expr_uses_outer_relids_at_level(inner, relids, sublevels_up)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_uses_outer_relids_at_level(expr, relids, sublevels_up)
+                || expr_uses_outer_relids_at_level(pattern, relids, sublevels_up)
+                || escape.as_deref().is_some_and(|escape| {
+                    expr_uses_outer_relids_at_level(escape, relids, sublevels_up)
+                })
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_uses_outer_relids_at_level(left, relids, sublevels_up)
+                || expr_uses_outer_relids_at_level(right, relids, sublevels_up)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|element| expr_uses_outer_relids_at_level(element, relids, sublevels_up)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_uses_outer_relids_at_level(expr, relids, sublevels_up)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_uses_outer_relids_at_level(array, relids, sublevels_up)
+                || subscripts.iter().any(|subscript| {
+                    subscript.lower.as_ref().is_some_and(|lower| {
+                        expr_uses_outer_relids_at_level(lower, relids, sublevels_up)
+                    }) || subscript.upper.as_ref().is_some_and(|upper| {
+                        expr_uses_outer_relids_at_level(upper, relids, sublevels_up)
+                    })
+                })
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(|child| expr_uses_outer_relids_at_level(child, relids, sublevels_up)),
+        Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn set_returning_call_uses_outer_relids(call: &SetReturningCall, relids: &[usize]) -> bool {
+    set_returning_call_exprs(call)
+        .into_iter()
+        .any(|expr| expr_uses_outer_relids(expr, relids))
+}
+
+fn project_set_target_uses_outer_relids(target: &ProjectSetTarget, relids: &[usize]) -> bool {
+    match target {
+        ProjectSetTarget::Scalar(entry) => expr_uses_outer_relids(&entry.expr, relids),
+        ProjectSetTarget::Set { call, .. } => set_returning_call_uses_outer_relids(call, relids),
+    }
+}
+
+fn path_uses_outer_relids(path: &Path, relids: &[usize]) -> bool {
+    match path {
+        Path::Result { .. }
+        | Path::SeqScan { .. }
+        | Path::IndexOnlyScan { .. }
+        | Path::IndexScan { .. }
+        | Path::BitmapIndexScan { .. }
+        | Path::WorkTableScan { .. } => false,
+        Path::BitmapOr { children, .. } => children
+            .iter()
+            .any(|child| path_uses_outer_relids(child, relids)),
+        Path::BitmapHeapScan {
+            bitmapqual,
+            recheck_qual,
+            filter_qual,
+            ..
+        } => {
+            path_uses_outer_relids(bitmapqual, relids)
+                || recheck_qual
+                    .iter()
+                    .any(|expr| expr_uses_outer_relids(expr, relids))
+                || filter_qual
+                    .iter()
+                    .any(|expr| expr_uses_outer_relids(expr, relids))
+        }
+        Path::Append { children, .. } | Path::SetOp { children, .. } => children
+            .iter()
+            .any(|child| path_uses_outer_relids(child, relids)),
+        Path::MergeAppend {
+            children, items, ..
+        } => {
+            children
+                .iter()
+                .any(|child| path_uses_outer_relids(child, relids))
+                || items
+                    .iter()
+                    .any(|item| expr_uses_outer_relids(&item.expr, relids))
+        }
+        Path::Unique { input, .. } => path_uses_outer_relids(input, relids),
+        Path::Filter {
+            input, predicate, ..
+        } => path_uses_outer_relids(input, relids) || expr_uses_outer_relids(predicate, relids),
+        Path::NestedLoopJoin {
+            left,
+            right,
+            restrict_clauses,
+            ..
+        }
+        | Path::HashJoin {
+            left,
+            right,
+            restrict_clauses,
+            ..
+        }
+        | Path::MergeJoin {
+            left,
+            right,
+            restrict_clauses,
+            ..
+        } => {
+            path_uses_outer_relids(left, relids)
+                || path_uses_outer_relids(right, relids)
+                || restrict_clauses
+                    .iter()
+                    .any(|restrict| expr_uses_outer_relids(&restrict.clause, relids))
+        }
+        Path::Projection { input, targets, .. } => {
+            path_uses_outer_relids(input, relids)
+                || targets
+                    .iter()
+                    .any(|target| expr_uses_outer_relids(&target.expr, relids))
+        }
+        Path::OrderBy { input, items, .. } | Path::IncrementalSort { input, items, .. } => {
+            path_uses_outer_relids(input, relids)
+                || items
+                    .iter()
+                    .any(|item| expr_uses_outer_relids(&item.expr, relids))
+        }
+        Path::Limit { input, .. } | Path::LockRows { input, .. } => {
+            path_uses_outer_relids(input, relids)
+        }
+        Path::Aggregate {
+            input,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            having,
+            ..
+        } => {
+            path_uses_outer_relids(input, relids)
+                || group_by
+                    .iter()
+                    .any(|expr| expr_uses_outer_relids(expr, relids))
+                || passthrough_exprs
+                    .iter()
+                    .any(|expr| expr_uses_outer_relids(expr, relids))
+                || accumulators.iter().any(|accum| {
+                    accum
+                        .direct_args
+                        .iter()
+                        .any(|arg| expr_uses_outer_relids(arg, relids))
+                        || accum
+                            .args
+                            .iter()
+                            .any(|arg| expr_uses_outer_relids(arg, relids))
+                        || accum
+                            .order_by
+                            .iter()
+                            .any(|item| expr_uses_outer_relids(&item.expr, relids))
+                        || accum
+                            .filter
+                            .as_ref()
+                            .is_some_and(|filter| expr_uses_outer_relids(filter, relids))
+                })
+                || having
+                    .as_ref()
+                    .is_some_and(|having| expr_uses_outer_relids(having, relids))
+        }
+        Path::WindowAgg { input, clause, .. } => {
+            path_uses_outer_relids(input, relids)
+                || clause
+                    .spec
+                    .partition_by
+                    .iter()
+                    .any(|expr| expr_uses_outer_relids(expr, relids))
+                || clause
+                    .spec
+                    .order_by
+                    .iter()
+                    .any(|item| expr_uses_outer_relids(&item.expr, relids))
+                || clause.functions.iter().any(|func| {
+                    func.args
+                        .iter()
+                        .any(|arg| expr_uses_outer_relids(arg, relids))
+                })
+        }
+        Path::Values { rows, .. } => rows
+            .iter()
+            .flatten()
+            .any(|expr| expr_uses_outer_relids(expr, relids)),
+        Path::FunctionScan { call, .. } => set_returning_call_uses_outer_relids(call, relids),
+        Path::SubqueryScan { input, .. } => path_uses_outer_relids(input, relids),
+        Path::CteScan { cte_plan, .. } => path_uses_outer_relids(cte_plan, relids),
+        Path::RecursiveUnion {
+            anchor, recursive, ..
+        } => path_uses_outer_relids(anchor, relids) || path_uses_outer_relids(recursive, relids),
+        Path::ProjectSet { input, targets, .. } => {
+            path_uses_outer_relids(input, relids)
+                || targets
+                    .iter()
+                    .any(|target| project_set_target_uses_outer_relids(target, relids))
+        }
+    }
+}
+
 fn set_returning_call_uses_immediate_outer_columns(call: &SetReturningCall) -> bool {
     match call {
         SetReturningCall::GenerateSeries {
@@ -3533,6 +4183,7 @@ fn estimate_nested_loop_join_internal(
     restrict_clauses: Vec<RestrictInfo>,
     pathtarget: PathTarget,
     output_columns: Vec<QueryColumn>,
+    enable_material: bool,
 ) -> Path {
     let left = if nested_loop_should_preserve_desc_limit_order(root, kind, &right) {
         backward_full_index_scan_path(left)
@@ -3552,7 +4203,7 @@ fn estimate_nested_loop_join_internal(
         &inner_join_keys_from_clauses(&restrict_clauses, &left, &right),
     );
     let (inner_first_scan, inner_rescan) =
-        nested_loop_inner_scan_costs(kind, &left, &right, right_info);
+        nested_loop_inner_scan_costs(kind, &left, &right, right_info, enable_material);
     let join_tuples = left_rows * right_rows;
     let join_cpu = join_tuple_cpu_cost(join_tuples, &restrict_clauses);
     let output_cpu = output_tuple_cpu_cost(rows);
@@ -3741,6 +4392,7 @@ fn estimate_nested_loop_join(
         restrict_clauses,
         pathtarget,
         output_columns,
+        true,
     )
 }
 
@@ -3761,6 +4413,7 @@ fn estimate_nested_loop_join_with_root(
         restrict_clauses,
         pathtarget,
         output_columns,
+        root.config.enable_material,
     )
 }
 
@@ -3769,6 +4422,7 @@ fn nested_loop_inner_scan_costs(
     left: &Path,
     right: &Path,
     right_info: PlanEstimate,
+    enable_material: bool,
 ) -> (f64, f64) {
     if matches!(kind, JoinType::Cross)
         && path_is_values_relation(left)
@@ -3787,10 +4441,15 @@ fn nested_loop_inner_scan_costs(
         return (scan_cost, scan_cost);
     }
 
-    (
-        materialized_inner_first_scan_cost(right_info),
-        materialized_inner_rescan_cost(right_info),
-    )
+    if enable_material {
+        (
+            materialized_inner_first_scan_cost(right_info),
+            materialized_inner_rescan_cost(right_info),
+        )
+    } else {
+        let scan_cost = right_info.total_cost.as_f64();
+        (scan_cost, scan_cost)
+    }
 }
 
 fn materialized_inner_first_scan_cost(info: PlanEstimate) -> f64 {
@@ -4146,6 +4805,7 @@ fn estimate_merge_join(
     merge_clauses: Vec<RestrictInfo>,
     outer_merge_keys: Vec<Expr>,
     inner_merge_keys: Vec<Expr>,
+    merge_key_descending: Vec<bool>,
     join_clauses: Vec<RestrictInfo>,
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Path {
@@ -4159,6 +4819,7 @@ fn estimate_merge_join(
         merge_clauses,
         outer_merge_keys,
         inner_merge_keys,
+        Some(merge_key_descending),
         join_clauses,
         restrict_clauses,
     )
@@ -4174,6 +4835,7 @@ fn estimate_merge_join_internal(
     merge_clauses: Vec<RestrictInfo>,
     outer_merge_keys: Vec<Expr>,
     inner_merge_keys: Vec<Expr>,
+    merge_key_descending: Option<Vec<bool>>,
     join_clauses: Vec<RestrictInfo>,
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Path {
@@ -4189,8 +4851,13 @@ fn estimate_merge_join_internal(
     let merge_clauses = merge_join_key_order(merge_clauses);
     let outer_merge_keys = merge_join_key_order(outer_merge_keys);
     let inner_merge_keys = merge_join_key_order(inner_merge_keys);
-    let outer_pathkeys = merge_pathkeys(&outer_merge_keys, &merge_clauses);
-    let inner_pathkeys = merge_pathkeys(&inner_merge_keys, &merge_clauses);
+    let merge_key_descending = merge_key_descending
+        .map(merge_join_key_order)
+        .unwrap_or_else(|| {
+            preferred_merge_key_directions(_root, &outer_merge_keys, &inner_merge_keys)
+        });
+    let outer_pathkeys = merge_pathkeys(&outer_merge_keys, &merge_clauses, &merge_key_descending);
+    let inner_pathkeys = merge_pathkeys(&inner_merge_keys, &merge_clauses, &merge_key_descending);
     let left = ensure_path_sorted_for_merge(left, &outer_pathkeys);
     let right = ensure_path_sorted_for_merge(right, &inner_pathkeys);
     let left_info = left.plan_info();
@@ -4244,6 +4911,7 @@ fn estimate_merge_join_internal(
         merge_clauses,
         outer_merge_keys,
         inner_merge_keys,
+        merge_key_descending,
         restrict_clauses,
     }
 }
@@ -4256,17 +4924,65 @@ fn merge_join_key_order<T>(mut values: Vec<T>) -> Vec<T> {
     values
 }
 
-fn merge_pathkeys(keys: &[Expr], clauses: &[RestrictInfo]) -> Vec<PathKey> {
+fn merge_pathkeys(keys: &[Expr], clauses: &[RestrictInfo], descending: &[bool]) -> Vec<PathKey> {
     keys.iter()
         .zip(clauses.iter())
-        .map(|(expr, restrict)| PathKey {
+        .enumerate()
+        .map(|(index, (expr, restrict))| PathKey {
             expr: expr.clone(),
             ressortgroupref: 0,
-            descending: false,
+            descending: descending.get(index).copied().unwrap_or(false),
             nulls_first: None,
             collation_oid: merge_clause_collation(restrict),
         })
         .collect()
+}
+
+fn preferred_merge_key_directions(
+    root: Option<&PlannerInfo>,
+    outer_keys: &[Expr],
+    inner_keys: &[Expr],
+) -> Vec<bool> {
+    outer_keys
+        .iter()
+        .zip(inner_keys.iter())
+        .map(|(outer_key, inner_key)| {
+            root.and_then(|root| {
+                preferred_query_pathkey_direction(root, outer_key)
+                    .or_else(|| preferred_query_pathkey_direction(root, inner_key))
+            })
+            .unwrap_or(false)
+        })
+        .collect()
+}
+
+fn preferred_query_pathkey_direction(root: &PlannerInfo, expr: &Expr) -> Option<bool> {
+    let expr = expand_join_rte_vars(root, expr.clone());
+    root.query_pathkeys.iter().find_map(|key| {
+        let key_expr = expand_join_rte_vars(root, key.expr.clone());
+        if key_expr == expr || root_inner_join_equates_exprs(root, &key_expr, &expr) {
+            Some(key.descending)
+        } else {
+            None
+        }
+    })
+}
+
+fn root_inner_join_equates_exprs(root: &PlannerInfo, left: &Expr, right: &Expr) -> bool {
+    root.inner_join_clauses.iter().any(|restrict| {
+        let Expr::Op(op) = &restrict.clause else {
+            return false;
+        };
+        if !matches!(op.op, OpExprKind::Eq) {
+            return false;
+        }
+        let [op_left, op_right] = op.args.as_slice() else {
+            return false;
+        };
+        let op_left = expand_join_rte_vars(root, op_left.clone());
+        let op_right = expand_join_rte_vars(root, op_right.clone());
+        (op_left == *left && op_right == *right) || (op_left == *right && op_right == *left)
+    })
 }
 
 fn merge_clause_collation(restrict: &RestrictInfo) -> Option<u32> {
@@ -7150,6 +7866,7 @@ fn runtime_index_argument_expr(expr: &Expr) -> bool {
             runtime_index_argument_expr(inner)
         }
         Expr::Op(op) => op.args.iter().all(runtime_index_argument_expr),
+        Expr::ArrayLiteral { elements, .. } => elements.iter().all(runtime_index_argument_expr),
         _ => false,
     }
 }
@@ -7162,6 +7879,10 @@ fn expr_contains_runtime_input(expr: &Expr) -> bool {
             expr_contains_runtime_input(inner)
         }
         Expr::Op(op) => op.args.iter().any(expr_contains_runtime_input),
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_runtime_input(&saop.left) || expr_contains_runtime_input(&saop.right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_runtime_input),
         _ => false,
     }
 }

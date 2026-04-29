@@ -154,6 +154,7 @@ fn encode_array_element_payload(
         }
         Value::Bytea(v) => Ok(v),
         Value::Uuid(v) => Ok(v.to_vec()),
+        Value::Tid(v) => Ok(render_tid_text(&v).into_bytes()),
         Value::Inet(v) => Ok(crate::backend::executor::encode_network_bytes(&v, false)),
         Value::Cidr(v) => Ok(crate::backend::executor::encode_network_bytes(&v, true)),
         Value::MacAddr(v) => Ok(v.to_vec()),
@@ -840,6 +841,7 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         Value::TsVector(_) => Some(SqlType::new(SqlTypeKind::TsVector)),
         Value::TsQuery(_) => Some(SqlType::new(SqlTypeKind::TsQuery)),
         Value::PgLsn(_) => Some(SqlType::new(SqlTypeKind::PgLsn)),
+        Value::Tid(_) => Some(SqlType::new(SqlTypeKind::Tid)),
         Value::InternalChar(_) => Some(SqlType::new(SqlTypeKind::InternalChar)),
         Value::Json(_) => Some(SqlType::new(SqlTypeKind::Json)),
         Value::Jsonb(_) => Some(SqlType::new(SqlTypeKind::Jsonb)),
@@ -1391,6 +1393,7 @@ fn format_array_values_nested(
                 out.push('"');
             }
             Value::Uuid(v) => push_array_text_element(&mut out, &render_uuid_text(v)),
+            Value::Tid(v) => push_array_text_element(&mut out, &render_tid_text(v)),
             Value::Inet(v) => push_array_text_element(&mut out, &v.render_inet()),
             Value::Cidr(v) => push_array_text_element(&mut out, &v.render_cidr()),
             Value::MacAddr(v) => {

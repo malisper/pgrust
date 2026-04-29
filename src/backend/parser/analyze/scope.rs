@@ -524,6 +524,21 @@ pub(super) fn resolve_column_with_outer(
         Err(other) => return Err(other),
     }
 
+    if let Some((relation, _)) = name.rsplit_once('.') {
+        let visible_outer_matches = outer_scopes
+            .iter()
+            .filter(|outer_scope| scope_has_visible_relation(outer_scope, relation))
+            .count();
+        if visible_outer_matches > 1 {
+            return Err(ParseError::DetailedError {
+                message: format!("table reference \"{relation}\" is ambiguous"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P09",
+            });
+        }
+    }
+
     for (depth, outer_scope) in outer_scopes.iter().enumerate() {
         match resolve_column(outer_scope, name) {
             Ok(index) => {
@@ -555,6 +570,20 @@ pub(super) fn resolve_column_with_outer(
     }
 
     Err(ParseError::UnknownColumn(name.to_string()))
+}
+
+fn scope_has_visible_relation(scope: &BoundScope, name: &str) -> bool {
+    scope.relations.iter().any(|relation| {
+        relation
+            .relation_names
+            .iter()
+            .any(|relation_name| relation_name.eq_ignore_ascii_case(name))
+    }) || scope.columns.iter().any(|column| {
+        column
+            .relation_names
+            .iter()
+            .any(|relation_name| relation_name.eq_ignore_ascii_case(name))
+    })
 }
 
 pub(super) fn resolve_relation_row_expr_with_outer(
@@ -654,6 +683,45 @@ fn from_item_is_lateral(item: &FromItem) -> bool {
         FromItem::TableSample { source, .. } => from_item_is_lateral(source),
         _ => false,
     }
+}
+
+fn from_item_contains_lateral(item: &FromItem) -> bool {
+    if from_item_is_lateral(item) {
+        return true;
+    }
+    match item {
+        FromItem::Join { left, right, .. } => {
+            from_item_contains_lateral(left) || from_item_contains_lateral(right)
+        }
+        _ => false,
+    }
+}
+
+fn invalid_lateral_outer_scope(mut scope: BoundScope) -> BoundScope {
+    for column in &mut scope.columns {
+        for name in std::mem::take(&mut column.relation_names) {
+            if !column
+                .hidden_invalid_relation_names
+                .iter()
+                .any(|hidden| hidden.eq_ignore_ascii_case(&name))
+            {
+                column.hidden_invalid_relation_names.push(name);
+            }
+        }
+    }
+    for relation in &mut scope.relations {
+        for name in std::mem::take(&mut relation.relation_names) {
+            if !relation
+                .hidden_invalid_relation_names
+                .iter()
+                .any(|hidden| hidden.eq_ignore_ascii_case(&name))
+            {
+                relation.hidden_invalid_relation_names.push(name);
+            }
+        }
+        relation.system_varno = None;
+    }
+    scope
 }
 
 fn scopes_match(left: &BoundScope, right: &BoundScope) -> bool {
@@ -803,7 +871,7 @@ pub(super) fn bind_from_item_with_ctes(
                 analyze_select_query_with_outer(
                     select,
                     catalog,
-                    &[],
+                    outer_scopes,
                     None,
                     visible_agg_scope.as_ref(),
                     ctes,
@@ -860,8 +928,13 @@ pub(super) fn bind_from_item_with_ctes(
                 expanded_views,
             )?;
             let mut right_outer_scopes = outer_scopes.to_vec();
-            if from_item_is_lateral(right) {
-                right_outer_scopes.insert(0, left_scope.clone());
+            if from_item_contains_lateral(right) {
+                let lateral_scope = if matches!(kind, JoinKind::Right | JoinKind::Full) {
+                    invalid_lateral_outer_scope(left_scope.clone())
+                } else {
+                    left_scope.clone()
+                };
+                right_outer_scopes.insert(0, lateral_scope);
             }
             let (right_plan, right_scope) = bind_from_item_with_ctes(
                 right,
@@ -999,6 +1072,15 @@ pub(super) fn bind_from_item_with_ctes(
                     )?;
                     (plan, scope, false)
                 };
+            if *preserve_source_names
+                && column_aliases.is_empty()
+                && let FromItem::Join {
+                    constraint: JoinConstraint::Using(columns),
+                    ..
+                } = source.as_ref()
+            {
+                return apply_join_using_alias(plan, scope, alias, columns.len());
+            }
             let alias_columns = match column_aliases {
                 AliasColumnSpec::Definitions(_) => &AliasColumnSpec::None,
                 _ => column_aliases,
@@ -4402,7 +4484,7 @@ fn join_using_relation_names(left: &ScopeColumn, right: &ScopeColumn) -> Vec<Str
 }
 
 fn bind_join_using_projection(
-    _kind: &JoinKind,
+    kind: &JoinKind,
     columns: &[String],
     left_scope: &BoundScope,
     right_scope: &BoundScope,
@@ -4448,7 +4530,11 @@ fn bind_join_using_projection(
         let left_ty = left_scope.desc.columns[*left_index].sql_type;
         let left_expr = left_scope.output_exprs[*left_index].clone();
         let right_expr = right_scope.output_exprs[*right_index].clone();
-        alias_exprs.push(Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)));
+        alias_exprs.push(match kind {
+            JoinKind::Full => Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)),
+            JoinKind::Right => right_expr,
+            _ => left_expr,
+        });
         output_columns.push(QueryColumn {
             name: name.clone(),
             sql_type: left_ty,
@@ -4558,6 +4644,45 @@ fn apply_function_rte_alias(plan: &mut AnalyzedFrom, alias: &str, desc: &Relatio
     call.set_output_columns(output_columns.clone());
     plan.output_columns = output_columns;
     true
+}
+
+fn apply_join_using_alias(
+    mut plan: AnalyzedFrom,
+    mut scope: BoundScope,
+    alias: &str,
+    using_column_count: usize,
+) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
+    if scope.relations.iter().any(|relation| {
+        relation
+            .relation_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(alias))
+    }) || scope.columns.iter().any(|column| {
+        column
+            .relation_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(alias))
+    }) {
+        return Err(ParseError::DuplicateTableName(alias.to_string()));
+    }
+
+    for column in scope.columns.iter_mut().take(using_column_count) {
+        if !column
+            .relation_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(alias))
+        {
+            column.relation_names.push(alias.to_string());
+        }
+    }
+    if let Some(rte) = plan.rtable.last_mut()
+        && matches!(rte.kind, RangeTblEntryKind::Join { .. })
+    {
+        rte.alias = Some(alias.to_string());
+        rte.alias_preserves_source_names = true;
+        rte.eref.aliasname = alias.to_string();
+    }
+    Ok((plan, scope))
 }
 
 fn apply_relation_alias(
