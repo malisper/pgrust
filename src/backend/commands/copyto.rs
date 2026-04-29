@@ -345,9 +345,9 @@ fn drain_copy_to_dml_notices(events: &mut Vec<CopyToDmlEvent>) {
 fn normalize_plpgsql_notice(notice: PlpgsqlNotice) -> Option<CopyToNotice> {
     let (severity, sqlstate) = match notice.level {
         RaiseLevel::Info => ("INFO", "00000"),
+        RaiseLevel::Log => return None,
         RaiseLevel::Notice => ("NOTICE", "00000"),
         RaiseLevel::Warning => ("WARNING", "01000"),
-        RaiseLevel::Log => ("LOG", "00000"),
         RaiseLevel::Exception => return None,
     };
     Some(CopyToNotice {

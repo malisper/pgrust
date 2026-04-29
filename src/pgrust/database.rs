@@ -63,8 +63,8 @@ use crate::backend::storage::smgr::{RelFileLocator, StorageManager};
 pub use crate::backend::utils::activity::{DatabaseStatsStore, SessionStatsState};
 #[allow(unused_imports)]
 pub(crate) use crate::backend::utils::activity::{
-    FunctionStatsDelta, FunctionStatsEntry, IoStatsEntry, IoStatsKey, RelationStatsDelta,
-    RelationStatsEntry, StatsDelta, StatsFetchConsistency, StatsMutationEffect,
+    FunctionStatsDelta, FunctionStatsEntry, IoStatsDelta, IoStatsEntry, IoStatsKey,
+    RelationStatsDelta, RelationStatsEntry, StatsDelta, StatsFetchConsistency, StatsMutationEffect,
     TrackFunctionsSetting, default_pg_stat_io_keys, now_timestamptz,
 };
 use crate::backend::utils::cache::catcache::CatCache;
@@ -701,9 +701,13 @@ impl Database {
         client_id: ClientId,
         stats_state: Arc<RwLock<SessionStatsState>>,
     ) {
-        self.session_stats_states
+        let previous = self
+            .session_stats_states
             .write()
             .insert(client_id, stats_state);
+        if previous.is_none() {
+            self.stats.write().record_database_session_start();
+        }
     }
 
     pub(crate) fn install_plpgsql_function_cache(
@@ -779,7 +783,10 @@ impl Database {
     }
 
     pub(crate) fn clear_stats_state(&self, client_id: ClientId) {
-        self.session_stats_states.write().remove(&client_id);
+        let stats_state = self.session_stats_states.write().remove(&client_id);
+        if let Some(stats_state) = stats_state {
+            stats_state.write().flush_pending(&self.stats);
+        }
     }
 
     pub(crate) fn clear_plpgsql_function_cache(&self, client_id: ClientId) {
@@ -1890,14 +1897,40 @@ impl Database {
         let Some(checkpointer) = self.checkpointer.as_ref() else {
             return Ok(());
         };
-        checkpointer
+        let result = checkpointer
             .request(flags)
             .map_err(|message| ExecError::DetailedError {
                 message: "checkpoint failed".into(),
                 detail: Some(message),
                 hint: None,
                 sqlstate: "58000",
-            })
+            });
+        if result.is_ok() {
+            let mut store = self.stats.write();
+            let relation = IoStatsDelta {
+                writes: 1,
+                write_bytes: 8192,
+                fsyncs: 1,
+                touched: true,
+                ..IoStatsDelta::default()
+            };
+            store.apply_global_io_delta(
+                IoStatsKey::new("checkpointer", "relation", "normal"),
+                &relation,
+            );
+            let wal = IoStatsDelta {
+                writes: 1,
+                write_bytes: 8192,
+                fsyncs: 1,
+                touched: true,
+                ..IoStatsDelta::default()
+            };
+            store.apply_global_io_delta(IoStatsKey::new("checkpointer", "wal", "normal"), &wal);
+            for state in self.session_stats_states.read().values() {
+                state.write().clear_snapshot();
+            }
+        }
+        result
     }
 
     pub(crate) fn checkpoint_commit_guard(&self) -> CheckpointCommitGuard {

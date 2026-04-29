@@ -1,0 +1,32 @@
+name: regression-tests-auto-rerun
+
+# Auto-rerun a regression-tests workflow run once when it ends in `failure`.
+# Motivation: GitHub-hosted larger runners (the 32x SKU we use here) intermittently
+# emit a runner shutdown signal mid-job that surfaces as `The operation was canceled`
+# and turns the job conclusion into `failure`. There is no documented signature
+# distinguishing this from a real test/process failure, so we rerun once
+# unconditionally and let genuinely failing jobs fail twice.
+#
+# `workflow_run` only fires from the default branch's copy of this file, so this
+# workflow must be merged to the default branch before auto-reruns start.
+on:
+  workflow_run:
+    workflows: ["regression-tests"]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  rerun-failed:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.run_attempt < 2 }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rerun failed jobs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Rerunning failed jobs in run ${{ github.event.workflow_run.id }} (next attempt: $(( ${{ github.event.workflow_run.run_attempt }} + 1 )))"
+          gh run rerun "${{ github.event.workflow_run.id }}" \
+            --repo "${{ github.repository }}" \
+            --failed

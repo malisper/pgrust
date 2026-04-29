@@ -17,6 +17,7 @@ use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
+use crate::backend::executor::value_io::format_failing_row_detail;
 use crate::backend::optimizer::{finalize_expr_subqueries, planner};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
@@ -49,7 +50,9 @@ use super::explain::{
     format_explain_plan_with_subplans, format_verbose_explain_plan_json_with_catalog,
     format_verbose_explain_plan_with_catalog, push_explain_line,
 };
-use super::partition::{exec_find_partition, exec_setup_partition_tuple_routing};
+use super::partition::{
+    exec_find_partition, exec_setup_partition_tuple_routing, partition_root_oid,
+};
 use super::trigger::RuntimeTriggers;
 use super::upsert::execute_insert_on_conflict_rows;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
@@ -924,7 +927,12 @@ fn explain_update_index_cond(target: &BoundUpdateTarget) -> Option<String> {
 }
 
 fn render_explain_index_value(value: &Value) -> String {
-    crate::backend::executor::render_explain_expr(&Expr::Const(value.clone()), &[])
+    let rendered = crate::backend::executor::render_explain_expr(&Expr::Const(value.clone()), &[]);
+    rendered
+        .strip_prefix('(')
+        .and_then(|inner| inner.strip_suffix(')'))
+        .unwrap_or(&rendered)
+        .to_string()
 }
 
 fn explain_strategy_operator(strategy: u16) -> &'static str {
@@ -1937,6 +1945,7 @@ pub(crate) fn rollback_inserted_row(
 
 struct PartitionUpdateDestination {
     relation_info: PartitionResultRelInfo,
+    parent_values: Vec<Value>,
     values: Vec<Value>,
 }
 
@@ -1985,8 +1994,61 @@ fn route_updated_partition_row(
     )?;
     Ok(Some(PartitionUpdateDestination {
         relation_info,
+        parent_values: root_values,
         values: routed_values,
     }))
+}
+
+fn enforce_direct_partition_update_constraint(
+    relation_oid: u32,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let Some(catalog) = ctx.catalog.clone() else {
+        return Ok(());
+    };
+    let Some(target) = catalog.relation_by_oid(relation_oid) else {
+        return Ok(());
+    };
+    if !target.relispartition {
+        return Ok(());
+    }
+    let mut proute = exec_setup_partition_tuple_routing(catalog.as_ref(), &target)?;
+    exec_find_partition(catalog.as_ref(), &mut proute, &target, values, ctx)?;
+    Ok(())
+}
+
+fn remap_root_partition_update_error_detail(
+    err: ExecError,
+    allow_partition_routing: bool,
+    relation_oid: u32,
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> ExecError {
+    if !allow_partition_routing {
+        return err;
+    }
+    let Some(catalog) = ctx.catalog.as_deref() else {
+        return err;
+    };
+    let Some(current_relation) = catalog.relation_by_oid(relation_oid) else {
+        return err;
+    };
+    if !current_relation.relispartition {
+        return err;
+    }
+    let Ok(Some(root_oid)) = partition_root_oid(catalog, relation_oid) else {
+        return err;
+    };
+    let Some(root_relation) = catalog.relation_by_oid(root_oid) else {
+        return err;
+    };
+    let Some(root_values) =
+        remap_child_row_to_parent(values, &current_relation.desc, &root_relation.desc)
+    else {
+        return err;
+    };
+    remap_routed_insert_error_detail(err, &root_values, ctx)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2034,7 +2096,8 @@ fn move_updated_row_to_partition(
         ctx,
         xid,
         cid,
-    )?;
+    )
+    .map_err(|err| remap_routed_insert_error_detail(err, &destination.parent_values, ctx))?;
     maintain_indexes_for_row(
         destination.relation_info.relation.rel,
         &destination.relation_info.relation.desc,
@@ -2150,6 +2213,7 @@ pub(crate) fn write_updated_row(
     rel: crate::backend::storage::smgr::RelFileLocator,
     relation_oid: u32,
     partition_update_root_oid: Option<u32>,
+    allow_partition_routing: bool,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
     desc: &RelationDesc,
@@ -2200,6 +2264,7 @@ pub(crate) fn write_updated_row(
         ctx,
     )?;
     if let Some(catalog) = ctx.catalog.clone()
+        && allow_partition_routing
         && let Some(destination) = route_updated_partition_row(
             catalog.as_ref(),
             relation_name,
@@ -2228,13 +2293,25 @@ pub(crate) fn write_updated_row(
             waiter,
         );
     }
-    crate::backend::executor::enforce_relation_constraints(
+    if !allow_partition_routing {
+        enforce_direct_partition_update_constraint(relation_oid, &current_values, ctx)?;
+    }
+    let constraint_result = crate::backend::executor::enforce_relation_constraints(
         relation_name,
         desc,
         relation_constraints,
         &current_values,
         ctx,
-    )?;
+    );
+    if let Err(err) = constraint_result {
+        return Err(remap_root_partition_update_error_detail(
+            err,
+            allow_partition_routing,
+            relation_oid,
+            &current_values,
+            ctx,
+        ));
+    }
     enforce_temporal_constraints_for_write(
         relation_name,
         rel,
@@ -3909,6 +3986,7 @@ fn apply_referential_action_to_rows(
                     constraint.child_rel,
                     constraint.child_relation_oid,
                     None,
+                    false,
                     constraint.child_toast,
                     toast_index.as_ref(),
                     &constraint.child_desc,
@@ -4384,6 +4462,11 @@ fn collect_vacuum_stats_for_relations_with_truncate_policy(
             relation_vacuum_truncate(entry.relation_oid, catalog, truncate, default_truncate),
         )
         .map_err(ExecError::Heap)?;
+        {
+            let mut session_stats = ctx.session_stats.write();
+            session_stats.note_io_read("client backend", "relation", "vacuum", 8192);
+            session_stats.note_io_reuse("client backend", "relation", "vacuum");
+        }
         stats.push(relation_stats);
         processed += 1;
     }
@@ -4872,12 +4955,6 @@ pub fn execute_create_index(
     }
 
     let access_method = create_index_access_method_row(stmt.using_method.as_deref())?;
-    if access_method.oid == BRIN_AM_OID && stmt.predicate.is_some() {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "BRIN partial indexes".into(),
-        )));
-    }
-
     let table_alias = stmt
         .table_name
         .rsplit('.')
@@ -5226,6 +5303,10 @@ pub fn execute_insert(
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
         let values = materialize_insert_rows(&stmt, catalog, ctx)?;
+        let relpersistence = catalog
+            .relation_by_oid(stmt.relation_oid)
+            .map(|relation| relation.relpersistence)
+            .unwrap_or('p');
 
         let returned_rows = if let Some(on_conflict) = stmt.on_conflict.as_ref() {
             let returned_rows = if catalog
@@ -5268,7 +5349,7 @@ pub fn execute_insert(
             for _ in 0..returned_rows.len() {
                 ctx.session_stats
                     .write()
-                    .note_relation_insert(stmt.relation_oid);
+                    .note_relation_insert_with_persistence(stmt.relation_oid, relpersistence);
             }
             returned_rows
         } else {
@@ -5292,7 +5373,7 @@ pub fn execute_insert(
             for _ in 0..returned_rows.len() {
                 ctx.session_stats
                     .write()
-                    .note_relation_insert(stmt.relation_oid);
+                    .note_relation_insert_with_persistence(stmt.relation_oid, relpersistence);
             }
             returned_rows
         };
@@ -5542,45 +5623,51 @@ fn execute_insert_rows_with_routing(
 
         let mut inserted_rows = Vec::new();
         for (_, result_rel_info) in routed {
-            let leaf_inserted_rows = execute_insert_rows(
-                &result_rel_info.relation_name,
-                result_rel_info.relation.relation_oid,
-                result_rel_info.relation.rel,
-                result_rel_info.relation.toast,
-                result_rel_info.toast_index.as_ref(),
-                &result_rel_info.relation.desc,
-                &result_rel_info.relation_constraints,
-                rls_write_checks,
-                &result_rel_info.indexes,
-                &result_rel_info.rows,
-                None,
-                ctx,
-                xid,
-                cid,
-            )?;
-            if let Some(returning) = returning {
-                for (parent_row, leaf_row) in result_rel_info
-                    .parent_rows
-                    .iter()
-                    .zip(leaf_inserted_rows.iter())
-                {
-                    let projected_row =
-                        remap_child_row_to_parent(leaf_row, &result_rel_info.relation.desc, desc)
-                            .unwrap_or_else(|| parent_row.clone());
-                    let row = project_returning_row_with_old_new(
-                        returning,
-                        &projected_row,
-                        None,
-                        Some(result_rel_info.relation.relation_oid),
-                        None,
-                        Some(&projected_row),
-                        ctx,
-                    )?;
-                    capture_copy_to_dml_returning_row(row.clone());
-                    inserted_rows.push(row);
+            for (parent_row, leaf_input_row) in result_rel_info
+                .parent_rows
+                .iter()
+                .zip(result_rel_info.rows.iter())
+            {
+                let leaf_inserted_rows = execute_insert_rows(
+                    &result_rel_info.relation_name,
+                    result_rel_info.relation.relation_oid,
+                    result_rel_info.relation.rel,
+                    result_rel_info.relation.toast,
+                    result_rel_info.toast_index.as_ref(),
+                    &result_rel_info.relation.desc,
+                    &result_rel_info.relation_constraints,
+                    rls_write_checks,
+                    &result_rel_info.indexes,
+                    std::slice::from_ref(leaf_input_row),
+                    None,
+                    ctx,
+                    xid,
+                    cid,
+                )
+                .map_err(|err| remap_routed_insert_error_detail(err, parent_row, ctx))?;
+                if let Some(returning) = returning {
+                    for leaf_row in leaf_inserted_rows.iter() {
+                        let projected_row = remap_child_row_to_parent(
+                            leaf_row,
+                            &result_rel_info.relation.desc,
+                            desc,
+                        )
+                        .unwrap_or_else(|| parent_row.clone());
+                        let row = project_returning_row_with_old_new(
+                            returning,
+                            &projected_row,
+                            None,
+                            Some(result_rel_info.relation.relation_oid),
+                            None,
+                            Some(&projected_row),
+                            ctx,
+                        )?;
+                        capture_copy_to_dml_returning_row(row.clone());
+                        inserted_rows.push(row);
+                    }
+                } else {
+                    inserted_rows.extend(leaf_inserted_rows);
                 }
-            } else {
-                inserted_rows.extend(leaf_inserted_rows);
             }
         }
         Ok(inserted_rows)
@@ -5591,6 +5678,37 @@ fn execute_insert_rows_with_routing(
         triggers.after_statement(None, ctx)?;
     }
     result
+}
+
+fn remap_routed_insert_error_detail(
+    err: ExecError,
+    parent_row: &[Value],
+    ctx: &ExecutorContext,
+) -> ExecError {
+    let detail = Some(format_failing_row_detail(parent_row, &ctx.datetime_config));
+    match err {
+        ExecError::CheckViolation {
+            relation,
+            constraint,
+            ..
+        } => ExecError::CheckViolation {
+            relation,
+            constraint,
+            detail,
+        },
+        ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+            ..
+        } => ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+            detail,
+        },
+        other => other,
+    }
 }
 
 fn remap_partition_row(
@@ -6294,9 +6412,13 @@ fn execute_merge_insert_action(
         cid,
     )?;
     if let Some(inserted_values) = inserted.into_iter().next() {
+        let relpersistence = catalog
+            .relation_by_oid(stmt.relation_oid)
+            .map(|relation| relation.relpersistence)
+            .unwrap_or('p');
         ctx.session_stats
             .write()
-            .note_relation_insert(stmt.relation_oid);
+            .note_relation_insert_with_persistence(stmt.relation_oid, relpersistence);
         Ok(Some(inserted_values))
     } else {
         Ok(None)
@@ -8835,7 +8957,14 @@ pub fn execute_prepared_insert_row(
     )?;
     ctx.session_stats
         .write()
-        .note_relation_insert(prepared.relation_oid);
+        .note_relation_insert_with_persistence(
+            prepared.relation_oid,
+            ctx.catalog
+                .as_deref()
+                .and_then(|catalog| catalog.relation_by_oid(prepared.relation_oid))
+                .map(|relation| relation.relpersistence)
+                .unwrap_or('p'),
+        );
     if let Some(triggers) = &triggers {
         if let Some(capture) = transition_capture.as_mut() {
             triggers.capture_insert_row(capture, &values);
@@ -9035,6 +9164,7 @@ pub fn execute_update_with_waiter(
                         target.rel,
                         target.relation_oid,
                         target.partition_update_root_oid,
+                        target.allow_partition_routing,
                         target.toast,
                         target.toast_index.as_ref(),
                         &target.desc,
@@ -9475,6 +9605,7 @@ fn execute_update_from_joined_input(
                     target.rel,
                     target.relation_oid,
                     target.partition_update_root_oid,
+                    target.allow_partition_routing,
                     target.toast,
                     target.toast_index.as_ref(),
                     &target.desc,

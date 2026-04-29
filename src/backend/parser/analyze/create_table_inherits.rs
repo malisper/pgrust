@@ -4,7 +4,9 @@ use crate::backend::access::common::toast_compression::compression_name;
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::DEFAULT_COLLATION_OID;
 
-use super::create_table::{LoweredCreateTable, lower_create_table};
+use super::create_table::{
+    LoweredCreateTable, expand_create_table_like_clauses, lower_create_table,
+};
 use super::{
     BoundRelation, CatalogLookup, ColumnConstraint, ConstraintAttributes, CreateTableElement,
     CreateTableStatement, ParseError, PartitionColumnOverride, RawTypeName, TableConstraint,
@@ -64,6 +66,9 @@ pub fn lower_create_table_with_catalog(
         return Ok(lowered);
     }
 
+    let (expanded_stmt, like_post_create_actions) =
+        expand_create_table_like_clauses(stmt, catalog)?;
+    let stmt = &expanded_stmt;
     let parents = resolve_parent_relations(stmt, catalog, persistence)?;
     if stmt.partition_of.is_some() && local_primary_key_count(stmt) > 0 {
         let parent_has_primary_key = parents.iter().any(|parent| {
@@ -85,7 +90,8 @@ pub fn lower_create_table_with_catalog(
             });
         }
     }
-    let merged_columns = merge_inherited_columns(stmt, &parents, catalog)?;
+    let mut merged_columns = merge_inherited_columns(stmt, &parents, catalog)?;
+    dedupe_inherited_not_null_names(&mut merged_columns);
     let inherited_constraints = inherited_table_constraints(&parents, catalog);
     let local_constraints = merge_local_table_constraints(&inherited_constraints, stmt)?;
     let mut synthetic = stmt.clone();
@@ -107,7 +113,10 @@ pub fn lower_create_table_with_catalog(
     synthetic.inherits.clear();
 
     let mut lowered = lower_create_table(&synthetic, catalog)?;
-    mark_inherited_check_actions(&mut lowered, stmt, &parents, catalog);
+    lowered
+        .like_post_create_actions
+        .extend(like_post_create_actions);
+    mark_inherited_check_actions(&mut lowered, &parents, catalog, stmt)?;
     for (column, merged) in lowered
         .relation_desc
         .columns
@@ -164,9 +173,12 @@ fn merge_local_table_constraints(
             continue;
         };
         if !table_constraints_are_mergeable(inherited, constraint) {
-            return Err(ParseError::InvalidTableDefinition(format!(
-                "constraint \"{name}\" conflicts with inherited constraint"
-            )));
+            return Err(ParseError::DetailedError {
+                message: inherited_constraint_conflict_message(name, inherited, constraint, stmt),
+                detail: None,
+                hint: None,
+                sqlstate: "42P17",
+            });
         }
         push_notice(format!(
             "merging constraint \"{name}\" with inherited definition"
@@ -175,18 +187,53 @@ fn merge_local_table_constraints(
     Ok(local_constraints)
 }
 
+fn inherited_constraint_conflict_message(
+    name: &str,
+    inherited: &TableConstraint,
+    local: &TableConstraint,
+    stmt: &CreateTableStatement,
+) -> String {
+    if let (
+        TableConstraint::Check {
+            attributes: inherited_attributes,
+            ..
+        },
+        TableConstraint::Check {
+            attributes: local_attributes,
+            ..
+        },
+    ) = (inherited, local)
+        && inherited_attributes.enforced.unwrap_or(true)
+        && !local_attributes.enforced.unwrap_or(true)
+    {
+        return format!(
+            "constraint \"{name}\" conflicts with NOT ENFORCED constraint on relation \"{}\"",
+            stmt.table_name
+        );
+    }
+    format!(
+        "constraint \"{name}\" conflicts with inherited constraint on relation \"{}\"",
+        stmt.table_name
+    )
+}
+
 fn table_constraints_are_mergeable(left: &TableConstraint, right: &TableConstraint) -> bool {
     match (left, right) {
         (
             TableConstraint::Check {
+                attributes: left_attributes,
                 expr_sql: left_expr,
-                ..
             },
             TableConstraint::Check {
+                attributes: right_attributes,
                 expr_sql: right_expr,
-                ..
             },
-        ) => left_expr.trim().eq_ignore_ascii_case(right_expr.trim()),
+        ) => {
+            left_expr.trim().eq_ignore_ascii_case(right_expr.trim())
+                && !right_attributes.no_inherit
+                && (!left_attributes.enforced.unwrap_or(true)
+                    || right_attributes.enforced.unwrap_or(true))
+        }
         _ => false,
     }
 }
@@ -219,6 +266,7 @@ fn inherited_table_constraints(
                         attributes: ConstraintAttributes {
                             name: Some(row.conname),
                             not_valid: !row.convalidated,
+                            enforced: Some(row.conenforced),
                             ..ConstraintAttributes::default()
                         },
                         expr_sql,
@@ -323,14 +371,6 @@ fn resolve_parent_relations(
                 sqlstate: "42P16",
             });
         }
-        if !allow_partitioned_parent && parent.relispartition {
-            return Err(ParseError::DetailedError {
-                message: format!("cannot inherit from partition \"{parent_name}\""),
-                detail: None,
-                hint: None,
-                sqlstate: "42P16",
-            });
-        }
         if allow_partitioned_parent && parent.relkind != 'p' {
             return Err(ParseError::DetailedError {
                 message: format!("\"{parent_name}\" is not partitioned"),
@@ -371,9 +411,11 @@ fn resolve_parent_relations(
             && persistence == TablePersistence::Permanent
             && parent.relpersistence == 't'
         {
-            return Err(ParseError::UnexpectedToken {
-                expected: "permanent parent for permanent inherited table",
-                actual: format!("temporary parent {}", parent_name),
+            return Err(ParseError::DetailedError {
+                message: format!("cannot inherit from temporary relation \"{parent_name}\""),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
             });
         }
         parents.push(parent);
@@ -491,12 +533,17 @@ fn merge_inherited_columns(
 
     for constraint in stmt.constraints() {
         match constraint {
-            TableConstraint::NotNull { column, .. } => {
-                mark_local_table_not_null(&mut merged, &column_lookup, column)?;
+            TableConstraint::NotNull { column, attributes } => {
+                mark_local_table_not_null(&mut merged, &column_lookup, column, attributes.clone())?;
             }
             TableConstraint::PrimaryKey { columns, .. } => {
                 for column in columns {
-                    mark_local_table_not_null(&mut merged, &column_lookup, column)?;
+                    mark_local_table_not_null(
+                        &mut merged,
+                        &column_lookup,
+                        column,
+                        ConstraintAttributes::default(),
+                    )?;
                 }
             }
             _ => {}
@@ -524,16 +571,32 @@ fn merge_inherited_columns(
         .iter()
         .find(|column| column.conflicting_parent_default)
     {
-        return Err(ParseError::UnexpectedToken {
-            expected: "compatible inherited column defaults",
-            actual: format!(
-                "conflicting inherited defaults for column {}",
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "column \"{}\" inherits conflicting default values",
                 conflict.column.name
             ),
+            detail: None,
+            hint: Some("To resolve the conflict, specify a default explicitly.".into()),
+            sqlstate: "42P16",
         });
     }
 
     Ok(merged)
+}
+
+fn dedupe_inherited_not_null_names(merged: &mut [MergedColumnSpec]) {
+    let mut seen = BTreeSet::new();
+    for column in merged {
+        for constraint in &mut column.column.constraints {
+            if let ColumnConstraint::NotNull { attributes } = constraint
+                && let Some(name) = attributes.name.as_deref()
+                && !seen.insert(name.to_ascii_lowercase())
+            {
+                attributes.name = None;
+            }
+        }
+    }
 }
 
 fn collation_name(catalog: &dyn CatalogLookup, oid: u32) -> String {
@@ -549,6 +612,7 @@ fn mark_local_table_not_null(
     merged: &mut [MergedColumnSpec],
     column_lookup: &BTreeMap<String, usize>,
     column_name: &str,
+    attributes: ConstraintAttributes,
 ) -> Result<(), ParseError> {
     let Some(index) = column_lookup
         .get(&column_name.to_ascii_lowercase())
@@ -557,11 +621,28 @@ fn mark_local_table_not_null(
         return Err(ParseError::UnknownColumn(column_name.to_string()));
     };
     let column = &mut merged[index];
-    if column.not_null_is_local || column.column.nullable() {
+    if column.not_null_is_local {
         return Ok(());
     }
     column.not_null_is_local = true;
-    replace_not_null_constraint(&mut column.column, ConstraintAttributes::default());
+    if column.column.nullable() {
+        column
+            .column
+            .constraints
+            .push(ColumnConstraint::NotNull { attributes });
+    } else if attributes.no_inherit {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "cannot define not-null constraint with NO INHERIT on column \"{}\"",
+                column.column.name
+            ),
+            detail: Some("The column has an inherited not-null constraint.".into()),
+            hint: None,
+            sqlstate: "42P16",
+        });
+    } else {
+        replace_not_null_constraint(&mut column.column, attributes);
+    }
     Ok(())
 }
 
@@ -652,10 +733,15 @@ fn merge_local_column(
                 attributes: attributes.clone(),
             });
         } else if attributes.no_inherit {
-            return Err(ParseError::InvalidTableDefinition(format!(
-                "cannot define not-null constraint with NO INHERIT on column \"{}\"",
-                merged.column.name
-            )));
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "cannot define not-null constraint with NO INHERIT on column \"{}\"",
+                    merged.column.name
+                ),
+                detail: Some("The column has an inherited not-null constraint.".into()),
+                hint: None,
+                sqlstate: "42P16",
+            });
         } else {
             replace_not_null_constraint(&mut merged.column, attributes.clone());
         }
@@ -750,10 +836,15 @@ fn merge_partition_column_override(
                 attributes: attributes.clone(),
             });
         } else if attributes.no_inherit {
-            return Err(ParseError::InvalidTableDefinition(format!(
-                "cannot define not-null constraint with NO INHERIT on column \"{}\"",
-                merged.column.name
-            )));
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "cannot define not-null constraint with NO INHERIT on column \"{}\"",
+                    merged.column.name
+                ),
+                detail: Some("The column has an inherited not-null constraint.".into()),
+                hint: None,
+                sqlstate: "42P16",
+            });
         } else {
             replace_not_null_constraint(&mut merged.column, attributes.clone());
         }
@@ -780,35 +871,12 @@ fn inherited_not_null_count(column: &crate::include::nodes::primnodes::ColumnDes
     (!column.storage.nullable && !column.not_null_constraint_no_inherit) as i16
 }
 
-fn local_column_check_constraint_matches(
-    stmt: &CreateTableStatement,
-    constraint_name: &str,
-    expr_sql: &str,
-) -> bool {
-    stmt.columns().any(|column| {
-        column.constraints.iter().any(|constraint| {
-            let ColumnConstraint::Check {
-                attributes,
-                expr_sql: local_expr_sql,
-            } = constraint
-            else {
-                return false;
-            };
-            attributes
-                .name
-                .as_deref()
-                .is_some_and(|name| name.eq_ignore_ascii_case(constraint_name))
-                && local_expr_sql.trim().eq_ignore_ascii_case(expr_sql.trim())
-        })
-    })
-}
-
 fn mark_inherited_check_actions(
     lowered: &mut LoweredCreateTable,
-    stmt: &CreateTableStatement,
     parents: &[BoundRelation],
     catalog: &dyn CatalogLookup,
-) {
+    stmt: &CreateTableStatement,
+) -> Result<(), ParseError> {
     let inherited_checks = parents
         .iter()
         .flat_map(|parent| catalog.constraint_rows_for_relation(parent.relation_oid))
@@ -827,16 +895,114 @@ fn mark_inherited_check_actions(
         if matches.is_empty() {
             continue;
         }
-        if local_column_check_constraint_matches(stmt, &action.constraint_name, &action.expr_sql) {
-            push_notice(format!(
-                "merging constraint \"{}\" with inherited definition",
-                action.constraint_name
-            ));
+        if stmt.partition_of.is_none()
+            && let Some(local) =
+                local_check_merge_attributes(stmt, &action.constraint_name, &action.expr_sql)
+        {
+            if local.no_inherit {
+                return Err(ParseError::DetailedError {
+                    message: format!(
+                        "constraint \"{}\" conflicts with inherited constraint on relation \"{}\"",
+                        action.constraint_name, stmt.table_name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P17",
+                });
+            }
+            if matches.iter().any(|row| row.conenforced) && !local.enforced.unwrap_or(true) {
+                return Err(ParseError::DetailedError {
+                    message: format!(
+                        "constraint \"{}\" conflicts with NOT ENFORCED constraint on relation \"{}\"",
+                        action.constraint_name, stmt.table_name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P17",
+                });
+            }
+            if !local_table_check_merge_exists(stmt, &action.constraint_name, &action.expr_sql) {
+                push_notice(format!(
+                    "merging constraint \"{}\" with inherited definition",
+                    action.constraint_name
+                ));
+            }
+            action.is_local = true;
+            action.enforced =
+                local.enforced.unwrap_or(true) || matches.iter().any(|row| row.conenforced);
+            action.not_valid = if action.enforced {
+                false
+            } else {
+                local.not_valid
+            };
+        } else {
+            action.is_local = false;
+            action.enforced = matches.iter().any(|row| row.conenforced);
+            action.not_valid = if action.enforced {
+                false
+            } else {
+                !matches.iter().any(|row| row.convalidated)
+            };
         }
         action.parent_constraint_oid = matches.first().map(|row| row.oid);
-        action.is_local = false;
         action.inhcount = matches.len().min(i16::MAX as usize) as i16;
     }
+    Ok(())
+}
+
+fn local_check_merge_attributes<'a>(
+    stmt: &'a CreateTableStatement,
+    name: &str,
+    expr_sql: &str,
+) -> Option<&'a ConstraintAttributes> {
+    for column in stmt.columns() {
+        for constraint in &column.constraints {
+            if let ColumnConstraint::Check {
+                attributes,
+                expr_sql: local_expr,
+            } = constraint
+                && attributes
+                    .name
+                    .as_deref()
+                    .is_some_and(|local_name| local_name.eq_ignore_ascii_case(name))
+                && local_expr.trim().eq_ignore_ascii_case(expr_sql.trim())
+            {
+                return Some(attributes);
+            }
+        }
+    }
+    stmt.constraints().find_map(|constraint| {
+        if let TableConstraint::Check {
+            attributes,
+            expr_sql: local_expr,
+        } = constraint
+            && attributes
+                .name
+                .as_deref()
+                .is_some_and(|local_name| local_name.eq_ignore_ascii_case(name))
+            && local_expr.trim().eq_ignore_ascii_case(expr_sql.trim())
+        {
+            return Some(attributes);
+        }
+        None
+    })
+}
+
+fn local_table_check_merge_exists(stmt: &CreateTableStatement, name: &str, expr_sql: &str) -> bool {
+    stmt.constraints().any(|constraint| {
+        if let TableConstraint::Check {
+            attributes,
+            expr_sql: local_expr,
+        } = constraint
+        {
+            return attributes
+                .name
+                .as_deref()
+                .is_some_and(|local_name| local_name.eq_ignore_ascii_case(name))
+                && local_expr.trim().eq_ignore_ascii_case(expr_sql.trim());
+        }
+        false
+    })
 }
 
 fn inherited_constraints_for_parent(

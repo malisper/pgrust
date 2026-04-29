@@ -619,6 +619,9 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
     {
         return (multirange_type.type_oid() as i32, -1, col.sql_type.typmod);
     }
+    if let Some(oid) = col.wire_type_oid {
+        return (oid as i32, -1, col.sql_type.typmod);
+    }
     if !col.sql_type.is_array && col.sql_type.type_oid != 0 {
         return (col.sql_type.type_oid as i32, -1, col.sql_type.typmod);
     }

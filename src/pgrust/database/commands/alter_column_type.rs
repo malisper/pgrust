@@ -218,9 +218,7 @@ fn reject_inherited_type_change_conflicts(
                 message: format!(
                     "cannot alter inherited column \"{column_name}\" of relation \"{relation_name}\""
                 ),
-                detail: Some(format!(
-                    "child table \"{relation_name}\" has conflicting inherited definition for column \"{column_name}\""
-                )),
+                detail: None,
                 hint: None,
                 sqlstate: "0A000",
             });

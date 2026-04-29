@@ -1403,6 +1403,7 @@ struct SavepointState {
     sequence_effect_len: usize,
     guc_effective_state: GucState,
     guc_commit_state: GucState,
+    stats_state: crate::backend::utils::activity::SessionStatsState,
 }
 
 #[derive(Debug, Clone)]
@@ -2458,6 +2459,21 @@ impl Session {
                 .get("enable_bitmapscan")
                 .map(|value| parse_bool_guc(value).unwrap_or(true))
                 .unwrap_or(true),
+            enable_nestloop: self
+                .gucs
+                .get("enable_nestloop")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            enable_mergejoin: self
+                .gucs
+                .get("enable_mergejoin")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
+            enable_hashjoin: self
+                .gucs
+                .get("enable_hashjoin")
+                .map(|value| parse_bool_guc(value).unwrap_or(true))
+                .unwrap_or(true),
             retain_partial_index_filters: false,
             enable_hashagg: self
                 .gucs
@@ -3212,6 +3228,7 @@ impl Session {
             | Statement::AlterTableRenameColumn(_)
             | Statement::AlterTableRename(_)
             | Statement::AlterTableSetSchema(_)
+            | Statement::AlterTableSetTablespace(_)
             | Statement::AlterTableSetPersistence(_)
             | Statement::AlterTableSet(_)
             | Statement::AlterTableReset(_)
@@ -3244,7 +3261,8 @@ impl Session {
             | Statement::CommentOnStatistics(_)
             | Statement::CommentOnAggregate(_)
             | Statement::CommentOnFunction(_)
-            | Statement::CommentOnOperator(_) => Some("COMMENT"),
+            | Statement::CommentOnOperator(_)
+            | Statement::CommentOnDatabase(_) => Some("COMMENT"),
             Statement::GrantObject(_) => Some("GRANT"),
             Statement::RevokeObject(_) => Some("REVOKE"),
             Statement::ReindexIndex(_) => Some("REINDEX"),
@@ -5152,6 +5170,24 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterTableSetTablespace(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_set_tablespace_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterTableSetPersistence(ref alter_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -6430,6 +6466,19 @@ impl Session {
                     db.execute_comment_on_role_stmt(self.client_id, comment_stmt)
                 }
             }
+            Statement::CommentOnDatabase(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute_comment_on_database_stmt(self.client_id, comment_stmt)
+                }
+            }
             Statement::CommentOnConversion(ref comment_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -6633,6 +6682,7 @@ impl Session {
                     sequence_effect_len: txn.sequence_effects.len(),
                     guc_effective_state,
                     guc_commit_state: txn.guc_commit_state.clone(),
+                    stats_state: self.stats_state.read().clone(),
                 });
                 Ok(StatementResult::AffectedRows(0))
             }
@@ -6660,7 +6710,7 @@ impl Session {
             }
             Statement::RollbackTo(ref name) => {
                 let client_id = self.client_id;
-                let (dynamic_type_snapshot, guc_effective_state) = {
+                let (dynamic_type_snapshot, guc_effective_state, stats_state) = {
                     let Some(txn) = self.active_txn.as_mut() else {
                         return Err(ExecError::Parse(ParseError::UnexpectedToken {
                             expected: "active transaction",
@@ -6744,10 +6794,14 @@ impl Session {
                     (
                         savepoint.dynamic_type_snapshot,
                         savepoint.guc_effective_state,
+                        savepoint.stats_state,
                     )
                 };
                 db.restore_dynamic_type_snapshot(&dynamic_type_snapshot);
                 self.restore_guc_state(db, guc_effective_state);
+                self.stats_state
+                    .write()
+                    .restore_after_savepoint_rollback(stats_state);
                 Ok(StatementResult::AffectedRows(0))
             }
             _ => {
@@ -8167,6 +8221,23 @@ impl Session {
                         &mut txn.temp_effects,
                     )
                 }
+                Statement::AlterTableSetTablespace(ref alter_stmt) => {
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    let relation = catalog
+                        .lookup_any_relation(&alter_stmt.table_name)
+                        .ok_or_else(|| {
+                            ExecError::Parse(ParseError::TableDoesNotExist(
+                                alter_stmt.table_name.clone(),
+                            ))
+                        })?;
+                    self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_set_tablespace_stmt_with_search_path(
+                        client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
                 Statement::AlterTableSetPersistence(ref alter_stmt) => {
                     let search_path = self.configured_search_path();
                     db.execute_alter_table_set_persistence_stmt_with_search_path(
@@ -9378,6 +9449,16 @@ impl Session {
                 Statement::CommentOnRole(ref comment_stmt) => {
                     let txn = self.active_txn.as_mut().unwrap();
                     db.execute_comment_on_role_stmt_in_transaction(
+                        client_id,
+                        comment_stmt,
+                        xid,
+                        cid,
+                        &mut txn.catalog_effects,
+                    )
+                }
+                Statement::CommentOnDatabase(ref comment_stmt) => {
+                    let txn = self.active_txn.as_mut().unwrap();
+                    db.execute_comment_on_database_stmt_in_transaction(
                         client_id,
                         comment_stmt,
                         xid,
@@ -11248,6 +11329,11 @@ impl Session {
             });
         }
         db.request_checkpoint(crate::backend::access::transam::CheckpointRequestFlags::sql())?;
+        {
+            let mut stats = self.stats_state.write();
+            stats.note_io_write("client backend", "wal", "normal", 8192);
+            stats.note_io_fsync("client backend", "wal", "normal");
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 

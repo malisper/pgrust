@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run PostgreSQL regression tests against pgrust and report pass/fail statistics.
 #
-# Usage: scripts/run_regression.sh [--port PORT] [--skip-build] [--skip-server] [--timeout SECS] [--jobs N] [--schedule FILE] [--test TESTNAME] [--upstream-setup] [--ignore-deps]
+# Usage: scripts/run_regression.sh [--port PORT] [--skip-build] [--skip-server] [--timeout SECS] [--jobs N] [--schedule FILE] [--test TESTNAME] [--upstream-setup] [--ignore-deps] [--shard-index N --shard-total N] [--deadline-secs SECS]
 #
 # By default, this script:
 #   1. Builds pgrust_server in release mode, or dev mode for --test
@@ -23,6 +23,9 @@
 #   --results-dir DIR Directory for results (default: unique temp dir)
 #   --data-dir DIR    Directory for the pgrust cluster (default: unique temp dir)
 #   --upstream-setup Use upstream test_setup.sql instead of the pgrust bootstrap (default: use pgrust bootstrap)
+#   --shard-index N   Run only schedule groups assigned to shard N (0-based)
+#   --shard-total N   Total number of schedule-group shards
+#   --deadline-secs N Stop scheduling new files after N seconds and write a partial summary
 #   --ignore-deps     Don't fail if test dependencies fail to set up (default: fail on dependency errors)
 
 set -euo pipefail
@@ -781,6 +784,11 @@ DATA_DIR_PROVIDED=false
 SERVER_PID=""
 USE_PGRUST_SETUP=true
 IGNORE_DEPS=false
+SHARD_INDEX=0
+SHARD_TOTAL=1
+DEADLINE_SECS=0
+SHARD_DIAG_PID=""
+SHARD_DIAG_INTERVAL_SECS="${SHARD_DIAG_INTERVAL_SECS:-90}"
 REGRESS_USER="${PGRUST_REGRESS_USER:-${PGUSER:-$(id -un)}}"
 REGRESS_TABLESPACE_DIR=""
 STARTUP_WAIT_SECS="${PGRUST_STARTUP_WAIT_SECS:-300}"
@@ -809,6 +817,9 @@ while [[ $# -gt 0 ]]; do
         --pgrust-setup) USE_PGRUST_SETUP=true; shift ;;
         --upstream-setup) USE_PGRUST_SETUP=false; shift ;;
         --ignore-deps) IGNORE_DEPS=true; shift ;;
+        --shard-index) SHARD_INDEX="$2"; shift 2 ;;
+        --shard-total) SHARD_TOTAL="$2"; shift 2 ;;
+        --deadline-secs) DEADLINE_SECS="$2"; shift 2 ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
@@ -816,6 +827,28 @@ done
 if ! [[ "$JOBS" =~ ^[0-9]+$ ]] || [[ "$JOBS" -lt 1 ]]; then
     echo "ERROR: --jobs must be a positive integer"
     exit 1
+fi
+if ! [[ "$SHARD_INDEX" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: --shard-index must be a non-negative integer"
+    exit 1
+fi
+if ! [[ "$SHARD_TOTAL" =~ ^[0-9]+$ ]] || [[ "$SHARD_TOTAL" -lt 1 ]]; then
+    echo "ERROR: --shard-total must be a positive integer"
+    exit 1
+fi
+if [[ "$SHARD_INDEX" -ge "$SHARD_TOTAL" ]]; then
+    echo "ERROR: --shard-index must be less than --shard-total"
+    exit 1
+fi
+if ! [[ "$DEADLINE_SECS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: --deadline-secs must be a non-negative integer"
+    exit 1
+fi
+
+RUN_START_EPOCH="$(date +%s)"
+RUN_DEADLINE_EPOCH=0
+if [[ "$DEADLINE_SECS" -gt 0 ]]; then
+    RUN_DEADLINE_EPOCH=$((RUN_START_EPOCH + DEADLINE_SECS))
 fi
 
 if [[ "$JOBS" -gt 1 && "$SKIP_SERVER" == false ]]; then
@@ -863,11 +896,49 @@ stop_server() {
     fi
 }
 
+# Periodic resource snapshots emitted to stdout so they land in the GitHub
+# Actions log even if the runner is killed mid-run (uploaded artifacts are
+# skipped on `cancelled` steps). Only enabled when sharded — local runs stay
+# quiet.
+emit_shard_diag_snapshot() {
+    local label="$1"
+    local ts disk_used disk_avail mem_used mem_avail load npgrust
+    ts=$(date -u +%H:%M:%SZ)
+    disk_used=$(df -BM "$HOME" 2>/dev/null | awk 'NR==2 {print $3}' || echo "?")
+    disk_avail=$(df -BM "$HOME" 2>/dev/null | awk 'NR==2 {print $4}' || echo "?")
+    mem_used=$(free -m 2>/dev/null | awk '/^Mem:/ {print $3"M"}' || echo "?")
+    mem_avail=$(free -m 2>/dev/null | awk '/^Mem:/ {print $7"M"}' || echo "?")
+    load=$(awk '{print $1"/"$2"/"$3}' /proc/loadavg 2>/dev/null || echo "?")
+    npgrust=$(pgrep -c pgrust_server 2>/dev/null || echo 0)
+    echo "[shard-diag $label $ts] disk=${disk_used}/${disk_avail} mem=${mem_used}/${mem_avail} load=${load} pgrust=${npgrust}"
+}
+
+start_shard_diagnostics_heartbeat() {
+    [[ "$SHARD_TOTAL" -gt 1 ]] || return 0
+    emit_shard_diag_snapshot startup
+    (
+        while true; do
+            sleep "$SHARD_DIAG_INTERVAL_SECS"
+            emit_shard_diag_snapshot heartbeat
+        done
+    ) &
+    SHARD_DIAG_PID=$!
+}
+
+stop_shard_diagnostics_heartbeat() {
+    if [[ -n "$SHARD_DIAG_PID" ]] && kill -0 "$SHARD_DIAG_PID" 2>/dev/null; then
+        kill "$SHARD_DIAG_PID" 2>/dev/null || true
+        wait "$SHARD_DIAG_PID" 2>/dev/null || true
+    fi
+    SHARD_DIAG_PID=""
+}
+
 cleanup() {
     if [[ "${SUMMARY_READY:-false}" == true && "${SUMMARY_WRITTEN:-false}" == false ]] && declare -F write_summary >/dev/null; then
         write_summary "aborted"
     fi
 
+    stop_shard_diagnostics_heartbeat
     stop_server
 }
 trap cleanup EXIT
@@ -1056,7 +1127,7 @@ if [[ ! -x "$SERVER_BIN" ]]; then
 fi
 
 # Set up results directory
-mkdir -p "$RESULTS_DIR/output" "$RESULTS_DIR/diff" "$RESULTS_DIR/results"
+mkdir -p "$RESULTS_DIR/output" "$RESULTS_DIR/diff" "$RESULTS_DIR/status" "$RESULTS_DIR/results"
 mkdir -p "$RESULTS_DIR/status"
 echo "Regression results dir: $RESULTS_DIR"
 echo "Regression data dir: $DATA_DIR"
@@ -1323,6 +1394,12 @@ build_isolated_regression_bases() {
 echo "Per-query statement_timeout: ${STATEMENT_TIMEOUT}s"
 echo "Per-file timeout: ${TIMEOUT}s"
 echo "Base setup timeout: ${BASE_SETUP_TIMEOUT}s"
+echo "Schedule shard: ${SHARD_INDEX}/${SHARD_TOTAL}"
+if [[ "$DEADLINE_SECS" -gt 0 ]]; then
+    echo "Shard scheduling deadline: ${DEADLINE_SECS}s"
+fi
+
+start_shard_diagnostics_heartbeat
 
 if [[ "$ISOLATED_PARALLEL" == true ]]; then
     echo "Parallel isolation: each concurrent test gets its own pgrust server, port, data dir, and tablespace."
@@ -1340,8 +1417,9 @@ if [[ -n "$SINGLE_TEST" ]]; then
     fi
 else
     TEST_FILES=()
+    ALL_TEST_GROUPS=()
     while IFS= read -r sql_file; do
-        [[ -n "$sql_file" ]] && TEST_GROUPS+=("$sql_file")
+        [[ -n "$sql_file" ]] && ALL_TEST_GROUPS+=("$sql_file")
     done < <(
         build_scheduled_test_groups \
             "$SQL_DIR" \
@@ -1349,6 +1427,18 @@ else
             "$([[ "$USE_PGRUST_SETUP" == false ]] && echo true || echo false)" \
             "$([[ "$SCHEDULE_OVERRIDE" == true ]] && echo false || echo true)"
     )
+
+    group_idx=0
+    for group in "${ALL_TEST_GROUPS[@]}"; do
+        if [[ $((group_idx % SHARD_TOTAL)) -eq "$SHARD_INDEX" ]]; then
+            TEST_GROUPS+=("$group")
+        fi
+        group_idx=$((group_idx + 1))
+    done
+
+    if [[ "$SHARD_TOTAL" -gt 1 ]]; then
+        echo "Selected ${#TEST_GROUPS[@]} of ${#ALL_TEST_GROUPS[@]} schedule groups for shard ${SHARD_INDEX}/${SHARD_TOTAL}."
+    fi
 
     for group in "${TEST_GROUPS[@]}"; do
         for sql_file in $group; do
@@ -1426,6 +1516,10 @@ write_summary() {
     cat > "$RESULTS_DIR/summary.json" <<EOF
 {
   "status": "$status",
+  "shard": {
+    "index": $SHARD_INDEX,
+    "total": $SHARD_TOTAL
+  },
   "tests": {
     "planned": ${#TEST_FILES[@]},
     "total": $TOTAL,
@@ -1683,6 +1777,41 @@ write_test_status() {
         > "$status_file"
 }
 
+deadline_exceeded() {
+    [[ "$RUN_DEADLINE_EPOCH" -gt 0 ]] && [[ "$(date +%s)" -ge "$RUN_DEADLINE_EPOCH" ]]
+}
+
+status_file_for_sql() {
+    local sql_file="$1"
+    local test_name="$(basename "$sql_file" .sql)"
+    printf '%s/status/%s.status\n' "$RESULTS_DIR" "$test_name"
+}
+
+mark_unstarted_tests_timed_out() {
+    local reason="$1"
+    shift
+    local sql_file=""
+    local test_name=""
+    local output_file=""
+    local status_file=""
+
+    for sql_file in "$@"; do
+        test_name="$(basename "$sql_file" .sql)"
+        status_file="$(status_file_for_sql "$sql_file")"
+        if [[ -f "$status_file" ]]; then
+            continue
+        fi
+
+        output_file="$RESULTS_DIR/output/${test_name}.out"
+        {
+            echo "TIMEOUT"
+            echo "$reason"
+        } > "$output_file"
+        write_test_status "$status_file" "timeout" "$test_name" 0 0 0 0
+        collect_test_status "$sql_file" || true
+    done
+}
+
 run_one_regression_test() {
     local sql_file="$1"
     local test_name="$(basename "$sql_file" .sql)"
@@ -1723,6 +1852,14 @@ run_one_regression_test() {
     if [[ "$test_name" == "select_distinct" ]] && ! run_select_distinct_index_setup; then
         {
             echo "ERROR: select_distinct index dependency setup failed"
+        } > "$output_file"
+        write_test_status "$status_file" "error" "$test_name" 0 0 0 0
+        return 1
+    fi
+
+    if [[ "$test_name" == "stats" && "$ISOLATED_PARALLEL" != true ]] && ! run_stats_helper_setup; then
+        {
+            echo "ERROR: stats helper dependency setup failed"
         } > "$output_file"
         write_test_status "$status_file" "error" "$test_name" 0 0 0 0
         return 1
@@ -1889,6 +2026,43 @@ SQL
     return 1
 }
 
+run_stats_helper_setup() {
+    local output_file="$RESULTS_DIR/output/test_setup_dependency_stats_helper.out"
+    local setup_file="$RESULTS_DIR/output/test_setup_dependency_stats_helper.sql"
+
+    cat > "$setup_file" <<'SQL'
+SELECT (to_regprocedure('check_estimated_rows(text)') IS NULL) AS create_stats_helper \gset
+\if :create_stats_helper
+create function check_estimated_rows(text) returns table (estimated int, actual int)
+language plpgsql as
+$$
+declare
+    ln text;
+    tmp text[];
+    first_row bool := true;
+begin
+    for ln in
+        execute format('explain analyze %s', $1)
+    loop
+        if first_row then
+            first_row := false;
+            tmp := regexp_match(ln, 'rows=(\d*) .* rows=(\d*)');
+            return query select tmp[1]::int, tmp[2]::int;
+        end if;
+    end loop;
+end;
+$$;
+\endif
+SQL
+    echo "Dependency setup for stats: check_estimated_rows"
+    if run_psql_file "$TIMEOUT" "$setup_file" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
+        return 0
+    fi
+    echo "ERROR: stats helper dependency setup failed" >&2
+    echo "See: $output_file" >&2
+    return 1
+}
+
 run_one_regression_test_isolated() (
     local sql_file="$1"
     local worker_slot="$2"
@@ -1916,6 +2090,7 @@ run_one_regression_test_isolated() (
     trap stop_server EXIT
     rm -rf "$worker_root"
     mkdir -p "$worker_root/fixtures"
+    mkdir -p "$RESULTS_DIR/output" "$RESULTS_DIR/diff" "$RESULTS_DIR/status"
 
     if test_uses_create_index_base "$test_name" && [[ "$NEEDS_CREATE_INDEX_BASE" == true ]]; then
         base_label="post_create_index"
@@ -1956,6 +2131,16 @@ run_one_regression_test_isolated() (
     if [[ "$test_name" == "select_distinct" ]] && ! run_select_distinct_index_setup; then
         {
             echo "ERROR: isolated worker $worker_name failed select_distinct index dependency setup"
+            echo "port: $PORT"
+            echo "data dir: $DATA_DIR"
+        } > "$output_file"
+        write_test_status "$status_file" "error" "$test_name" 0 0 0 0
+        return 1
+    fi
+
+    if [[ "$test_name" == "stats" ]] && ! run_stats_helper_setup; then
+        {
+            echo "ERROR: isolated worker $worker_name failed stats helper dependency setup"
             echo "port: $PORT"
             echo "data dir: $DATA_DIR"
         } > "$output_file"
@@ -2070,9 +2255,12 @@ run_test_batch() {
         fi
     done
 
+    write_summary "$RUN_STATUS"
+
     if [[ "$batch_needs_restart" == true ]]; then
         if ! restart_server "Restarting after failed parallel batch..."; then
             RUN_STATUS="aborted"
+            write_summary "$RUN_STATUS"
             return 1
         fi
     fi
@@ -2085,6 +2273,7 @@ run_schedule_group() {
     local -a group_files=()
     local -a batch=()
     local sql_file=""
+    local i=0
 
     for sql_file in $group; do
         group_files+=("$sql_file")
@@ -2094,13 +2283,26 @@ run_schedule_group() {
         echo "parallel group (${#group_files[@]} tests):"
     fi
 
-    for sql_file in "${group_files[@]}"; do
+    for ((i = 0; i < ${#group_files[@]}; i++)); do
+        sql_file="${group_files[$i]}"
+        if deadline_exceeded; then
+            RUN_STATUS="deadline"
+            mark_unstarted_tests_timed_out \
+                "Shard deadline reached before scheduling this test." \
+                "${group_files[@]:$i}"
+            write_summary "$RUN_STATUS"
+            return 0
+        fi
+
         batch+=("$sql_file")
         if [[ ${#batch[@]} -ge "$JOBS" ]]; then
             if ! run_test_batch "${batch[@]}"; then
                 return 1
             fi
             batch=()
+            if deadline_exceeded; then
+                RUN_STATUS="deadline"
+            fi
         fi
     done
 
@@ -2113,8 +2315,37 @@ run_schedule_group() {
     return 0
 }
 
-for group in "${TEST_GROUPS[@]}"; do
+for ((group_idx = 0; group_idx < ${#TEST_GROUPS[@]}; group_idx++)); do
+    group="${TEST_GROUPS[$group_idx]}"
+    if deadline_exceeded; then
+        RUN_STATUS="deadline"
+        remaining_files=()
+        for ((remaining_group_idx = group_idx; remaining_group_idx < ${#TEST_GROUPS[@]}; remaining_group_idx++)); do
+            for sql_file in ${TEST_GROUPS[$remaining_group_idx]}; do
+                remaining_files+=("$sql_file")
+            done
+        done
+        mark_unstarted_tests_timed_out \
+            "Shard deadline reached before scheduling this schedule group." \
+            "${remaining_files[@]}"
+        write_summary "$RUN_STATUS"
+        break
+    fi
+
     if ! run_schedule_group "$group"; then
+        break
+    fi
+    if [[ "$RUN_STATUS" == "deadline" ]]; then
+        remaining_files=()
+        for ((remaining_group_idx = group_idx + 1; remaining_group_idx < ${#TEST_GROUPS[@]}; remaining_group_idx++)); do
+            for sql_file in ${TEST_GROUPS[$remaining_group_idx]}; do
+                remaining_files+=("$sql_file")
+            done
+        done
+        mark_unstarted_tests_timed_out \
+            "Shard deadline reached before scheduling this schedule group." \
+            "${remaining_files[@]}"
+        write_summary "$RUN_STATUS"
         break
     fi
 done
