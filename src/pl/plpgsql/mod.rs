@@ -4,10 +4,12 @@ mod compile;
 mod exec;
 mod gram;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::backend::executor::{ExecError, ExecutorContext, StatementResult};
-use crate::backend::parser::{Catalog, CatalogLookup, DoStatement, ParseError, parse_statement};
+use crate::backend::parser::{
+    Catalog, CatalogLookup, DoStatement, ParseError, SqlType, SqlTypeKind, parse_statement,
+};
 
 pub use ast::*;
 pub use cache::PlpgsqlFunctionCache;
@@ -37,7 +39,7 @@ pub(crate) fn validate_create_function_body(
     body: &str,
     has_output_args: bool,
 ) -> Result<(), ParseError> {
-    validate_create_function_body_with_options(body, has_output_args, false, false, &[], None)
+    validate_create_function_body_with_options(body, has_output_args, false, false, &[], &[], None)
         .map(|_| ())
 }
 
@@ -47,16 +49,113 @@ pub(crate) fn validate_create_function_body_with_options(
     returns_void: bool,
     returns_set: bool,
     arg_names: &[String],
+    arg_types: &[(String, SqlType)],
     gucs: Option<&HashMap<String, String>>,
 ) -> Result<Vec<PlpgsqlValidationNotice>, ParseError> {
     let block = parse_block(body)?;
     validate_declared_cursor_arguments(&block)?;
     validate_raise_placeholders(&block)?;
     validate_return_statements(&block, has_output_args, returns_void, returns_set)?;
+    validate_get_diagnostics_targets(&block, arg_types)?;
     validate_static_sql(&block)?;
     let mut notices = Vec::new();
     validate_shadowed_variables(&block, arg_names, gucs, &mut notices)?;
     Ok(notices)
+}
+
+fn validate_get_diagnostics_targets(
+    block: &Block,
+    arg_types: &[(String, SqlType)],
+) -> Result<(), ParseError> {
+    let hidden_names = block
+        .declarations
+        .iter()
+        .map(|decl| match decl {
+            Decl::Var(decl) => &decl.name,
+            Decl::Cursor(decl) => &decl.name,
+            Decl::Alias(decl) => &decl.name,
+        })
+        .map(|name| name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let visible_arg_types = arg_types
+        .iter()
+        .filter(|(name, _)| !hidden_names.contains(&name.to_ascii_lowercase()))
+        .cloned()
+        .collect::<Vec<_>>();
+    for stmt in &block.statements {
+        validate_get_diagnostics_targets_in_stmt(stmt, &visible_arg_types)?;
+    }
+    for handler in &block.exception_handlers {
+        for stmt in &handler.statements {
+            validate_get_diagnostics_targets_in_stmt(stmt, &visible_arg_types)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_get_diagnostics_targets_in_stmt(
+    stmt: &Stmt,
+    arg_types: &[(String, SqlType)],
+) -> Result<(), ParseError> {
+    match stmt {
+        Stmt::WithLine { stmt, .. } => validate_get_diagnostics_targets_in_stmt(stmt, arg_types),
+        Stmt::GetDiagnostics { items, .. } => {
+            for (target, _) in items {
+                validate_get_diagnostics_target(target, arg_types)?;
+            }
+            Ok(())
+        }
+        Stmt::Block(block) => validate_get_diagnostics_targets(block, arg_types),
+        Stmt::If {
+            branches,
+            else_branch,
+        } => {
+            for (_, body) in branches {
+                for stmt in body {
+                    validate_get_diagnostics_targets_in_stmt(stmt, arg_types)?;
+                }
+            }
+            for stmt in else_branch {
+                validate_get_diagnostics_targets_in_stmt(stmt, arg_types)?;
+            }
+            Ok(())
+        }
+        Stmt::While { body, .. }
+        | Stmt::Loop { body }
+        | Stmt::ForInt { body, .. }
+        | Stmt::ForQuery { body, .. }
+        | Stmt::ForEach { body, .. } => {
+            for stmt in body {
+                validate_get_diagnostics_targets_in_stmt(stmt, arg_types)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_get_diagnostics_target(
+    target: &AssignTarget,
+    arg_types: &[(String, SqlType)],
+) -> Result<(), ParseError> {
+    let AssignTarget::Name(name) = target else {
+        return Ok(());
+    };
+    let Some((_, ty)) = arg_types
+        .iter()
+        .find(|(arg_name, _)| arg_name.eq_ignore_ascii_case(name))
+    else {
+        return Ok(());
+    };
+    if matches!(ty.kind, SqlTypeKind::Composite | SqlTypeKind::Record) {
+        return Err(ParseError::DetailedError {
+            message: format!("\"{name}\" is not a scalar variable"),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+    Ok(())
 }
 
 fn validate_raise_placeholders(block: &Block) -> Result<(), ParseError> {

@@ -3414,10 +3414,12 @@ impl Database {
         let mut all_arg_modes = Vec::new();
         let mut all_arg_names = Vec::new();
         let mut output_args = Vec::new();
+        let mut plpgsql_arg_types = Vec::new();
         let mut provariadic = 0;
 
         for arg in &create_stmt.args {
             let sql_type = resolve_raw_type_name(&arg.ty, &catalog).map_err(ExecError::Parse)?;
+            plpgsql_arg_types.push((arg.name.clone().unwrap_or_default(), sql_type));
             if matches!(sql_type.kind, SqlTypeKind::Shell) {
                 push_backend_notice(
                     "NOTICE",
@@ -3673,6 +3675,7 @@ impl Database {
                 prorettype == VOID_TYPE_OID,
                 proretset,
                 proargnames.as_deref().unwrap_or(&[]),
+                &plpgsql_arg_types,
                 gucs,
             )
             .map_err(ExecError::Parse)?;

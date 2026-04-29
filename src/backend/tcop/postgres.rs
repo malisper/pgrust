@@ -2182,6 +2182,9 @@ fn select_function_call_name(sql: &str) -> Option<String> {
 }
 
 fn routine_definition_error_position(sql: &str, message: &str) -> Option<usize> {
+    if let Some(position) = plpgsql_get_diagnostics_target_error_position(sql, message) {
+        return Some(position);
+    }
     match message {
         "invalid attribute in procedure definition" => {
             find_case_insensitive_token_position(sql, "WINDOW")
@@ -2253,6 +2256,30 @@ fn find_nth_identifier_position(sql: &str, ident: &str, nth: usize) -> Option<us
             index += ident_bytes.len();
         } else {
             index += 1;
+        }
+    }
+    None
+}
+
+fn plpgsql_get_diagnostics_target_error_position(sql: &str, message: &str) -> Option<usize> {
+    let target = message
+        .strip_prefix('"')?
+        .split_once("\" is not a scalar variable")?
+        .0;
+    let lower = sql.to_ascii_lowercase();
+    for phrase in ["get diagnostics", "get stacked diagnostics"] {
+        let mut from = 0usize;
+        while let Some(offset) = lower[from..].find(phrase) {
+            let start = from + offset + phrase.len();
+            let end = sql[start..]
+                .find('=')
+                .map(|offset| start + offset)
+                .or_else(|| sql[start..].find(';').map(|offset| start + offset))
+                .unwrap_or(sql.len());
+            if let Some(target_offset) = find_identifier_in_segment(&sql[start..end], target) {
+                return Some(start + target_offset + 1);
+            }
+            from = start;
         }
     }
     None

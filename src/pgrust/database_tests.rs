@@ -17293,6 +17293,27 @@ fn plpgsql_get_diagnostics_pg_context_reports_live_stack() {
 }
 
 #[test]
+fn plpgsql_get_diagnostics_rejects_composite_target() {
+    let base = temp_dir("plpgsql_get_diagnostics_composite_target");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table plpgsql_diag_row(a int4)")
+        .unwrap();
+    let err = db
+        .execute(
+            1,
+            "create function plpgsql_diag_bad(x plpgsql_diag_row) returns void language plpgsql as $$
+             begin
+               get diagnostics x = row_count;
+               return;
+             end
+             $$",
+        )
+        .unwrap_err();
+    assert_sqlstate(err, "42804", "\"x\" is not a scalar variable");
+}
+
+#[test]
 fn plpgsql_declare_default_scope_matches_declaration_order() {
     let base = temp_dir("plpgsql_declare_default_scope");
     let db = Database::open(&base, 16).unwrap();
