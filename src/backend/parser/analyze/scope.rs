@@ -4384,7 +4384,7 @@ fn join_using_relation_names(left: &ScopeColumn, right: &ScopeColumn) -> Vec<Str
 }
 
 fn bind_join_using_projection(
-    kind: &JoinKind,
+    _kind: &JoinKind,
     columns: &[String],
     left_scope: &BoundScope,
     right_scope: &BoundScope,
@@ -4430,11 +4430,7 @@ fn bind_join_using_projection(
         let left_ty = left_scope.desc.columns[*left_index].sql_type;
         let left_expr = left_scope.output_exprs[*left_index].clone();
         let right_expr = right_scope.output_exprs[*right_index].clone();
-        alias_exprs.push(match kind {
-            JoinKind::Inner | JoinKind::Cross | JoinKind::Left => left_expr,
-            JoinKind::Right => right_expr,
-            JoinKind::Full => Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)),
-        });
+        alias_exprs.push(Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)));
         output_columns.push(QueryColumn {
             name: name.clone(),
             sql_type: left_ty,
@@ -4654,10 +4650,22 @@ fn apply_relation_alias(
     }
 
     if preserve_source_names {
+        let join_using_alias_merged_cols = plan.rtable.last().and_then(|rte| {
+            if let RangeTblEntryKind::Join { joinmergedcols, .. } = &rte.kind
+                && *joinmergedcols > 0
+            {
+                Some(*joinmergedcols)
+            } else {
+                None
+            }
+        });
         let alias_only_anonymous = columns
             .iter()
             .any(|column| column.relation_names.is_empty());
-        for column in &mut columns {
+        for (index, column) in columns.iter_mut().enumerate() {
+            if join_using_alias_merged_cols.is_some_and(|merged_cols| index >= merged_cols) {
+                continue;
+            }
             if alias_only_anonymous && !column.relation_names.is_empty() {
                 continue;
             }
@@ -4669,28 +4677,30 @@ fn apply_relation_alias(
                 column.relation_names.push(alias.to_string());
             }
         }
-        let relation_alias_only_anonymous = relations
-            .iter()
-            .any(|relation| relation.relation_names.is_empty());
-        if relations.is_empty() {
-            relations.push(ScopeRelation {
-                relation_names: vec![alias.to_string()],
-                hidden_invalid_relation_names: vec![],
-                hidden_missing_relation_names: vec![],
-                system_varno: None,
-                relation_oid: None,
-            });
-        } else {
-            for relation in &mut relations {
-                if relation_alias_only_anonymous && !relation.relation_names.is_empty() {
-                    continue;
-                }
-                if !relation
-                    .relation_names
-                    .iter()
-                    .any(|name| name.eq_ignore_ascii_case(alias))
-                {
-                    relation.relation_names.push(alias.to_string());
+        if join_using_alias_merged_cols.is_none() {
+            let relation_alias_only_anonymous = relations
+                .iter()
+                .any(|relation| relation.relation_names.is_empty());
+            if relations.is_empty() {
+                relations.push(ScopeRelation {
+                    relation_names: vec![alias.to_string()],
+                    hidden_invalid_relation_names: vec![],
+                    hidden_missing_relation_names: vec![],
+                    system_varno: None,
+                    relation_oid: None,
+                });
+            } else {
+                for relation in &mut relations {
+                    if relation_alias_only_anonymous && !relation.relation_names.is_empty() {
+                        continue;
+                    }
+                    if !relation
+                        .relation_names
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(alias))
+                    {
+                        relation.relation_names.push(alias.to_string());
+                    }
                 }
             }
         }

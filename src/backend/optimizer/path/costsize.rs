@@ -2474,48 +2474,6 @@ fn build_join_paths_internal(
     }
 
     if !lateral_orientation_locked
-        && config.enable_hashjoin
-        && matches!(kind, JoinType::Left | JoinType::Right)
-        && let Some(hash_join) =
-            extract_hash_join_clauses(&restrict_clauses, right_relids, left_relids)
-    {
-        paths.push(estimate_hash_join_internal(
-            root,
-            right.clone(),
-            left.clone(),
-            reverse_join_type(kind),
-            pathtarget.clone(),
-            output_columns.clone(),
-            hash_join.hash_clauses,
-            hash_join.outer_hash_keys,
-            hash_join.inner_hash_keys,
-            hash_join.join_clauses,
-            restrict_clauses.clone(),
-        ));
-    }
-
-    if !lateral_orientation_locked
-        && config.enable_mergejoin
-        && matches!(kind, JoinType::Left | JoinType::Right)
-        && let Some(merge_join) =
-            extract_merge_join_clauses(&restrict_clauses, right_relids, left_relids)
-    {
-        paths.push(estimate_merge_join_internal(
-            root,
-            right.clone(),
-            left.clone(),
-            reverse_join_type(kind),
-            pathtarget.clone(),
-            output_columns.clone(),
-            merge_join.merge_clauses,
-            merge_join.outer_merge_keys,
-            merge_join.inner_merge_keys,
-            merge_join.join_clauses,
-            restrict_clauses.clone(),
-        ));
-    }
-
-    if !lateral_orientation_locked
         && config.enable_mergejoin
         && matches!(kind, JoinType::Inner)
         && let Some(merge_join) =
@@ -2537,14 +2495,6 @@ fn build_join_paths_internal(
     }
 
     paths
-}
-
-fn reverse_join_type(kind: JoinType) -> JoinType {
-    match kind {
-        JoinType::Left => JoinType::Right,
-        JoinType::Right => JoinType::Left,
-        other => other,
-    }
 }
 
 fn parameterized_inner_index_path(

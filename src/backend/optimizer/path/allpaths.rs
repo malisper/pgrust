@@ -858,6 +858,7 @@ fn collect_bitmap_or_paths(
         .filter(|index| {
             index.index_meta.indisvalid
                 && index.index_meta.indisready
+                && !index.index_meta.indisexclusion
                 && !index.index_meta.indkey.is_empty()
                 && access_method_supports_bitmap_scan(index.index_meta.am_oid)
         })
@@ -1197,6 +1198,7 @@ fn collect_relation_access_paths(
         .filter(|index| {
             index.index_meta.indisvalid
                 && index.index_meta.indisready
+                && !index.index_meta.indisexclusion
                 && !index.index_meta.indkey.is_empty()
         })
     {
@@ -1358,6 +1360,7 @@ fn collect_relation_ordered_index_paths(
         .filter(|index| {
             index.index_meta.indisvalid
                 && index.index_meta.indisready
+                && !index.index_meta.indisexclusion
                 && !index.index_meta.indkey.is_empty()
         })
     {
