@@ -1153,6 +1153,159 @@ impl AggregateRuntime {
         }
     }
 
+    pub(crate) fn partial_value(
+        &self,
+        accum: &AggAccum,
+        state: &AccumState,
+    ) -> Result<Value, ExecError> {
+        match (self, state) {
+            (
+                AggregateRuntime::Builtin {
+                    func: AggFunc::Count,
+                    ..
+                },
+                AccumState::Count { count },
+            ) => Ok(Value::Int64(*count)),
+            (
+                AggregateRuntime::Builtin {
+                    func: AggFunc::Sum, ..
+                },
+                AccumState::Sum { .. },
+            )
+            | (
+                AggregateRuntime::Builtin {
+                    func: AggFunc::Min, ..
+                },
+                AccumState::Min { .. },
+            )
+            | (
+                AggregateRuntime::Builtin {
+                    func: AggFunc::Max, ..
+                },
+                AccumState::Max { .. },
+            ) => Ok(state.finalize()),
+            (
+                AggregateRuntime::Builtin {
+                    func: AggFunc::Avg, ..
+                },
+                AccumState::Avg {
+                    sum,
+                    count,
+                    result_type,
+                },
+            ) => Ok(Value::Record(
+                crate::include::nodes::datum::RecordValue::anonymous(vec![
+                    (
+                        "sum".into(),
+                        numeric_accum_to_value(sum.as_ref(), *result_type),
+                    ),
+                    ("count".into(), Value::Int64(*count)),
+                ]),
+            )),
+            (
+                AggregateRuntime::Builtin {
+                    func: AggFunc::Avg, ..
+                },
+                AccumState::IntervalAvg { sum, count },
+            ) => Ok(Value::Record(
+                crate::include::nodes::datum::RecordValue::anonymous(vec![
+                    (
+                        "sum".into(),
+                        sum.clone().map(Value::Interval).unwrap_or(Value::Null),
+                    ),
+                    ("count".into(), Value::Int64(*count)),
+                ]),
+            )),
+            (AggregateRuntime::Builtin { func, .. }, _) => Err(ExecError::DetailedError {
+                message: format!("aggregate {func:?} is not partial-safe"),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            }),
+            _ => Err(ExecError::DetailedError {
+                message: "only builtin aggregates support partial aggregation".into(),
+                detail: Some(format!("aggregate oid {}", accum.aggfnoid)),
+                hint: None,
+                sqlstate: "0A000",
+            }),
+        }
+    }
+
+    pub(crate) fn combine_partial(
+        &self,
+        accum: &AggAccum,
+        state: &mut AccumState,
+        partial: &Value,
+        ctx: &mut crate::backend::executor::ExecutorContext,
+    ) -> Result<(), ExecError> {
+        match self {
+            AggregateRuntime::Builtin {
+                func: AggFunc::Count,
+                ..
+            } => {
+                let Value::Int64(value) = partial else {
+                    return Ok(());
+                };
+                if let AccumState::Count { count } = state {
+                    *count += *value;
+                }
+                Ok(())
+            }
+            AggregateRuntime::Builtin {
+                func: AggFunc::Avg, ..
+            } => {
+                let Value::Record(record) = partial else {
+                    return Ok(());
+                };
+                let Some(sum_value) = record.fields.first() else {
+                    return Ok(());
+                };
+                let partial_count = match record.fields.get(1) {
+                    Some(Value::Int64(value)) => *value,
+                    _ => 0,
+                };
+                match state {
+                    AccumState::Avg {
+                        sum,
+                        count,
+                        result_type,
+                    } => {
+                        *sum = accumulate_value(sum.take(), *result_type, sum_value);
+                        *count += partial_count;
+                    }
+                    AccumState::IntervalAvg { sum, count } => {
+                        if let Value::Interval(value) = sum_value {
+                            *sum = Some(match sum.take() {
+                                Some(current) => current
+                                    .checked_add(*value)
+                                    .ok_or_else(interval_avg_out_of_range)?,
+                                None => value.clone(),
+                            });
+                        }
+                        *count += partial_count;
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }
+            AggregateRuntime::Builtin {
+                func: AggFunc::Sum, ..
+            }
+            | AggregateRuntime::Builtin {
+                func: AggFunc::Min, ..
+            }
+            | AggregateRuntime::Builtin {
+                func: AggFunc::Max, ..
+            } => self.transition(state, std::slice::from_ref(partial), ctx),
+            _ => Err(ExecError::DetailedError {
+                message: "only builtin aggregates support partial aggregation".into(),
+                detail: Some(format!("aggregate oid {}", accum.aggfnoid)),
+                hint: None,
+                sqlstate: "0A000",
+            }),
+        }
+    }
+
     pub(crate) fn finalize(
         &self,
         accum: &AggAccum,
@@ -1812,6 +1965,19 @@ fn accumulate_value(
             })
         }
         _ => sum,
+    }
+}
+
+fn numeric_accum_to_value(sum: Option<&NumericAccum>, result_type: SqlType) -> Value {
+    match sum {
+        Some(NumericAccum::Int(value)) if matches!(result_type.kind, SqlTypeKind::Numeric) => {
+            Value::Numeric(NumericValue::from_i64(*value))
+        }
+        Some(NumericAccum::Int(value)) => Value::Int64(*value),
+        Some(NumericAccum::Float(value)) => Value::Float64(*value),
+        Some(NumericAccum::Numeric(value)) => Value::Numeric(value.clone()),
+        Some(NumericAccum::NumericSum(value)) => Value::Numeric(value.to_numeric()),
+        None => Value::Null,
     }
 }
 

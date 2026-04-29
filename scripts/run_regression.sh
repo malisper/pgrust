@@ -1434,13 +1434,18 @@ else
     # groups happen to land on indices 0,4,8,12,16,20. Weighting by
     # test-count-per-group is a proxy for runtime; per-test history would be
     # better but requires plumbing regression-history data into the harness.
+    # :HACK: Pass groups as argv rather than stdin. The previous version piped
+    # `printf %s\n ${ALL_TEST_GROUPS[@]} | python3 - "$SHARD_TOTAL" <<'PY' ... PY`
+    # but the heredoc redirected python's stdin, so sys.stdin.read() returned
+    # empty and every group defaulted to shard 0 (load=231/0/0/0 in the first
+    # broken production run, 25084823283).
     SHARD_ASSIGNMENTS=()
     if [[ ${#ALL_TEST_GROUPS[@]} -gt 0 ]]; then
-        mapfile -t SHARD_ASSIGNMENTS < <(
-            printf '%s\n' "${ALL_TEST_GROUPS[@]}" | python3 - "$SHARD_TOTAL" <<'PY'
+        lpt_script="$(mktemp "${TMPDIR:-/tmp}/lpt.XXXXXX.py")"
+        cat > "$lpt_script" <<'PY'
 import sys
 shard_total = int(sys.argv[1])
-groups = sys.stdin.read().splitlines()
+groups = sys.argv[2:]
 weights = [(len(g.split()), i) for i, g in enumerate(groups)]
 # Heaviest first; original index breaks ties so assignment is deterministic.
 weights.sort(key=lambda x: (-x[0], x[1]))
@@ -1453,7 +1458,8 @@ for weight, orig_idx in weights:
 for a in assignment:
     print(a)
 PY
-        )
+        mapfile -t SHARD_ASSIGNMENTS < <(python3 "$lpt_script" "$SHARD_TOTAL" "${ALL_TEST_GROUPS[@]}")
+        rm -f "$lpt_script"
     fi
 
     SHARD_LOADS=()

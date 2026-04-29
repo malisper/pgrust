@@ -657,6 +657,8 @@ pub(super) fn optimize_path_with_config(
                 output_columns,
                 slot_id,
                 strategy,
+                phase,
+                semantic_accumulators,
                 disabled,
                 pathkeys,
                 ..
@@ -682,6 +684,8 @@ pub(super) fn optimize_path_with_config(
                     pathtarget,
                     slot_id,
                     strategy,
+                    phase,
+                    semantic_accumulators,
                     disabled,
                     pathkeys,
                     input: Box::new(input),
