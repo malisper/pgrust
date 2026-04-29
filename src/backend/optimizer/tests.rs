@@ -12,8 +12,7 @@ use crate::backend::parser::{
 };
 use crate::backend::parser::{analyze_select_query_with_outer, parse_select};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_OID, INT4_CMP_GT_PROC_OID, PUBLIC_NAMESPACE_OID,
-    PgInheritsRow,
+    BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_OID, PUBLIC_NAMESPACE_OID, PgInheritsRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{
@@ -105,17 +104,6 @@ fn gt(left: Expr, right: Expr) -> Expr {
     Expr::op_auto(OpExprKind::Gt, vec![left, right])
 }
 
-fn leakproof_gt(left: Expr, right: Expr) -> Expr {
-    Expr::Op(Box::new(OpExpr {
-        opno: 0,
-        opfuncid: INT4_CMP_GT_PROC_OID,
-        op: OpExprKind::Gt,
-        opresulttype: bool_ty(),
-        args: vec![left, right],
-        collation_oid: None,
-    }))
-}
-
 fn is_special_user_var(expr: &Expr, varno: usize, index: usize) -> bool {
     matches!(
         expr,
@@ -142,8 +130,8 @@ fn base_restrict_expr_order_respects_security_levels_and_leakproof() {
             gt(var(1, 1), Expr::Const(Value::Int32(1))),
         ],
     );
-    let cheap_leakproof = leakproof_gt(var(1, 1), Expr::Const(Value::Int32(2)));
-    let cheap_nonleakproof = gt(var(1, 1), Expr::Const(Value::Int32(3)));
+    let cheap_leakproof = gt(var(1, 1), Expr::Const(Value::Int32(2)));
+    let cheap_nonleakproof = Expr::func(999_999, Some(bool_ty()), false, vec![var(1, 1)]);
     let mut rel = RelOptInfo::new(
         vec![1],
         RelOptKind::BaseRel,

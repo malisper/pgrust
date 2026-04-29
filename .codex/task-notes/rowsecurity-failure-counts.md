@@ -701,3 +701,21 @@ Permissive policy OR ordering bucket:
 - Latest rowsecurity regression result with the requested 120s timeout:
   `732/774` matched, `42` mismatches, `804` diff lines, `40` hunks. New diff
   copied to `/tmp/diffs/rowsecurity.diff`.
+
+Leakproof comparison ordering bucket:
+- Built-in comparison expressions that do not carry a resolved operator proc OID
+  are now treated as leakproof for security-qual ordering, while catalog-backed
+  operators/functions still use `pg_proc.proleakproof` and unknown functions
+  remain non-leakproof.
+- Updated the focused optimizer ordering test to exercise the normal
+  `Expr::op_auto` comparison path and a non-leakproof function predicate.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  base_restrict_expr_order_respects_security_levels_and_leakproof` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `735/774` matched, `39` mismatches, `762` diff lines, `38` hunks. New diff
+  copied to `/tmp/diffs/rowsecurity.diff`.
+- Remaining simple inherited-table qual-order hunks around `a <= 2`/`a = 2`
+  still exist; this slice reduced other security ordering and notice-display
+  mismatches.

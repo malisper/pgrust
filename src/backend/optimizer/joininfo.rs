@@ -96,7 +96,9 @@ fn expr_is_leakproof(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
                     .operator_by_oid(op.opno)
                     .map(|operator| operator.oprcode)
             };
-            proc_oid.is_some_and(|proc_oid| proc_is_leakproof(proc_oid, catalog))
+            proc_oid
+                .map(|proc_oid| proc_is_leakproof(proc_oid, catalog))
+                .unwrap_or_else(|| builtin_comparison_op_is_leakproof(op.op))
                 && op.args.iter().all(|arg| expr_is_leakproof(arg, catalog))
         }
         Expr::Func(func) => {
@@ -142,6 +144,18 @@ fn expr_is_leakproof(expr: &Expr, catalog: &dyn CatalogLookup) -> bool {
         | Expr::SubPlan(_)
         | Expr::Random => false,
     }
+}
+
+fn builtin_comparison_op_is_leakproof(op: crate::include::nodes::primnodes::OpExprKind) -> bool {
+    matches!(
+        op,
+        crate::include::nodes::primnodes::OpExprKind::Eq
+            | crate::include::nodes::primnodes::OpExprKind::NotEq
+            | crate::include::nodes::primnodes::OpExprKind::Lt
+            | crate::include::nodes::primnodes::OpExprKind::LtEq
+            | crate::include::nodes::primnodes::OpExprKind::Gt
+            | crate::include::nodes::primnodes::OpExprKind::GtEq
+    )
 }
 
 fn proc_is_leakproof(proc_oid: u32, catalog: &dyn CatalogLookup) -> bool {
