@@ -6014,6 +6014,9 @@ fn maybe_wrap_nested_loop_inner_plan(
     if !root.is_some_and(|root| root.config.enable_memoize) || nest_params.is_empty() {
         return right_plan;
     }
+    if memoize_inner_plan_is_trivial_or_function(&right_plan) {
+        return right_plan;
+    }
     // :HACK: PostgreSQL avoids wrapping the whole lateral VALUES branch in
     // Memoize when the outer key has little reuse; keeping the inner index
     // Memoize visible lets repeated VALUES constants share one cache.
@@ -6074,6 +6077,21 @@ fn maybe_wrap_nested_loop_inner_plan(
         binary_mode,
         single_row: false,
         est_entries: 0,
+    }
+}
+
+fn memoize_inner_plan_is_trivial_or_function(plan: &Plan) -> bool {
+    match plan {
+        // :HACK: PostgreSQL does not expose Memoize for the simple lateral
+        // function/result shapes exercised by rangefuncs. These paths are
+        // cheap, and memoizing FunctionScan can also be observably wrong for
+        // volatile set-returning functions.
+        Plan::FunctionScan { .. } | Plan::Result { .. } => true,
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Materialize { input, .. } => memoize_inner_plan_is_trivial_or_function(input),
+        _ => false,
     }
 }
 

@@ -14,4 +14,4 @@ scripts/run_regression.sh --skip-build --jobs 1 --test rangefuncs --timeout 120 
 CARGO_TARGET_DIR=/tmp/pgrust-target-rangefuncs-current scripts/run_regression.sh --jobs 1 --test rangefuncs --timeout 120 --port 55467 --results-dir /tmp/diffs/rangefuncs-current-rebuilt
 
 Remaining:
-rangefuncs still fails 432/437 matched, 110 diff lines. Mismatches: one verbose EXPLAIN constant rendering for set-op SQL function returning numeric composite, three nested lateral SQL-function EXPLAIN shape/rendering differences around extractq2, and one EXPLAIN Memoize difference around jsonb_to_recordset lateral function.
+Fixed in the follow-up patch. `rangefuncs` now passes 437/437 matched queries in `/tmp/diffs/rangefuncs-fix2`.
