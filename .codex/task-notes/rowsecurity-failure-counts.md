@@ -762,3 +762,17 @@ Raw pg_policy collation probe bucket:
 - Latest rowsecurity regression result with the requested 120s timeout:
   `736/774` matched, `38` mismatches, `732` diff lines, `36` hunks. New diff
   copied to `/tmp/diffs/rowsecurity.diff`.
+
+Hash EXPLAIN child indentation bucket:
+- Hash node EXPLAIN children now use normal one-level indentation instead of
+  the old `indent + 3` special case, matching PostgreSQL's hash-input scan
+  layout and table width.
+- Added focused coverage for a hash join where the hash input scan must appear
+  one level below `Hash`.
+- `scripts/cargo_isolated.sh test --lib --quiet
+  explain_hash_child_uses_one_level_of_indentation` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `738/774` matched, `36` mismatches, `707` diff lines, `34` hunks. New diff
+  copied to `/tmp/diffs/rowsecurity.diff`.

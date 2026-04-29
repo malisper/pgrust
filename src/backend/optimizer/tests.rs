@@ -4024,6 +4024,45 @@ fn explain_indents_scan_filter_details_under_append_children() {
 }
 
 #[test]
+fn explain_hash_child_uses_one_level_of_indentation() {
+    let mut catalog = Catalog::default();
+    let desc = RelationDesc {
+        columns: vec![column_desc("id", int4(), false)],
+    };
+    let left = catalog
+        .create_table("hash_left", desc.clone())
+        .expect("create left table");
+    let right = catalog
+        .create_table("hash_right", desc)
+        .expect("create right table");
+    catalog
+        .set_relation_stats(left.relation_oid, 128, 10_000.0)
+        .expect("seed left stats");
+    catalog
+        .set_relation_stats(right.relation_oid, 128, 10_000.0)
+        .expect("seed right stats");
+
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select * from hash_left join hash_right on hash_left.id = hash_right.id",
+        &catalog,
+    );
+    let lines = explain_lines_for_planned_stmt(&planned);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("        ->  Seq Scan on hash_right")),
+        "expected hash input one level below Hash, got {lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("                    ->  Seq Scan on hash_right")),
+        "hash input was indented too deeply: {lines:?}"
+    );
+}
+
+#[test]
 fn explain_formats_distinct_minmax_with_unique_and_index_only_scan() {
     let catalog = catalog_with_inherited_indexed_items();
     let planned =
