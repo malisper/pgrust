@@ -618,3 +618,17 @@ psql describe policy bucket:
   readable SQL in `pg_policy.polqual`/`polwithcheck`, while PostgreSQL's
   `pg_get_expr` output retains PostgreSQL parenthesization and subquery
   formatting.
+
+psql permissions visibility bucket:
+- The psql permissions/`\dp` shortcut now respects
+  `pg_table_is_visible(c.oid)` by comparing the relation's display name under
+  the session search path, so public bootstrap relations are hidden when
+  `search_path` is narrowed to `regress_rls_schema`.
+- Added focused coverage where `\dp`-style metadata sees only the relation
+  visible in the current schema and not a relation in `public`.
+- `scripts/cargo_isolated.sh test --lib --quiet psql_permissions_query` passed.
+- `scripts/cargo_isolated.sh test --lib --quiet row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result with the requested 120s timeout:
+  `721/774` matched, `53` mismatches, `949` diff lines, `50` hunks. New diff
+  copied to `/tmp/diffs/rowsecurity.diff`.

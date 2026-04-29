@@ -5516,6 +5516,10 @@ fn psql_describe_permissions_query(
     let policy_rows = catcache.policy_rows();
     let hide_system_schemas = lower_sql.contains("n.nspname <> 'pg_catalog'")
         || lower_sql.contains("n.nspname <> 'information_schema'");
+    let require_table_visible = lower_sql.contains("pg_catalog.pg_table_is_visible(c.oid)")
+        || lower_sql.contains("pg_table_is_visible(c.oid)");
+    let txn_ctx = session.catalog_txn_ctx();
+    let search_path = session.configured_search_path();
 
     let mut rows = catcache
         .class_rows()
@@ -5525,6 +5529,19 @@ fn psql_describe_permissions_query(
             let schema_name = namespace_names.get(&class.relnamespace)?.clone();
             if hide_system_schemas
                 && matches!(schema_name.as_str(), "pg_catalog" | "information_schema")
+            {
+                return None;
+            }
+            if require_table_visible
+                && db
+                    .relation_display_name(
+                        session.client_id,
+                        txn_ctx,
+                        search_path.as_deref(),
+                        class.oid,
+                    )
+                    .as_deref()
+                    != Some(class.relname.as_str())
             {
                 return None;
             }
@@ -12352,6 +12369,39 @@ ORDER BY 1, 2;";
             }
             other => panic!("expected policies text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn psql_permissions_query_respects_table_visibility_filter() {
+        let db = Database::open(temp_dir("describe_permissions_visibility"), 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table public_tbl (id int4)")
+            .unwrap();
+        session.execute(&db, "create schema app").unwrap();
+        session.execute(&db, "set search_path = app").unwrap();
+        session
+            .execute(&db, "create table app_tbl (id int4)")
+            .unwrap();
+
+        let sql = r#"SELECT n.nspname as "Schema",
+  c.relname as "Name",
+  CASE c.relkind WHEN 'r' THEN 'table' END as "Type",
+  c.relacl AS "Access privileges",
+  NULL AS "Column privileges",
+  (SELECT pg_catalog.array_to_string(ARRAY(SELECT polname FROM pg_catalog.pg_policy pol WHERE polrelid = c.oid), E'\n')) AS "Policies"
+FROM pg_catalog.pg_class c
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r')
+      AND pg_catalog.pg_table_is_visible(c.oid)
+      AND n.nspname <> 'pg_catalog'
+      AND n.nspname <> 'information_schema'
+ORDER BY 1, 2;"#;
+        let (columns, rows) = execute_psql_describe_query(&db, &session, sql).unwrap();
+        assert_eq!(columns.len(), 6);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Value::Text("app".into()));
+        assert_eq!(rows[0][1], Value::Text("app_tbl".into()));
     }
 
     #[test]
