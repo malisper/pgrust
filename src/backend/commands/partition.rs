@@ -306,6 +306,10 @@ fn child_partition_bound(child: &BoundRelation) -> Result<PartitionBoundSpec, Ex
     deserialize_partition_bound(bound).map_err(ExecError::Parse)
 }
 
+pub(crate) fn partition_relation_is_default(child: &BoundRelation) -> Result<bool, ExecError> {
+    Ok(child_partition_bound(child)?.is_default())
+}
+
 fn key_values(
     relation: &BoundRelation,
     spec: &LoweredPartitionSpec,
@@ -1664,7 +1668,7 @@ pub(crate) fn exec_find_partition(
     }
 }
 
-fn remap_partition_row_to_child_layout(
+pub(crate) fn remap_partition_row_to_child_layout(
     row: &[Value],
     parent_desc: &RelationDesc,
     child_desc: &RelationDesc,
@@ -1710,7 +1714,7 @@ fn remap_partition_row_to_child_layout(
     Ok(child_row)
 }
 
-fn remap_partition_row_to_parent_layout(
+pub(crate) fn remap_partition_row_to_parent_layout(
     row: &[Value],
     child_desc: &RelationDesc,
     parent_desc: &RelationDesc,

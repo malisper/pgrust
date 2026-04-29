@@ -545,7 +545,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return Some(position);
             }
             if message == "conflicting constraint properties" {
-                return find_constraint_enforcement_attribute_position(sql);
+                return find_conflicting_constraint_enforcement_attribute_position(sql);
             }
             if message == "range lower bound must be less than or equal to range upper bound" {
                 return find_range_literal_position(sql);
@@ -590,7 +590,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return find_case_insensitive_token_position(sql, "INITIALLY");
             }
             if message == "multiple ENFORCED/NOT ENFORCED clauses not allowed" {
-                return find_constraint_enforcement_attribute_position(sql);
+                return find_conflicting_constraint_enforcement_attribute_position(sql);
             }
             return None;
         }
@@ -2442,7 +2442,7 @@ fn find_last_case_insensitive_token_position(sql: &str, token: &str) -> Option<u
         .map(|index| index + 1)
 }
 
-fn find_constraint_enforcement_attribute_position(sql: &str) -> Option<usize> {
+fn find_conflicting_constraint_enforcement_attribute_position(sql: &str) -> Option<usize> {
     [
         find_case_insensitive_token_position(sql, "NOT ENFORCED"),
         find_last_case_insensitive_token_position(sql, "ENFORCED"),
@@ -7468,6 +7468,19 @@ fn psql_describe_constraints_query(
     let txn_ctx = session.catalog_txn_ctx();
     let include_sametable = lower.contains("as sametable");
     let include_ontable = lower.contains(" as ontable");
+    let include_partition_ancestors = lower.contains("pg_partition_ancestors");
+    let catalog = session.catalog_lookup(db);
+    let mut relation_oids = vec![oid];
+    if include_partition_ancestors {
+        let mut pending = catalog.inheritance_parents(oid);
+        while let Some(parent) = pending.pop() {
+            if relation_oids.contains(&parent.inhparent) {
+                continue;
+            }
+            relation_oids.push(parent.inhparent);
+            pending.extend(catalog.inheritance_parents(parent.inhparent));
+        }
+    }
     let incoming_refs = lower.contains("where confrelid in")
         || lower.contains("where c.confrelid in")
         || lower.contains("where r.confrelid in")
@@ -7481,7 +7494,7 @@ fn psql_describe_constraints_query(
             txn_ctx,
         )
         .into_iter()
-        .filter(|row| row.confrelid == oid)
+        .filter(|row| relation_oids.contains(&row.confrelid))
         .filter(|row| contype_filter.is_none_or(|contype| row.contype == contype))
         .filter(|row| !lower.contains("conparentid = 0") || row.conparentid == 0)
         .filter_map(|row| {
@@ -7509,20 +7522,26 @@ fn psql_describe_constraints_query(
         })
         .collect::<Vec<_>>()
     } else {
-        let relation = db.describe_relation_by_oid(session.client_id, txn_ctx, oid)?;
-        let relname = db
-            .relation_display_name(
-                session.client_id,
-                txn_ctx,
-                session.configured_search_path().as_deref(),
-                oid,
-            )
-            .unwrap_or_else(|| oid.to_string());
-        db.constraint_rows_for_relation(session.client_id, txn_ctx, oid)
+        relation_oids
             .into_iter()
-            .filter(|row| contype_filter.is_none_or(|contype| row.contype == contype))
-            .filter(|row| !lower.contains("conparentid = 0") || row.conparentid == 0)
-            .filter_map(|row| {
+            .flat_map(|relation_oid| {
+                db.constraint_rows_for_relation(session.client_id, txn_ctx, relation_oid)
+                    .into_iter()
+                    .map(move |row| (relation_oid, row))
+            })
+            .filter(|(_, row)| contype_filter.is_none_or(|contype| row.contype == contype))
+            .filter(|(_, row)| !lower.contains("conparentid = 0") || row.conparentid == 0)
+            .filter_map(|(relation_oid, row)| {
+                let relation =
+                    db.describe_relation_by_oid(session.client_id, txn_ctx, relation_oid)?;
+                let relname = db
+                    .relation_display_name(
+                        session.client_id,
+                        txn_ctx,
+                        session.configured_search_path().as_deref(),
+                        relation_oid,
+                    )
+                    .unwrap_or_else(|| relation_oid.to_string());
                 let condef = constraint_def_for_row(db, session, Some(&relation), &row)?;
                 if include_sametable {
                     Some(vec![
@@ -7962,10 +7981,11 @@ fn foreign_key_constraint_def(
         .collect::<Option<Vec<_>>>()?;
     let referenced_relation =
         db.describe_relation_by_oid(session.client_id, session.catalog_txn_ctx(), row.confrelid)?;
+    let search_path = session.configured_search_path();
     let referenced_relation_name = db.relation_display_name(
         session.client_id,
         session.catalog_txn_ctx(),
-        None,
+        search_path.as_deref(),
         row.confrelid,
     )?;
     let mut referenced_columns = row
@@ -8012,7 +8032,23 @@ fn foreign_key_constraint_def(
         def.push_str(&set_columns.join(", "));
         def.push(')');
     }
+    append_foreign_key_constraint_options(&mut def, row);
     Some(def)
+}
+
+fn append_foreign_key_constraint_options(
+    def: &mut String,
+    row: &crate::include::catalog::PgConstraintRow,
+) {
+    if row.condeferrable {
+        def.push_str(" DEFERRABLE");
+        if row.condeferred {
+            def.push_str(" INITIALLY DEFERRED");
+        }
+    }
+    if !row.conenforced {
+        def.push_str(" NOT ENFORCED");
+    }
 }
 
 fn relation_column_names_for_attnums(

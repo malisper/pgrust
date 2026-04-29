@@ -20,7 +20,8 @@ use crate::backend::parser::{
 use crate::backend::storage::lmgr::{TableLockMode, lock_table_requests_interruptible};
 use crate::backend::utils::misc::interrupts::check_for_interrupts;
 use crate::include::catalog::{
-    CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, PgInheritsRow,
+    CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
+    CONSTRAINT_UNIQUE, PgInheritsRow,
 };
 
 fn add_lock_request(
@@ -39,6 +40,60 @@ fn relation_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> Stri
         .class_row_by_oid(relation_oid)
         .map(|row| row.relname)
         .unwrap_or_else(|| relation_oid.to_string())
+}
+
+fn relation_basename(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+fn partition_subtree_oids(catalog: &dyn CatalogLookup, root_oid: u32) -> Vec<u32> {
+    let mut subtree = vec![root_oid];
+    let mut stack = vec![root_oid];
+    while let Some(parent_oid) = stack.pop() {
+        for child in catalog.inheritance_children(parent_oid) {
+            subtree.push(child.inhrelid);
+            stack.push(child.inhrelid);
+        }
+    }
+    subtree
+}
+
+fn reject_attach_partition_referenced_by_foreign_key(
+    catalog: &dyn CatalogLookup,
+    child: &BoundRelation,
+    partition_name: &str,
+) -> Result<(), ExecError> {
+    let constraints = catalog.constraint_rows();
+    for referenced_oid in partition_subtree_oids(catalog, child.relation_oid) {
+        if let Some(row) = constraints
+            .iter()
+            .find(|row| row.contype == CONSTRAINT_FOREIGN && row.confrelid == referenced_oid)
+        {
+            let referenced_name = relation_name_for_oid(catalog, referenced_oid);
+            if referenced_oid == child.relation_oid {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "cannot attach table \"{}\" as a partition because it is referenced by foreign key \"{}\"",
+                        relation_basename(partition_name),
+                        row.conname
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "55000",
+                });
+            }
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot ALTER TABLE \"{}\" because it is being used by active queries in this session",
+                    referenced_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "55006",
+            });
+        }
+    }
+    Ok(())
 }
 
 fn lookup_partition_alter_parent(
@@ -484,6 +539,7 @@ impl Database {
             &child,
             &stmt.partition_table,
         )?;
+        reject_attach_partition_referenced_by_foreign_key(&catalog, &child, &stmt.partition_table)?;
         validate_attach_partition_not_circular(&catalog, &parent, &child)?;
 
         let bound = lower_partition_bound_for_relation(&parent, &stmt.bound, &catalog)
@@ -1094,6 +1150,23 @@ impl Database {
         ensure_relation_owner(self, client_id, &child, &stmt.partition_table)?;
 
         let mut next_cid = cid.saturating_add(1);
+        self.validate_referenced_partition_foreign_keys_for_detach_in_transaction(
+            client_id,
+            xid,
+            next_cid,
+            child.relation_oid,
+            configured_search_path,
+        )?;
+        let catalog =
+            self.lazy_catalog_lookup(client_id, Some((xid, next_cid)), configured_search_path);
+        next_cid = self.drop_referenced_partition_foreign_key_constraints_in_transaction(
+            client_id,
+            xid,
+            next_cid,
+            child.relation_oid,
+            &catalog,
+            catalog_effects,
+        )?;
         next_cid = self.drop_cloned_parent_row_triggers_from_partition_in_transaction(
             client_id,
             xid,
@@ -1101,6 +1174,15 @@ impl Database {
             parent.relation_oid,
             child.relation_oid,
             configured_search_path,
+            catalog_effects,
+        )?;
+        next_cid = self.detach_partition_child_foreign_key_constraints_in_transaction(
+            client_id,
+            xid,
+            next_cid,
+            parent.relation_oid,
+            child.relation_oid,
+            &catalog,
             catalog_effects,
         )?;
         next_cid = self.detach_partitioned_index_links_from_partition_in_transaction(

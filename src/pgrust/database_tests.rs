@@ -18482,6 +18482,45 @@ fn update_and_delete_rules_propagate_old_and_new_values() {
 }
 
 #[test]
+fn explain_delete_expands_delete_rule_actions() {
+    let base = temp_dir("explain_delete_rule_action");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table t1 (a int4 primary key)")
+        .unwrap();
+    db.execute(1, "create table t2 (b int4)").unwrap();
+    db.execute(
+        1,
+        "create rule r1 as on delete to t1 do delete from t2 where t2.b = old.a",
+    )
+    .unwrap();
+
+    let rows = query_rows(&db, 1, "explain (costs off) delete from t1 where a = 1");
+    let lines = rows
+        .into_iter()
+        .map(|row| match row.as_slice() {
+            [Value::Text(line)] => line.to_string(),
+            other => panic!("expected text explain row, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        vec![
+            "Delete on t2",
+            "  ->  Nested Loop",
+            "        ->  Index Scan using t1_pkey on t1",
+            "              Index Cond: (a = 1)",
+            "        ->  Seq Scan on t2",
+            "              Filter: (b = 1)",
+            "",
+            "Delete on t1",
+            "  ->  Index Scan using t1_pkey on t1",
+            "        Index Cond: (a = 1)",
+        ]
+    );
+}
+
+#[test]
 fn insert_rules_fire_in_alphabetical_order() {
     let base = temp_dir("rule_fire_order");
     let db = Database::open(&base, 16).unwrap();
@@ -21324,6 +21363,51 @@ fn alter_table_alter_column_type_allows_foreign_key_columns() {
             vec![Value::Int64(2), Value::Int32(4), Value::Int32(8)],
         ]
     );
+}
+
+#[test]
+fn alter_table_alter_column_type_rewrites_referenced_index_metadata() {
+    let base = temp_dir("alter_table_alter_column_type_fk_index_metadata");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table fk_notpartitioned_pk (a int primary key, check (a > 0))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_partitioned_fk (a int references fk_notpartitioned_pk(a) primary key) partition by range(a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_partitioned_fk_1 partition of fk_partitioned_fk for values from (minvalue) to (maxvalue)",
+    )
+    .unwrap();
+    db.execute(1, "insert into fk_notpartitioned_pk values (1)")
+        .unwrap();
+    db.execute(1, "insert into fk_partitioned_fk values (1)")
+        .unwrap();
+
+    db.execute(
+        1,
+        "alter table fk_notpartitioned_pk alter column a type bigint",
+    )
+    .unwrap();
+
+    match db.execute(1, "delete from fk_notpartitioned_pk where a = 1") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint, detail, ..
+        }) => {
+            assert_eq!(constraint, "fk_partitioned_fk_a_fkey");
+            assert_eq!(
+                detail.as_deref(),
+                Some("Key (a)=(1) is still referenced from table \"fk_partitioned_fk\".")
+            );
+        }
+        other => panic!("expected referenced FK violation after ALTER TYPE, got {other:?}"),
+    }
 }
 
 #[test]
@@ -27222,6 +27306,54 @@ fn multi_level_partition_routing_remaps_dropped_column_layouts() {
 }
 
 #[test]
+fn partition_update_routing_remaps_dropped_column_layouts() {
+    let base = temp_dir("partitioned_update_drop_column_routing");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table repro_root (b int4, dropme int4, a int4) partition by range (a, b)",
+    )
+    .unwrap();
+    db.execute(1, "alter table repro_root drop column dropme")
+        .unwrap();
+    db.execute(1, "create table repro_low (a int4, b int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table repro_root attach partition repro_low for values from (0, 0) to (10, 10)",
+    )
+    .unwrap();
+    db.execute(1, "create table repro_high (a int4, b int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table repro_root attach partition repro_high for values from (10, 10) to (20, 20)",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into repro_root (a, b) values (1, 1)")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from repro_low"),
+        vec![vec![Value::Int32(1), Value::Int32(1)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "update repro_root set a = 11 where a = 1 returning a, b",
+        ),
+        vec![vec![Value::Int32(11), Value::Int32(1)]]
+    );
+    assert!(query_rows(&db, 1, "select a, b from repro_low").is_empty());
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from repro_high"),
+        vec![vec![Value::Int32(11), Value::Int32(1)]]
+    );
+}
+
+#[test]
 fn foreign_key_on_partitioned_table_creates_child_constraints() {
     let base = temp_dir("foreign_key_partitioned_child_constraints");
     let db = Database::open(&base, 16).unwrap();
@@ -27317,6 +27449,104 @@ fn alter_partitioned_foreign_key_enforced_updates_child_constraints() {
 }
 
 #[test]
+fn alter_partitioned_foreign_key_enforced_handles_nested_dropped_column_children() {
+    let base = temp_dir("foreign_key_partitioned_reenforce_nested_children");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pk_items (a int4, b int4, primary key (a, b))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_parent (b int4, a int4) partition by range (a, b)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent add constraint fk_parent_ab_fkey \
+         foreign key (a, b) references pk_items",
+    )
+    .unwrap();
+    db.execute(1, "create table fk_parent_1 (a int4, b int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent_1 add foreign key (a, b) references pk_items",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent attach partition fk_parent_1 for values from (0, 0) to (1000, 1000)",
+    )
+    .unwrap();
+    db.execute(1, "create table fk_parent_2 (a int4, b int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent attach partition fk_parent_2 for values from (1000, 1000) to (2000, 2000)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_parent_3 (fdrop1 int4, fdrop2 int4, fdrop3 int4, fdrop4 int4, b int4, a int4) partition by hash (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent_3 drop column fdrop1, drop column fdrop2, drop column fdrop3, drop column fdrop4",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_parent_3_0 partition of fk_parent_3 for values with (modulus 5, remainder 0)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_parent_3_1 partition of fk_parent_3 for values with (modulus 5, remainder 1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent attach partition fk_parent_3 for values from (2000, 2000) to (3000, 3000)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into pk_items values (500, 501), (1500, 1501), (2500, 2502), (2502, 2503)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into fk_parent (a, b) values (500, 501), (1500, 1501), (2500, 2502), (2502, 2503)",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "alter table fk_parent alter constraint fk_parent_ab_fkey not enforced",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent alter constraint fk_parent_ab_fkey enforced",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_trigger t join pg_constraint c on c.oid = t.tgconstraint \
+              where c.conname = 'fk_parent_ab_fkey'",
+        ),
+        vec![vec![Value::Int64(12)]]
+    );
+}
+
+#[test]
 fn attach_partition_merges_existing_foreign_key_with_parent() {
     let base = temp_dir("foreign_key_attach_merges_existing_child");
     let db = Database::open(&base, 16).unwrap();
@@ -27333,7 +27563,7 @@ fn attach_partition_merges_existing_foreign_key_with_parent() {
     db.execute(1, "create table fk_child (a int4)").unwrap();
     db.execute(
         1,
-        "alter table fk_child add constraint fk_parent_a_fkey foreign key (a) references pk_items not enforced",
+        "alter table fk_child add constraint fk_parent_a_fkey foreign key (a) references pk_items",
     )
     .unwrap();
     db.execute(
@@ -27361,6 +27591,497 @@ fn attach_partition_merges_existing_foreign_key_with_parent() {
         }
         other => panic!("expected merged child foreign key violation, got {other:?}"),
     }
+}
+
+#[test]
+fn attach_partition_rejects_foreign_key_enforceability_conflict() {
+    let base = temp_dir("foreign_key_attach_enforceability_conflict");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pk_items (a int4 primary key)")
+        .unwrap();
+    db.execute(1, "create table fk_parent (a int4) partition by range (a)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent add constraint fk_parent_a_fkey foreign key (a) references pk_items",
+    )
+    .unwrap();
+    db.execute(1, "create table fk_child (a int4)").unwrap();
+    db.execute(
+        1,
+        "alter table fk_child add constraint fk_child_a_fkey foreign key (a) references pk_items not enforced",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "alter table fk_parent attach partition fk_child for values from (0) to (100)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "constraint \"fk_parent_a_fkey\" enforceability conflicts with constraint \"fk_child_a_fkey\" on relation \"fk_child\""
+            );
+            assert_eq!(sqlstate, "42P16");
+        }
+        other => panic!("expected enforceability conflict, got {other:?}"),
+    }
+}
+
+#[test]
+fn reattach_partition_reuses_inherited_foreign_key_constraint() {
+    let base = temp_dir("foreign_key_reattach_reuses_inherited");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pk_items (a int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table fk_parent (a int4 references pk_items) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_child partition of fk_parent for values from (0) to (100)",
+    )
+    .unwrap();
+    db.execute(1, "alter table fk_parent detach partition fk_child")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent attach partition fk_child for values from (0) to (100)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint where conrelid = 'fk_child'::regclass and contype = 'f'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+}
+
+#[test]
+fn referenced_partition_foreign_key_clones_validate_and_enforce() {
+    let base = temp_dir("foreign_key_referenced_partition_clones_validate");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pk_items (a int4 primary key) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk_items_1 partition of pk_items for values in (1)",
+    )
+    .unwrap();
+    db.execute(1, "create table pk_items_2 (b int4, a int4 not null)")
+        .unwrap();
+    db.execute(1, "alter table pk_items_2 drop column b")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table pk_items attach partition pk_items_2 for values in (2)",
+    )
+    .unwrap();
+    db.execute(1, "create table fk_items (a int4)").unwrap();
+    db.execute(1, "insert into pk_items values (1), (2)")
+        .unwrap();
+    db.execute(1, "insert into fk_items values (1), (2)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table fk_items add constraint fk_items_a_fkey foreign key (a) references pk_items not valid",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, confrelid::regclass::text, convalidated \
+               from pg_constraint \
+              where conrelid = 'fk_items'::regclass and contype = 'f' \
+              order by conname",
+        ),
+        vec![
+            vec![
+                Value::Text("fk_items_a_fkey".into()),
+                Value::Text("pk_items".into()),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("fk_items_a_fkey_1".into()),
+                Value::Text("pk_items_1".into()),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("fk_items_a_fkey_2".into()),
+                Value::Text("pk_items_2".into()),
+                Value::Bool(false),
+            ],
+        ]
+    );
+
+    db.execute(
+        1,
+        "alter table fk_items validate constraint fk_items_a_fkey",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, convalidated \
+               from pg_constraint \
+              where conrelid = 'fk_items'::regclass and contype = 'f' \
+              order by conname",
+        ),
+        vec![
+            vec![Value::Text("fk_items_a_fkey".into()), Value::Bool(true)],
+            vec![Value::Text("fk_items_a_fkey_1".into()), Value::Bool(true)],
+            vec![Value::Text("fk_items_a_fkey_2".into()), Value::Bool(true)],
+        ]
+    );
+    match db.execute(1, "delete from pk_items where a = 2") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "fk_items_a_fkey_2");
+        }
+        other => panic!("expected referenced partition foreign key violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn partitioned_referenced_foreign_key_enforced_validates_existing_rows() {
+    let base = temp_dir("foreign_key_partitioned_referenced_enforced_validate");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pk_items (a int4, b int4, primary key (a, b)) partition by range (a, b)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk_items_1 partition of pk_items for values from (0, 0) to (1000, 1000)",
+    )
+    .unwrap();
+    db.execute(1, "create table fk_items (b int4, a int4)")
+        .unwrap();
+    db.execute(1, "insert into pk_items values (101, 102)")
+        .unwrap();
+    db.execute(1, "insert into fk_items values (102, 101)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table fk_items add constraint fk_items_ab_fkey \
+         foreign key (a, b) references pk_items not enforced",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "alter table fk_items alter constraint fk_items_ab_fkey enforced",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, conenforced, convalidated \
+               from pg_constraint \
+              where conrelid = 'fk_items'::regclass and contype = 'f' \
+              order by conname",
+        ),
+        vec![
+            vec![
+                Value::Text("fk_items_ab_fkey".into()),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("fk_items_ab_fkey_1".into()),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn pg_get_constraintdef_formats_foreign_key_not_enforced() {
+    let base = temp_dir("foreign_key_constraintdef_not_enforced");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pk_items (a int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table fk_items (a int4 constraint fk_items_a_fkey references pk_items not enforced)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_constraintdef(oid) \
+               from pg_constraint \
+              where conrelid = 'fk_items'::regclass and conname = 'fk_items_a_fkey'",
+        ),
+        vec![vec![Value::Text(
+            "FOREIGN KEY (a) REFERENCES pk_items(a) NOT ENFORCED".into()
+        )]]
+    );
+}
+
+#[test]
+fn referenced_partition_foreign_key_allows_dropped_columns_on_unattached_partition_parent() {
+    let base = temp_dir("foreign_key_referenced_partition_unattached_dropped_columns");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create schema fkpart3").unwrap();
+    db.execute(1, "set search_path to fkpart3").unwrap();
+    db.execute(
+        1,
+        "create table pk (a int primary key) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk1 partition of pk for values from (0) to (1000)",
+    )
+    .unwrap();
+    db.execute(1, "create table pk2 (b int, a int)").unwrap();
+    db.execute(1, "alter table pk2 drop column b").unwrap();
+    db.execute(1, "alter table pk2 alter a set not null")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table pk attach partition pk2 for values from (1000) to (2000)",
+    )
+    .unwrap();
+    db.execute(1, "create table fk (a int) partition by range (a)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table fk1 partition of fk for values from (0) to (750)",
+    )
+    .unwrap();
+    db.execute(1, "alter table fk add foreign key (a) references pk")
+        .unwrap();
+    db.execute(1, "create table fk2 (b int, a int)").unwrap();
+    db.execute(1, "alter table fk2 drop column b").unwrap();
+    db.execute(
+        1,
+        "alter table fk attach partition fk2 for values from (750) to (3500)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk3 partition of pk for values from (2000) to (3000)",
+    )
+    .unwrap();
+    db.execute(1, "create table pk4 (like pk)").unwrap();
+    db.execute(
+        1,
+        "alter table pk attach partition pk4 for values from (3000) to (4000)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk5 (c int, b int, a int not null) partition by range (a)",
+    )
+    .unwrap();
+
+    db.execute(1, "alter table pk5 drop column b, drop column c")
+        .unwrap();
+    db.execute(
+        1,
+        "create table pk51 partition of pk5 for values from (4000) to (4500)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn referenced_partition_foreign_key_clones_new_referenced_partitions() {
+    let base = temp_dir("foreign_key_referenced_partition_clones_new_parts");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pk_items (a int4 primary key) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk_items_1 partition of pk_items for values in (1)",
+    )
+    .unwrap();
+    db.execute(1, "create table fk_items (a int4 references pk_items)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table pk_items_2 partition of pk_items for values in (2)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, confrelid::regclass::text \
+               from pg_constraint \
+              where conrelid = 'fk_items'::regclass and contype = 'f' \
+              order by conname",
+        ),
+        vec![
+            vec![
+                Value::Text("fk_items_a_fkey".into()),
+                Value::Text("pk_items".into()),
+            ],
+            vec![
+                Value::Text("fk_items_a_fkey_1".into()),
+                Value::Text("pk_items_1".into()),
+            ],
+            vec![
+                Value::Text("fk_items_a_fkey_2".into()),
+                Value::Text("pk_items_2".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn self_referencing_partitioned_foreign_key_adds_referenced_clones() {
+    let base = temp_dir("foreign_key_self_partition_referenced_clones");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pk_items (a int4, b int4, primary key (a, b)) partition by range (a, b)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk_items_1 partition of pk_items for values from (0, 0) to (1000, 1000)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk_items_2 partition of pk_items for values from (1000, 1000) to (2000, 2000)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table pk_items add constraint selffk foreign key (a, b) references pk_items not valid",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk_items_3 partition of pk_items for values from (2000, 2000) to (3000, 3000) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk_items_3_1 partition of pk_items_3 for values from (2000) to (2100)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, confrelid::regclass::text, convalidated \
+               from pg_constraint \
+              where conrelid = 'pk_items'::regclass and contype = 'f' \
+              order by conname",
+        ),
+        vec![
+            vec![
+                Value::Text("selffk".into()),
+                Value::Text("pk_items".into()),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("selffk_1".into()),
+                Value::Text("pk_items_1".into()),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("selffk_2".into()),
+                Value::Text("pk_items_2".into()),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("selffk_3".into()),
+                Value::Text("pk_items_3".into()),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("selffk_3_1".into()),
+                Value::Text("pk_items_3_1".into()),
+                Value::Bool(false),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn referenced_partition_foreign_key_detach_checks_and_drops_clones() {
+    let base = temp_dir("foreign_key_referenced_partition_detach");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pk_items (a int4 primary key) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk_items_1 partition of pk_items for values in (1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk_items_2 partition of pk_items for values in (2)",
+    )
+    .unwrap();
+    db.execute(1, "insert into pk_items values (1), (2)")
+        .unwrap();
+    db.execute(1, "create table fk_items (a int4 references pk_items)")
+        .unwrap();
+    db.execute(1, "insert into fk_items values (1)").unwrap();
+
+    match db.execute(1, "alter table pk_items detach partition pk_items_1") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "fk_items_a_fkey_1");
+        }
+        other => panic!("expected detach foreign key violation, got {other:?}"),
+    }
+
+    db.execute(1, "delete from fk_items").unwrap();
+    db.execute(1, "alter table pk_items detach partition pk_items_1")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) \
+               from pg_constraint \
+              where conrelid = 'fk_items'::regclass \
+                and confrelid = 'pk_items_1'::regclass",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    db.execute(1, "drop table pk_items_1").unwrap();
 }
 
 #[test]
@@ -27490,6 +28211,758 @@ fn validate_partitioned_foreign_key_marks_child_constraints() {
 }
 
 #[test]
+fn match_full_validation_scans_partition_leaves() {
+    let base = temp_dir("foreign_key_match_full_partition_leaf_validation");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pk_items (a int4, b int4, primary key (a, b))",
+    )
+    .unwrap();
+    db.execute(1, "insert into pk_items values (1, 1)").unwrap();
+    db.execute(
+        1,
+        "create table fk_parent (a int4, b int4) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_child partition of fk_parent for values from (0) to (10)",
+    )
+    .unwrap();
+    db.execute(1, "insert into fk_child values (1, null)")
+        .unwrap();
+
+    match db.execute(
+        1,
+        "alter table fk_parent add constraint fk_parent_ab_fkey foreign key (a, b) references pk_items match full",
+    ) {
+        Err(ExecError::ForeignKeyViolation {
+            constraint,
+            message,
+            detail,
+        }) => {
+            assert_eq!(constraint, "fk_parent_ab_fkey");
+            assert!(message.contains("table \"fk_child\""));
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("MATCH FULL"))
+            );
+        }
+        other => panic!("expected partition leaf MATCH FULL validation failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn attach_partition_validates_inherited_foreign_key_rows() {
+    let base = temp_dir("foreign_key_attach_validates_child_rows");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pk_items (a int4 primary key)")
+        .unwrap();
+    db.execute(1, "insert into pk_items values (1)").unwrap();
+    db.execute(1, "create table fk_parent (a int4) partition by range (a)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent add constraint fk_parent_a_fkey foreign key (a) references pk_items",
+    )
+    .unwrap();
+    db.execute(1, "create table fk_child (a int4)").unwrap();
+    db.execute(1, "insert into fk_child values (2)").unwrap();
+
+    match db.execute(
+        1,
+        "alter table fk_parent attach partition fk_child for values from (0) to (10)",
+    ) {
+        Err(ExecError::ForeignKeyViolation {
+            constraint,
+            message,
+            ..
+        }) => {
+            assert_eq!(constraint, "fk_parent_a_fkey");
+            assert!(message.contains("table \"fk_child\""));
+        }
+        other => panic!("expected attach partition foreign-key validation failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn inherited_foreign_key_drop_and_alter_are_rejected() {
+    let base = temp_dir("foreign_key_inherited_child_ddl_rejected");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pk_items (a int4 primary key)")
+        .unwrap();
+    db.execute(1, "create table fk_parent (a int4) partition by range (a)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table fk_child partition of fk_parent for values from (0) to (10)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent add constraint fk_parent_a_fkey foreign key (a) references pk_items",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table fk_child drop constraint fk_parent_a_fkey") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "0A000");
+            assert_eq!(
+                message,
+                "cannot drop inherited constraint \"fk_parent_a_fkey\" of relation \"fk_child\""
+            );
+        }
+        other => panic!("expected inherited FK drop rejection, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "alter table fk_child alter constraint fk_parent_a_fkey deferrable",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        }) => {
+            assert_eq!(sqlstate, "55000");
+            assert_eq!(
+                message,
+                "cannot alter constraint \"fk_parent_a_fkey\" on relation \"fk_child\""
+            );
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "Constraint \"fk_parent_a_fkey\" is derived from constraint \"fk_parent_a_fkey\" of relation \"fk_parent\"."
+                )
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("You may alter the constraint it derives from instead.")
+            );
+        }
+        other => panic!("expected inherited FK alter rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn parent_foreign_key_add_merges_matching_child_foreign_key() {
+    let base = temp_dir("foreign_key_parent_add_merges_child_fk");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create schema fkpart_merge").unwrap();
+    db.execute(1, "create table fkpart_merge.pkey (a int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table fkpart_merge.fk_part (a int4) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fkpart_merge.fk_part_1 partition of fkpart_merge.fk_part \
+         (foreign key (a) references fkpart_merge.pkey) for values in (1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fkpart_merge.fk_part add foreign key (a) references fkpart_merge.pkey",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, conparentid <> 0, conislocal, coninhcount::int4 \
+               from pg_constraint \
+              where conrelid = 'fkpart_merge.fk_part_1'::regclass and contype = 'f' \
+              order by conname",
+        ),
+        vec![vec![
+            Value::Text("fk_part_1_a_fkey".into()),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Int32(1),
+        ]]
+    );
+    match db.execute(
+        1,
+        "alter table fkpart_merge.fk_part_1 drop constraint fk_part_1_a_fkey",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "0A000");
+            assert_eq!(
+                message,
+                "cannot drop inherited constraint \"fk_part_1_a_fkey\" of relation \"fk_part_1\""
+            );
+        }
+        other => panic!("expected merged child FK drop rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn detach_partition_promotes_inherited_foreign_key_to_local_root() {
+    let base = temp_dir("foreign_key_detach_promotes_child_fk");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create schema fkpart_detach").unwrap();
+    db.execute(1, "create table fkpart_detach.pkey (a int primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table fkpart_detach.fk_part \
+         (a int, constraint fkey foreign key (a) references fkpart_detach.pkey) \
+         partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fkpart_detach.fk_part_1 partition of fkpart_detach.fk_part \
+         for values in (1) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fkpart_detach.fk_part_1_1 \
+         (a int, constraint my_fkey foreign key (a) references fkpart_detach.pkey)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fkpart_detach.fk_part_1 attach partition fkpart_detach.fk_part_1_1 \
+         for values in (1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fkpart_detach.fk_part detach partition fkpart_detach.fk_part_1",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conparentid = 0, conislocal, coninhcount::int4 \
+               from pg_constraint \
+              where conrelid = 'fkpart_detach.fk_part_1'::regclass and conname = 'fkey'",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true), Value::Int32(0)]]
+    );
+    db.execute(
+        1,
+        "alter table fkpart_detach.fk_part_1 drop constraint fkey",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "alter table fkpart_detach.fk_part_1_1 drop constraint my_fkey",
+    ) {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. })) => {
+            assert_eq!(
+                actual,
+                "constraint \"my_fkey\" of relation \"fk_part_1_1\" does not exist"
+            );
+        }
+        other => panic!("expected child clone to be dropped with detached root FK, got {other:?}"),
+    }
+}
+
+#[test]
+fn partition_attach_keeps_mismatched_local_foreign_key_deferrability() {
+    let base = temp_dir("foreign_key_attach_keeps_local_deferrability");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pk_items (a int4, b int4, primary key (a, b))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_parent (a int4, b int4) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent add foreign key (a, b) references pk_items \
+         on update cascade on delete cascade",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_child (a int4, b int4, \
+         foreign key (a, b) references pk_items(a, b) \
+         on update cascade on delete cascade deferrable) \
+         partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent attach partition fk_child for values in (4500)",
+    )
+    .unwrap();
+    db.execute(1, "alter table fk_parent detach partition fk_child")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table fk_parent attach partition fk_child for values in (4500)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, condeferrable \
+               from pg_constraint \
+              where conrelid = 'fk_child'::regclass and contype = 'f' \
+              order by conname",
+        ),
+        vec![
+            vec![Value::Text("fk_child_a_b_fkey".into()), Value::Bool(true)],
+            vec![Value::Text("fk_parent_a_b_fkey".into()), Value::Bool(false),],
+        ]
+    );
+}
+
+#[test]
+fn attach_partition_rejects_table_referenced_by_foreign_key() {
+    let base = temp_dir("foreign_key_attach_referenced_table_reject");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table pk_items (a int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table fk_items (a int4 references pk_items) partition by list (a)",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "alter table fk_items attach partition pk_items for values in (1)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "55000");
+            assert_eq!(
+                message,
+                "cannot attach table \"pk_items\" as a partition because it is referenced by foreign key \"fk_items_a_fkey\""
+            );
+        }
+        other => panic!("expected referenced table attach rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn attach_partition_rejects_subtree_referenced_by_foreign_key() {
+    let base = temp_dir("foreign_key_attach_referenced_subtree_reject");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pk_items (a int4 primary key) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk_items_1 partition of pk_items for values in (1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_items (a int4 references pk_items_1) partition by list (a)",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "alter table fk_items attach partition pk_items for values in (1)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "55006");
+            assert_eq!(
+                message,
+                "cannot ALTER TABLE \"pk_items_1\" because it is being used by active queries in this session"
+            );
+        }
+        other => panic!("expected referenced subtree attach rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn detached_self_referencing_partition_still_blocks_root_delete() {
+    let base = temp_dir("foreign_key_detached_self_ref_blocks_delete");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parted_self_fk (\
+            id bigint not null primary key, \
+            id_abc bigint, \
+            foreign key (id_abc) references parted_self_fk(id)\
+         ) partition by range (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table part1_self_fk (id bigint not null primary key, id_abc bigint)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table parted_self_fk attach partition part1_self_fk for values from (0) to (10)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table part2_self_fk partition of parted_self_fk for values from (10) to (20)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into parted_self_fk values (1, null), (2, null), (10, 1), (11, 2)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table parted_self_fk detach partition part2_self_fk",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conrelid::regclass::text, confrelid::regclass::text, conparentid = 0 \
+               from pg_constraint \
+              where conrelid = 'part2_self_fk'::regclass and contype = 'f'",
+        ),
+        vec![vec![
+            Value::Text("part2_self_fk".into()),
+            Value::Text("parted_self_fk".into()),
+            Value::Bool(true),
+        ]]
+    );
+    match db.execute(1, "delete from parted_self_fk where id = 2") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint,
+            message,
+            detail,
+            ..
+        }) => {
+            assert_eq!(constraint, "parted_self_fk_id_abc_fkey");
+            assert!(message.contains("on table \"part2_self_fk\""));
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("part2_self_fk"))
+            );
+        }
+        other => panic!("expected detached self-referencing FK violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn referenced_partition_clone_names_default_last() {
+    let base = temp_dir("foreign_key_referenced_partition_default_last");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pk_items (a int4 primary key) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk_items_default partition of pk_items default",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk_items_1 partition of pk_items for values in (1)",
+    )
+    .unwrap();
+    db.execute(1, "create table fk_items (a int4 references pk_items)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, confrelid::regclass::text \
+               from pg_constraint \
+              where conrelid = 'fk_items'::regclass and contype = 'f' \
+              order by conname",
+        ),
+        vec![
+            vec![
+                Value::Text("fk_items_a_fkey".into()),
+                Value::Text("pk_items".into()),
+            ],
+            vec![
+                Value::Text("fk_items_a_fkey_1".into()),
+                Value::Text("pk_items_1".into()),
+            ],
+            vec![
+                Value::Text("fk_items_a_fkey_2".into()),
+                Value::Text("pk_items_default".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn partitioned_foreign_key_actions_remap_leaf_rows() {
+    let base = temp_dir("foreign_key_partitioned_set_default_leaf_action");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pk_items (a int4, b int4, primary key (a, b)) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk_items_0 partition of pk_items for values in (0)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk_items_1 partition of pk_items for values in (1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_items (a int4 default 0, b int4 default 99) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_items_0 partition of fk_items for values in (0)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_items_1 partition of fk_items for values in (1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_items add constraint fk_items_ab_fkey \
+         foreign key (a, b) references pk_items on delete set default (a)",
+    )
+    .unwrap();
+    db.execute(1, "insert into pk_items values (0, 10), (1, 10)")
+        .unwrap();
+    db.execute(1, "insert into fk_items values (1, 10)")
+        .unwrap();
+
+    db.execute(1, "delete from pk_items where a = 1 and b = 10")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, fk_items.a, fk_items.b \
+               from fk_items join pg_class c on c.oid = fk_items.tableoid \
+              order by c.relname",
+        ),
+        vec![vec![
+            Value::Text("fk_items_0".into()),
+            Value::Int32(0),
+            Value::Int32(10),
+        ]]
+    );
+}
+
+#[test]
+fn partitioned_foreign_key_set_default_rechecks_and_keeps_row() {
+    let base = temp_dir("foreign_key_partitioned_set_default_recheck");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pk_items (a int4, b int4, primary key (a, b))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_items (a int4 default 2501, b int4 default 142857) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_items_3 partition of fk_items for values in (2500, 2501, 2502, 2503)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_items add foreign key (a, b) references pk_items \
+         on delete set default on update set default",
+    )
+    .unwrap();
+    db.execute(1, "insert into pk_items values (2502, 2503)")
+        .unwrap();
+    db.execute(1, "insert into fk_items values (2502, 2503)")
+        .unwrap();
+
+    match db.execute(1, "update pk_items set a = 1500 where a = 2502") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint, detail, ..
+        }) => {
+            assert_eq!(constraint, "fk_items_a_b_fkey");
+            assert!(
+                detail.as_deref().is_some_and(
+                    |detail| detail.contains("Key (a, b)=(2501, 142857) is not present")
+                )
+            );
+        }
+        other => panic!("expected SET DEFAULT recheck foreign-key failure, got {other:?}"),
+    }
+
+    db.execute(1, "insert into pk_items values (2501, 142857)")
+        .unwrap();
+    db.execute(1, "update pk_items set a = 1500 where a = 2502")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from fk_items where b = 142857",),
+        vec![vec![Value::Int32(2501), Value::Int32(142857)]]
+    );
+}
+
+#[test]
+fn partitioned_foreign_key_action_replacement_updates_child_clones() {
+    let base = temp_dir("foreign_key_partitioned_action_replacement");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pk_items (a int4, b int4, primary key (a, b))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_items (a int4 default 2501, b int4 default 142857) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk_items_1 partition of fk_items for values in (null, 500, 501, 502)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk_items add foreign key (a, b) references pk_items \
+         match simple on delete set null on update set null",
+    )
+    .unwrap();
+    db.execute(1, "create table fk_items_3 (a int4, b int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table fk_items attach partition fk_items_3 for values in (2500, 2501, 2502, 2503)",
+    )
+    .unwrap();
+    db.execute(1, "alter table fk_items drop constraint fk_items_a_b_fkey")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table fk_items add foreign key (a, b) references pk_items \
+         on delete set default on update set default",
+    )
+    .unwrap();
+    db.execute(1, "insert into pk_items values (2502, 2503)")
+        .unwrap();
+    db.execute(1, "insert into fk_items_3 values (2502, 2503)")
+        .unwrap();
+
+    match db.execute(1, "update pk_items set a = 1500 where a = 2502") {
+        Err(ExecError::ForeignKeyViolation {
+            constraint, detail, ..
+        }) => {
+            assert_eq!(constraint, "fk_items_a_b_fkey");
+            assert!(
+                detail.as_deref().is_some_and(
+                    |detail| detail.contains("Key (a, b)=(2501, 142857) is not present")
+                )
+            );
+        }
+        other => panic!("expected replacement SET DEFAULT recheck failure, got {other:?}"),
+    }
+
+    db.execute(1, "insert into pk_items values (2501, 142857)")
+        .unwrap();
+    db.execute(1, "update pk_items set a = 1500 where a = 2502")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from fk_items where b = 142857",),
+        vec![vec![Value::Int32(2501), Value::Int32(142857)]]
+    );
+}
+
+#[test]
+fn pending_trigger_events_include_partition_children() {
+    let base = temp_dir("foreign_key_pending_events_partition_children");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table pk_items (a int4 primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table fk_parent (
+                a int4 references pk_items deferrable initially deferred
+            ) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table fk_child partition of fk_parent for values from (0) to (10)",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into fk_parent values (2)")
+        .unwrap();
+    match session.execute(
+        &db,
+        "alter table fk_parent drop constraint fk_parent_a_fkey",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "55006");
+            assert_eq!(
+                message,
+                "cannot ALTER TABLE \"fk_child\" because it has pending trigger events"
+            );
+        }
+        other => panic!("expected pending partition child trigger-event error, got {other:?}"),
+    }
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn foreign_key_can_reference_partitioned_primary_key() {
     let base = temp_dir("foreign_key_reference_partitioned_pk");
     let db = Database::open(&base, 16).unwrap();
@@ -27514,6 +28987,71 @@ fn foreign_key_can_reference_partitioned_primary_key() {
         }
         other => panic!("expected partitioned referenced-key violation, got {other:?}"),
     }
+}
+
+#[test]
+fn partitioned_foreign_key_cascade_updates_leaf_partition_rows() {
+    let base = temp_dir("foreign_key_partitioned_action_leaf_update");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pk (a int4 primary key) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk1 partition of pk for values from (1) to (100) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk11 partition of pk1 for values from (1) to (50)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table pk12 partition of pk1 for values from (50) to (100)",
+    )
+    .unwrap();
+    db.execute(1, "create table fk (a int4) partition by range (a)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table fk1 partition of fk for values from (1) to (100) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk11 partition of fk1 for values from (1) to (10)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fk12 partition of fk1 for values from (10) to (100)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table fk add foreign key (a) references pk on update cascade on delete cascade",
+    )
+    .unwrap();
+    db.execute(1, "create table fk_d partition of fk default")
+        .unwrap();
+    db.execute(1, "insert into pk values (1)").unwrap();
+    db.execute(1, "insert into fk values (1)").unwrap();
+
+    db.execute(1, "update pk set a = 20").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, fk.a from fk join pg_class c on c.oid = fk.tableoid",
+        ),
+        vec![vec![Value::Text("fk12".into()), Value::Int32(20)]]
+    );
+    db.execute(1, "delete from pk where a = 20").unwrap();
+    assert!(query_rows(&db, 1, "select a from fk").is_empty());
 }
 
 #[test]
@@ -31259,6 +32797,147 @@ fn alter_table_alter_constraint_initially_deferred_parent_delete_fails_at_commit
     assert_eq!(
         query_rows(&db, 1, "select id, parent_id from children order by id",),
         vec![vec![Value::Int32(1), Value::Int32(1)]]
+    );
+}
+
+#[test]
+fn deferred_foreign_key_checks_survive_savepoint_rollback() {
+    let base = temp_dir("deferred_fk_savepoint_rollback");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parents (id int4 primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table children (parent_id int4 references parents deferrable initially deferred)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into parents values (1)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into children values (1)")
+        .unwrap();
+    session.execute(&db, "savepoint x").unwrap();
+    session.execute(&db, "delete from children").unwrap();
+    session.execute(&db, "rollback to x").unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into children values (2)")
+        .unwrap();
+    session.execute(&db, "savepoint x").unwrap();
+    session.execute(&db, "delete from children").unwrap();
+    session.execute(&db, "rollback to x").unwrap();
+    match session.execute(&db, "commit") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_id_fkey");
+        }
+        other => panic!("expected deferred foreign-key violation after rollback, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_drop_foreign_key_rejects_pending_trigger_events() {
+    let base = temp_dir("fk_drop_pending_trigger_events");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parents (id int4 primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table children (parent_id int4 references parents deferrable initially deferred)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into parents values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into children values (1)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into children values (2)")
+        .unwrap();
+    match session.execute(
+        &db,
+        "alter table children drop constraint children_parent_id_fkey",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "55006");
+            assert_eq!(
+                message,
+                "cannot ALTER TABLE \"children\" because it has pending trigger events"
+            );
+        }
+        other => panic!("expected pending child trigger-event error, got {other:?}"),
+    }
+    session.execute(&db, "commit").unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "delete from parents where id = 1")
+        .unwrap();
+    match session.execute(
+        &db,
+        "alter table children drop constraint children_parent_id_fkey",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "55006");
+            assert_eq!(
+                message,
+                "cannot ALTER TABLE \"parents\" because it has pending trigger events"
+            );
+        }
+        other => panic!("expected pending parent trigger-event error, got {other:?}"),
+    }
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn foreign_key_cascade_update_treats_negative_zero_as_changed() {
+    let base = temp_dir("fk_cascade_negative_zero");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parents (a float8, b float8, primary key (a, b))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table children (
+            x float8,
+            y float8,
+            foreign key (x, y) references parents (a, b) on update cascade
+        )",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values ('-0', '-0')")
+        .unwrap();
+    db.execute(1, "insert into children values ('-0', '-0')")
+        .unwrap();
+
+    db.execute(1, "update parents set a = '0' where a = '-0'")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select x, y from children"),
+        vec![vec![Value::Float64(0.0), Value::Float64(-0.0)]]
     );
 }
 
