@@ -566,6 +566,7 @@ pub struct Query {
     pub distinct_on: Vec<SortGroupClause>,
     pub where_qual: Option<Expr>,
     pub group_by: Vec<Expr>,
+    pub grouping_sets: Vec<Vec<Expr>>,
     pub accumulators: Vec<AggAccum>,
     pub window_clauses: Vec<WindowClause>,
     pub having_qual: Option<Expr>,

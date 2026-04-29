@@ -220,6 +220,7 @@ fn render_relation_expr_sql_with_options(
         distinct_on: Vec::new(),
         where_qual: None,
         group_by: Vec::new(),
+        grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
         having_qual: None,
