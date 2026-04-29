@@ -13111,6 +13111,39 @@ fn parse_create_table_partition_of_with_short_column_options() {
 }
 
 #[test]
+fn parse_create_table_partition_of_with_column_key_options() {
+    match parse_statement(
+        "create table part_b partition of parted \
+         (a primary key, b unique) \
+         for values in ('b')",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.partition_of.as_deref(), Some("parted"));
+            assert_eq!(ct.elements.len(), 2);
+            assert!(matches!(
+                &ct.elements[0],
+                CreateTableElement::PartitionColumnOverride(override_)
+                    if override_.name == "a"
+                        && override_.constraints.iter().any(|constraint| {
+                            matches!(constraint, ColumnConstraint::PrimaryKey { .. })
+                        })
+            ));
+            assert!(matches!(
+                &ct.elements[1],
+                CreateTableElement::PartitionColumnOverride(override_)
+                    if override_.name == "b"
+                        && override_.constraints.iter().any(|constraint| {
+                            matches!(constraint, ColumnConstraint::Unique { .. })
+                        })
+            ));
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
 fn parse_alter_table_attach_partition() {
     match parse_statement(
         "alter table measurement attach partition measurement_mid \

@@ -622,6 +622,95 @@ impl<'a> PartitionedKeyInstaller<'a> {
         self.apply_effect(effect)
     }
 
+    fn set_index_valid(&mut self, index_oid: u32, valid: bool) -> Result<(), ExecError> {
+        let index = crate::backend::utils::cache::lsyscache::index_row_by_indexrelid(
+            self.db,
+            self.client_id,
+            Some((self.xid, self.visible_cid())),
+            index_oid,
+        )
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "index catalog row",
+                actual: format!("missing pg_index row for {index_oid}"),
+            })
+        })?;
+        if index.indisready && index.indisvalid == valid {
+            return Ok(());
+        }
+        let cid = self.take_cid();
+        let ctx = self.write_ctx(cid);
+        let effect = self
+            .db
+            .catalog
+            .write()
+            .set_index_ready_valid_mvcc(index_oid, true, valid, &ctx)
+            .map_err(|err| match err {
+                CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
+                _ => ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index catalog validity update",
+                    actual: "index validity update failed".into(),
+                }),
+            })?;
+        self.apply_effect(effect)
+    }
+
+    fn validate_direct_partition_primary_key_not_nulls(
+        &self,
+        relation: &BoundRelation,
+        spec: &PartitionedKeySpec,
+    ) -> Result<(), ExecError> {
+        if !spec.primary {
+            return Ok(());
+        }
+        for child in self.direct_partition_children(relation.relation_oid)? {
+            let child_name = self.relation_name(child.relation_oid)?;
+            for column_name in &spec.columns {
+                let Some(column) = child.desc.columns.iter().find(|column| {
+                    !column.dropped && column.name.eq_ignore_ascii_case(column_name)
+                }) else {
+                    continue;
+                };
+                if column.storage.nullable {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "column \"{}\" of table \"{}\" is not marked NOT NULL",
+                            column.name, child_name
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P16",
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn relation_has_primary_key(&self, relation_oid: u32) -> bool {
+        self.db
+            .lazy_catalog_lookup(
+                self.client_id,
+                Some((self.xid, self.visible_cid())),
+                self.configured_search_path,
+            )
+            .constraint_rows_for_relation(relation_oid)
+            .into_iter()
+            .any(|row| row.contype == CONSTRAINT_PRIMARY && row.conindid != 0)
+    }
+
+    fn multiple_primary_keys_error(&self, relation: &BoundRelation) -> ExecError {
+        let relation_name = self
+            .relation_name(relation.relation_oid)
+            .unwrap_or_else(|_| relation.relation_oid.to_string());
+        ExecError::Parse(ParseError::DetailedError {
+            message: format!("multiple primary keys for table \"{relation_name}\" are not allowed"),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn create_key_constraint(
         &mut self,
@@ -762,8 +851,12 @@ impl<'a> PartitionedKeyInstaller<'a> {
         parent: Option<&AttachedKey>,
         spec: &PartitionedKeySpec,
         desired_constraint_name: Option<&str>,
+        recurse: bool,
     ) -> Result<AttachedKey, ExecError> {
         let relation = self.current_relation(relation.relation_oid)?;
+        if parent.is_none() && relation.relkind == 'p' && !recurse {
+            self.validate_direct_partition_primary_key_not_nulls(&relation, spec)?;
+        }
         if relation.relkind == 'p' {
             let partition_spec = crate::backend::parser::relation_partition_spec(&relation)
                 .map_err(ExecError::Parse)?;
@@ -799,7 +892,8 @@ impl<'a> PartitionedKeyInstaller<'a> {
         {
             if relation.relkind == 'p' {
                 for child in self.direct_partition_children(relation.relation_oid)? {
-                    let _ = self.reconcile_relation_key_tree(child, Some(&existing), spec, None)?;
+                    let _ =
+                        self.reconcile_relation_key_tree(child, Some(&existing), spec, None, true)?;
                 }
             }
             return Ok(existing);
@@ -829,7 +923,8 @@ impl<'a> PartitionedKeyInstaller<'a> {
             };
             if relation.relkind == 'p' {
                 for child in self.direct_partition_children(relation.relation_oid)? {
-                    let _ = self.reconcile_relation_key_tree(child, Some(&attached), spec, None)?;
+                    let _ =
+                        self.reconcile_relation_key_tree(child, Some(&attached), spec, None, true)?;
                 }
             }
             return Ok(attached);
@@ -838,12 +933,18 @@ impl<'a> PartitionedKeyInstaller<'a> {
         if parent.is_none()
             && let Some(existing) = self.find_existing_key(&relation, spec, None)?
         {
-            if relation.relkind == 'p' {
+            if relation.relkind == 'p' && recurse {
                 for child in self.direct_partition_children(relation.relation_oid)? {
-                    let _ = self.reconcile_relation_key_tree(child, Some(&existing), spec, None)?;
+                    let _ =
+                        self.reconcile_relation_key_tree(child, Some(&existing), spec, None, true)?;
                 }
             }
             return Ok(existing);
+        }
+
+        if parent.is_some() && spec.primary && self.relation_has_primary_key(relation.relation_oid)
+        {
+            return Err(self.multiple_primary_keys_error(&relation));
         }
 
         let relation_name = self.relation_name(relation.relation_oid)?;
@@ -948,8 +1049,16 @@ impl<'a> PartitionedKeyInstaller<'a> {
         };
 
         if relation.relkind == 'p' {
-            for child in self.direct_partition_children(relation.relation_oid)? {
-                let _ = self.reconcile_relation_key_tree(child, Some(&attached), spec, None)?;
+            if recurse {
+                for child in self.direct_partition_children(relation.relation_oid)? {
+                    let _ =
+                        self.reconcile_relation_key_tree(child, Some(&attached), spec, None, true)?;
+                }
+            } else if !self
+                .direct_partition_children(relation.relation_oid)?
+                .is_empty()
+            {
+                self.set_index_valid(attached.index_oid, false)?;
             }
         }
         Ok(attached)
@@ -964,6 +1073,7 @@ impl Database {
         start_cid: CommandId,
         relation: &BoundRelation,
         actions: &[IndexBackedConstraintAction],
+        recurse: bool,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<CommandId, ExecError> {
@@ -987,6 +1097,7 @@ impl Database {
                 parent.as_ref(),
                 &spec,
                 action.constraint_name.as_deref(),
+                recurse,
             )?;
         }
         Ok(next_cid)
@@ -1040,6 +1151,7 @@ impl Database {
                 Some(&parent_key),
                 &spec,
                 None,
+                true,
             )?;
         }
         Ok(next_cid)

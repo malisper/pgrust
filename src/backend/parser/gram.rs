@@ -2446,6 +2446,8 @@ fn looks_like_partition_column_override(item: &str) -> bool {
         || keyword_at_start(rest, "null")
         || keyword_at_start(rest, "default")
         || keyword_at_start(rest, "check")
+        || keyword_at_start(rest, "primary")
+        || keyword_at_start(rest, "unique")
 }
 
 fn parse_partition_column_override(
@@ -2494,6 +2496,24 @@ fn parse_partition_column_override(
                 expr_sql: expr_sql.trim().to_string(),
             });
             rest = next.trim_start();
+        } else if keyword_at_start(rest, "primary") {
+            rest = consume_keyword(rest, "primary").trim_start();
+            if !keyword_at_start(rest, "key") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "KEY",
+                    actual: rest.to_string(),
+                }
+                .into());
+            }
+            rest = consume_keyword(rest, "key").trim_start();
+            constraints.push(ColumnConstraint::PrimaryKey {
+                attributes: ConstraintAttributes::default(),
+            });
+        } else if keyword_at_start(rest, "unique") {
+            rest = consume_keyword(rest, "unique").trim_start();
+            constraints.push(ColumnConstraint::Unique {
+                attributes: ConstraintAttributes::default(),
+            });
         } else if keyword_at_start(rest, "default") {
             rest = consume_keyword(rest, "default").trim_start();
             if rest.is_empty() {

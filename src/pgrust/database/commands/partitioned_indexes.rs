@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::super::*;
@@ -169,6 +170,75 @@ impl<'a> PartitionedIndexInstaller<'a> {
             .any(|row| row.conindid == index_oid)
     }
 
+    fn constraint_for_index(
+        &self,
+        relation_oid: u32,
+        index_oid: u32,
+    ) -> Option<crate::include::catalog::PgConstraintRow> {
+        self.catalog()
+            .constraint_rows_for_relation(relation_oid)
+            .into_iter()
+            .find(|row| row.conindid == index_oid)
+    }
+
+    fn update_constraint_inheritance(
+        &mut self,
+        relation_oid: u32,
+        constraint_oid: u32,
+        parent_constraint_oid: u32,
+    ) -> Result<(), ExecError> {
+        let cid = self.take_cid();
+        let ctx = self.write_ctx(cid);
+        let effect = self
+            .db
+            .catalog
+            .write()
+            .update_index_backed_constraint_inheritance_mvcc(
+                relation_oid,
+                constraint_oid,
+                parent_constraint_oid,
+                false,
+                1,
+                true,
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        self.apply_effect(effect)
+    }
+
+    fn verify_primary_index_not_nulls(
+        &self,
+        relation: &BoundRelation,
+        spec: &PartitionedIndexSpec,
+    ) -> Result<(), ExecError> {
+        for column in &spec.columns {
+            if column.expr_sql.is_some() {
+                continue;
+            }
+            let Some(desc_column) = relation
+                .desc
+                .columns
+                .iter()
+                .find(|desc| !desc.dropped && desc.name.eq_ignore_ascii_case(&column.name))
+            else {
+                continue;
+            };
+            if desc_column.storage.nullable {
+                let relation_name = self.relation_name(relation.relation_oid)?;
+                return Err(ExecError::DetailedError {
+                    message: "invalid primary key definition".into(),
+                    detail: Some(format!(
+                        "Column \"{}\" of relation \"{}\" is not marked NOT NULL.",
+                        desc_column.name, relation_name
+                    )),
+                    hint: None,
+                    sqlstate: "42P16",
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn column_attnums_for_index_columns(
         desc: &crate::backend::executor::RelationDesc,
         columns: &[IndexColumnDef],
@@ -223,6 +293,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
         expected_relkind: char,
         require_valid: bool,
         require_unattached: bool,
+        allow_constraint_backed: bool,
     ) -> Result<bool, ExecError> {
         let catalog = self.catalog();
         let Some(index_relation) = catalog.relation_by_oid(index.relation_oid) else {
@@ -237,7 +308,9 @@ impl<'a> PartitionedIndexInstaller<'a> {
         if require_unattached && !catalog.inheritance_parents(index.relation_oid).is_empty() {
             return Ok(false);
         }
-        if self.index_is_constraint_backed(relation.relation_oid, index.relation_oid) {
+        if !allow_constraint_backed
+            && self.index_is_constraint_backed(relation.relation_oid, index.relation_oid)
+        {
             return Ok(false);
         }
         let Some(class_row) = catalog.class_row_by_oid(index.relation_oid) else {
@@ -251,7 +324,6 @@ impl<'a> PartitionedIndexInstaller<'a> {
         Ok(class_row.relam == spec.build_options.am_oid
             && index.index_meta.indisunique == spec.unique
             && index.index_meta.indnullsnotdistinct == spec.nulls_not_distinct
-            && !index.index_meta.indisprimary
             && index.index_meta.indkey == expected_attnums
             && index.index_meta.indexprs == expected_indexprs
             && actual_predicate == expected_predicate
@@ -281,6 +353,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
                 expected_relkind,
                 false,
                 false,
+                false,
             )? {
                 return Ok(Some(child_index));
             }
@@ -306,6 +379,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
                 expected_relkind,
                 require_valid,
                 true,
+                false,
             )? {
                 return Ok(Some(index));
             }
@@ -330,7 +404,15 @@ impl<'a> PartitionedIndexInstaller<'a> {
             if !class_row.relname.eq_ignore_ascii_case(index_name) {
                 continue;
             }
-            if self.index_matches_relation(&index, relation, spec, 'I', require_valid, true)? {
+            if self.index_matches_relation(
+                &index,
+                relation,
+                spec,
+                'I',
+                require_valid,
+                true,
+                false,
+            )? {
                 return Ok(Some(index));
             }
         }
@@ -757,6 +839,84 @@ impl<'a> PartitionedIndexInstaller<'a> {
 }
 
 impl Database {
+    pub(super) fn copy_create_table_like_indexes_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        start_cid: CommandId,
+        source_relation_oid: u32,
+        target_relation: &BoundRelation,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let mut next_cid = start_cid;
+        let mut installer = PartitionedIndexInstaller {
+            db: self,
+            client_id,
+            xid,
+            next_cid: &mut next_cid,
+            configured_search_path,
+            catalog_effects,
+            maintenance_work_mem_kb: 65_536,
+            interrupts,
+        };
+        let source = installer.current_relation(source_relation_oid)?;
+        let target = installer.current_relation(target_relation.relation_oid)?;
+        let (constraint_index_oids, mut indexes) = {
+            let catalog = self.lazy_catalog_lookup(
+                client_id,
+                Some((xid, installer.visible_cid())),
+                configured_search_path,
+            );
+            (
+                catalog
+                    .constraint_rows_for_relation(source_relation_oid)
+                    .into_iter()
+                    .filter(|row| row.conindid != 0)
+                    .map(|row| row.conindid)
+                    .collect::<BTreeSet<_>>(),
+                catalog.index_relations_for_heap(source_relation_oid),
+            )
+        };
+        indexes.sort_by(|left, right| left.name.cmp(&right.name));
+        for source_index in indexes {
+            if constraint_index_oids.contains(&source_index.relation_oid) {
+                continue;
+            }
+            if !source_index.index_meta.indisvalid || !source_index.index_meta.indisready {
+                continue;
+            }
+            let spec = installer.spec_from_index(&source_index, &source)?;
+            let base_name = Database::default_index_base_name(
+                &installer.relation_name(target.relation_oid)?,
+                &spec.columns,
+            );
+            let index_name = self.choose_available_relation_name(
+                client_id,
+                xid,
+                installer.visible_cid(),
+                target.namespace_oid,
+                &base_name,
+            )?;
+            if target.relkind == 'p' {
+                let index_entry =
+                    installer.create_partitioned_index(&target, &index_name, &spec, true)?;
+                let valid = installer.reconcile_existing_partitioned_index_children(
+                    &target,
+                    index_entry.relation_oid,
+                    &spec,
+                )?;
+                if !valid {
+                    installer.set_index_valid(index_entry.relation_oid, false)?;
+                }
+            } else {
+                let _ = installer.create_physical_index(&target, &index_name, &spec)?;
+            }
+        }
+        Ok(next_cid)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_partitioned_index_in_transaction(
         &self,
@@ -1069,18 +1229,6 @@ impl Database {
                 sqlstate: "42710",
             });
         }
-        if installer.index_is_constraint_backed(child_table.relation_oid, child_index.relation_oid)
-        {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "cannot attach constraint index \"{}\"",
-                    stmt.child_index_name
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42809",
-            });
-        }
         let spec = installer.spec_from_index(&parent_index, &parent_table)?;
         let expected_relkind = if child_table.relkind == 'p' { 'I' } else { 'i' };
         if !installer.index_matches_relation(
@@ -1089,6 +1237,7 @@ impl Database {
             &spec,
             expected_relkind,
             false,
+            true,
             true,
         )? {
             return Err(ExecError::DetailedError {
@@ -1101,7 +1250,41 @@ impl Database {
                 sqlstate: "42809",
             });
         }
+        let parent_constraint =
+            installer.constraint_for_index(parent_table.relation_oid, parent_index.relation_oid);
+        let child_constraint = if let Some(parent_constraint) = parent_constraint.as_ref() {
+            let parent_table_name = installer.relation_name(parent_table.relation_oid)?;
+            let child_constraint = installer
+                .constraint_for_index(child_table.relation_oid, child_index.relation_oid)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!(
+                        "cannot attach index \"{}\" as a partition of index \"{}\"",
+                        stmt.child_index_name, stmt.parent_index_name
+                    ),
+                    detail: Some(format!(
+                        "The index \"{}\" belongs to a constraint in table \"{}\" but no constraint exists for index \"{}\".",
+                        stmt.parent_index_name,
+                        parent_table_name,
+                        stmt.child_index_name
+                    )),
+                    hint: None,
+                    sqlstate: "42809",
+                })?;
+            if parent_index.index_meta.indisprimary {
+                installer.verify_primary_index_not_nulls(&child_table, &spec)?;
+            }
+            Some((parent_constraint.oid, child_constraint.oid))
+        } else {
+            None
+        };
         installer.create_index_inheritance(child_index.relation_oid, parent_index.relation_oid)?;
+        if let Some((parent_constraint_oid, child_constraint_oid)) = child_constraint {
+            installer.update_constraint_inheritance(
+                child_table.relation_oid,
+                child_constraint_oid,
+                parent_constraint_oid,
+            )?;
+        }
         let _ = installer.validate_partitioned_index_upward(parent_index.relation_oid)?;
         Ok(StatementResult::AffectedRows(0))
     }

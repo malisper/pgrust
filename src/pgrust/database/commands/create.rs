@@ -2411,6 +2411,7 @@ impl Database {
                 next_cid,
                 relation,
                 &lowered.constraint_actions,
+                true,
                 configured_search_path,
                 catalog_effects,
             )?;
@@ -2965,9 +2966,22 @@ impl Database {
         lowered: &crate::backend::parser::LoweredCreateTable,
         xid: TransactionId,
         mut cid: CommandId,
+        configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<CommandId, ExecError> {
         for action in &lowered.like_post_create_actions {
+            if action.include_indexes {
+                cid = self.copy_create_table_like_indexes_in_transaction(
+                    client_id,
+                    xid,
+                    cid,
+                    action.source_relation_oid,
+                    relation,
+                    configured_search_path,
+                    catalog_effects,
+                )?;
+            }
+
             if action.include_comments {
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
@@ -4921,6 +4935,7 @@ impl Database {
                             &lowered,
                             xid,
                             next_cid,
+                            configured_search_path,
                             catalog_effects,
                         )?;
                         if let Some(parent_oid) = lowered.partition_parent_oid {
