@@ -855,11 +855,11 @@ fn format_typed_oid_text(
         SqlTypeKind::RegNamespace => Some(format_catalog_oid_text(oid, namespace_names, true)),
         SqlTypeKind::RegProc => Some(
             crate::backend::executor::expr_reg::format_regproc_oid_optional(oid, None)
-                .unwrap_or_else(|| format_catalog_oid_text(oid, proc_names, true)),
+                .unwrap_or_else(|| format_proc_oid_text(oid, proc_names, true)),
         ),
         SqlTypeKind::RegProcedure => Some(
             crate::backend::executor::expr_reg::format_regprocedure_oid_optional(oid, None)
-                .or_else(|| proc_names.and_then(|names| names.get(&oid).cloned()))
+                .or_else(|| format_proc_oid_text_optional(oid, proc_names))
                 .unwrap_or_else(|| format_catalog_oid_text(oid, None, true)),
         ),
         SqlTypeKind::RegOper => Some(
@@ -882,6 +882,26 @@ fn format_typed_oid_text(
         ),
         _ => None,
     }
+}
+
+fn format_proc_oid_text(
+    oid: u32,
+    proc_names: Option<&HashMap<u32, String>>,
+    dash_on_zero: bool,
+) -> String {
+    if dash_on_zero && oid == 0 {
+        return "-".to_string();
+    }
+    format_proc_oid_text_optional(oid, proc_names).unwrap_or_else(|| oid.to_string())
+}
+
+fn format_proc_oid_text_optional(
+    oid: u32,
+    proc_names: Option<&HashMap<u32, String>>,
+) -> Option<String> {
+    proc_names
+        .and_then(|names| names.get(&oid))
+        .map(|name| crate::backend::executor::expr_reg::quote_identifier_if_needed(name))
 }
 
 pub(crate) fn send_typed_data_row(

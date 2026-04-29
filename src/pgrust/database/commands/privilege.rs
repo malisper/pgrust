@@ -25,6 +25,7 @@ const TABLE_TRIGGER_PRIVILEGE_CHARS: &str = "t";
 const TABLE_MAINTAIN_PRIVILEGE_CHARS: &str = "m";
 const SCHEMA_ALL_PRIVILEGE_CHARS: &str = "UC";
 const SCHEMA_USAGE_PRIVILEGE_CHARS: &str = "U";
+const SCHEMA_CREATE_PRIVILEGE_CHARS: &str = "C";
 const TYPE_USAGE_PRIVILEGE_CHARS: &str = "U";
 const FUNCTION_EXECUTE_PRIVILEGE_CHARS: &str = "X";
 const FOREIGN_USAGE_PRIVILEGE_CHARS: &str = "U";
@@ -73,6 +74,7 @@ fn table_column_privilege_specs(
 fn object_privilege_chars(privilege: GrantObjectPrivilege) -> Option<&'static str> {
     match privilege {
         GrantObjectPrivilege::AllPrivilegesOnSchema => Some(SCHEMA_ALL_PRIVILEGE_CHARS),
+        GrantObjectPrivilege::CreateOnSchema => Some(SCHEMA_CREATE_PRIVILEGE_CHARS),
         GrantObjectPrivilege::UsageOnSchema => Some(SCHEMA_USAGE_PRIVILEGE_CHARS),
         GrantObjectPrivilege::UsageOnType => Some(TYPE_USAGE_PRIVILEGE_CHARS),
         GrantObjectPrivilege::ExecuteOnFunction
@@ -612,13 +614,14 @@ impl Database {
                     stmt,
                     configured_search_path,
                 ),
-            GrantObjectPrivilege::AllPrivilegesOnSchema | GrantObjectPrivilege::UsageOnSchema => {
-                self.execute_grant_schema_acl_stmt_with_search_path(
+            GrantObjectPrivilege::AllPrivilegesOnSchema
+            | GrantObjectPrivilege::CreateOnSchema
+            | GrantObjectPrivilege::UsageOnSchema => self
+                .execute_grant_schema_acl_stmt_with_search_path(
                     client_id,
                     stmt,
                     configured_search_path,
-                )
-            }
+                ),
             GrantObjectPrivilege::UsageOnType => self.execute_grant_type_acl_stmt_with_search_path(
                 client_id,
                 stmt,
@@ -680,8 +683,10 @@ impl Database {
                     configured_search_path,
                     catalog_effects,
                 ),
-            GrantObjectPrivilege::AllPrivilegesOnSchema | GrantObjectPrivilege::UsageOnSchema => {
-                self.execute_schema_acl_stmt_in_transaction_with_search_path(
+            GrantObjectPrivilege::AllPrivilegesOnSchema
+            | GrantObjectPrivilege::CreateOnSchema
+            | GrantObjectPrivilege::UsageOnSchema => self
+                .execute_schema_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt.privilege.clone(),
                     &stmt.object_names,
@@ -691,8 +696,7 @@ impl Database {
                     configured_search_path,
                     catalog_effects,
                     true,
-                )
-            }
+                ),
             GrantObjectPrivilege::UsageOnType => self
                 .execute_type_acl_stmt_in_transaction_with_search_path(
                     client_id,
@@ -776,8 +780,10 @@ impl Database {
                     configured_search_path,
                     catalog_effects,
                 ),
-            GrantObjectPrivilege::AllPrivilegesOnSchema | GrantObjectPrivilege::UsageOnSchema => {
-                self.execute_schema_acl_stmt_in_transaction_with_search_path(
+            GrantObjectPrivilege::AllPrivilegesOnSchema
+            | GrantObjectPrivilege::CreateOnSchema
+            | GrantObjectPrivilege::UsageOnSchema => self
+                .execute_schema_acl_stmt_in_transaction_with_search_path(
                     client_id,
                     stmt.privilege.clone(),
                     &stmt.object_names,
@@ -787,8 +793,7 @@ impl Database {
                     configured_search_path,
                     catalog_effects,
                     false,
-                )
-            }
+                ),
             GrantObjectPrivilege::UsageOnType => self
                 .execute_type_acl_stmt_in_transaction_with_search_path(
                     client_id,
@@ -866,13 +871,14 @@ impl Database {
                     stmt,
                     configured_search_path,
                 ),
-            GrantObjectPrivilege::AllPrivilegesOnSchema | GrantObjectPrivilege::UsageOnSchema => {
-                self.execute_revoke_schema_acl_stmt_with_search_path(
+            GrantObjectPrivilege::AllPrivilegesOnSchema
+            | GrantObjectPrivilege::CreateOnSchema
+            | GrantObjectPrivilege::UsageOnSchema => self
+                .execute_revoke_schema_acl_stmt_with_search_path(
                     client_id,
                     stmt,
                     configured_search_path,
-                )
-            }
+                ),
             GrantObjectPrivilege::UsageOnType => self
                 .execute_revoke_type_acl_stmt_with_search_path(
                     client_id,

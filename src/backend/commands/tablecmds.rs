@@ -79,10 +79,10 @@ use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{
     ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYRANGEOID, BOX_TYPE_OID, BPCHAR_TYPE_OID,
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID, HASH_AM_OID,
-    PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PUBLISH_GENCOLS_STORED, PgAmRow,
-    PgOpclassRow, PgPublicationRelRow, PgPublicationRow, RECORD_TYPE_OID, SPGIST_AM_OID,
-    TEXT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_am_rows, builtin_range_name_for_sql_type,
-    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
+    PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow, PgPublicationRelRow, PgPublicationRow,
+    RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_am_rows,
+    builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
@@ -2354,6 +2354,7 @@ fn route_updated_partition_row(
     catalog: &dyn CatalogLookup,
     relation_name: &str,
     relation_oid: u32,
+    partition_update_root_oid: Option<u32>,
     relation_constraints: &BoundRelationConstraints,
     indexes: &[BoundIndexRelation],
     toast_index: Option<&BoundIndexRelation>,
@@ -2366,15 +2367,17 @@ fn route_updated_partition_row(
     if !current_relation.relispartition {
         return Ok(None);
     }
-    let root_oid = partition_root_oid(catalog, relation_oid)?.unwrap_or(relation_oid);
+    let Some(root_oid) = partition_update_root_oid else {
+        let mut proute = exec_setup_partition_tuple_routing(catalog, &current_relation)?;
+        exec_find_partition(catalog, &mut proute, &current_relation, current_values, ctx)?;
+        return Ok(None);
+    };
     let Some(root_relation) = catalog.relation_by_oid(root_oid) else {
         return Ok(None);
     };
-    let Some(root_values) =
+    let root_values =
         remap_child_row_to_parent(current_values, &current_relation.desc, &root_relation.desc)
-    else {
-        return Ok(None);
-    };
+            .unwrap_or_else(|| current_values.to_vec());
     let mut proute = exec_setup_partition_tuple_routing(catalog, &root_relation)?;
     let routed = exec_find_partition(catalog, &mut proute, &root_relation, &root_values, ctx)?;
     if routed.relation_oid == relation_oid {
@@ -2610,6 +2613,7 @@ pub(crate) fn write_updated_row(
     relation_name: &str,
     rel: crate::backend::storage::smgr::RelFileLocator,
     relation_oid: u32,
+    partition_update_root_oid: Option<u32>,
     allow_partition_routing: bool,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
@@ -2666,6 +2670,7 @@ pub(crate) fn write_updated_row(
             catalog.as_ref(),
             relation_name,
             relation_oid,
+            partition_update_root_oid,
             relation_constraints,
             indexes,
             toast_index,
@@ -4381,6 +4386,7 @@ fn apply_referential_action_to_rows(
                     &constraint.child_relation_name,
                     constraint.child_rel,
                     constraint.child_relation_oid,
+                    None,
                     false,
                     constraint.child_toast,
                     toast_index.as_ref(),
@@ -5986,81 +5992,109 @@ fn execute_insert_rows_with_routing(
         );
     }
 
-    let mut routed = BTreeMap::<u32, PartitionResultRelInfo>::new();
-    let mut proute = exec_setup_partition_tuple_routing(catalog, &target_relation)?;
-    for row in rows {
-        let leaf = exec_find_partition(catalog, &mut proute, &target_relation, row, ctx)?;
-        let leaf_row = remap_partition_row(row, &target_relation.desc, &leaf.desc)?;
-        match routed.entry(leaf.relation_oid) {
-            Entry::Occupied(mut entry) => {
-                let entry = entry.get_mut();
-                entry.parent_rows.push(row.clone());
-                entry.rows.push(leaf_row);
-            }
-            Entry::Vacant(entry) => {
-                let mut result_rel_info = PartitionResultRelInfo::new(
-                    catalog,
-                    relation_name,
-                    relation_oid,
-                    relation_constraints,
-                    indexes,
-                    toast_index,
-                    leaf,
-                )?;
-                result_rel_info.parent_rows.push(row.clone());
-                result_rel_info.rows.push(leaf_row);
-                entry.insert(result_rel_info);
-            }
-        }
+    let root_statement_triggers = if target_relation.relkind == 'p' {
+        Some(RuntimeTriggers::load(
+            catalog,
+            relation_oid,
+            relation_name,
+            desc,
+            TriggerOperation::Insert,
+            &[],
+            ctx.session_replication_role,
+        )?)
+    } else {
+        None
+    };
+    if let Some(triggers) = &root_statement_triggers {
+        triggers.before_statement(ctx)?;
     }
 
-    let mut inserted_rows = Vec::new();
-    for (_, result_rel_info) in routed {
-        for (parent_row, leaf_input_row) in result_rel_info
-            .parent_rows
-            .iter()
-            .zip(result_rel_info.rows.iter())
-        {
-            let leaf_inserted_rows = execute_insert_rows(
-                &result_rel_info.relation_name,
-                result_rel_info.relation.relation_oid,
-                result_rel_info.relation.rel,
-                result_rel_info.relation.toast,
-                result_rel_info.toast_index.as_ref(),
-                &result_rel_info.relation.desc,
-                &result_rel_info.relation_constraints,
-                rls_write_checks,
-                &result_rel_info.indexes,
-                std::slice::from_ref(leaf_input_row),
-                None,
-                ctx,
-                xid,
-                cid,
-            )
-            .map_err(|err| remap_routed_insert_error_detail(err, parent_row, ctx))?;
-            if let Some(returning) = returning {
-                for leaf_row in leaf_inserted_rows.iter() {
-                    let projected_row =
-                        remap_child_row_to_parent(leaf_row, &result_rel_info.relation.desc, desc)
-                            .unwrap_or_else(|| parent_row.clone());
-                    let row = project_returning_row_with_old_new(
-                        returning,
-                        &projected_row,
-                        None,
-                        Some(result_rel_info.relation.relation_oid),
-                        None,
-                        Some(&projected_row),
-                        ctx,
-                    )?;
-                    capture_copy_to_dml_returning_row(row.clone());
-                    inserted_rows.push(row);
+    let result = (|| {
+        let mut routed = BTreeMap::<u32, PartitionResultRelInfo>::new();
+        let mut proute = exec_setup_partition_tuple_routing(catalog, &target_relation)?;
+        for row in rows {
+            let leaf = exec_find_partition(catalog, &mut proute, &target_relation, row, ctx)?;
+            let leaf_row = remap_partition_row(row, &target_relation.desc, &leaf.desc)?;
+            match routed.entry(leaf.relation_oid) {
+                Entry::Occupied(mut entry) => {
+                    let entry = entry.get_mut();
+                    entry.parent_rows.push(row.clone());
+                    entry.rows.push(leaf_row);
                 }
-            } else {
-                inserted_rows.extend(leaf_inserted_rows);
+                Entry::Vacant(entry) => {
+                    let mut result_rel_info = PartitionResultRelInfo::new(
+                        catalog,
+                        relation_name,
+                        relation_oid,
+                        relation_constraints,
+                        indexes,
+                        toast_index,
+                        leaf,
+                    )?;
+                    result_rel_info.parent_rows.push(row.clone());
+                    result_rel_info.rows.push(leaf_row);
+                    entry.insert(result_rel_info);
+                }
             }
         }
+
+        let mut inserted_rows = Vec::new();
+        for (_, result_rel_info) in routed {
+            for (parent_row, leaf_input_row) in result_rel_info
+                .parent_rows
+                .iter()
+                .zip(result_rel_info.rows.iter())
+            {
+                let leaf_inserted_rows = execute_insert_rows(
+                    &result_rel_info.relation_name,
+                    result_rel_info.relation.relation_oid,
+                    result_rel_info.relation.rel,
+                    result_rel_info.relation.toast,
+                    result_rel_info.toast_index.as_ref(),
+                    &result_rel_info.relation.desc,
+                    &result_rel_info.relation_constraints,
+                    rls_write_checks,
+                    &result_rel_info.indexes,
+                    std::slice::from_ref(leaf_input_row),
+                    None,
+                    ctx,
+                    xid,
+                    cid,
+                )
+                .map_err(|err| remap_routed_insert_error_detail(err, parent_row, ctx))?;
+                if let Some(returning) = returning {
+                    for leaf_row in leaf_inserted_rows.iter() {
+                        let projected_row = remap_child_row_to_parent(
+                            leaf_row,
+                            &result_rel_info.relation.desc,
+                            desc,
+                        )
+                        .unwrap_or_else(|| parent_row.clone());
+                        let row = project_returning_row_with_old_new(
+                            returning,
+                            &projected_row,
+                            None,
+                            Some(result_rel_info.relation.relation_oid),
+                            None,
+                            Some(&projected_row),
+                            ctx,
+                        )?;
+                        capture_copy_to_dml_returning_row(row.clone());
+                        inserted_rows.push(row);
+                    }
+                } else {
+                    inserted_rows.extend(leaf_inserted_rows);
+                }
+            }
+        }
+        Ok(inserted_rows)
+    })();
+    if result.is_ok()
+        && let Some(triggers) = &root_statement_triggers
+    {
+        triggers.after_statement(None, ctx)?;
     }
-    Ok(inserted_rows)
+    result
 }
 
 fn remap_routed_insert_error_detail(
@@ -6468,7 +6502,13 @@ pub(crate) fn relation_permission_denied(ctx: &ExecutorContext, relation_oid: u3
         .catalog
         .as_deref()
         .and_then(|catalog| catalog.class_row_by_oid(relation_oid))
-        .map(|row| row.relname)
+        .map(|row| {
+            if row.relnamespace == PG_TOAST_NAMESPACE_OID {
+                format!("pg_toast.{}", row.relname)
+            } else {
+                row.relname
+            }
+        })
         .unwrap_or_else(|| relation_oid.to_string());
     ExecError::DetailedError {
         message: format!("permission denied for table {relation_name}"),
@@ -6486,11 +6526,17 @@ fn relation_permission_denied_for_requirement(
     } else {
         "table"
     };
+    let relation_name = if requirement.relation_name.starts_with("pg_toast.") {
+        requirement.relation_name.as_str()
+    } else {
+        requirement
+            .relation_name
+            .rsplit_once('.')
+            .map(|(_, name)| name)
+            .unwrap_or(&requirement.relation_name)
+    };
     ExecError::DetailedError {
-        message: format!(
-            "permission denied for {relation_kind} {}",
-            requirement.relation_name
-        ),
+        message: format!("permission denied for {relation_kind} {relation_name}"),
         detail: None,
         hint: None,
         sqlstate: "42501",
@@ -9420,6 +9466,36 @@ pub fn execute_update_with_waiter(
         }
         let mut affected_rows = 0;
         let mut returned_rows = Vec::new();
+        let root_update_relation = stmt
+            .targets
+            .iter()
+            .find_map(|target| target.partition_update_root_oid)
+            .and_then(|oid| catalog.relation_by_oid(oid));
+        let root_update_triggers = root_update_relation
+            .as_ref()
+            .map(|root| {
+                let modified_attnums = stmt
+                    .targets
+                    .first()
+                    .map(|target| modified_attnums_for_update(&target.assignments))
+                    .unwrap_or_default();
+                RuntimeTriggers::load(
+                    catalog,
+                    root.relation_oid,
+                    &stmt.target_relation_name,
+                    &root.desc,
+                    TriggerOperation::Update,
+                    &modified_attnums,
+                    ctx.session_replication_role,
+                )
+            })
+            .transpose()?;
+        if let Some(triggers) = &root_update_triggers {
+            triggers.before_statement(ctx)?;
+        }
+        let mut root_transition_capture = root_update_triggers
+            .as_ref()
+            .map(|triggers| triggers.new_transition_capture());
 
         for target in &stmt.targets {
             let modified_attnums = modified_attnums_for_update(&target.assignments);
@@ -9531,6 +9607,7 @@ pub fn execute_update_with_waiter(
                         &target.relation_name,
                         target.rel,
                         target.relation_oid,
+                        target.partition_update_root_oid,
                         target.allow_partition_routing,
                         target.toast,
                         target.toast_index.as_ref(),
@@ -9592,6 +9669,29 @@ pub fn execute_update_with_waiter(
                                     ctx,
                                 )?;
                                 capture_copy_to_dml_notices();
+                            }
+                            if let (Some(root_triggers), Some(root_capture), Some(root_relation)) = (
+                                root_update_triggers.as_ref(),
+                                root_transition_capture.as_mut(),
+                                root_update_relation.as_ref(),
+                            ) {
+                                let root_old_values = remap_child_row_to_parent(
+                                    &current_old_values,
+                                    &target.desc,
+                                    &root_relation.desc,
+                                )
+                                .unwrap_or_else(|| current_old_values.clone());
+                                let root_new_values = remap_child_row_to_parent(
+                                    &triggered_values,
+                                    &target.desc,
+                                    &root_relation.desc,
+                                )
+                                .unwrap_or_else(|| triggered_values.clone());
+                                root_triggers.capture_update_row(
+                                    root_capture,
+                                    &root_old_values,
+                                    &root_new_values,
+                                );
                             }
                             affected_rows += 1;
                             break;
@@ -9655,6 +9755,14 @@ pub fn execute_update_with_waiter(
                 } else {
                     triggers.after_statement(None, ctx)?;
                 }
+            }
+        }
+        if let Some(triggers) = &root_update_triggers {
+            if let Some(capture) = root_transition_capture.as_ref() {
+                triggers.after_transition_rows(capture, ctx)?;
+                triggers.after_statement(Some(capture), ctx)?;
+            } else {
+                triggers.after_statement(None, ctx)?;
             }
         }
 
@@ -9940,6 +10048,7 @@ fn execute_update_from_joined_input(
                     &target.relation_name,
                     target.rel,
                     target.relation_oid,
+                    target.partition_update_root_oid,
                     target.allow_partition_routing,
                     target.toast,
                     target.toast_index.as_ref(),

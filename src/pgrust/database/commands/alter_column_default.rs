@@ -2,9 +2,29 @@ use super::super::*;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_heap_relation_for_alter_table,
-    lookup_table_or_partitioned_table_for_alter_table, validate_alter_table_alter_column_default,
-    validate_alter_table_alter_column_expression,
+    validate_alter_table_alter_column_default, validate_alter_table_alter_column_expression,
 };
+
+fn lookup_relation_for_alter_column_default(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    if_exists: bool,
+) -> Result<Option<crate::backend::parser::BoundRelation>, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'f' | 'v') => Ok(Some(entry)),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table",
+        })),
+        None if if_exists => {
+            crate::backend::utils::misc::notices::push_notice(format!(
+                r#"relation "{name}" does not exist, skipping"#
+            ));
+            Ok(None)
+        }
+        None => Err(ExecError::Parse(ParseError::UnknownTable(name.to_string()))),
+    }
+}
 
 impl Database {
     pub(crate) fn execute_alter_table_alter_column_default_stmt_with_search_path(
@@ -15,7 +35,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+        let Some(relation) = lookup_relation_for_alter_column_default(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -23,8 +43,9 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        let lock_tag = crate::pgrust::database::relation_lock_tag(&relation);
         self.table_locks.lock_table_interruptible(
-            relation.rel,
+            lock_tag,
             TableLockMode::AccessExclusive,
             client_id,
             interrupts.as_ref(),
@@ -43,7 +64,7 @@ impl Database {
             );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
+        self.table_locks.unlock_table(lock_tag, client_id);
         result
     }
 
@@ -58,7 +79,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+        let Some(relation) = lookup_relation_for_alter_column_default(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,

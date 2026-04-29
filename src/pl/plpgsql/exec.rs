@@ -1651,7 +1651,12 @@ fn exec_function_block(
 
     for local in &block.local_slots {
         state.values[local.slot] = match &local.default_expr {
-            Some(expr) => cast_value(eval_function_expr(expr, &state.values, ctx)?, local.ty)?,
+            Some(expr) => cast_function_value(
+                eval_function_expr(expr, &state.values, ctx)?,
+                compiled_expr_sql_type_hint(expr),
+                local.ty,
+                ctx,
+            )?,
             None => Value::Null,
         };
     }
@@ -2528,12 +2533,10 @@ fn exec_function_create_table_as(
     Ok(())
 }
 
-fn exec_function_create_table(
+fn exec_dynamic_create_table(
     stmt: &crate::backend::parser::CreateTableStatement,
-    compiled: &CompiledFunction,
-    state: &mut FunctionState,
     ctx: &mut ExecutorContext,
-) -> Result<(), ExecError> {
+) -> Result<StatementResult, ExecError> {
     let db = ctx.database.clone().ok_or_else(|| {
         function_runtime_error(
             "PL/pgSQL CREATE TABLE requires database execution context",
@@ -2546,7 +2549,7 @@ fn exec_function_create_table(
     let cid = ctx.next_command_id;
     let effect_start = ctx.catalog_effects.len();
     let mut sequence_effects = Vec::new();
-    db.execute_create_table_stmt_in_transaction_with_search_path(
+    let result = db.execute_create_table_stmt_in_transaction_with_search_path(
         ctx.client_id,
         stmt,
         xid,
@@ -2555,14 +2558,28 @@ fn exec_function_create_table(
         &mut ctx.catalog_effects,
         &mut ctx.temp_effects,
         &mut sequence_effects,
-    )?;
-    db.fire_event_triggers_in_executor_context(ctx, "ddl_command_end", "CREATE TABLE")?;
-    let consumed_catalog_cids = ctx
-        .catalog_effects
-        .len()
-        .saturating_sub(effect_start)
-        .max(1);
-    advance_plpgsql_command_id_by(ctx, consumed_catalog_cids as u32);
+    );
+    if result.is_ok() {
+        db.fire_event_triggers_in_executor_context(ctx, "ddl_command_end", "CREATE TABLE")?;
+    }
+    if result.is_ok() {
+        let consumed_catalog_cids = ctx
+            .catalog_effects
+            .len()
+            .saturating_sub(effect_start)
+            .max(1);
+        advance_plpgsql_command_id_by(ctx, consumed_catalog_cids as u32);
+    }
+    result
+}
+
+fn exec_function_create_table(
+    stmt: &crate::backend::parser::CreateTableStatement,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    exec_dynamic_create_table(stmt, ctx)?;
     state.values[compiled.found_slot] = Value::Bool(false);
     Ok(())
 }
@@ -3067,11 +3084,30 @@ fn execute_dynamic_statement(
                 }
                 result
             }
+            crate::backend::parser::Statement::CreateTable(stmt) => {
+                exec_dynamic_create_table(&stmt, ctx)
+            }
             crate::backend::parser::Statement::DropIndex(stmt) => {
                 exec_function_drop_index(&stmt, ctx)
             }
             crate::backend::parser::Statement::DropTable(stmt) => {
                 exec_function_drop_table(&stmt, catalog.as_ref(), ctx)
+            }
+            crate::backend::parser::Statement::AlterTableAttachPartition(stmt)
+                if ctx.trigger_depth > 0 =>
+            {
+                Err(ExecError::DetailedError {
+                    message: format!(
+                        "cannot ALTER TABLE \"{}\" because it is being used by active queries in this session",
+                        stmt.parent_table
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(&stmt.parent_table)
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "55006",
+                })
             }
             crate::backend::parser::Statement::Set(stmt)
                 if stmt.name.eq_ignore_ascii_case("jit") =>
@@ -4019,6 +4055,7 @@ fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
         "syntax_error" => Some("42601"),
         "feature_not_supported" => Some("0A000"),
         "reading_sql_data_not_permitted" => Some("2F003"),
+        "wrong_object_type" => Some("42809"),
         _ => None,
     }
 }

@@ -10,7 +10,9 @@ use crate::backend::parser::{
 };
 use crate::backend::rewrite::render_relation_expr_sql;
 use crate::include::access::htup::{AttributeCompression, AttributeStorage};
-use crate::include::catalog::{CONSTRAINT_CHECK, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
+use crate::include::catalog::{
+    CONSTRAINT_CHECK, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, DEFAULT_COLLATION_OID,
+};
 use crate::include::nodes::primnodes::expr_contains_set_returning;
 use crate::pgrust::database::ddl::format_sql_type_name;
 
@@ -672,7 +674,9 @@ fn expand_like_clause(
             CreateTableElement::Column(crate::backend::parser::ColumnDef {
                 name: column.name.clone(),
                 ty: RawTypeName::Builtin(column.sql_type),
-                collation: None,
+                collation: (column.collation_oid != 0
+                    && column.collation_oid != DEFAULT_COLLATION_OID)
+                    .then(|| collation_name(catalog, column.collation_oid)),
                 default_expr: if generated.is_some() {
                     None
                 } else if options.defaults && column.generated.is_none() {
@@ -762,6 +766,15 @@ fn expand_like_clause(
         });
 
     Ok((elements, post_create_action))
+}
+
+fn collation_name(catalog: &dyn CatalogLookup, oid: u32) -> String {
+    catalog
+        .collation_rows()
+        .into_iter()
+        .find(|row| row.oid == oid)
+        .map(|row| row.collname)
+        .unwrap_or_else(|| oid.to_string())
 }
 
 fn constraint_column_names(attnums: Option<&[i16]>, desc: &RelationDesc) -> Option<Vec<String>> {

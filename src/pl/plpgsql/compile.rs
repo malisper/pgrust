@@ -1026,7 +1026,7 @@ fn compile_var_decl(
     let default_expr = decl
         .default_expr
         .as_deref()
-        .map(|expr| compile_expr_text(expr, catalog, env))
+        .map(|expr| compile_assignment_expr_text(expr, catalog, env))
         .transpose()?;
     Ok(CompiledVar {
         slot,

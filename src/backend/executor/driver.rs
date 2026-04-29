@@ -8,7 +8,7 @@ use super::{
     parse_statement, pg_plan_query, pg_plan_values_query,
 };
 use crate::backend::parser::{
-    CatalogLookup, UnsupportedStatement, pg_plan_query_with_config,
+    CatalogLookup, CreateStatisticsStatement, UnsupportedStatement, pg_plan_query_with_config,
     pg_plan_values_query_with_config, plan_merge,
 };
 use crate::include::nodes::pathnodes::PlannerConfig;
@@ -16,6 +16,15 @@ use crate::pgrust::database::queue_pending_notification;
 use crate::pl::plpgsql::execute_do;
 
 fn unsupported_statement_error(stmt: &UnsupportedStatement) -> ExecError {
+    if stmt.feature == "ALTER TABLE form" {
+        let lower = stmt.sql.to_ascii_lowercase();
+        if lower.contains(" set with oids") {
+            return ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "valid ALTER TABLE form",
+                actual: "syntax error at or near \"WITH\"".into(),
+            });
+        }
+    }
     ExecError::Parse(ParseError::FeatureNotSupported(format!(
         "{}: {}",
         stmt.feature, stmt.sql
@@ -675,6 +684,12 @@ fn execute_statement_with_source(
             // form so regression scripts that set up ownership can proceed.
             Ok(StatementResult::AffectedRows(0))
         }
+        Statement::Unsupported(stmt)
+            if stmt.feature == "ALTER TABLE form"
+                && stmt.sql.to_ascii_lowercase().contains(" set without oids") =>
+        {
+            Ok(StatementResult::AffectedRows(0))
+        }
         Statement::AlterTableCompound(_) => Err(ExecError::Parse(
             ParseError::FeatureNotSupported("ALTER TABLE compound execution".into()),
         )),
@@ -739,6 +754,7 @@ pub fn execute_readonly_statement_with_config(
             ctx,
         ),
         Statement::Analyze(stmt) => execute_analyze(stmt, catalog),
+        Statement::CreateStatistics(stmt) => validate_readonly_create_statistics(&stmt, catalog),
         Statement::Show(_)
         | Statement::Set(_)
         | Statement::Reset(_)
@@ -775,6 +791,12 @@ pub fn execute_readonly_statement_with_config(
         ))),
         Statement::Unsupported(stmt) if stmt.feature == "ALTER DEFAULT PRIVILEGES" => {
             // :HACK: see readonly path above.
+            Ok(StatementResult::AffectedRows(0))
+        }
+        Statement::Unsupported(stmt)
+            if stmt.feature == "ALTER TABLE form"
+                && stmt.sql.to_ascii_lowercase().contains(" set without oids") =>
+        {
             Ok(StatementResult::AffectedRows(0))
         }
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
@@ -1055,6 +1077,64 @@ pub fn execute_readonly_statement_with_config(
             expected: "read-only statement",
             actual: format!("{other:?}"),
         })),
+    }
+}
+
+fn validate_readonly_create_statistics(
+    stmt: &CreateStatisticsStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<StatementResult, ExecError> {
+    let relation_name = normalize_readonly_statistics_from_clause(&stmt.from_clause)?;
+    match catalog.lookup_any_relation(&relation_name) {
+        Some(relation) if matches!(relation.relkind, 'r' | 'm' | 'p' | 'f') => {
+            Ok(StatementResult::AffectedRows(0))
+        }
+        Some(relation) => Err(unsupported_readonly_statistics_relation_error(
+            &relation_name,
+            relation.relkind,
+        )),
+        None => Err(ExecError::Parse(ParseError::UnknownTable(relation_name))),
+    }
+}
+
+fn normalize_readonly_statistics_from_clause(from_clause: &str) -> Result<String, ExecError> {
+    let input = from_clause.trim();
+    if input.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnexpectedEof));
+    }
+    if input.contains(char::is_whitespace) || input.contains('(') {
+        return Err(ExecError::DetailedError {
+            message: "CREATE STATISTICS only supports relation names in the FROM clause".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    Ok(input.trim_matches('"').to_ascii_lowercase())
+}
+
+fn unsupported_readonly_statistics_relation_error(relation_name: &str, relkind: char) -> ExecError {
+    let base_name = relation_name
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(relation_name)
+        .trim_matches('"');
+    let detail_kind = match relkind {
+        'c' => "composite types",
+        'f' => "foreign tables",
+        'i' | 'I' => "indexes",
+        'S' => "sequences",
+        't' => "TOAST tables",
+        'v' => "views",
+        _ => "relations of this kind",
+    };
+    ExecError::DetailedError {
+        message: format!("cannot define statistics for relation \"{base_name}\""),
+        detail: Some(format!(
+            "This operation is not supported for {detail_kind}."
+        )),
+        hint: None,
+        sqlstate: "42809",
     }
 }
 

@@ -7606,6 +7606,80 @@ fn create_table_partition_validation_matches_postgres_messages() {
 }
 
 #[test]
+fn alter_table_rejects_partition_key_column_drop_and_type_change() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table partitioned (a int4, b int4) partition by range (a, (a + b + 1))",
+        )
+        .unwrap();
+
+    match session.execute(&db, "alter table partitioned drop column a") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message
+            == "cannot drop column \"a\" because it is part of the partition key of relation \"partitioned\""
+            && sqlstate == "42P16" => {}
+        other => panic!("expected partition-key drop rejection, got {other:?}"),
+    }
+    match session.execute(&db, "alter table partitioned alter column b type text") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message
+            == "cannot alter column \"b\" because it is part of the partition key of relation \"partitioned\""
+            && sqlstate == "42P16" => {}
+        other => panic!("expected partition-key type-change rejection, got {other:?}"),
+    }
+    match session.execute(&db, "alter table partitioned set (fillfactor=100)") {
+        Err(ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }) if message == "cannot specify storage parameters for a partitioned table"
+            && hint
+                == Some("Specify storage parameters for its leaf partitions instead.".into())
+            && sqlstate == "0A000" => {}
+        other => panic!("expected partitioned storage-parameter rejection, got {other:?}"),
+    }
+    session
+        .execute(&db, "create table nonpartitioned (a int4, b int4)")
+        .unwrap();
+    match session.execute(&db, "alter table partitioned inherit nonpartitioned") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "cannot change inheritance of partitioned table"
+            && sqlstate == "42P16" => {}
+        other => panic!("expected partitioned child inherit rejection, got {other:?}"),
+    }
+    match session.execute(&db, "alter table nonpartitioned inherit partitioned") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "cannot inherit from partitioned table \"partitioned\""
+            && sqlstate == "42P16" => {}
+        other => panic!("expected partitioned parent inherit rejection, got {other:?}"),
+    }
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select attname, atttypid::regtype::text \
+             from pg_attribute \
+             where attrelid = 'partitioned'::regclass and attnum > 0 and not attisdropped \
+             order by attnum",
+        ),
+        vec![
+            vec![Value::Text("a".into()), Value::Text("integer".into())],
+            vec![Value::Text("b".into()), Value::Text("integer".into())],
+        ]
+    );
+}
+
+#[test]
 fn partition_bound_validation_and_catalog_describe_helpers() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -7698,7 +7772,7 @@ fn partition_bound_validation_and_catalog_describe_helpers() {
     session
         .execute(
             &db,
-            "create table commented_parted (a int, b text) partition by list (a)",
+            "create table commented_parted (a int, b text, unique (a, b)) partition by list (a)",
         )
         .unwrap();
     session
@@ -7711,6 +7785,18 @@ fn partition_bound_validation_and_catalog_describe_helpers() {
         .execute(
             &db,
             "comment on column commented_parted.a is 'partition key'",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "comment on constraint commented_parted_a_b_key on commented_parted is 'partitioned constraint'",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "comment on index commented_parted_a_b_key is 'partitioned index'",
         )
         .unwrap();
     assert_eq!(
@@ -7728,6 +7814,22 @@ fn partition_bound_validation_and_catalog_describe_helpers() {
             "select description from pg_description where objoid = 'commented_parted'::regclass and objsubid = 1"
         ),
         vec![vec![Value::Text("partition key".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select description from pg_description where objoid = (select oid from pg_constraint where conname = 'commented_parted_a_b_key') and classoid = 2606"
+        ),
+        vec![vec![Value::Text("partitioned constraint".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select obj_description('commented_parted_a_b_key'::regclass)"
+        ),
+        vec![vec![Value::Text("partitioned index".into())]]
     );
 
     session
@@ -9037,7 +9139,7 @@ fn partitioned_key_coverage_checks_fire_for_root_partition_of_and_attach_partiti
     session
         .execute(
             &db,
-            "create table attach_child_cov (a int, b int) partition by range (b)",
+            "create table attach_child_cov (a int not null, b int) partition by range (b)",
         )
         .unwrap();
     session
@@ -9174,7 +9276,7 @@ fn attach_partition_creates_missing_keys_and_fk_to_partitioned_key_stays_rejecte
         )
         .unwrap();
     session
-        .execute(&db, "create table attach_child (a int)")
+        .execute(&db, "create table attach_child (a int not null)")
         .unwrap();
     session
         .execute(
@@ -9719,6 +9821,47 @@ fn inheritance_multi_parent_create_and_drop_clean_up_catalog_rows() {
 }
 
 #[test]
+fn create_table_inherits_notices_column_check_constraint_merge() {
+    let dir = temp_dir("inheritance_column_check_merge_notice");
+    let db = Database::open(&dir, 32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parent_merge_notice (a int4 constraint con1 check (a > 0))",
+        )
+        .unwrap();
+    clear_backend_notices();
+    session
+        .execute(
+            &db,
+            "create table child_merge_notice \
+             (a int4 constraint con1 check (a > 0), d int4) \
+             inherits (parent_merge_notice)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![
+            r#"merging column "a" with inherited definition"#.to_string(),
+            r#"merging constraint "con1" with inherited definition"#.to_string(),
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conislocal, coninhcount::int4 \
+             from pg_constraint \
+             where conrelid = 'child_merge_notice'::regclass and conname = 'con1'",
+        ),
+        vec![vec![Value::Bool(true), Value::Int32(1)]]
+    );
+}
+
+#[test]
 fn dropping_inherited_child_removes_pg_inherits_rows() {
     let dir = temp_dir("inheritance_drop_cleanup");
     let db = Database::open(&dir, 128).unwrap();
@@ -9903,7 +10046,7 @@ fn alter_table_add_check_merges_inherited_constraint_as_local() {
                 message,
                 "cannot drop inherited constraint \"f1_pos\" of relation \"c1\""
             );
-            assert_eq!(sqlstate, "0A000");
+            assert_eq!(sqlstate, "42P16");
         }
         other => panic!("expected inherited check drop rejection, got {other:?}"),
     }
@@ -18231,6 +18374,195 @@ fn alter_index_rename_supports_if_exists_and_rename() {
 }
 
 #[test]
+fn relation_rename_accepts_alter_table_and_index_object_kind_mismatch() {
+    let base = temp_dir("relation_rename_object_kind_mismatch");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table rename_rel (a int4)")
+        .unwrap();
+    session
+        .execute(&db, "create index rename_rel_idx on rename_rel (a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table rename_parted (a int4) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index rename_parted_idx on rename_parted (a)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "alter index rename_rel rename to rename_rel_2")
+        .unwrap();
+    session
+        .execute(&db, "alter index rename_parted rename to rename_parted_2")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname from pg_class \
+             where relname in ('rename_rel_2', 'rename_parted_2') \
+             order by relname",
+        ),
+        vec![
+            vec![Value::Text("rename_parted_2".into())],
+            vec![Value::Text("rename_rel_2".into())],
+        ]
+    );
+
+    session
+        .execute(&db, "alter index rename_rel_idx rename to rename_rel_idx_2")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter index rename_parted_idx rename to rename_parted_idx_2",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table rename_rel_idx_2 rename to rename_rel_idx_3",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table rename_parted_idx_2 rename to rename_parted_idx_3",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relname from pg_class \
+             where relname in ('rename_rel_idx_3', 'rename_parted_idx_3') \
+             order by relname",
+        ),
+        vec![
+            vec![Value::Text("rename_parted_idx_3".into())],
+            vec![Value::Text("rename_rel_idx_3".into())],
+        ]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn partitioned_table_and_index_rename_use_distinct_lock_tags() {
+    let base = temp_dir("rename_partitioned_lock_tags");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table lock_parted (a int4) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index lock_parted_idx on lock_parted (a)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "alter index lock_parted rename to lock_parted_2")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relation::regclass::text, mode from pg_locks \
+             where pid = pg_backend_pid() and locktype = 'relation' \
+               and relation::regclass::text like 'lock_parted%' \
+             order by relation::regclass::text",
+        ),
+        vec![vec![
+            Value::Text("lock_parted_2".into()),
+            Value::Text("AccessExclusiveLock".into()),
+        ]]
+    );
+    session.execute(&db, "commit").unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "alter index lock_parted_idx rename to lock_parted_idx_2",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relation::regclass::text, mode from pg_locks \
+             where pid = pg_backend_pid() and locktype = 'relation' \
+               and relation::regclass::text like 'lock_parted%' \
+             order by relation::regclass::text",
+        ),
+        vec![vec![
+            Value::Text("lock_parted_idx_2".into()),
+            Value::Text("ShareUpdateExclusiveLock".into()),
+        ]]
+    );
+    session.execute(&db, "commit").unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "alter table lock_parted_idx_2 rename to lock_parted_idx_3",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relation::regclass::text, mode from pg_locks \
+             where pid = pg_backend_pid() and locktype = 'relation' \
+               and relation::regclass::text like 'lock_parted%' \
+             order by relation::regclass::text",
+        ),
+        vec![vec![
+            Value::Text("lock_parted_idx_3".into()),
+            Value::Text("AccessExclusiveLock".into()),
+        ]]
+    );
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn alter_table_rename_accepts_views() {
+    let base = temp_dir("alter_table_rename_view");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table rename_view_base (a int4)")
+        .unwrap();
+    db.execute(1, "insert into rename_view_base values (1)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view rename_view_source as select a from rename_view_base",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table rename_view_source rename to rename_view_dest",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select a from rename_view_dest"),
+        vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
 fn alter_index_rename_if_exists_missing_pushes_notice() {
     let base = temp_dir("alter_index_rename_if_exists_missing");
     let db = Database::open(&base, 16).unwrap();
@@ -18706,6 +19038,81 @@ fn alter_table_alter_column_set_default_applies_to_future_rows() {
 }
 
 #[test]
+fn alter_table_view_alter_column_default_updates_view_catalog() {
+    let base = temp_dir("alter_table_view_set_default");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "create view items_view as select id, note from items")
+        .unwrap();
+
+    db.execute(
+        1,
+        "alter table items_view alter column note set default 'hello'",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_expr(adbin, adrelid) \
+             from pg_attrdef where adrelid = 'items_view'::regclass"
+        ),
+        vec![vec![Value::Text("'hello'".into())]]
+    );
+
+    db.execute(1, "alter table items_view alter column note drop default")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_attrdef where adrelid = 'items_view'::regclass"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn alter_table_view_rejects_unsupported_column_actions_with_view_detail() {
+    let base = temp_dir("alter_table_view_unsupported_column_actions");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, note text)")
+        .unwrap();
+    db.execute(1, "create view items_view as select id, note from items")
+        .unwrap();
+
+    for (sql, action) in [
+        (
+            "alter table items_view alter column id drop not null",
+            "ALTER COLUMN ... DROP NOT NULL",
+        ),
+        (
+            "alter table items_view alter column note set not null",
+            "ALTER COLUMN ... SET NOT NULL",
+        ),
+        ("alter table items_view drop column note", "DROP COLUMN"),
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::DetailedError {
+                message,
+                detail,
+                sqlstate,
+                ..
+            }) if message
+                == format!(
+                    "ALTER action {action} cannot be performed on relation \"items_view\""
+                )
+                && detail == Some("This operation is not supported for views.".into())
+                && sqlstate == "42809" => {}
+            other => panic!("expected unsupported view action error for {sql}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn alter_table_alter_column_drop_default_removes_future_default() {
     let base = temp_dir("alter_table_drop_default");
     let db = Database::open(&base, 16).unwrap();
@@ -18733,11 +19140,8 @@ fn alter_table_alter_column_set_default_rejects_mismatched_type() {
         .unwrap();
 
     match db.execute(1, "alter table items alter column id set default 'oops'") {
-        Err(ExecError::DetailedError {
-            message, sqlstate, ..
-        }) if message
-            == "column \"id\" is of type integer but default expression is of type text"
-            && sqlstate == "42804" => {}
+        Err(ExecError::InvalidIntegerInput { ty, value }) if ty == "integer" && value == "oops" => {
+        }
         other => panic!("expected default type mismatch error, got {other:?}"),
     }
 }
@@ -20204,6 +20608,10 @@ fn alter_table_alter_column_type_rebuilds_indexed_target_column() {
         .unwrap();
 
     assert_eq!(
+        query_rows(&db, 1, "select id from items where note = 20 order by id"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(
         query_rows(&db, 1, "select note from items where note = 20"),
         vec![vec![Value::Int64(20)]]
     );
@@ -21407,6 +21815,99 @@ fn create_statistics_rejects_xid_column_with_postgres_message() {
             assert_eq!(sqlstate, "0A000");
         }
         other => panic!("expected xid CREATE STATISTICS rejection, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_statistics_rejects_virtual_generated_and_system_column_expressions() {
+    let base = temp_dir("create_statistics_generated_system_columns");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table ext_stats_test1 (x int, y int, z int generated always as (x + y) virtual)",
+    )
+    .unwrap();
+
+    for sql in [
+        "create statistics tst on z from ext_stats_test1",
+        "create statistics tst on (z + 1) from ext_stats_test1",
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::DetailedError { message, .. }) => assert_eq!(
+                message,
+                "statistics creation on virtual generated columns is not supported"
+            ),
+            other => panic!("expected generated-column CREATE STATISTICS rejection, got {other:?}"),
+        }
+    }
+
+    match db.execute(
+        1,
+        "create statistics tst on (tableoid::int + 1) from ext_stats_test1",
+    ) {
+        Err(ExecError::DetailedError { message, .. }) => assert_eq!(
+            message,
+            "statistics creation on system columns is not supported"
+        ),
+        other => panic!("expected system-column CREATE STATISTICS rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_statistics_reports_postgres_relation_kind_errors() {
+    let base = temp_dir("create_statistics_relation_kind_errors");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create schema tststats").unwrap();
+    db.execute(1, "create table tststats.t (a int, b int)")
+        .unwrap();
+    db.execute(1, "create index ti on tststats.t (a, b)")
+        .unwrap();
+    db.execute(1, "create sequence tststats.s").unwrap();
+    db.execute(1, "create view tststats.v as select * from tststats.t")
+        .unwrap();
+    db.execute(1, "create type tststats.ty as (a int, b int)")
+        .unwrap();
+
+    for (sql, relation, detail) in [
+        (
+            "create statistics tststats.s2 on a, b from tststats.ti",
+            "ti",
+            "This operation is not supported for indexes.",
+        ),
+        (
+            "create statistics tststats.s3 on a, b from tststats.s",
+            "s",
+            "This operation is not supported for sequences.",
+        ),
+        (
+            "create statistics tststats.s4 on a, b from tststats.v",
+            "v",
+            "This operation is not supported for views.",
+        ),
+        (
+            "create statistics tststats.s6 on a, b from tststats.ty",
+            "ty",
+            "This operation is not supported for composite types.",
+        ),
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::DetailedError {
+                message,
+                detail: actual_detail,
+                sqlstate,
+                ..
+            }) => {
+                assert_eq!(
+                    message,
+                    format!("cannot define statistics for relation \"{relation}\"")
+                );
+                assert_eq!(actual_detail.as_deref(), Some(detail));
+                assert_eq!(sqlstate, "42809");
+            }
+            other => panic!("expected relation-kind CREATE STATISTICS rejection, got {other:?}"),
+        }
     }
 }
 
@@ -23169,6 +23670,330 @@ fn pg_stats_ext_views_exist_and_bind_columns() {
              where statistics_name = 'stats_ext_view_stat'",
         ),
         Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
+fn pg_mcv_list_items_decodes_extended_statistics_payload() {
+    let base = temp_dir("pg_mcv_list_items_statistics");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table stats_mcv_items (a int4, b int4, c int4)")
+        .unwrap();
+    db.execute(1, "insert into stats_mcv_items values (1, 2, 3), (1, 2, 3)")
+        .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_mcv_items_stat (mcv) on a, b, c from stats_mcv_items",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_mcv_items").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select m.index, m.values, m.nulls, m.frequency, m.base_frequency \
+             from pg_statistic_ext s \
+             join pg_statistic_ext_data d on d.stxoid = s.oid, \
+                  pg_mcv_list_items(d.stxdmcv) m \
+             where s.stxname = 'stats_mcv_items_stat'",
+        ),
+        vec![vec![
+            Value::Int32(0),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::Text("1".into()),
+                    Value::Text("2".into()),
+                    Value::Text("3".into()),
+                ])
+                .with_element_type_oid(TEXT_TYPE_OID),
+            ),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::Bool(false),
+                    Value::Bool(false),
+                    Value::Bool(false)
+                ])
+                .with_element_type_oid(crate::include::catalog::BOOL_TYPE_OID),
+            ),
+            Value::Float64(1.0),
+            Value::Float64(1.0),
+        ]]
+    );
+}
+
+#[test]
+fn analyze_warns_when_extended_statistics_cannot_be_computed() {
+    let base = temp_dir("analyze_extended_statistics_warning");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table stats_warn (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "alter table stats_warn alter a set statistics 0")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into stats_warn select i, i % 23 from generate_series(1, 1000) i",
+    )
+    .unwrap();
+    db.execute(1, "create statistics stats_warn_ab on a, b from stats_warn")
+        .unwrap();
+
+    clear_backend_notices();
+    db.execute(1, "analyze stats_warn").unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![
+            "statistics object \"public.stats_warn_ab\" could not be computed for relation \"public.stats_warn\""
+                .to_string()
+        ]
+    );
+
+    db.execute(1, "alter table stats_warn alter a set statistics -1")
+        .unwrap();
+    clear_backend_notices();
+    db.execute(1, "analyze stats_warn (a)").unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![
+            "statistics object \"public.stats_warn_ab\" could not be computed for relation \"public.stats_warn\""
+                .to_string()
+        ]
+    );
+
+    db.execute(1, "alter statistics stats_warn_ab set statistics 0")
+        .unwrap();
+    clear_backend_notices();
+    db.execute(1, "analyze stats_warn").unwrap();
+    assert!(take_backend_notice_messages().is_empty());
+}
+
+#[test]
+fn stats_ext_dependencies_use_postgres_selectivity_formula() {
+    let base = temp_dir("stats_ext_dependencies_selectivity");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table stats_fd (filler1 text, filler2 numeric, a int4, b text, filler3 date, c int4, d text) \
+         with (autovacuum_enabled = off)",
+    )
+    .unwrap();
+    db.execute(1, "create index stats_fd_ab_idx on stats_fd (a, b)")
+        .unwrap();
+    db.execute(1, "create index stats_fd_abc_idx on stats_fd (a, b, c)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into stats_fd (a, b, c, filler1) \
+         select mod(i,100), mod(i,50)::text, mod(i,25), i \
+         from generate_series(1,5000) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_fd_dep (dependencies) on a, b, c from stats_fd",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_fd").unwrap();
+
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_fd where a = any (array[1, 51]) and b = any (array['1', '2'])",
+        ),
+        100
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_fd where (a = 1 or a = 51) and b = '1'",
+        ),
+        99
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_fd where a < any (array[1, 51]) and b > '1'",
+        ),
+        2472
+    );
+}
+
+#[test]
+fn stats_ext_mcv_or_and_array_selectivity_match_postgres_shapes() {
+    let base = temp_dir("stats_ext_mcv_selectivity");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table stats_mcv (a int4, b text, c int4, d text, ia int4[]) \
+         with (autovacuum_enabled = off)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into stats_mcv (a, b, c, d, ia) \
+         select mod(i,100), mod(i,50)::text, mod(i,25), null, \
+                array[mod(i,25)] \
+         from generate_series(1,5000) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_mcv_abcia (mcv) on a, b, c, ia from stats_mcv",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_mcv").unwrap();
+
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv where a = 1 or b = '1' or c = 1",
+        ),
+        200
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv where a in (1, 2, 51, 52) and b in ('1', '2')",
+        ),
+        200
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv where a <= any (array[1, 2, 3]) and b in ('1', '2', '3')",
+        ),
+        150
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv where a = any (array[4, 5]) and 4 = any (ia)",
+        ),
+        4
+    );
+
+    db.execute(1, "create table stats_mcv_partial (a int4, b int4, c int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into stats_mcv_partial (a, b, c) \
+         select mod(i,10), mod(i,10), mod(i,10) \
+         from generate_series(0,999) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into stats_mcv_partial (a, b, c) \
+         select i, i, i \
+         from generate_series(0,99) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into stats_mcv_partial (a, b, c) \
+         select i, i, i \
+         from generate_series(0,3999) s(i)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_mcv_partial_mcv (mcv) on a, b, c from stats_mcv_partial",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_mcv_partial").unwrap();
+
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv_partial where a = 0 and b = 0 and c = 0",
+        ),
+        102
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv_partial where a = 0 or b = 0 or c = 0",
+        ),
+        96
+    );
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv_partial where a = 10 or b = 10 or c = 10",
+        ),
+        2
+    );
+
+    db.execute(
+        1,
+        "create table stats_mcv_multi (a int4, b int4, c int4, d int4)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into stats_mcv_multi (a, b, c, d) \
+         select mod(i,5), mod(i,5), mod(i,7), mod(i,7) \
+         from generate_series(1,5000) s(i)",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_mcv_multi").unwrap();
+    db.execute(
+        1,
+        "create statistics stats_mcv_multi_ab (mcv) on a, b from stats_mcv_multi",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create statistics stats_mcv_multi_cd (mcv) on c, d from stats_mcv_multi",
+    )
+    .unwrap();
+    db.execute(1, "analyze stats_mcv_multi").unwrap();
+
+    assert_eq!(
+        explain_estimated_rows(
+            &db,
+            1,
+            "select * from stats_mcv_multi where a = 0 or b = 0 or c = 0 or d = 0",
+        ),
+        1571
+    );
+}
+
+#[test]
+fn grouping_subquery_left_join_estimates_outer_rows() {
+    let base = temp_dir("grouping_subquery_left_join_estimate");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table grouping_unique (x integer)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into grouping_unique (x) select gs from generate_series(1,1000) as gs",
+    )
+    .unwrap();
+    db.execute(1, "analyze grouping_unique").unwrap();
+
+    let sql = "select * from generate_series(1, 1) t1 left join \
+               (select x from grouping_unique t2 group by x) as q1 on t1.t1 = q1.x";
+    assert_eq!(
+        explain_estimated_rows(&db, 1, sql),
+        1,
+        "{:?}",
+        explain_lines(&db, 1, sql)
     );
 }
 
@@ -27312,6 +28137,135 @@ fn create_table_check_not_enforced_skips_write_enforcement_and_cannot_validate()
 }
 
 #[test]
+fn create_table_local_not_valid_check_is_catalog_valid_immediately() {
+    let base = temp_dir("create_check_not_valid_catalog_valid");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table items (id int4, check (false) no inherit not valid)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select convalidated, pg_get_constraintdef(oid) \
+             from pg_constraint where conrelid = 'items'::regclass and conname = 'items_check'"
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Text("CHECK (false) NO INHERIT".into()),
+        ]]
+    );
+}
+
+#[test]
+fn alter_table_add_check_not_enforced_skips_validation_and_write_enforcement() {
+    let base = temp_dir("alter_check_not_enforced");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    db.execute(1, "insert into items values (0)").unwrap();
+    db.execute(
+        1,
+        "alter table items add constraint items_id_check check (id > 0) not enforced",
+    )
+    .unwrap();
+    db.execute(1, "insert into items values (-1)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conenforced, convalidated, pg_get_constraintdef(oid) \
+             from pg_constraint where conname = 'items_id_check'"
+        ),
+        vec![vec![
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Text("CHECK (id > 0) NOT ENFORCED NOT VALID".into()),
+        ]]
+    );
+
+    match db.execute(1, "alter table items validate constraint items_id_check") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "cannot validate NOT ENFORCED constraint" && sqlstate == "0A000" => {}
+        other => panic!("expected validate-not-enforced failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_check_validation_uses_validation_errors_and_checks_children() {
+    let base = temp_dir("alter_check_validation_wording");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table check_parent (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "insert into check_parent values (1, 10), (1, 20)")
+        .unwrap();
+
+    match db.execute(
+        1,
+        "alter table check_parent add constraint b_greater_than_ten check (b > 10)",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        }) if message
+            == "check constraint \"b_greater_than_ten\" of relation \"check_parent\" is violated by some row"
+            && detail.is_none()
+            && sqlstate == "23514" => {}
+        other => panic!("expected DDL check validation failure, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "alter table check_parent add constraint b_greater_than_ten check (b > 10) not valid",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "alter table check_parent validate constraint b_greater_than_ten",
+    ) {
+        Err(ExecError::DetailedError { message, .. })
+            if message
+                == "check constraint \"b_greater_than_ten\" of relation \"check_parent\" is violated by some row" =>
+            {}
+        other => panic!("expected DDL validate check failure, got {other:?}"),
+    }
+
+    db.execute(1, "delete from check_parent where not b > 10")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table check_parent validate constraint b_greater_than_ten",
+    )
+    .unwrap();
+    db.execute(1, "create table check_child () inherits (check_parent)")
+        .unwrap();
+    db.execute(1, "insert into check_child values (6, 30), (7, 16)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table check_parent add constraint b_le_20 check (b <= 20) not valid",
+    )
+    .unwrap();
+
+    match db.execute(1, "alter table check_parent validate constraint b_le_20") {
+        Err(ExecError::DetailedError { message, .. })
+            if message
+                == "check constraint \"b_le_20\" of relation \"check_child\" is violated by some row" =>
+            {}
+        other => panic!("expected child DDL validate check failure, got {other:?}"),
+    }
+}
+
+#[test]
 fn inherited_check_rejects_not_enforced_or_not_valid_child_conflicts() {
     let base = temp_dir("check_inherit_conflicts");
     let db = Database::open(&base, 16).unwrap();
@@ -27366,6 +28320,57 @@ fn inherited_check_rejects_not_enforced_or_not_valid_child_conflicts() {
         }
         other => panic!("expected NOT VALID child CHECK conflict, got {other:?}"),
     }
+}
+
+#[test]
+fn alter_table_check_validation_has_executor_catalog_for_functions() {
+    let base = temp_dir("alter_check_validation_function_catalog");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table func_parent (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "create table func_child1 () inherits (func_parent)")
+        .unwrap();
+    db.execute(1, "create table func_child2 () inherits (func_parent)")
+        .unwrap();
+    db.execute(1, "insert into func_parent values (1, 20)")
+        .unwrap();
+    db.execute(1, "insert into func_child1 values (7, 16)")
+        .unwrap();
+    db.execute(1, "insert into func_child2 values (8, 18)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function boo(int) returns int immutable strict language plpgsql as $$ begin raise notice 'boo: %', $1; return $1; end $$",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(
+        1,
+        "alter table func_child2 add constraint identity check (b = boo(b))",
+    )
+    .unwrap();
+    assert_eq!(take_notice_messages(), vec!["boo: 18".to_string()]);
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "alter table func_parent add constraint identity check (b = boo(b)) not valid",
+    )
+    .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec!["merging constraint \"identity\" with inherited definition".to_string()]
+    );
+
+    clear_notices();
+    db.execute(1, "alter table func_parent validate constraint identity")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec!["boo: 20".to_string(), "boo: 16".to_string()]
+    );
 }
 
 #[test]
@@ -28471,6 +29476,40 @@ fn alter_table_add_foreign_key_without_constraint_name_accepts_no_space_before_c
             "select confmatchtype, convalidated from pg_constraint where conname = 'children_parent_id_parent_code_fkey'",
         ),
         vec![vec![Value::Text("f".into()), Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn alter_column_type_with_foreign_key_after_referenced_type_change_finishes() {
+    let base = temp_dir("alter_column_type_fk_referenced_type_change");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(
+        1,
+        "create table attbl (p1 int constraint pk_attbl primary key)",
+    )
+    .unwrap();
+    db.execute(1, "create table atref (c1 int references attbl(p1))")
+        .unwrap();
+
+    db.execute(1, "alter table attbl alter column p1 set data type bigint")
+        .unwrap();
+    db.execute(1, "alter table atref alter column c1 set data type bigint")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a.atttypid::regtype::text \
+             from pg_class c join pg_attribute a on a.attrelid = c.oid \
+             where c.relname in ('attbl', 'atref') and a.attname in ('p1', 'c1') \
+             order by c.relname, a.attname"
+        ),
+        vec![
+            vec![Value::Text("bigint".into())],
+            vec![Value::Text("bigint".into())],
+        ]
     );
 }
 
@@ -30435,6 +31474,40 @@ fn alter_table_set_and_drop_not_null_updates_enforcement_and_catalog() {
 }
 
 #[test]
+fn alter_table_drop_parent_not_null_removes_inherited_child_constraint() {
+    let base = temp_dir("alter_table_drop_inherited_not_null");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nn_parent (a int4 not null)")
+        .unwrap();
+    db.execute(1, "create table nn_child (b text) inherits (nn_parent)")
+        .unwrap();
+
+    db.execute(1, "alter table nn_parent alter a drop not null")
+        .unwrap();
+    db.execute(1, "insert into nn_parent values (null)")
+        .unwrap();
+    db.execute(1, "insert into nn_child (a, b) values (null, 'ok')")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint
+              where conrelid = 'nn_child'::regclass and contype = 'n'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    match db.execute(1, "alter table nn_child alter a set not null") {
+        Err(ExecError::DetailedError { message, .. })
+            if message == "column \"a\" of relation \"nn_child\" contains null values" => {}
+        other => panic!("expected child SET NOT NULL validation failure, got {other:?}"),
+    }
+}
+
+#[test]
 fn alter_table_add_and_drop_key_constraints_manage_indexes() {
     let base = temp_dir("alter_table_key_constraints_indexes");
     let db = Database::open(&base, 16).unwrap();
@@ -30742,13 +31815,13 @@ fn alter_table_drop_primary_key_removes_only_pk_owned_not_null_constraints() {
 
     match db.execute(1, "alter table items drop constraint items_code_not_null") {
         Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
-            if actual.contains("PRIMARY KEY constraint \"items_pkey\"") => {}
+            if actual == "column \"code\" is in a primary key" => {}
         other => panic!("expected PK-owned NOT NULL drop rejection, got {other:?}"),
     }
 
     match db.execute(1, "alter table items alter column code drop not null") {
         Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
-            if actual.contains("PRIMARY KEY constraint \"items_pkey\"") => {}
+            if actual == "column \"code\" is in a primary key" => {}
         other => panic!("expected PK-owned column drop-not-null rejection, got {other:?}"),
     }
 
@@ -43864,6 +44937,60 @@ fn plpgsql_runtime_errors_include_statement_context() {
         }
         other => panic!("expected PL/pgSQL context, got {other:?}"),
     }
+}
+
+#[test]
+fn plpgsql_decl_default_accepts_query_expression() {
+    let dir = temp_dir("plpgsql_decl_default_query");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table decl_default_src (label text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into decl_default_src values ('ok')")
+        .unwrap();
+
+    clear_notices();
+    session
+        .execute(
+            &db,
+            "do $$ \
+             declare \
+               loaded text := label from decl_default_src; \
+               rel_name text := oid::regclass from pg_class where relname = 'decl_default_src'; \
+             begin \
+               raise notice 'label % relation %', loaded, rel_name; \
+             end \
+             $$",
+        )
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec!["label ok relation decl_default_src".to_string()]
+    );
+
+    session
+        .execute(&db, "create view decl_default_view as select 1::int4 as a")
+        .unwrap();
+    clear_notices();
+    session
+        .execute(
+            &db,
+            "do $$ \
+             begin \
+               execute 'create statistics decl_default_bad_stats on a from decl_default_view'; \
+             exception when wrong_object_type then \
+               raise notice 'caught wrong object'; \
+             end \
+             $$",
+        )
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec!["caught wrong object".to_string()]
+    );
 }
 
 #[test]
