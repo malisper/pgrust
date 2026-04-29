@@ -484,6 +484,7 @@ struct CompileEnv {
     exception_sqlstate: Option<ScopeVar>,
     exception_sqlerrm: Option<ScopeVar>,
     variable_conflict: PlpgsqlVariableConflict,
+    nonstandard_string_literals: bool,
     next_slot: usize,
 }
 
@@ -883,6 +884,7 @@ pub(crate) fn compile_do_block_with_gucs(
 ) -> Result<CompiledBlock, ParseError> {
     let mut env = CompileEnv::default();
     env.variable_conflict = variable_conflict_from_gucs(gucs);
+    env.nonstandard_string_literals = nonstandard_string_literals_from_gucs(gucs);
     let _ = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
     let _ = env.define_exception_slots();
     compile_block(block, catalog, &mut env, None)
@@ -895,6 +897,7 @@ pub(crate) fn compile_do_function(
 ) -> Result<CompiledFunction, ParseError> {
     let mut env = CompileEnv::default();
     env.variable_conflict = variable_conflict_from_gucs(gucs);
+    env.nonstandard_string_literals = nonstandard_string_literals_from_gucs(gucs);
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
     let (sqlstate_slot, sqlerrm_slot) = env.define_exception_slots();
     let return_contract = FunctionReturnContract::Scalar {
@@ -938,6 +941,7 @@ pub(crate) fn compile_function_from_proc(
     let print_strict_params = print_strict_params_directive(&row.prosrc);
     let mut env = CompileEnv::default();
     env.variable_conflict = variable_conflict_mode(&row.prosrc, gucs);
+    env.nonstandard_string_literals = nonstandard_string_literals_from_gucs(gucs);
     let mut parameter_slots = Vec::new();
     let mut output_slots = Vec::new();
 
@@ -1081,6 +1085,11 @@ fn variable_conflict_from_gucs(gucs: Option<&HashMap<String, String>>) -> Plpgsq
         .unwrap_or_default()
 }
 
+fn nonstandard_string_literals_from_gucs(gucs: Option<&HashMap<String, String>>) -> bool {
+    gucs.and_then(|gucs| gucs.get("standard_conforming_strings"))
+        .is_some_and(|value| value.eq_ignore_ascii_case("off"))
+}
+
 fn variable_conflict_directive(source: &str) -> Option<PlpgsqlVariableConflict> {
     source.lines().find_map(|line| {
         let line = line.trim();
@@ -1111,6 +1120,7 @@ pub(crate) fn compile_trigger_function_from_proc(
     let print_strict_params = print_strict_params_directive(&row.prosrc);
     let mut env = CompileEnv::default();
     env.variable_conflict = variable_conflict_mode(&row.prosrc, gucs);
+    env.nonstandard_string_literals = nonstandard_string_literals_from_gucs(gucs);
     let mut trigger_transition_ctes = Vec::new();
     env.local_ctes = transition_tables
         .iter()
@@ -1761,13 +1771,23 @@ fn compile_raise_stmt(
         }
     }
 
-    let message = message.clone().or(default_message).or_else(|| {
-        if message_expr.is_none() {
-            Some(sqlstate.clone().unwrap_or_else(|| "P0001".into()))
-        } else {
-            None
-        }
-    });
+    let message = message
+        .as_ref()
+        .map(|message| {
+            if env.nonstandard_string_literals {
+                decode_nonstandard_backslash_escapes(message)
+            } else {
+                message.clone()
+            }
+        })
+        .or(default_message)
+        .or_else(|| {
+            if message_expr.is_none() {
+                Some(sqlstate.clone().unwrap_or_else(|| "P0001".into()))
+            } else {
+                None
+            }
+        });
 
     if let Some(message) = &message {
         let placeholder_count = count_raise_placeholders(message);
@@ -2457,6 +2477,85 @@ fn compile_return_query_static_source(
 
 fn normalize_sql_context_text(sql: &str) -> String {
     sql.trim().trim_end_matches(';').trim_end().to_string()
+}
+
+fn normalize_nonstandard_string_literals(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            let previous = sql[..i].chars().rev().find(|ch| !ch.is_ascii_whitespace());
+            if !matches!(previous, Some('E' | 'e' | '&')) {
+                out.push('E');
+            }
+            out.push('\'');
+            i += 1;
+            while i < bytes.len() {
+                out.push(bytes[i] as char);
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 1;
+                    out.push(bytes[i] as char);
+                } else if bytes[i] == b'\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                        i += 1;
+                        out.push('\'');
+                    } else {
+                        i += 1;
+                        break;
+                    }
+                }
+                i += 1;
+            }
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    out
+}
+
+fn decode_nonstandard_backslash_escapes(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        let Some(escaped) = chars.next() else {
+            out.push('\\');
+            break;
+        };
+        match escaped {
+            '\\' => out.push('\\'),
+            '\'' => out.push('\''),
+            '0'..='7' => {
+                let mut digits = String::from(escaped);
+                while digits.len() < 3 {
+                    match chars.peek().copied() {
+                        Some(next @ '0'..='7') => {
+                            digits.push(next);
+                            chars.next();
+                        }
+                        _ => break,
+                    }
+                }
+                if let Ok(code) = u32::from_str_radix(&digits, 8)
+                    && let Some(decoded) = char::from_u32(code)
+                {
+                    out.push(decoded);
+                }
+            }
+            other => {
+                out.push('\\');
+                out.push(other);
+            }
+        }
+    }
+    out
 }
 
 fn compile_perform_stmt(
@@ -4022,6 +4121,13 @@ fn compile_expr_sql(
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
 ) -> Result<CompiledExpr, ParseError> {
+    let normalized_sql;
+    let sql = if env.nonstandard_string_literals {
+        normalized_sql = normalize_nonstandard_string_literals(sql);
+        normalized_sql.as_str()
+    } else {
+        sql
+    };
     let parsed = normalize_plpgsql_expr(parse_expr(sql)?, env);
     let (expr, sql_type) = match bind_scalar_expr_in_named_slot_scope(
         &parsed,

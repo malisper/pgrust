@@ -49267,6 +49267,38 @@ fn plpgsql_nested_dynamic_do_preserves_outer_notices() {
 }
 
 #[test]
+fn plpgsql_nonstandard_string_literals_decode_backslashes() {
+    let dir = temp_dir("plpgsql_nonstandard_strings");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set standard_conforming_strings = off")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            r#"create function pl_nonstandard_string() returns text language plpgsql as $$
+             begin
+               raise notice 'foo\\bar\041baz';
+               return 'foo\\bar\041baz';
+             end
+             $$"#,
+        )
+        .unwrap();
+
+    clear_notices();
+    let result = session
+        .execute(&db, "select pl_nonstandard_string()")
+        .unwrap();
+    let StatementResult::Query { rows, .. } = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(rows, vec![vec![Value::Text("foo\\bar!baz".into())]]);
+    assert_eq!(take_notice_messages(), vec!["foo\\bar!baz".to_string()]);
+}
+
+#[test]
 fn drop_function_ignores_argument_names_and_out_only_modes() {
     let dir = temp_dir("drop_function_mode_signature");
     let db = Database::open(&dir, 64).unwrap();
