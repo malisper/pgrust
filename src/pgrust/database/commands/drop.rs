@@ -367,7 +367,7 @@ impl DropTableDependency {
                 ..
             } => (
                 3,
-                policy.relation_oid,
+                0,
                 format!("{relation_display_name}:{}", policy.policy_name),
             ),
         }

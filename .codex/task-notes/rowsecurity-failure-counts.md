@@ -251,6 +251,19 @@ Inherited append EXPLAIN alias bucket:
 - Latest rowsecurity regression result: `718/774` matched, `56` mismatches,
   `1053` diff lines. New diff copied to `/tmp/diffs/rowsecurity.diff`.
 
+UPDATE/DELETE FROM target RLS bucket:
+- UPDATE FROM and DELETE USING now push target USING visibility into the joined
+  input query, so invisible target rows are filtered before write checks instead
+  of being rejected late as RLS write-check errors.
+- Policy cascade notice ordering now sorts dependent policies by displayed
+  owning relation and policy name.
+- Added a focused UPDATE FROM test where target RLS allows only one matching
+  target row.
+- Focused UPDATE FROM/source-RLS tests and `row_security` passed.
+- `scripts/cargo_isolated.sh check` passed.
+- Latest rowsecurity regression result: `720/774` matched, `54` mismatches,
+  `1042` diff lines. New diff copied to `/tmp/diffs/rowsecurity.diff`.
+
 SQL function/GUC bucket:
 - SQL-language functions now accept single-statement `WITH` bodies and
   SQL-standard `BEGIN ATOMIC ... END` bodies.

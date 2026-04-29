@@ -4681,6 +4681,102 @@ fn update_from_applies_source_relation_rls() {
 }
 
 #[test]
+fn update_from_filters_target_rows_with_rls_using() {
+    let dir = temp_dir("update_from_target_rls");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role update_from_target_rls_user")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table update_from_target_rls_target (id int4, b text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table update_from_target_rls_source (id int4, b text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into update_from_target_rls_target values (1, 'one'), (2, 'two')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into update_from_target_rls_source values (1, 'blocked'), (2, 'allowed')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table update_from_target_rls_target enable row level security",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy target_update on update_from_target_rls_target
+             for update using (id = 2) with check (true)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy target_select on update_from_target_rls_target
+             for select using (true)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "grant all on update_from_target_rls_target, update_from_target_rls_source
+             to update_from_target_rls_user",
+        )
+        .unwrap();
+    session
+        .execute(&db, "set session authorization update_from_target_rls_user")
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "update update_from_target_rls_target t
+             set b = s.b
+             from update_from_target_rls_source s
+             where t.id = s.id
+             returning t.id, t.b",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(2), Value::Text("allowed".into())]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id, b from update_from_target_rls_target order by id",
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Text("one".into())],
+            vec![Value::Int32(2), Value::Text("allowed".into())],
+        ]
+    );
+}
+
+#[test]
 fn dml_returning_old_new_pseudo_rows() {
     let dir = temp_dir("dml_returning_old_new_pseudo_rows");
     let db = Database::open(&dir, 128).unwrap();

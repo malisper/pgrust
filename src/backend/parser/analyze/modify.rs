@@ -4376,8 +4376,8 @@ fn bind_update_from(
     )?;
     let query = query_from_projection_with_target_security_quals(
         projected,
-        target_rls.visibility_quals.clone(),
-        user_predicate,
+        Vec::new(),
+        predicate.clone(),
         catalog,
     )?;
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
@@ -4711,8 +4711,8 @@ fn bind_delete_using(
     )?;
     let query = query_from_projection_with_target_security_quals(
         projected,
-        target_rls.visibility_quals,
-        user_predicate,
+        Vec::new(),
+        predicate.clone(),
         catalog,
     )?;
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
