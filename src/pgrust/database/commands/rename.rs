@@ -685,6 +685,24 @@ impl Database {
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::UnknownColumn(rename_stmt.column_name.clone()))
             })?;
+        if let Some(rewrite_oid) = catalog
+            .rewrite_rows_for_relation(relation.relation_oid)
+            .into_iter()
+            .find(|row| row.rulename == "_RETURN")
+            .map(|row| row.oid)
+            && let Some(mut query) =
+                crate::backend::rewrite::stored_view_query_for_rule(rewrite_oid)
+        {
+            if let Some(target) = query
+                .target_list
+                .iter_mut()
+                .filter(|target| !target.resjunk)
+                .nth(column_index)
+            {
+                target.name = new_column_name.clone();
+                crate::backend::rewrite::register_stored_view_query(rewrite_oid, query);
+            }
+        }
         new_desc.columns[column_index].name = new_column_name.clone();
         new_desc.columns[column_index].storage.name = new_column_name.clone();
         let reloptions = catalog

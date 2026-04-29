@@ -512,6 +512,8 @@ pub(super) fn unknown_string_literal_peer_type(peer_type: SqlType) -> Option<Sql
         SqlTypeKind::Record if peer_type.type_oid != 0 => return Some(peer_type),
         SqlTypeKind::InternalChar => return Some(SqlType::new(SqlTypeKind::InternalChar)),
         SqlTypeKind::Name => return Some(SqlType::new(SqlTypeKind::Name)),
+        SqlTypeKind::Varchar => return Some(SqlType::new(SqlTypeKind::Varchar)),
+        SqlTypeKind::Char => return Some(SqlType::new(SqlTypeKind::Char)),
         SqlTypeKind::Inet => return Some(SqlType::new(SqlTypeKind::Inet)),
         SqlTypeKind::Cidr => return Some(SqlType::new(SqlTypeKind::Cidr)),
         SqlTypeKind::MacAddr => return Some(SqlType::new(SqlTypeKind::MacAddr)),

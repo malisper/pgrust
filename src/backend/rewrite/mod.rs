@@ -3,6 +3,8 @@ mod rules;
 mod view_dml;
 mod views;
 
+use std::cell::Cell;
+
 use row_security::apply_query_row_security_with_active_relations;
 pub(crate) use row_security::{
     RlsWriteCheck, RlsWriteCheckSource, TargetRlsState, apply_query_row_security,
@@ -18,10 +20,10 @@ pub(crate) use view_dml::{
     ViewPrivilegeContext, resolve_auto_updatable_view_target,
 };
 pub(crate) use views::{
-    format_view_definition, load_view_return_query, load_view_return_select,
-    refresh_query_relation_descriptors, render_relation_expr_sql,
+    format_view_definition, has_stored_view_query, load_view_return_query, load_view_return_select,
+    refresh_query_relation_descriptors, register_stored_view_query, render_relation_expr_sql,
     render_relation_expr_sql_for_information_schema, render_view_query_sql,
-    split_stored_view_definition_sql,
+    split_stored_view_definition_sql, stored_view_query_for_rule,
 };
 
 use crate::backend::parser::{CatalogLookup, ParseError};
@@ -33,6 +35,23 @@ use crate::include::nodes::primnodes::{
     WindowFrameBound, WindowFuncExpr, WindowFuncKind, WindowSpec, set_returning_call_exprs,
 };
 use views::rewrite_view_relation_query;
+
+thread_local! {
+    static RESTRICT_NONSYSTEM_VIEW_EXPANSION: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) fn with_restrict_nonsystem_view_expansion<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
+    RESTRICT_NONSYSTEM_VIEW_EXPANSION.with(|flag| {
+        let previous = flag.replace(enabled);
+        let result = f();
+        flag.set(previous);
+        result
+    })
+}
+
+fn restrict_nonsystem_view_expansion_enabled() -> bool {
+    RESTRICT_NONSYSTEM_VIEW_EXPANSION.with(Cell::get)
+}
 
 pub(crate) fn pg_rewrite_query(
     query: Query,
@@ -688,6 +707,22 @@ fn rewrite_rte(
             toast: _,
             tablesample: _,
         } if relkind == 'v' => {
+            if restrict_nonsystem_view_expansion_enabled() {
+                let class_row = catalog
+                    .class_row_by_oid(relation_oid)
+                    .ok_or_else(|| ParseError::UnknownTable(relation_oid.to_string()))?;
+                if class_row.relnamespace != crate::include::catalog::PG_CATALOG_NAMESPACE_OID {
+                    return Err(ParseError::DetailedError {
+                        message: format!(
+                            "access to non-system view \"{}\" is restricted",
+                            class_row.relname
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42501",
+                    });
+                }
+            }
             let mut analyzed = rewrite_view_relation_query(
                 relation_oid,
                 &rte.desc,

@@ -589,17 +589,6 @@ pub(crate) fn rewrite_dependent_views(
     for (index, dependent_view) in dependent_views.iter().enumerate() {
         let mut query = dependent_view.query.clone();
         crate::backend::rewrite::refresh_query_relation_descriptors(&mut query, &catalog);
-        let mut sql = crate::backend::rewrite::render_view_query_sql(&query, &catalog);
-        sql = append_view_check_option(sql, dependent_view.check_option);
-        let rule_ctx = CatalogWriteContext {
-            pool: db.pool.clone(),
-            txns: db.txns.clone(),
-            xid,
-            cid: cid.saturating_add(index as u32),
-            client_id,
-            waiter: None,
-            interrupts: db.interrupt_state(client_id),
-        };
         let rewrite_oid = catalog
             .rewrite_rows_for_relation(dependent_view.relation_oid)
             .into_iter()
@@ -614,6 +603,21 @@ pub(crate) fn rewrite_dependent_views(
                     ),
                 })
             })?;
+        if crate::backend::rewrite::has_stored_view_query(rewrite_oid) {
+            crate::backend::rewrite::register_stored_view_query(rewrite_oid, query);
+            continue;
+        }
+        let mut sql = crate::backend::rewrite::render_view_query_sql(&query, &catalog);
+        sql = append_view_check_option(sql, dependent_view.check_option);
+        let rule_ctx = CatalogWriteContext {
+            pool: db.pool.clone(),
+            txns: db.txns.clone(),
+            xid,
+            cid: cid.saturating_add(index as u32),
+            client_id,
+            waiter: None,
+            interrupts: db.interrupt_state(client_id),
+        };
         let drop_effect = db
             .catalog
             .write()
