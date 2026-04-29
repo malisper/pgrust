@@ -70,7 +70,10 @@ use std::rc::Rc;
 
 const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
 
-fn pg_sql_sort_by<T>(values: &mut [T], mut compare: impl FnMut(&T, &T) -> std::cmp::Ordering) {
+pub(crate) fn pg_sql_sort_by<T>(
+    values: &mut [T],
+    mut compare: impl FnMut(&T, &T) -> std::cmp::Ordering,
+) {
     fn med3<T>(
         values: &[T],
         a: usize,
@@ -3303,7 +3306,81 @@ pub(crate) fn render_explain_join_expr(
 }
 
 fn render_explain_var_name(var: &Var, column_names: &[String]) -> Option<String> {
-    attrno_index(var.varattno).and_then(|index| column_names.get(index).cloned())
+    attrno_index(var.varattno)
+        .and_then(|index| column_names.get(index).cloned())
+        .map(normalize_explain_var_name)
+}
+
+fn normalize_explain_var_name(name: String) -> String {
+    let mut inner = name.as_str();
+    let mut stripped = false;
+    while let Some(next) = inner
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        inner = next;
+        stripped = true;
+    }
+    if !stripped {
+        return name;
+    }
+    if matches!(
+        inner.split_once('(').map(|(func, _)| func),
+        Some("avg" | "count" | "max" | "min" | "sum")
+    ) {
+        inner.to_string()
+    } else {
+        name
+    }
+}
+
+fn normalize_aggregate_operand_parens(rendered: String) -> String {
+    let mut chars = rendered.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] != '(' || !aggregate_call_starts_at(&chars, index + 1) {
+            index += 1;
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut end = index;
+        while end < chars.len() {
+            match chars[end] {
+                '(' => depth += 1,
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            end += 1;
+        }
+        if index > 0
+            && end < chars.len()
+            && chars[index - 1] == '('
+            && chars.get(end + 1).is_some_and(|ch| ch.is_whitespace())
+        {
+            chars.remove(end);
+            chars.remove(index);
+            index = index.saturating_sub(1);
+        } else {
+            index = end.saturating_add(1);
+        }
+    }
+    chars.into_iter().collect()
+}
+
+fn aggregate_call_starts_at(chars: &[char], index: usize) -> bool {
+    ["avg(", "count(", "max(", "min(", "sum("]
+        .iter()
+        .any(|prefix| {
+            let prefix = prefix.chars().collect::<Vec<_>>();
+            chars
+                .get(index..index.saturating_add(prefix.len()))
+                .is_some_and(|candidate| candidate == prefix.as_slice())
+        })
 }
 
 fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
@@ -7448,10 +7525,11 @@ impl PlanNode for AggregateState {
             }
         }
         if let Some(having) = &self.having {
-            lines.push(format!(
-                "{prefix}Filter: {}",
-                render_explain_expr(having, self.column_names())
+            let rendered = normalize_aggregate_operand_parens(render_explain_expr(
+                having,
+                self.column_names(),
             ));
+            lines.push(format!("{prefix}Filter: {}", rendered));
         }
     }
     fn explain_children(

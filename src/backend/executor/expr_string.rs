@@ -14,7 +14,7 @@ use super::expr_range::render_range_text_with_config;
 use super::node_types::Value;
 use super::render_macaddr_text;
 use super::render_macaddr8_text;
-use super::value_io::format_array_text;
+use super::value_io::{format_array_text, render_tid_text};
 use crate::backend::executor::jsonb::render_jsonb_bytes;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind};
@@ -995,6 +995,7 @@ fn value_output_text_with_config(
         Value::Numeric(v) => v.render(),
         Value::Interval(v) => render_interval_text_with_config(*v, datetime_config),
         Value::Uuid(v) => crate::backend::executor::value_io::render_uuid_text(v),
+        Value::Tid(v) => render_tid_text(v),
         Value::Bool(v) => {
             if *v {
                 "t".into()

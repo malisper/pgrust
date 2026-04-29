@@ -660,6 +660,7 @@ pub struct MergeJoinState {
     pub(crate) merge_clauses: Vec<Expr>,
     pub(crate) outer_merge_keys: Vec<Expr>,
     pub(crate) inner_merge_keys: Vec<Expr>,
+    pub(crate) merge_key_descending: Vec<bool>,
     pub(crate) join_qual: Vec<Expr>,
     pub(crate) qual: Vec<Expr>,
     pub(crate) combined_names: Vec<String>,

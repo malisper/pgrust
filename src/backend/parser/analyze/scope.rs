@@ -4475,7 +4475,7 @@ fn join_using_relation_names(left: &ScopeColumn, right: &ScopeColumn) -> Vec<Str
 }
 
 fn bind_join_using_projection(
-    _kind: &JoinKind,
+    kind: &JoinKind,
     columns: &[String],
     left_scope: &BoundScope,
     right_scope: &BoundScope,
@@ -4521,7 +4521,11 @@ fn bind_join_using_projection(
         let left_ty = left_scope.desc.columns[*left_index].sql_type;
         let left_expr = left_scope.output_exprs[*left_index].clone();
         let right_expr = right_scope.output_exprs[*right_index].clone();
-        alias_exprs.push(Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)));
+        alias_exprs.push(match kind {
+            JoinKind::Full => Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)),
+            JoinKind::Right => right_expr,
+            _ => left_expr,
+        });
         output_columns.push(QueryColumn {
             name: name.clone(),
             sql_type: left_ty,

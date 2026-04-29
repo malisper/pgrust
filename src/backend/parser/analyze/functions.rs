@@ -16,7 +16,7 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::primnodes::{
     BuiltinWindowFunction, HashFunctionKind, HypotheticalAggFunc, JsonRecordFunction,
-    RegexTableFunction, StringTableFunction, TextSearchTableFunction,
+    OrderedSetAggFunc, RegexTableFunction, StringTableFunction, TextSearchTableFunction,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -916,6 +916,13 @@ pub(super) fn resolve_builtin_hypothetical_aggregate(name: &str) -> Option<Hypot
         "dense_rank" => Some(HypotheticalAggFunc::DenseRank),
         "percent_rank" => Some(HypotheticalAggFunc::PercentRank),
         "cume_dist" => Some(HypotheticalAggFunc::CumeDist),
+        _ => None,
+    }
+}
+
+pub(super) fn resolve_builtin_ordered_set_aggregate(name: &str) -> Option<OrderedSetAggFunc> {
+    match normalize_builtin_function_name(name) {
+        "percentile_disc" => Some(OrderedSetAggFunc::PercentileDisc),
         _ => None,
     }
 }

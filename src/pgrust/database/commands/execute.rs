@@ -2478,6 +2478,11 @@ impl Database {
                     0,
                     configured_search_path,
                 ),
+            Statement::Cluster(ref cluster_stmt) => self.execute_cluster_stmt_with_search_path(
+                client_id,
+                cluster_stmt,
+                configured_search_path,
+            ),
             Statement::DropTable(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
                 let guard =

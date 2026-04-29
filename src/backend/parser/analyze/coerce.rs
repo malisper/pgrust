@@ -480,6 +480,10 @@ fn is_string_literal_expr(expr: &SqlExpr) -> bool {
     )
 }
 
+fn is_null_literal_expr(expr: &SqlExpr) -> bool {
+    matches!(expr, SqlExpr::Const(Value::Null))
+}
+
 pub(super) fn unknown_string_literal_peer_type(peer_type: SqlType) -> Option<SqlType> {
     if peer_type.is_array {
         return Some(peer_type);
@@ -598,6 +602,17 @@ pub(super) fn coerce_unknown_string_literal_type(
         }
     }
     expr_type
+}
+
+pub(super) fn coerce_unknown_set_operation_literal_type(
+    expr: &SqlExpr,
+    expr_type: SqlType,
+    peer_type: SqlType,
+) -> SqlType {
+    if is_null_literal_expr(expr) {
+        return peer_type;
+    }
+    coerce_unknown_string_literal_type(expr, expr_type, peer_type)
 }
 
 pub(super) fn should_use_text_concat(

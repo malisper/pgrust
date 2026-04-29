@@ -576,6 +576,11 @@ pub enum TempMutationEffect {
         old_name: String,
         new_name: String,
     },
+    ReplaceRel {
+        relation_oid: u32,
+        old_rel: crate::backend::storage::smgr::RelFileLocator,
+        new_rel: crate::backend::storage::smgr::RelFileLocator,
+    },
 }
 
 impl Database {

@@ -14,20 +14,20 @@ use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, AlterAggregateRenameStatement, AlterColumnExpressionAction,
     AlterColumnIdentityAction, AlterDomainAction, AlterGenericOptionAction, AlterTableTriggerMode,
     AlterTableTriggerStateStatement, AlterTableTriggerTarget, AlterTriggerRenameStatement,
-    AlterTypeSetOptionsStatement, CastContext, ColumnConstraint, ColumnGeneratedKind,
-    ColumnIdentityKind, CommentOnAggregateStatement, CommentOnColumnStatement,
+    AlterTypeSetOptionsStatement, CastContext, ClusterStatement, ColumnConstraint,
+    ColumnGeneratedKind, ColumnIdentityKind, CommentOnAggregateStatement, CommentOnColumnStatement,
     CommentOnFunctionStatement, CommentOnOperatorStatement, CommentOnTypeStatement,
     CommentOnViewStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
     CreateBaseTypeOption, CreateBaseTypeStatement, CreateCastMethod, CreateCastStatement,
     CreateCompositeTypeStatement, CreateShellTypeStatement, CreateTriggerStatement,
-    CreateTypeStatement, DomainConstraintSpecKind, DropAggregateStatement, DropCastStatement,
-    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType,
-    GrantObjectPrivilege, GrantTableColumnPrivilege, IndexColumnDef, InsertSource, InsertStatement,
-    JoinTreeNode, OverridingKind, PartitionStrategy, PublicationObjectSpec, PublicationOption,
-    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
-    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
-    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
-    TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
+    CreateTypeStatement, CursorScrollOption, DeclareCursorStatement, DomainConstraintSpecKind,
+    DropAggregateStatement, DropCastStatement, DropTriggerStatement, DropTypeStatement,
+    ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, GrantTableColumnPrivilege,
+    IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode, OverridingKind, PartitionStrategy,
+    PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
+    RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
+    SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec,
+    TriggerLevel, TriggerReferencingSpec, TriggerTiming, UserMappingUser, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{
     AttrNumber, INNER_VAR, JoinType, OUTER_VAR, Var, is_system_attr,
@@ -1925,29 +1925,15 @@ fn analyze_join_using_creates_join_rte_alias_vars() {
             assert_eq!(*joinmergedcols, 1);
             assert_eq!(joinleftcols, &vec![1, 2, 3]);
             assert_eq!(joinrightcols, &vec![1, 2]);
-            match &joinaliasvars[0] {
-                Expr::Coalesce(left, right) => {
-                    assert_eq!(
-                        left.as_ref(),
-                        &Expr::Var(Var {
-                            varno: 1,
-                            varattno: 1,
-                            varlevelsup: 0,
-                            vartype: SqlType::new(SqlTypeKind::Int4),
-                        })
-                    );
-                    assert_eq!(
-                        right.as_ref(),
-                        &Expr::Var(Var {
-                            varno: 2,
-                            varattno: 1,
-                            varlevelsup: 0,
-                            vartype: SqlType::new(SqlTypeKind::Int4),
-                        })
-                    );
-                }
-                other => panic!("expected merged join alias expr, got {other:?}"),
-            }
+            assert_eq!(
+                joinaliasvars[0],
+                Expr::Var(Var {
+                    varno: 1,
+                    varattno: 1,
+                    varlevelsup: 0,
+                    vartype: SqlType::new(SqlTypeKind::Int4),
+                })
+            );
         }
         other => panic!("expected join rte, got {other:?}"),
     }
@@ -9788,6 +9774,38 @@ fn parse_select_with_order_limit_offset() {
     assert_eq!(stmt.order_by[0].nulls_first, None);
     assert_eq!(stmt.limit, Some(2));
     assert_eq!(stmt.offset, Some(1));
+}
+
+#[test]
+fn parse_select_with_folded_integer_offset_expression() {
+    let stmt = parse_select("select name from people order by id offset 20000 - 4").unwrap();
+    assert_eq!(stmt.offset, Some(19996));
+}
+
+#[test]
+fn parse_cluster_table_using_index() {
+    let stmt = parse_statement("cluster sorttest using sorttest_idx").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::Cluster(ClusterStatement { table_name, index_name })
+            if table_name == "sorttest" && index_name == "sorttest_idx"
+    ));
+}
+
+#[test]
+fn parse_explain_declare_cursor() {
+    let stmt = parse_statement("explain (costs off) declare c scroll cursor for select 1").unwrap();
+    match stmt {
+        Statement::Explain(explain) => {
+            assert!(!explain.costs);
+            assert!(matches!(
+                *explain.statement,
+                Statement::DeclareCursor(DeclareCursorStatement { name, scroll, .. })
+                    if name == "c" && scroll == CursorScrollOption::Scroll
+            ));
+        }
+        other => panic!("expected EXPLAIN, got {other:?}"),
+    }
 }
 
 #[test]

@@ -2031,10 +2031,7 @@ fn lookup_system_binding(
 }
 
 fn ctid_value(tid: crate::include::access::htup::ItemPointerData) -> Value {
-    Value::Text(CompactString::from_owned(format!(
-        "({},{})",
-        tid.block_number, tid.offset_number
-    )))
+    Value::Tid(tid)
 }
 
 fn lookup_ctid_binding(
@@ -6554,6 +6551,7 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
         | Value::TimestampTz(_) => 8,
         Value::TimeTz(_) => 12,
         Value::Interval(_) | Value::Uuid(_) => 16,
+        Value::Tid(_) => 6,
         Value::Bool(_) => 1,
         Value::Numeric(numeric) => numeric.render().len(),
         Value::Bit(bits) => bits.bytes.len(),

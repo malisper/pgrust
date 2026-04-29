@@ -16,7 +16,7 @@ use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, IntervalValue, NumericValue, Value,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, AggFunc, HypotheticalAggFunc, expr_sql_type_hint,
+    AggAccum, AggFunc, HypotheticalAggFunc, OrderedSetAggFunc, expr_sql_type_hint,
 };
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
@@ -53,6 +53,9 @@ pub(crate) enum AggregateRuntime {
     },
     Hypothetical {
         func: HypotheticalAggFunc,
+    },
+    OrderedSet {
+        func: OrderedSetAggFunc,
     },
     Custom(CustomAggregateRuntime),
 }
@@ -1106,7 +1109,9 @@ impl AggregateRuntime {
                 }
                 state
             }
-            AggregateRuntime::Hypothetical { .. } => AccumState::Hypothetical,
+            AggregateRuntime::Hypothetical { .. } | AggregateRuntime::OrderedSet { .. } => {
+                AccumState::Hypothetical
+            }
             AggregateRuntime::Custom(custom) => {
                 AccumState::custom(custom.init_value.clone().unwrap_or(Value::Null))
             }
@@ -1121,7 +1126,7 @@ impl AggregateRuntime {
     ) -> Result<(), ExecError> {
         match self {
             AggregateRuntime::Builtin { transition, .. } => transition(state, arg_values),
-            AggregateRuntime::Hypothetical { .. } => Ok(()),
+            AggregateRuntime::Hypothetical { .. } | AggregateRuntime::OrderedSet { .. } => Ok(()),
             AggregateRuntime::Custom(custom) => {
                 let mut call_args = Vec::with_capacity(arg_values.len() + 1);
                 let current_state = match state {
@@ -1320,6 +1325,9 @@ impl AggregateRuntime {
             AggregateRuntime::Hypothetical { func } => {
                 finalize_hypothetical_aggregate(*func, accum, ordered_inputs, direct_arg_values)
             }
+            AggregateRuntime::OrderedSet { func } => {
+                finalize_ordered_set_aggregate(*func, ordered_inputs, direct_arg_values)
+            }
             AggregateRuntime::Custom(custom) => {
                 let state_value = match state {
                     AccumState::Custom { value } => value.clone(),
@@ -1373,9 +1381,18 @@ fn finalize_hypothetical_aggregate(
     let mut peer_rows = 0usize;
     let mut preceding_groups = 0usize;
     let mut previous_preceding_keys: Option<&[Value]> = None;
+    let hypothetical_keys = direct_arg_values
+        .iter()
+        .zip(accum.order_by.iter())
+        .map(|(value, order_by)| {
+            expr_sql_type_hint(&order_by.expr)
+                .map(|target| super::cast_value(value.clone(), target))
+                .unwrap_or_else(|| Ok(value.clone()))
+        })
+        .collect::<Result<Vec<_>, ExecError>>()?;
 
     for input in ordered_inputs {
-        match compare_order_by_keys(&accum.order_by, &input.sort_keys, direct_arg_values)? {
+        match compare_order_by_keys(&accum.order_by, &input.sort_keys, &hypothetical_keys)? {
             Ordering::Less => {
                 preceding_rows += 1;
                 let is_new_group = match previous_preceding_keys {
@@ -1409,6 +1426,50 @@ fn finalize_hypothetical_aggregate(
             (preceding_rows + peer_rows + 1) as f64 / (ordered_inputs.len() + 1) as f64,
         ),
     })
+}
+
+fn finalize_ordered_set_aggregate(
+    func: OrderedSetAggFunc,
+    ordered_inputs: &[OrderedAggInput],
+    direct_arg_values: &[Value],
+) -> Result<Value, ExecError> {
+    match func {
+        OrderedSetAggFunc::PercentileDisc => {
+            let Some(percentile) = direct_arg_values.first() else {
+                return Err(ExecError::DetailedError {
+                    message: "ordered-set aggregate direct-argument count mismatch".into(),
+                    detail: Some("percentile_disc expects one percentile argument".into()),
+                    hint: None,
+                    sqlstate: "XX000",
+                });
+            };
+            if matches!(percentile, Value::Null) {
+                return Ok(Value::Null);
+            }
+            let percentile = expect_float8_arg("percentile_disc", percentile)?;
+            if !(0.0..=1.0).contains(&percentile) || percentile.is_nan() {
+                return Err(ExecError::DetailedError {
+                    message: format!("percentile value {percentile} is not between 0 and 1"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22003",
+                });
+            }
+
+            let values = ordered_inputs
+                .iter()
+                .filter_map(|input| input.arg_values.first())
+                .filter(|value| !matches!(value, Value::Null))
+                .collect::<Vec<_>>();
+            if values.is_empty() {
+                return Ok(Value::Null);
+            }
+
+            let rank = (percentile * values.len() as f64).ceil() as usize;
+            let index = rank.saturating_sub(1).min(values.len() - 1);
+            Ok(values[index].clone())
+        }
+    }
 }
 
 fn finalize_regr_stats(
@@ -1730,6 +1791,7 @@ fn json_object_agg_key(key: &Value) -> String {
         Value::Numeric(v) => v.render(),
         Value::Interval(v) => render_interval_text(*v),
         Value::Uuid(v) => crate::backend::executor::value_io::render_uuid_text(v),
+        Value::Tid(v) => crate::backend::executor::value_io::render_tid_text(v),
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::EnumOid(v) => v.to_string(),
@@ -1789,6 +1851,9 @@ fn value_to_json_text(value: &Value) -> String {
         Value::Interval(v) => serde_json::to_string(&render_interval_text(*v)).unwrap(),
         Value::Uuid(v) => {
             serde_json::to_string(&crate::backend::executor::value_io::render_uuid_text(v)).unwrap()
+        }
+        Value::Tid(v) => {
+            serde_json::to_string(&crate::backend::executor::value_io::render_tid_text(v)).unwrap()
         }
         Value::Bool(v) => {
             if *v {

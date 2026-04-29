@@ -5153,6 +5153,7 @@ fn merge_join_path_lowers_to_merge_join_plan_with_executable_keys() {
         merge_clauses: vec![restrict(eq(var(1, 1), var(2, 1)))],
         outer_merge_keys: vec![var(1, 1)],
         inner_merge_keys: vec![var(2, 1)],
+        merge_key_descending: vec![false],
         restrict_clauses: vec![
             restrict(eq(var(1, 1), var(2, 1))),
             restrict(gt(var(1, 2), var(2, 2))),

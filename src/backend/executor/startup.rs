@@ -319,6 +319,7 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending: _,
             join_qual,
             qual,
             ..
@@ -897,6 +898,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             join_qual,
             qual,
         } => {
@@ -927,6 +929,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 merge_clauses,
                 outer_merge_keys,
                 inner_merge_keys,
+                merge_key_descending,
                 join_qual,
                 qual,
                 combined_names,

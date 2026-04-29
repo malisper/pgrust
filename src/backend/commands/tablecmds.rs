@@ -460,6 +460,7 @@ pub(crate) fn execute_explain(
 
     let explain_target = match statement {
         Statement::Select(select) => EitherExplainTarget::Select(select),
+        Statement::DeclareCursor(declare) => EitherExplainTarget::Select(declare.query),
         Statement::Insert(_) => {
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "EXPLAIN INSERT".into(),
@@ -478,7 +479,7 @@ pub(crate) fn execute_explain(
         }
         _ => {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "SELECT, UPDATE, or MERGE statement after EXPLAIN",
+                expected: "SELECT, UPDATE, MERGE, or DECLARE CURSOR statement after EXPLAIN",
                 actual: "unsupported statement".into(),
             }));
         }
@@ -3503,7 +3504,7 @@ fn constraint_columns(
         .collect()
 }
 
-fn collect_matching_rows_index(
+pub(crate) fn collect_matching_rows_index(
     rel: crate::backend::storage::smgr::RelFileLocator,
     desc: &RelationDesc,
     toast: Option<ToastRelationRef>,
@@ -6182,6 +6183,7 @@ fn remap_child_row_to_parent(
 fn parse_tid_text(value: &Value) -> Result<Option<ItemPointerData>, ExecError> {
     let text = match value {
         Value::Null => return Ok(None),
+        Value::Tid(tid) => return Ok(Some(*tid)),
         Value::Text(text) => text.as_str(),
         Value::TextRef(_, _) => {
             return Err(ExecError::DetailedError {
