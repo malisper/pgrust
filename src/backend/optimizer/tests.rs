@@ -19,7 +19,7 @@ use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, RelOptInfo, RelOptKind,
 };
 use crate::include::nodes::plannodes::{
-    AggregateStrategy, IndexScanKeyArgument, Plan, PlanEstimate, PlannedStmt,
+    AggregatePhase, AggregateStrategy, IndexScanKeyArgument, Plan, PlanEstimate, PlannedStmt,
 };
 use crate::include::nodes::primnodes::{
     Aggref, AttrNumber, Expr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry,
@@ -186,6 +186,7 @@ fn seqscan_path_with_rows(slot_id: usize, startup_cost: f64, total_cost: f64, ro
         relispopulated: true,
         disabled: false,
         toast: None,
+        tablesample: None,
         desc: RelationDesc {
             columns: output_columns
                 .into_iter()
@@ -823,6 +824,39 @@ fn catalog_with_indexed_items() -> Catalog {
     catalog
 }
 
+fn catalog_with_expr_key() -> Catalog {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "expr_key",
+            RelationDesc {
+                columns: vec![
+                    column_desc("x", SqlType::new(SqlTypeKind::Numeric), false),
+                    column_desc("t", SqlType::new(SqlTypeKind::Text), false),
+                ],
+            },
+        )
+        .expect("create expr_key");
+    let index = catalog
+        .create_index(
+            "expr_key_idx_x_t",
+            "expr_key",
+            false,
+            &["x".into(), "t".into()],
+        )
+        .expect("create expr_key index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark expr_key index usable");
+    catalog
+        .set_relation_stats(table.relation_oid, 64, 40.0)
+        .expect("seed expr_key table stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 32, 40.0)
+        .expect("seed expr_key index stats");
+    catalog
+}
+
 fn catalog_with_indexed_later_column() -> Catalog {
     let mut catalog = Catalog::default();
     let table = catalog
@@ -1311,6 +1345,254 @@ fn create_range_partition(
     relation_oid
 }
 
+fn create_list_partitioned_table(catalog: &mut Catalog, name: &str) -> u32 {
+    let desc = RelationDesc {
+        columns: vec![
+            column_desc("k", int4(), false),
+            column_desc("v", int4(), true),
+        ],
+    };
+    let entry = catalog
+        .create_table_with_relkind(
+            name,
+            desc,
+            PUBLIC_NAMESPACE_OID,
+            CURRENT_DATABASE_OID,
+            'p',
+            'p',
+            BOOTSTRAP_SUPERUSER_OID,
+        )
+        .expect("create list partitioned table");
+    let spec = LoweredPartitionSpec {
+        strategy: PartitionStrategy::List,
+        key_columns: vec!["k".into()],
+        key_exprs: vec![var(1, 1)],
+        key_types: vec![int4()],
+        key_sqls: vec!["k".into()],
+        partattrs: vec![1],
+        partclass: vec![0],
+        partcollation: vec![0],
+    };
+    let relation_oid = entry.relation_oid;
+    let table = catalog.tables.get_mut(&name.to_ascii_lowercase()).unwrap();
+    table.relhassubclass = true;
+    table.partitioned_table = Some(pg_partitioned_table_row(relation_oid, &spec, 0));
+    relation_oid
+}
+
+fn create_list_partition(
+    catalog: &mut Catalog,
+    parent_oid: u32,
+    name: &str,
+    values: &[i32],
+    is_default: bool,
+    inhseqno: i32,
+) -> u32 {
+    let desc = RelationDesc {
+        columns: vec![
+            column_desc("k", int4(), false),
+            column_desc("v", int4(), true),
+        ],
+    };
+    let entry = catalog
+        .create_table(name, desc)
+        .expect("create list partition child");
+    let bound = PartitionBoundSpec::List {
+        values: values
+            .iter()
+            .copied()
+            .map(SerializedPartitionValue::Int32)
+            .collect(),
+        is_default,
+    };
+    let relation_oid = entry.relation_oid;
+    let table = catalog.tables.get_mut(&name.to_ascii_lowercase()).unwrap();
+    table.relispartition = true;
+    table.relpartbound = Some(serialize_partition_bound(&bound).expect("serialize bound"));
+    catalog.inherits.push(PgInheritsRow {
+        inhrelid: relation_oid,
+        inhparent: parent_oid,
+        inhseqno,
+        inhdetachpending: false,
+    });
+    relation_oid
+}
+
+fn add_ready_k_index(catalog: &mut Catalog, table_name: &str) {
+    let table_oid = catalog
+        .lookup_any_relation(table_name)
+        .expect("table should exist")
+        .relation_oid;
+    let index = catalog
+        .create_index(
+            format!("{table_name}_k_idx"),
+            table_name,
+            false,
+            &[IndexColumnDef::from("k")],
+        )
+        .expect("create partition child index");
+    catalog
+        .set_index_ready_valid(index.relation_oid, true, true)
+        .expect("mark index ready");
+    catalog
+        .set_relation_stats(table_oid, 128, 10_000.0)
+        .expect("seed table stats");
+    catalog
+        .set_relation_stats(index.relation_oid, 8, 10_000.0)
+        .expect("seed index stats");
+}
+
+fn create_abc_range_partitioned_table(catalog: &mut Catalog, name: &str) -> u32 {
+    let desc = RelationDesc {
+        columns: vec![
+            column_desc("a", int4(), false),
+            column_desc("b", int4(), false),
+            column_desc("c", int4(), false),
+        ],
+    };
+    let entry = catalog
+        .create_table_with_relkind(
+            name,
+            desc,
+            PUBLIC_NAMESPACE_OID,
+            CURRENT_DATABASE_OID,
+            'p',
+            'p',
+            BOOTSTRAP_SUPERUSER_OID,
+        )
+        .expect("create abc partitioned table");
+    let spec = LoweredPartitionSpec {
+        strategy: PartitionStrategy::Range,
+        key_columns: vec!["a".into()],
+        key_exprs: vec![var(1, 1)],
+        key_types: vec![int4()],
+        key_sqls: vec!["a".into()],
+        partattrs: vec![1],
+        partclass: vec![0],
+        partcollation: vec![0],
+    };
+    let relation_oid = entry.relation_oid;
+    let table = catalog.tables.get_mut(&name.to_ascii_lowercase()).unwrap();
+    table.relhassubclass = true;
+    table.partitioned_table = Some(pg_partitioned_table_row(relation_oid, &spec, 0));
+    relation_oid
+}
+
+fn create_abc_range_partition(
+    catalog: &mut Catalog,
+    parent_oid: u32,
+    name: &str,
+    from: i32,
+    to: i32,
+    inhseqno: i32,
+) -> u32 {
+    let desc = RelationDesc {
+        columns: vec![
+            column_desc("a", int4(), false),
+            column_desc("b", int4(), false),
+            column_desc("c", int4(), false),
+        ],
+    };
+    let entry = catalog
+        .create_table(name, desc)
+        .expect("create abc partition child");
+    let bound = PartitionBoundSpec::Range {
+        from: vec![PartitionRangeDatumValue::Value(
+            SerializedPartitionValue::Int32(from),
+        )],
+        to: vec![PartitionRangeDatumValue::Value(
+            SerializedPartitionValue::Int32(to),
+        )],
+        is_default: false,
+    };
+    let relation_oid = entry.relation_oid;
+    let table = catalog.tables.get_mut(&name.to_ascii_lowercase()).unwrap();
+    table.relispartition = true;
+    table.relpartbound = Some(serialize_partition_bound(&bound).expect("serialize bound"));
+    catalog.inherits.push(PgInheritsRow {
+        inhrelid: relation_oid,
+        inhparent: parent_oid,
+        inhseqno,
+        inhdetachpending: false,
+    });
+    relation_oid
+}
+
+fn add_ready_abc_order_index(catalog: &mut Catalog, table_name: &str) {
+    let table_oid = catalog
+        .lookup_any_relation(table_name)
+        .expect("table should exist")
+        .relation_oid;
+    let index_name = format!("{table_name}_a_abs_b_c_idx");
+    add_ready_index(
+        catalog,
+        table_name,
+        &index_name,
+        false,
+        false,
+        &[
+            IndexColumnDef::from("a"),
+            IndexColumnDef {
+                name: "expr".into(),
+                expr_sql: Some("abs(b)".into()),
+                expr_type: Some(int4()),
+                collation: None,
+                opclass: None,
+                opclass_options: Vec::new(),
+                descending: false,
+                nulls_first: None,
+            },
+            IndexColumnDef::from("c"),
+        ],
+        Some(int4_btree_options(3, false)),
+        None,
+    );
+    let index_oid = catalog
+        .lookup_any_relation(&index_name)
+        .expect("index should exist")
+        .relation_oid;
+    catalog
+        .set_relation_stats(table_oid, 128, 10_000.0)
+        .expect("seed table stats");
+    catalog
+        .set_relation_stats(index_oid, 8, 10_000.0)
+        .expect("seed index stats");
+}
+
+fn catalog_with_indexed_range_partitions() -> Catalog {
+    let mut catalog = Catalog::default();
+    let parent_oid = create_partitioned_table(&mut catalog, "rp");
+    create_range_partition(&mut catalog, parent_oid, "rp_p1", 0, 10, 1);
+    create_range_partition(&mut catalog, parent_oid, "rp_p3", 20, 30, 2);
+    create_range_partition(&mut catalog, parent_oid, "rp_p2", 10, 20, 3);
+    for child in ["rp_p1", "rp_p2", "rp_p3"] {
+        add_ready_k_index(&mut catalog, child);
+    }
+    catalog
+}
+
+fn catalog_with_expression_indexed_range_partitions() -> Catalog {
+    let mut catalog = Catalog::default();
+    let parent_oid = create_abc_range_partitioned_table(&mut catalog, "erp");
+    create_abc_range_partition(&mut catalog, parent_oid, "erp_p1", 0, 10, 1);
+    create_abc_range_partition(&mut catalog, parent_oid, "erp_p2", 10, 20, 2);
+    for child in ["erp_p1", "erp_p2"] {
+        add_ready_abc_order_index(&mut catalog, child);
+    }
+    catalog
+}
+
+fn catalog_with_interleaved_list_partitions() -> Catalog {
+    let mut catalog = Catalog::default();
+    let parent_oid = create_list_partitioned_table(&mut catalog, "lp");
+    create_list_partition(&mut catalog, parent_oid, "lp_p35", &[3, 5], false, 1);
+    create_list_partition(&mut catalog, parent_oid, "lp_p4", &[4], false, 2);
+    for child in ["lp_p35", "lp_p4"] {
+        add_ready_k_index(&mut catalog, child);
+    }
+    catalog
+}
+
 fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
     match plan {
         Plan::Append { children, .. }
@@ -1328,6 +1610,9 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children.iter().find_map(append_with_join_children),
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
@@ -1390,6 +1675,9 @@ fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
             }
         }
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
@@ -1424,6 +1712,139 @@ fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. } => {}
     }
+}
+
+#[test]
+fn ordered_range_partition_query_uses_append_without_sort() {
+    let catalog = catalog_with_indexed_range_partitions();
+    let planned = planned_stmt_for_sql_with_catalog("select k from rp order by k", &catalog);
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Append { .. }
+        )),
+        "expected ordered append path, got {:?}",
+        planned.plan_tree
+    );
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::OrderBy { .. } | Plan::MergeAppend { .. }
+        )),
+        "ordered range partitions should not require Sort or MergeAppend: {:?}",
+        planned.plan_tree
+    );
+    assert_eq!(
+        child_relation_names(&planned.plan_tree),
+        vec!["rp_p1", "rp_p2", "rp_p3"]
+    );
+}
+
+#[test]
+fn descending_ordered_range_partition_query_reverses_append_children() {
+    let catalog = catalog_with_indexed_range_partitions();
+    let planned = planned_stmt_for_sql_with_catalog("select k from rp order by k desc", &catalog);
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Append { .. }
+        )),
+        "expected ordered append path, got {:?}",
+        planned.plan_tree
+    );
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::OrderBy { .. } | Plan::MergeAppend { .. }
+        )),
+        "descending ordered range partitions should not require Sort or MergeAppend: {:?}",
+        planned.plan_tree
+    );
+    assert_eq!(
+        child_relation_names(&planned.plan_tree),
+        vec!["rp_p3", "rp_p2", "rp_p1"]
+    );
+}
+
+#[test]
+fn interleaved_list_partition_order_uses_merge_append() {
+    let catalog = catalog_with_interleaved_list_partitions();
+    let planned = planned_stmt_for_sql_with_catalog("select k from lp order by k", &catalog);
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::MergeAppend { .. }
+        )),
+        "interleaved list bounds should use merge append, got {:?}",
+        planned.plan_tree
+    );
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::OrderBy { .. }
+        )),
+        "interleaved list partitions have ordered children and should not require Sort: {:?}",
+        planned.plan_tree
+    );
+}
+
+#[test]
+fn expression_index_ordered_range_partition_query_uses_append() {
+    let catalog = catalog_with_expression_indexed_range_partitions();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select a, b, c from erp order by a, abs(b), c",
+        &catalog,
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Append { .. }
+        )),
+        "expected expression-index ordered append path, got {:?}",
+        planned.plan_tree
+    );
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::OrderBy { .. } | Plan::MergeAppend { .. }
+        )),
+        "translated expression pathkeys should not require Sort or MergeAppend: {:?}",
+        planned.plan_tree
+    );
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::IndexOnlyScan { .. } | Plan::IndexScan { .. }
+        )),
+        "expected child index paths, got {:?}",
+        planned.plan_tree
+    );
+}
+
+#[test]
+fn range_partition_is_not_null_keeps_non_default_partitions() {
+    let catalog = catalog_with_indexed_range_partitions();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select k from rp where k is not null and k < 15",
+        &catalog,
+    );
+
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Result { .. }
+        )),
+        "range IS NOT NULL should not prune all non-default partitions: {:?}",
+        planned.plan_tree
+    );
+    assert_eq!(
+        child_relation_names(&planned.plan_tree),
+        vec!["rp_p1", "rp_p2"]
+    );
 }
 
 #[test]
@@ -1667,6 +2088,9 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
             children.iter().any(|child| plan_contains(child, predicate))
         }
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -1692,6 +2116,21 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
             recursive: right,
             ..
         } => plan_contains(left, predicate) || plan_contains(right, predicate),
+    }
+}
+
+fn contains_exec_param_for_tests(expr: &Expr) -> bool {
+    match expr {
+        Expr::Param(Param {
+            paramkind: ParamKind::Exec,
+            ..
+        }) => true,
+        Expr::Op(op) => op.args.iter().any(contains_exec_param_for_tests),
+        Expr::Func(func) => func.args.iter().any(contains_exec_param_for_tests),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            contains_exec_param_for_tests(inner)
+        }
+        _ => false,
     }
 }
 
@@ -1783,6 +2222,9 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => children.iter().find_map(find_aggregate_plan),
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
@@ -2065,6 +2507,9 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
     match plan {
         Plan::SeqScan { .. } => Some(plan),
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -2119,6 +2564,9 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
             .map(|child| count_plan_nodes(child, predicate))
             .sum(),
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Filter { input, .. }
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
@@ -2315,6 +2763,8 @@ fn aggregate_pathkeys_follow_strategy() {
         pathtarget: PathTarget::new(vec![var(10, 1)]),
         slot_id: 20,
         strategy: AggregateStrategy::Hashed,
+        phase: AggregatePhase::Complete,
+        semantic_accumulators: None,
         disabled: false,
         pathkeys: vec![key.clone()],
         input: Box::new(values_path(10, 1.0, 1.0)),
@@ -2335,6 +2785,8 @@ fn aggregate_pathkeys_follow_strategy() {
         pathtarget: PathTarget::new(vec![var(10, 1)]),
         slot_id: 20,
         strategy: AggregateStrategy::Sorted,
+        phase: AggregatePhase::Complete,
+        semantic_accumulators: None,
         disabled: false,
         pathkeys: vec![key.clone()],
         input: Box::new(values_path(10, 1.0, 1.0)),
@@ -2817,6 +3269,32 @@ fn planner_estimates_constant_generate_series_rows() {
 }
 
 #[test]
+fn planner_estimates_left_join_to_grouped_subquery_as_outer_rows() {
+    let mut catalog = Catalog::default();
+    let table = catalog
+        .create_table(
+            "grouping_unique",
+            RelationDesc {
+                columns: vec![column_desc("x", int4(), false)],
+            },
+        )
+        .expect("create grouping_unique");
+    catalog
+        .set_relation_stats(table.relation_oid, 10, 1000.0)
+        .expect("seed grouping_unique stats");
+
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select * from generate_series(1, 1) t1 left join \
+         (select x from grouping_unique t2 group by x) as q1 on t1.t1 = q1.x",
+        &catalog,
+    );
+    assert_eq!(
+        planned.plan_tree.plan_info().plan_rows.as_f64().round() as u64,
+        1
+    );
+}
+
+#[test]
 fn planner_places_lock_rows_between_order_by_and_limit() {
     let mut catalog = Catalog::default();
     catalog
@@ -2851,6 +3329,51 @@ fn planner_places_lock_rows_between_order_by_and_limit() {
         row_marks[0].strength,
         crate::include::nodes::parsenodes::SelectLockingClause::ForUpdate
     );
+}
+
+#[test]
+fn planner_for_update_of_locks_only_named_relation() {
+    let mut catalog = Catalog::default();
+    for name in ["t1", "t2"] {
+        catalog
+            .create_table(
+                name,
+                RelationDesc {
+                    columns: vec![column_desc("id", int4(), false)],
+                },
+            )
+            .expect("create table");
+    }
+    let stmt = parse_select("select * from t1, t2 for update of t2").expect("parse");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
+    let planned = super::planner(query, &catalog).expect("plan");
+    let Plan::LockRows { row_marks, .. } = strip_projections(&planned.plan_tree) else {
+        panic!("expected lock rows, got {:?}", planned.plan_tree);
+    };
+    assert_eq!(row_marks.len(), 1);
+    assert_eq!(row_marks[0].rtindex, 2);
+}
+
+#[test]
+fn planner_for_update_of_join_alias_rejects_join_target() {
+    let mut catalog = Catalog::default();
+    for name in ["t1", "t2"] {
+        catalog
+            .create_table(
+                name,
+                RelationDesc {
+                    columns: vec![column_desc("id", int4(), false)],
+                },
+            )
+            .expect("create table");
+    }
+    let stmt =
+        parse_select("select * from t1 join t2 using (id) as jt for update of jt").expect("parse");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
+    let err = super::planner(query, &catalog).expect_err("plan should reject join target");
+    assert_eq!(err.to_string(), "FOR UPDATE cannot be applied to a join");
 }
 
 #[test]
@@ -3574,6 +4097,94 @@ fn planner_uses_runtime_index_key_for_correlated_limit_subplan() {
 }
 
 #[test]
+fn planner_memoizes_expression_key_nested_loop() {
+    let catalog = catalog_with_expr_key();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select * from expr_key t1 inner join expr_key t2 on t1.x = t2.t::numeric and t1.t::numeric = t2.x",
+        &catalog,
+        PlannerConfig {
+            enable_hashjoin: false,
+            enable_mergejoin: false,
+            ..PlannerConfig::default()
+        },
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::Memoize { .. }
+        )),
+        "expected Memoize in expression-key join plan: {:#?}",
+        planned.plan_tree
+    );
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| {
+            match plan {
+            Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => keys.iter().any(
+                |key| matches!(&key.argument, IndexScanKeyArgument::Runtime(expr) if contains_exec_param_for_tests(expr))
+            ),
+            _ => false,
+        }
+        }),
+        "expected runtime index probe in expression-key join plan: {:#?}",
+        planned.plan_tree
+    );
+    validate_planned_stmt_for_tests(&planned);
+}
+
+#[test]
+fn planner_uses_runtime_scalar_array_index_for_or_join_clause() {
+    fn contains_exec_param(expr: &Expr) -> bool {
+        match expr {
+            Expr::Param(Param {
+                paramkind: ParamKind::Exec,
+                ..
+            }) => true,
+            Expr::Op(op) => op.args.iter().any(contains_exec_param),
+            Expr::ArrayLiteral { elements, .. } => elements.iter().any(contains_exec_param),
+            Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => contains_exec_param(inner),
+            _ => false,
+        }
+    }
+
+    let catalog = catalog_with_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog_and_config(
+        "select count(*) from items o join lateral (select i.id from items i where i.id = o.id or i.id = o.id + 1 or i.id = o.id + 2) i on true where o.id < 10",
+        &catalog,
+        PlannerConfig {
+            enable_seqscan: false,
+            enable_material: false,
+            ..PlannerConfig::default()
+        },
+    );
+
+    let has_runtime_index = plan_contains(&planned.plan_tree, |plan| match plan {
+        Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => keys.iter().any(|key| {
+            matches!(
+                &key.argument,
+                IndexScanKeyArgument::Runtime(expr) if contains_exec_param(expr)
+            )
+        }),
+        _ => false,
+    });
+    let has_parameterized_memoize = plan_contains(&planned.plan_tree, |plan| {
+        matches!(
+            plan,
+            Plan::Memoize {
+                key_paramids,
+                dependent_paramids,
+                ..
+            } if !key_paramids.is_empty() && !dependent_paramids.is_empty()
+        )
+    });
+    assert!(
+        has_runtime_index || has_parameterized_memoize,
+        "expected OR join clause to use a runtime index scan or memoized parameterized path: {planned:#?}"
+    );
+    validate_planned_stmt_for_tests(&planned);
+}
+
+#[test]
 fn planner_simplifies_outer_max_of_unique_scalar_sublink() {
     let catalog = catalog_with_unique_indexed_items();
     let planned = planned_stmt_for_sql_with_catalog_and_larger_parse_stack(
@@ -3662,6 +4273,9 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
         match plan {
             Plan::ProjectSet { .. } => Some(plan),
             Plan::Hash { input, .. }
+            | Plan::Materialize { input, .. }
+            | Plan::Memoize { input, .. }
+            | Plan::Gather { input, .. }
             | Plan::Filter { input, .. }
             | Plan::Projection { input, .. }
             | Plan::OrderBy { input, .. }
@@ -3736,6 +4350,9 @@ fn grouped_target_srf_uses_project_set_before_aggregate() {
                 plan_contains(input, |child| matches!(child, Plan::ProjectSet { .. }))
             }
             Plan::Hash { input, .. }
+            | Plan::Materialize { input, .. }
+            | Plan::Memoize { input, .. }
+            | Plan::Gather { input, .. }
             | Plan::Filter { input, .. }
             | Plan::Projection { input, .. }
             | Plan::OrderBy { input, .. }
@@ -4660,6 +5277,7 @@ fn merge_join_path_lowers_to_merge_join_plan_with_executable_keys() {
         merge_clauses: vec![restrict(eq(var(1, 1), var(2, 1)))],
         outer_merge_keys: vec![var(1, 1)],
         inner_merge_keys: vec![var(2, 1)],
+        merge_key_descending: vec![false],
         restrict_clauses: vec![
             restrict(eq(var(1, 1), var(2, 1))),
             restrict(gt(var(1, 2), var(2, 2))),

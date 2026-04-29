@@ -9,18 +9,21 @@ use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::analyze::{
     bind_index_predicate, flatten_and_conjuncts, predicate_implies_index_predicate,
 };
-use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{
+    Query, QueryRowMark, RangeTblEntryKind, TableSampleClause,
+};
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, PlannerSubroot, RestrictInfo};
 use crate::include::nodes::plannodes::{
-    ExecParamSource, IndexScanKey, IndexScanKeyArgument, Plan, PlanEstimate, PlanRowMark,
+    ExecParamSource, IndexScanKey, IndexScanKeyArgument, PartitionPruneChildDomain,
+    PartitionPrunePlan, Plan, PlanEstimate, PlanRowMark,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, OUTER_VAR, OpExpr,
-    OrderByEntry, Param, ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry, Var,
-    WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index, is_executor_special_varno,
-    is_system_attr, set_returning_call_exprs, user_attrno,
+    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, JoinType, OUTER_VAR,
+    OpExpr, OrderByEntry, Param, ParamKind, QueryColumn, RowsFromSource, ScalarArrayOpExpr,
+    SubPlan, TargetEntry, Var, WindowClause, WindowFuncExpr, WindowFuncKind, XmlExpr, attrno_index,
+    is_executor_special_varno, is_system_attr, set_returning_call_exprs, user_attrno,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
 struct IndexedTlistEntry {
@@ -120,10 +123,25 @@ pub(super) fn create_plan_with_param_base(
         ext_params: Vec::new(),
     };
     validate_planner_path(&path);
-    let plan = set_plan_refs(&mut ctx, path);
+    let plan = maybe_wrap_parallel_gather(root, set_plan_refs(&mut ctx, path));
     let allowed_params = exec_param_sources(&ctx.ext_params);
     validate_executable_plan_with_params(&plan, &allowed_params);
     (plan, ctx.ext_params, ctx.next_param_id)
+}
+
+fn maybe_wrap_parallel_gather(root: &PlannerInfo, plan: Plan) -> Plan {
+    if root.config.force_parallel_gather
+        && root.config.max_parallel_workers_per_gather > 0
+        && root.parse.limit_count.is_some()
+    {
+        return Plan::Gather {
+            plan_info: plan.plan_info(),
+            input: Box::new(plan),
+            workers_planned: root.config.max_parallel_workers_per_gather,
+            single_copy: true,
+        };
+    }
+    plan
 }
 
 pub(super) fn create_plan_without_root(path: Path) -> Plan {
@@ -265,6 +283,116 @@ fn aggregate_output_expr(accum: &crate::include::nodes::primnodes::AggAccum, agg
     }))
 }
 
+fn render_semantic_expr_name(root: Option<&PlannerInfo>, expr: &Expr) -> String {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => root
+            .and_then(|root| root.parse.rtable.get(var.varno.saturating_sub(1)))
+            .and_then(|rte| {
+                attrno_index(var.varattno).and_then(|index| {
+                    rte.desc.columns.get(index).map(|column| {
+                        let qualifier = rte.alias.as_deref().or_else(|| {
+                            (!rte.eref.aliasname.is_empty()).then_some(rte.eref.aliasname.as_str())
+                        });
+                        qualifier
+                            .map(|qualifier| format!("{qualifier}.{}", column.name))
+                            .unwrap_or_else(|| column.name.clone())
+                    })
+                })
+            })
+            .unwrap_or_else(|| crate::backend::executor::render_explain_expr(expr, &[])),
+        Expr::Op(op) if op.args.len() == 2 => {
+            let op_text = match op.op {
+                crate::include::nodes::primnodes::OpExprKind::Add => "+",
+                crate::include::nodes::primnodes::OpExprKind::Sub => "-",
+                crate::include::nodes::primnodes::OpExprKind::Mul => "*",
+                crate::include::nodes::primnodes::OpExprKind::Div => "/",
+                crate::include::nodes::primnodes::OpExprKind::Mod => "%",
+                crate::include::nodes::primnodes::OpExprKind::Eq => "=",
+                crate::include::nodes::primnodes::OpExprKind::NotEq => "<>",
+                crate::include::nodes::primnodes::OpExprKind::Lt => "<",
+                crate::include::nodes::primnodes::OpExprKind::LtEq => "<=",
+                crate::include::nodes::primnodes::OpExprKind::Gt => ">",
+                crate::include::nodes::primnodes::OpExprKind::GtEq => ">=",
+                _ => return crate::backend::executor::render_explain_expr(expr, &[]),
+            };
+            format!(
+                "({} {} {})",
+                render_semantic_expr_name(root, &op.args[0]),
+                op_text,
+                render_semantic_expr_name(root, &op.args[1])
+            )
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            render_semantic_expr_name(root, inner)
+        }
+        Expr::Const(value) => {
+            let rendered =
+                crate::backend::executor::render_explain_expr(&Expr::Const(value.clone()), &[]);
+            rendered
+                .strip_prefix('(')
+                .and_then(|value| value.strip_suffix(')'))
+                .unwrap_or(&rendered)
+                .to_string()
+        }
+        _ => crate::backend::executor::render_explain_expr(expr, &[]),
+    }
+}
+
+fn render_semantic_accum_name(root: Option<&PlannerInfo>, accum: &AggAccum) -> String {
+    let name = crate::include::catalog::builtin_aggregate_function_for_proc_oid(accum.aggfnoid)
+        .map(|func| func.name().to_string())
+        .unwrap_or_else(|| format!("agg_{}", accum.aggfnoid));
+    let mut args = if accum.args.is_empty() {
+        vec!["*".into()]
+    } else {
+        accum
+            .args
+            .iter()
+            .map(|arg| render_semantic_expr_name(root, arg))
+            .collect::<Vec<_>>()
+    };
+    if accum.distinct && !args.is_empty() {
+        args[0] = format!("DISTINCT {}", args[0]);
+    }
+    let mut rendered = format!("{name}({})", args.join(", "));
+    if !accum.order_by.is_empty() {
+        let order_by = accum
+            .order_by
+            .iter()
+            .map(|item| render_semantic_expr_name(root, &item.expr))
+            .collect::<Vec<_>>()
+            .join(", ");
+        rendered = format!("{name}({} ORDER BY {order_by})", args.join(", "));
+    }
+    rendered
+}
+
+fn aggregate_semantic_output_names(
+    root: Option<&PlannerInfo>,
+    group_by: &[Expr],
+    passthrough_exprs: &[Expr],
+    accumulators: &[AggAccum],
+) -> Vec<String> {
+    let mut names =
+        Vec::with_capacity(group_by.len() + passthrough_exprs.len() + accumulators.len());
+    names.extend(
+        group_by
+            .iter()
+            .map(|expr| render_semantic_expr_name(root, expr)),
+    );
+    names.extend(
+        passthrough_exprs
+            .iter()
+            .map(|expr| render_semantic_expr_name(root, expr)),
+    );
+    names.extend(
+        accumulators
+            .iter()
+            .map(|accum| render_semantic_accum_name(root, accum)),
+    );
+    names
+}
+
 fn dedup_match_exprs(exprs: Vec<Expr>) -> Vec<Expr> {
     let mut deduped = Vec::new();
     for expr in exprs {
@@ -337,10 +465,13 @@ fn build_projection_tlist(
 fn build_aggregate_tlist(
     root: Option<&PlannerInfo>,
     slot_id: usize,
+    phase: crate::include::nodes::plannodes::AggregatePhase,
     group_by: &[Expr],
     passthrough_exprs: &[Expr],
     accumulators: &[crate::include::nodes::primnodes::AggAccum],
+    semantic_accumulators: Option<&[crate::include::nodes::primnodes::AggAccum]>,
 ) -> IndexedTlist {
+    let display_accumulators = semantic_accumulators.unwrap_or(accumulators);
     let mut entries =
         Vec::with_capacity(group_by.len() + passthrough_exprs.len() + accumulators.len());
     for (index, expr) in group_by.iter().enumerate() {
@@ -375,14 +506,20 @@ fn build_aggregate_tlist(
         });
     }
     for (aggno, accum) in accumulators.iter().enumerate() {
+        let display_accum = display_accumulators.get(aggno).unwrap_or(accum);
         let index = group_by.len() + passthrough_exprs.len() + aggno;
+        let output_type = if phase == crate::include::nodes::plannodes::AggregatePhase::Partial {
+            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Record)
+        } else {
+            accum.sql_type
+        };
         entries.push(IndexedTlistEntry {
             index,
-            sql_type: accum.sql_type,
+            sql_type: output_type,
             ressortgroupref: 0,
             match_exprs: dedup_match_exprs(vec![
-                slot_var(slot_id, user_attrno(index), accum.sql_type),
-                aggregate_output_expr(accum, aggno),
+                slot_var(slot_id, user_attrno(index), output_type),
+                aggregate_output_expr(display_accum, aggno),
             ]),
         });
     }
@@ -639,11 +776,21 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
         | Path::LockRows { input, .. } => build_path_tlist(root, input),
         Path::Aggregate {
             slot_id,
+            phase,
             group_by,
             passthrough_exprs,
             accumulators,
+            semantic_accumulators,
             ..
-        } => build_aggregate_tlist(root, *slot_id, group_by, passthrough_exprs, accumulators),
+        } => build_aggregate_tlist(
+            root,
+            *slot_id,
+            *phase,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            semantic_accumulators.as_deref(),
+        ),
         Path::WindowAgg {
             slot_id,
             input,
@@ -702,7 +849,7 @@ fn search_input_tlist_entry<'a>(
     input: &Path,
     tlist: &'a IndexedTlist,
 ) -> Option<&'a IndexedTlistEntry> {
-    let flattened_expr = root.map(|root| flatten_join_alias_vars(root, expr.clone()));
+    let flattened_expr = root.and_then(|root| maybe_flatten_join_alias_vars(root, expr));
     search_tlist_entry(root, expr, tlist).or_else(|| {
         let mut matched_index = None;
         for entry in &tlist.entries {
@@ -737,6 +884,146 @@ fn search_input_tlist_entry<'a>(
         }
         matched_index.and_then(|index| tlist.entries.iter().find(|entry| entry.index == index))
     })
+}
+
+fn maybe_flatten_join_alias_vars(root: &PlannerInfo, expr: &Expr) -> Option<Expr> {
+    expr_references_join_alias_var(root, expr).then(|| flatten_join_alias_vars(root, expr.clone()))
+}
+
+fn expr_references_join_alias_var(root: &PlannerInfo, expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => root
+            .parse
+            .rtable
+            .get(var.varno.saturating_sub(1))
+            .is_some_and(|rte| matches!(rte.kind, RangeTblEntryKind::Join { .. })),
+        Expr::Aggref(aggref) => {
+            aggref
+                .direct_args
+                .iter()
+                .any(|expr| expr_references_join_alias_var(root, expr))
+                || aggref
+                    .args
+                    .iter()
+                    .any(|expr| expr_references_join_alias_var(root, expr))
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|entry| expr_references_join_alias_var(root, &entry.expr))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(|expr| expr_references_join_alias_var(root, expr))
+        }
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|expr| expr_references_join_alias_var(root, expr))
+                || case_expr.args.iter().any(|arm| {
+                    expr_references_join_alias_var(root, &arm.expr)
+                        || expr_references_join_alias_var(root, &arm.result)
+                })
+                || expr_references_join_alias_var(root, &case_expr.defresult)
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_ref()
+            .is_some_and(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_ref()
+            .is_some_and(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::ScalarArrayOp(op) => {
+            expr_references_join_alias_var(root, &op.left)
+                || expr_references_join_alias_var(root, &op.right)
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::Cast(inner, _) => expr_references_join_alias_var(root, inner),
+        Expr::Collate { expr, .. } => expr_references_join_alias_var(root, expr),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_references_join_alias_var(root, expr)
+                || expr_references_join_alias_var(root, pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_references_join_alias_var(root, expr))
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_references_join_alias_var(root, inner),
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            expr_references_join_alias_var(root, left)
+                || expr_references_join_alias_var(root, right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|expr| expr_references_join_alias_var(root, expr)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_references_join_alias_var(root, expr)),
+        Expr::FieldSelect { expr, .. } => expr_references_join_alias_var(root, expr),
+        Expr::Coalesce(left, right) => {
+            expr_references_join_alias_var(root, left)
+                || expr_references_join_alias_var(root, right)
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_references_join_alias_var(root, array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| expr_references_join_alias_var(root, expr))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| expr_references_join_alias_var(root, expr))
+                })
+        }
+        Expr::SqlJsonQueryFunction(_)
+        | Expr::SetReturning(_)
+        | Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
 }
 
 fn output_component_matches_expr(candidate: &Expr, expr: &Expr) -> bool {
@@ -1039,6 +1326,32 @@ fn lower_projection_expr_by_input_target(
                 .collect(),
             array_type,
         },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| {
+                    (
+                        name,
+                        lower_projection_expr_by_input_target(root, expr, input, input_tlist),
+                    )
+                })
+                .collect(),
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(lower_projection_expr_by_input_target(
+                root,
+                *expr,
+                input,
+                input_tlist,
+            )),
+            field,
+            field_type,
+        },
         Expr::Coalesce(left, right) => Expr::Coalesce(
             Box::new(lower_projection_expr_by_input_target(
                 root,
@@ -1105,7 +1418,7 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
         Expr::Var(var) => {
             var.varlevelsup == 0
                 && !is_executor_special_varno(var.varno)
-                && !is_system_attr(var.varattno)
+                && (attrno_index(var.varattno).is_some() || is_system_attr(var.varattno))
         }
         Expr::Aggref(aggref) => {
             aggref.args.iter().any(expr_contains_local_semantic_var)
@@ -1213,6 +1526,16 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
     }
 }
 
+fn expr_is_local_system_var(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Var(var)
+            if var.varlevelsup == 0
+                && !is_executor_special_varno(var.varno)
+                && is_system_attr(var.varattno)
+    )
+}
+
 fn path_single_relid(path: &Path) -> Option<usize> {
     match path {
         Path::Append { relids, .. } => relids.first().copied().filter(|_| relids.len() == 1),
@@ -1222,6 +1545,7 @@ fn path_single_relid(path: &Path) -> Option<usize> {
         | Path::IndexScan { source_id, .. }
         | Path::BitmapIndexScan { source_id, .. }
         | Path::BitmapHeapScan { source_id, .. } => Some(*source_id),
+        Path::Values { slot_id, .. } => rte_slot_varno(*slot_id),
         Path::BitmapOr { .. } => None,
         Path::Unique { input, .. }
         | Path::Filter { input, .. }
@@ -1476,6 +1800,96 @@ fn rewrite_appendrel_expr_for_input_path(root: &PlannerInfo, expr: Expr, path: &
         .unwrap_or(expr)
 }
 
+fn fix_executor_join_var_for_input(expr: &Expr, input: &Path) -> Option<Expr> {
+    let Expr::Var(var) = expr else {
+        return None;
+    };
+    if var.varlevelsup > 0 || !is_executor_special_varno(var.varno) || is_system_attr(var.varattno)
+    {
+        return None;
+    }
+    let index = attrno_index(var.varattno)?;
+    match input {
+        Path::NestedLoopJoin { left, kind, .. }
+        | Path::HashJoin { left, kind, .. }
+        | Path::MergeJoin { left, kind, .. } => {
+            let left_width = left.output_vars().len();
+            let physical_index = if var.varno == OUTER_VAR {
+                index
+            } else if matches!(kind, JoinType::Semi | JoinType::Anti) {
+                return None;
+            } else {
+                left_width + index
+            };
+            (physical_index < input.output_vars().len())
+                .then(|| special_slot_var(OUTER_VAR, physical_index, var.vartype))
+        }
+        Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::IncrementalSort { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
+        | Path::Unique { input, .. } => fix_executor_join_var_for_input(expr, input),
+        _ => None,
+    }
+}
+
+fn fix_semantic_output_expr_for_input(
+    root: Option<&PlannerInfo>,
+    expr: &Expr,
+    input: &Path,
+) -> Option<Expr> {
+    input
+        .semantic_output_target()
+        .exprs
+        .iter()
+        .enumerate()
+        .find_map(|(index, candidate)| {
+            let direct = exprs_equivalent(root, candidate, expr);
+            let flattened = root.is_some_and(|root| {
+                exprs_equivalent(
+                    Some(root),
+                    &flatten_join_alias_vars(root, candidate.clone()),
+                    &flatten_join_alias_vars(root, expr.clone()),
+                )
+            });
+            (direct || flattened).then(|| special_slot_var(OUTER_VAR, index, expr_sql_type(expr)))
+        })
+}
+
+fn fix_join_rte_var_for_input(
+    root: Option<&PlannerInfo>,
+    expr: &Expr,
+    input: &Path,
+) -> Option<Expr> {
+    let (Some(root), Expr::Var(var)) = (root, expr) else {
+        return None;
+    };
+    if var.varlevelsup > 0 || is_executor_special_varno(var.varno) || is_system_attr(var.varattno) {
+        return None;
+    }
+    let index = attrno_index(var.varattno)?;
+    if input
+        .output_vars()
+        .get(index)
+        .is_none_or(|output| expr_sql_type(output) != var.vartype)
+    {
+        return None;
+    }
+    if path_single_relid(input) == Some(var.varno) {
+        return Some(special_slot_var(OUTER_VAR, index, var.vartype));
+    }
+    if !root
+        .parse
+        .rtable
+        .get(var.varno.saturating_sub(1))
+        .is_some_and(|rte| matches!(rte.kind, RangeTblEntryKind::Join { .. }))
+    {
+        return None;
+    }
+    Some(special_slot_var(OUTER_VAR, index, var.vartype))
+}
+
 fn fix_upper_expr_for_input(
     root: Option<&PlannerInfo>,
     expr: Expr,
@@ -1484,6 +1898,9 @@ fn fix_upper_expr_for_input(
 ) -> Expr {
     let rewritten = fix_upper_expr(root, expr.clone(), input_tlist);
     if rewritten != expr {
+        if let Some(fixed) = fix_executor_join_var_for_input(&rewritten, input) {
+            return fixed;
+        }
         return rewritten;
     }
     if let Some(root) = root {
@@ -1491,11 +1908,23 @@ fn fix_upper_expr_for_input(
         if translated != expr {
             let translated_rewritten = fix_upper_expr(Some(root), translated.clone(), input_tlist);
             if translated_rewritten != translated {
+                if let Some(fixed) = fix_executor_join_var_for_input(&translated_rewritten, input) {
+                    return fixed;
+                }
                 return translated_rewritten;
             }
         }
     }
     if let Some(rewritten) = fix_immediate_subquery_output_expr(root, &expr, input, input_tlist) {
+        return rewritten;
+    }
+    if let Some(rewritten) = fix_executor_join_var_for_input(&expr, input) {
+        return rewritten;
+    }
+    if let Some(rewritten) = fix_join_rte_var_for_input(root, &expr, input) {
+        return rewritten;
+    }
+    if let Some(rewritten) = fix_semantic_output_expr_for_input(root, &expr, input) {
         return rewritten;
     }
     expr
@@ -1527,12 +1956,11 @@ fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
 }
 
 fn exec_param_for_outer_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr {
+    let can_reuse_ancestor_param = expr_max_varlevelsup(&expr) > 1;
     let parent_expr = decrement_outer_expr_levels(expr.clone());
     let paramtype = expr_sql_type(&parent_expr);
-    if let Some(existing) = ctx
-        .ext_params
-        .iter()
-        .find(|param| param.expr == parent_expr)
+    if can_reuse_ancestor_param
+        && let Some(existing) = find_existing_exec_param(ctx, parent_expr.clone())
     {
         return Expr::Param(Param {
             paramkind: ParamKind::Exec,
@@ -1544,6 +1972,7 @@ fn exec_param_for_outer_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr {
     ctx.next_param_id += 1;
     ctx.ext_params.push(ExecParamSource {
         paramid,
+        label: label_for_expr(ctx, &parent_expr),
         expr: parent_expr,
     });
     Expr::Param(Param {
@@ -1551,6 +1980,171 @@ fn exec_param_for_outer_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr {
         paramid,
         paramtype,
     })
+}
+
+fn expr_max_varlevelsup(expr: &Expr) -> usize {
+    match expr {
+        Expr::Var(var) => var.varlevelsup,
+        Expr::Aggref(aggref) => aggref
+            .args
+            .iter()
+            .map(expr_max_varlevelsup)
+            .chain(
+                aggref
+                    .aggfilter
+                    .as_ref()
+                    .map(|expr| expr_max_varlevelsup(expr)),
+            )
+            .max()
+            .unwrap_or(aggref.agglevelsup)
+            .max(aggref.agglevelsup),
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .map(expr_max_varlevelsup)
+            .chain(match &window_func.kind {
+                WindowFuncKind::Aggregate(aggref) => aggref
+                    .aggfilter
+                    .as_ref()
+                    .map(|expr| expr_max_varlevelsup(expr)),
+                WindowFuncKind::Builtin(_) => None,
+            })
+            .max()
+            .unwrap_or(0),
+        Expr::Op(op) => op.args.iter().map(expr_max_varlevelsup).max().unwrap_or(0),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .map(expr_max_varlevelsup)
+            .max()
+            .unwrap_or(0),
+        Expr::Case(case_expr) => case_expr
+            .arg
+            .as_deref()
+            .map(expr_max_varlevelsup)
+            .into_iter()
+            .chain(case_expr.args.iter().flat_map(|arm| {
+                [
+                    expr_max_varlevelsup(&arm.expr),
+                    expr_max_varlevelsup(&arm.result),
+                ]
+            }))
+            .chain(std::iter::once(expr_max_varlevelsup(&case_expr.defresult)))
+            .max()
+            .unwrap_or(0),
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .map(expr_max_varlevelsup)
+            .max()
+            .unwrap_or(0),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .map(expr_max_varlevelsup)
+            .max()
+            .unwrap_or(0),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .map(expr_max_varlevelsup)
+            .max()
+            .unwrap_or(0),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .map(expr_max_varlevelsup)
+            .unwrap_or(0),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_deref()
+            .map(expr_max_varlevelsup)
+            .into_iter()
+            .chain(subplan.args.iter().map(expr_max_varlevelsup))
+            .max()
+            .unwrap_or(0),
+        Expr::ScalarArrayOp(saop) => {
+            expr_max_varlevelsup(&saop.left).max(expr_max_varlevelsup(&saop.right))
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_max_varlevelsup(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => expr_max_varlevelsup(expr)
+            .max(expr_max_varlevelsup(pattern))
+            .max(escape.as_deref().map(expr_max_varlevelsup).unwrap_or(0)),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_max_varlevelsup(left).max(expr_max_varlevelsup(right))
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            elements.iter().map(expr_max_varlevelsup).max().unwrap_or(0)
+        }
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .map(|(_, expr)| expr_max_varlevelsup(expr))
+            .max()
+            .unwrap_or(0),
+        Expr::ArraySubscript { array, subscripts } => subscripts
+            .iter()
+            .flat_map(|subscript| [subscript.lower.as_ref(), subscript.upper.as_ref()])
+            .flatten()
+            .map(expr_max_varlevelsup)
+            .chain(std::iter::once(expr_max_varlevelsup(array)))
+            .max()
+            .unwrap_or(0),
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .map(expr_max_varlevelsup)
+            .max()
+            .unwrap_or(0),
+        Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => 0,
+    }
+}
+
+fn find_existing_exec_param<'a>(
+    ctx: &'a SetRefsContext<'_>,
+    mut expr: Expr,
+) -> Option<&'a ExecParamSource> {
+    loop {
+        if let Some(existing) = ctx
+            .ext_params
+            .iter()
+            .find(|param| exprs_equivalent(ctx.root, &param.expr, &expr))
+        {
+            return Some(existing);
+        }
+        let decremented = decrement_outer_expr_levels(expr.clone());
+        if decremented == expr {
+            return None;
+        }
+        expr = decremented;
+    }
 }
 
 fn inline_exec_params(expr: Expr, params: &[ExecParamSource], consumed: &mut Vec<usize>) -> Expr {
@@ -1677,6 +2271,134 @@ fn inline_exec_params(expr: Expr, params: &[ExecParamSource], consumed: &mut Vec
         ),
         other => other,
     }
+}
+
+fn label_for_runtime_expr(ctx: &SetRefsContext<'_>, expr: &Expr) -> Option<String> {
+    label_for_expr(ctx, &decrement_outer_expr_levels(expr.clone()))
+}
+
+fn label_for_expr(ctx: &SetRefsContext<'_>, expr: &Expr) -> Option<String> {
+    let root = ctx.root?;
+    Some(render_param_label_expr(root, expr, ctx))
+}
+
+fn render_param_label_expr(root: &PlannerInfo, expr: &Expr, ctx: &SetRefsContext<'_>) -> String {
+    match expr {
+        Expr::Var(var) if var.varlevelsup > 0 => {
+            let mut var = var.clone();
+            var.varlevelsup -= 1;
+            render_param_label_expr(root, &Expr::Var(var), ctx)
+        }
+        Expr::Var(var) if var.varlevelsup == 0 => root
+            .parse
+            .rtable
+            .get(var.varno.saturating_sub(1))
+            .and_then(|rte| {
+                attrno_index(var.varattno).and_then(|index| {
+                    if let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind
+                        && let Some(alias_expr) = joinaliasvars.get(index)
+                    {
+                        return Some(render_param_label_expr(root, alias_expr, ctx));
+                    }
+                    rte.desc.columns.get(index).map(|column| {
+                        if let Some(alias) = rte.alias.as_deref() {
+                            format!("{alias}.{}", column.name)
+                        } else {
+                            column.name.clone()
+                        }
+                    })
+                })
+            })
+            .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Param(param) if matches!(param.paramkind, ParamKind::Exec) => ctx
+            .ext_params
+            .iter()
+            .rev()
+            .find(|source| source.paramid == param.paramid)
+            .map(|source| {
+                source
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| render_param_label_expr(root, &source.expr, ctx))
+            })
+            .unwrap_or_else(|| format!("${}", param.paramid)),
+        Expr::Cast(inner, ty) => {
+            let inner = render_param_label_expr(root, inner, ctx);
+            format!("({inner})::{}", param_label_type_name(*ty))
+        }
+        Expr::Collate { expr: inner, .. } => render_param_label_expr(root, inner, ctx),
+        Expr::Op(op) => {
+            let op_text = match op.op {
+                crate::include::nodes::primnodes::OpExprKind::Add => "+",
+                crate::include::nodes::primnodes::OpExprKind::Sub => "-",
+                crate::include::nodes::primnodes::OpExprKind::Mul => "*",
+                crate::include::nodes::primnodes::OpExprKind::Div => "/",
+                crate::include::nodes::primnodes::OpExprKind::Mod => "%",
+                crate::include::nodes::primnodes::OpExprKind::Eq => "=",
+                crate::include::nodes::primnodes::OpExprKind::NotEq => "<>",
+                crate::include::nodes::primnodes::OpExprKind::Lt => "<",
+                crate::include::nodes::primnodes::OpExprKind::LtEq => "<=",
+                crate::include::nodes::primnodes::OpExprKind::Gt => ">",
+                crate::include::nodes::primnodes::OpExprKind::GtEq => ">=",
+                _ => {
+                    return crate::backend::executor::render_explain_expr(expr, &[]);
+                }
+            };
+            match op.args.as_slice() {
+                [left, right] => format!(
+                    "({} {op_text} {})",
+                    render_param_label_expr(root, left, ctx),
+                    render_param_label_expr(root, right, ctx)
+                ),
+                [inner] => format!("({op_text}{})", render_param_label_expr(root, inner, ctx)),
+                _ => crate::backend::executor::render_explain_expr(expr, &[]),
+            }
+        }
+        Expr::Const(value) => {
+            let rendered =
+                crate::backend::executor::render_explain_expr(&Expr::Const(value.clone()), &[]);
+            rendered
+                .strip_prefix('(')
+                .and_then(|value| value.strip_suffix(')'))
+                .unwrap_or(&rendered)
+                .to_string()
+        }
+        _ => crate::backend::executor::render_explain_expr(expr, &[]),
+    }
+}
+
+fn param_label_type_name(ty: crate::backend::parser::SqlType) -> String {
+    use crate::backend::parser::SqlTypeKind;
+    let element = if ty.is_array { ty.element_type() } else { ty };
+    let rendered = match element.kind {
+        SqlTypeKind::Bool => "boolean".into(),
+        SqlTypeKind::Int2 => "smallint".into(),
+        SqlTypeKind::Int4 => "integer".into(),
+        SqlTypeKind::Int8 => "bigint".into(),
+        SqlTypeKind::Float4 => "real".into(),
+        SqlTypeKind::Float8 => "double precision".into(),
+        SqlTypeKind::Numeric => element
+            .numeric_precision_scale()
+            .map(|(precision, scale)| format!("numeric({precision},{scale})"))
+            .unwrap_or_else(|| "numeric".into()),
+        SqlTypeKind::Text => "text".into(),
+        SqlTypeKind::Varchar => "character varying".into(),
+        SqlTypeKind::Char => "character".into(),
+        _ => format!("{:?}", element.kind).to_ascii_lowercase(),
+    };
+    if ty.is_array {
+        format!("{rendered}[]")
+    } else {
+        rendered
+    }
+}
+
+fn can_bind_as_nest_param(rebased_expr: &Expr, fixed_expr: &Expr) -> bool {
+    let fixed_is_system_var = expr_is_local_system_var(fixed_expr);
+    expr_contains_local_semantic_var(rebased_expr)
+        && (fixed_expr != rebased_expr || fixed_is_system_var)
+        && expr_sql_type(fixed_expr) == expr_sql_type(rebased_expr)
+        && (!expr_contains_local_semantic_var(fixed_expr) || fixed_is_system_var)
 }
 
 fn decrement_outer_expr_levels(expr: Expr) -> Expr {
@@ -1826,6 +2548,35 @@ fn lower_set_returning_call(
     use crate::include::nodes::primnodes::SetReturningCall;
 
     match call {
+        SetReturningCall::RowsFrom {
+            items,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::RowsFrom {
+            items: items
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::RowsFromItem {
+                    source: match item.source {
+                        RowsFromSource::Function(call) => {
+                            RowsFromSource::Function(lower_set_returning_call(ctx, call, mode))
+                        }
+                        RowsFromSource::Project {
+                            output_exprs,
+                            output_columns,
+                        } => RowsFromSource::Project {
+                            output_exprs: output_exprs
+                                .into_iter()
+                                .map(|expr| lower_expr(ctx, expr, mode))
+                                .collect(),
+                            output_columns,
+                        },
+                    },
+                    column_definitions: item.column_definitions,
+                })
+                .collect(),
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
@@ -2021,6 +2772,7 @@ fn lower_set_returning_call(
             function_name,
             func_variadic,
             args,
+            inlined_expr,
             output_columns,
             with_ordinality,
         } => SetReturningCall::UserDefined {
@@ -2031,6 +2783,7 @@ fn lower_set_returning_call(
                 .into_iter()
                 .map(|arg| lower_expr(ctx, arg, mode))
                 .collect(),
+            inlined_expr: inlined_expr.map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
             output_columns,
             with_ordinality,
         },
@@ -2049,6 +2802,35 @@ fn fix_set_returning_call_upper_exprs(
     use crate::include::nodes::primnodes::SetReturningCall;
 
     match call {
+        SetReturningCall::RowsFrom {
+            items,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::RowsFrom {
+            items: items
+                .into_iter()
+                .map(|item| crate::include::nodes::primnodes::RowsFromItem {
+                    source: match item.source {
+                        RowsFromSource::Function(call) => RowsFromSource::Function(
+                            fix_set_returning_call_upper_exprs(root, call, path, input_tlist),
+                        ),
+                        RowsFromSource::Project {
+                            output_exprs,
+                            output_columns,
+                        } => RowsFromSource::Project {
+                            output_exprs: output_exprs
+                                .into_iter()
+                                .map(|expr| fix_upper_expr_for_input(root, expr, path, input_tlist))
+                                .collect(),
+                            output_columns,
+                        },
+                    },
+                    column_definitions: item.column_definitions,
+                })
+                .collect(),
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
@@ -2246,6 +3028,7 @@ fn fix_set_returning_call_upper_exprs(
             function_name,
             func_variadic,
             args,
+            inlined_expr,
             output_columns,
             with_ordinality,
         } => SetReturningCall::UserDefined {
@@ -2256,6 +3039,8 @@ fn fix_set_returning_call_upper_exprs(
                 .into_iter()
                 .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
                 .collect(),
+            inlined_expr: inlined_expr
+                .map(|expr| Box::new(fix_upper_expr_for_input(root, *expr, path, input_tlist))),
             output_columns,
             with_ordinality,
         },
@@ -2347,6 +3132,7 @@ fn lower_sublink(
         .target_list
         .first()
         .map(|target| target.sql_type);
+    let target_width = sublink.subselect.target_list.len();
     let config = ctx.root.map(|root| root.config).unwrap_or_default();
     let (planned_stmt, next_param_id) =
         planner_with_param_base_and_config(*sublink.subselect, catalog, ctx.next_param_id, config)
@@ -2400,6 +3186,7 @@ fn lower_sublink(
             .testexpr
             .map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
         first_col_type,
+        target_width,
         plan_id,
         par_param,
         args,
@@ -2412,7 +3199,17 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
     }
     match expr {
         Expr::Var(var) if var.varlevelsup > 0 => exec_param_for_outer_expr(ctx, Expr::Var(var)),
-        Expr::Var(var) if is_executor_special_varno(var.varno) => Expr::Var(var),
+        Expr::Var(var) if is_executor_special_varno(var.varno) => {
+            let expr = Expr::Var(var);
+            if let LowerMode::Input {
+                path: Some(input), ..
+            } = mode
+                && let Some(rewritten) = fix_executor_join_var_for_input(&expr, input)
+            {
+                return rewritten;
+            }
+            expr
+        }
         Expr::Var(var) => {
             if is_system_attr(var.varattno) {
                 Expr::Var(var)
@@ -2500,6 +3297,7 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
                 .testexpr
                 .map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
             first_col_type: subplan.first_col_type,
+            target_width: subplan.target_width,
             plan_id: subplan.plan_id,
             par_param: subplan.par_param,
             args: subplan
@@ -2609,6 +3407,13 @@ fn lower_index_scan_key(
     key: IndexScanKey,
     mode: LowerMode<'_>,
 ) -> IndexScanKey {
+    let runtime_label = match &key.argument {
+        IndexScanKeyArgument::Runtime(expr) => key
+            .runtime_label
+            .clone()
+            .or_else(|| label_for_runtime_expr(ctx, expr)),
+        IndexScanKeyArgument::Const(_) => key.runtime_label.clone(),
+    };
     let argument = match key.argument {
         IndexScanKeyArgument::Const(value) => IndexScanKeyArgument::Const(value),
         IndexScanKeyArgument::Runtime(expr) => {
@@ -2620,6 +3425,7 @@ fn lower_index_scan_key(
         strategy: key.strategy,
         argument,
         display_expr: key.display_expr,
+        runtime_label,
     }
 }
 
@@ -2827,6 +3633,487 @@ fn exec_param_sources(params: &[ExecParamSource]) -> BTreeSet<usize> {
     params.iter().map(|param| param.paramid).collect()
 }
 
+fn collect_index_scan_key_exec_paramids(keys: &[IndexScanKey], out: &mut BTreeSet<usize>) {
+    for key in keys {
+        if let IndexScanKeyArgument::Runtime(expr) = &key.argument {
+            collect_expr_exec_paramids(expr, out);
+        }
+        if let Some(display_expr) = &key.display_expr {
+            collect_expr_exec_paramids(display_expr, out);
+        }
+    }
+}
+
+fn collect_order_by_exec_paramids(item: &OrderByEntry, out: &mut BTreeSet<usize>) {
+    collect_expr_exec_paramids(&item.expr, out);
+}
+
+fn collect_aggref_exec_paramids(aggref: &Aggref, out: &mut BTreeSet<usize>) {
+    aggref
+        .direct_args
+        .iter()
+        .for_each(|arg| collect_expr_exec_paramids(arg, out));
+    aggref
+        .args
+        .iter()
+        .for_each(|arg| collect_expr_exec_paramids(arg, out));
+    aggref
+        .aggorder
+        .iter()
+        .for_each(|item| collect_order_by_exec_paramids(item, out));
+    if let Some(filter) = &aggref.aggfilter {
+        collect_expr_exec_paramids(filter, out);
+    }
+}
+
+fn collect_agg_accum_exec_paramids(accum: &AggAccum, out: &mut BTreeSet<usize>) {
+    accum
+        .direct_args
+        .iter()
+        .for_each(|arg| collect_expr_exec_paramids(arg, out));
+    accum
+        .args
+        .iter()
+        .for_each(|arg| collect_expr_exec_paramids(arg, out));
+    accum
+        .order_by
+        .iter()
+        .for_each(|item| collect_order_by_exec_paramids(item, out));
+    if let Some(filter) = &accum.filter {
+        collect_expr_exec_paramids(filter, out);
+    }
+}
+
+fn collect_window_func_exec_paramids(window_func: &WindowFuncExpr, out: &mut BTreeSet<usize>) {
+    window_func
+        .args
+        .iter()
+        .for_each(|arg| collect_expr_exec_paramids(arg, out));
+    if let WindowFuncKind::Aggregate(aggref) = &window_func.kind {
+        collect_aggref_exec_paramids(aggref, out);
+    }
+}
+
+fn collect_window_clause_exec_paramids(clause: &WindowClause, out: &mut BTreeSet<usize>) {
+    clause
+        .spec
+        .partition_by
+        .iter()
+        .for_each(|expr| collect_expr_exec_paramids(expr, out));
+    clause
+        .spec
+        .order_by
+        .iter()
+        .for_each(|item| collect_order_by_exec_paramids(item, out));
+    clause
+        .functions
+        .iter()
+        .for_each(|func| collect_window_func_exec_paramids(func, out));
+}
+
+fn collect_set_returning_call_exec_paramids(
+    call: &crate::include::nodes::primnodes::SetReturningCall,
+    out: &mut BTreeSet<usize>,
+) {
+    set_returning_call_exprs(call)
+        .into_iter()
+        .for_each(|expr| collect_expr_exec_paramids(expr, out));
+}
+
+fn collect_set_returning_call_external_exec_paramids(
+    call: &crate::include::nodes::primnodes::SetReturningCall,
+    bound: &BTreeSet<usize>,
+    out: &mut BTreeSet<usize>,
+) {
+    set_returning_call_exprs(call)
+        .into_iter()
+        .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+}
+
+fn collect_expr_exec_paramids(expr: &Expr, out: &mut BTreeSet<usize>) {
+    match expr {
+        Expr::Param(Param {
+            paramkind: ParamKind::Exec,
+            paramid,
+            ..
+        }) => {
+            out.insert(*paramid);
+        }
+        Expr::Aggref(aggref) => collect_aggref_exec_paramids(aggref, out),
+        Expr::WindowFunc(window_func) => collect_window_func_exec_paramids(window_func, out),
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .for_each(|arg| collect_expr_exec_paramids(arg, out)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .for_each(|arg| collect_expr_exec_paramids(arg, out)),
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_expr_exec_paramids(arg, out);
+            }
+            case_expr.args.iter().for_each(|arm| {
+                collect_expr_exec_paramids(&arm.expr, out);
+                collect_expr_exec_paramids(&arm.result, out);
+            });
+            collect_expr_exec_paramids(&case_expr.defresult, out);
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .for_each(|arg| collect_expr_exec_paramids(arg, out)),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .for_each(|expr| collect_expr_exec_paramids(expr, out)),
+        Expr::SetReturning(srf) => collect_set_returning_call_exec_paramids(&srf.call, out),
+        Expr::SubLink(sublink) => {
+            if let Some(testexpr) = &sublink.testexpr {
+                collect_expr_exec_paramids(testexpr, out);
+            }
+        }
+        Expr::SubPlan(subplan) => {
+            // par_param ids are subplan-local slots populated from args at
+            // execution; the containing plan only depends directly on args.
+            if let Some(testexpr) = &subplan.testexpr {
+                collect_expr_exec_paramids(testexpr, out);
+            }
+            subplan
+                .args
+                .iter()
+                .for_each(|arg| collect_expr_exec_paramids(arg, out));
+        }
+        Expr::ScalarArrayOp(saop) => {
+            collect_expr_exec_paramids(&saop.left, out);
+            collect_expr_exec_paramids(&saop.right, out);
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .for_each(|expr| collect_expr_exec_paramids(expr, out)),
+        Expr::Cast(inner, _)
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => collect_expr_exec_paramids(inner, out),
+        Expr::Collate { expr: inner, .. } => collect_expr_exec_paramids(inner, out),
+        Expr::Coalesce(left, right)
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            collect_expr_exec_paramids(left, out);
+            collect_expr_exec_paramids(right, out);
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_expr_exec_paramids(expr, out);
+            collect_expr_exec_paramids(pattern, out);
+            if let Some(escape) = escape {
+                collect_expr_exec_paramids(escape, out);
+            }
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .for_each(|element| collect_expr_exec_paramids(element, out)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .for_each(|(_, expr)| collect_expr_exec_paramids(expr, out)),
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_expr_exec_paramids(array, out);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_expr_exec_paramids(lower, out);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_expr_exec_paramids(upper, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_external_expr_exec_paramids(
+    expr: &Expr,
+    bound: &BTreeSet<usize>,
+    out: &mut BTreeSet<usize>,
+) {
+    let mut params = BTreeSet::new();
+    collect_expr_exec_paramids(expr, &mut params);
+    out.extend(
+        params
+            .into_iter()
+            .filter(|paramid| !bound.contains(paramid)),
+    );
+}
+
+fn collect_index_scan_key_external_exec_paramids(
+    keys: &[IndexScanKey],
+    bound: &BTreeSet<usize>,
+    out: &mut BTreeSet<usize>,
+) {
+    for key in keys {
+        if let IndexScanKeyArgument::Runtime(expr) = &key.argument {
+            collect_external_expr_exec_paramids(expr, bound, out);
+        }
+        if let Some(display_expr) = &key.display_expr {
+            collect_external_expr_exec_paramids(display_expr, bound, out);
+        }
+    }
+}
+
+fn collect_plan_external_exec_paramids(
+    plan: &Plan,
+    bound: &BTreeSet<usize>,
+    out: &mut BTreeSet<usize>,
+) {
+    match plan {
+        Plan::Result { .. } | Plan::SeqScan { .. } | Plan::WorkTableScan { .. } => {}
+        Plan::Append { children, .. }
+        | Plan::BitmapOr { children, .. }
+        | Plan::SetOp { children, .. } => {
+            children
+                .iter()
+                .for_each(|child| collect_plan_external_exec_paramids(child, bound, out));
+        }
+        Plan::MergeAppend {
+            items, children, ..
+        } => {
+            items
+                .iter()
+                .for_each(|item| collect_external_expr_exec_paramids(&item.expr, bound, out));
+            children
+                .iter()
+                .for_each(|child| collect_plan_external_exec_paramids(child, bound, out));
+        }
+        Plan::Unique { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => collect_plan_external_exec_paramids(input, bound, out),
+        Plan::OrderBy { input, items, .. } | Plan::IncrementalSort { input, items, .. } => {
+            collect_plan_external_exec_paramids(input, bound, out);
+            items
+                .iter()
+                .for_each(|item| collect_external_expr_exec_paramids(&item.expr, bound, out));
+        }
+        Plan::SubqueryScan { input, filter, .. } => {
+            collect_plan_external_exec_paramids(input, bound, out);
+            if let Some(filter) = filter {
+                collect_external_expr_exec_paramids(filter, bound, out);
+            }
+        }
+        Plan::Filter {
+            input, predicate, ..
+        } => {
+            collect_plan_external_exec_paramids(input, bound, out);
+            collect_external_expr_exec_paramids(predicate, bound, out);
+        }
+        Plan::Projection { input, targets, .. } => {
+            collect_plan_external_exec_paramids(input, bound, out);
+            targets
+                .iter()
+                .for_each(|target| collect_external_expr_exec_paramids(&target.expr, bound, out));
+        }
+        Plan::ProjectSet { input, targets, .. } => {
+            collect_plan_external_exec_paramids(input, bound, out);
+            targets.iter().for_each(|target| {
+                use crate::include::nodes::primnodes::ProjectSetTarget;
+                match target {
+                    ProjectSetTarget::Scalar(entry) => {
+                        collect_external_expr_exec_paramids(&entry.expr, bound, out)
+                    }
+                    ProjectSetTarget::Set { call, .. } => {
+                        collect_set_returning_call_external_exec_paramids(call, bound, out)
+                    }
+                }
+            });
+        }
+        Plan::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        }
+        | Plan::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        } => {
+            collect_index_scan_key_external_exec_paramids(keys, bound, out);
+            collect_index_scan_key_external_exec_paramids(order_by_keys, bound, out);
+        }
+        Plan::BitmapIndexScan {
+            keys, index_quals, ..
+        } => {
+            collect_index_scan_key_external_exec_paramids(keys, bound, out);
+            index_quals
+                .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+        }
+        Plan::BitmapHeapScan {
+            bitmapqual,
+            recheck_qual,
+            filter_qual,
+            ..
+        } => {
+            collect_plan_external_exec_paramids(bitmapqual, bound, out);
+            recheck_qual
+                .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+            filter_qual
+                .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+        }
+        Plan::Hash {
+            input, hash_keys, ..
+        } => {
+            collect_plan_external_exec_paramids(input, bound, out);
+            hash_keys
+                .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+        }
+        Plan::Memoize {
+            input, cache_keys, ..
+        } => {
+            collect_plan_external_exec_paramids(input, bound, out);
+            cache_keys
+                .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+        }
+        Plan::NestedLoopJoin {
+            left,
+            right,
+            nest_params,
+            join_qual,
+            qual,
+            ..
+        } => {
+            collect_plan_external_exec_paramids(left, bound, out);
+            nest_params
+                .iter()
+                .for_each(|param| collect_external_expr_exec_paramids(&param.expr, bound, out));
+            join_qual
+                .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+            qual.iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+            let mut right_bound = bound.clone();
+            right_bound.extend(nest_params.iter().map(|param| param.paramid));
+            collect_plan_external_exec_paramids(right, &right_bound, out);
+        }
+        Plan::HashJoin {
+            left,
+            right,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            collect_plan_external_exec_paramids(left, bound, out);
+            collect_plan_external_exec_paramids(right, bound, out);
+            hash_clauses
+                .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+            hash_keys
+                .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+            join_qual
+                .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+            qual.iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+        }
+        Plan::MergeJoin {
+            left,
+            right,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            collect_plan_external_exec_paramids(left, bound, out);
+            collect_plan_external_exec_paramids(right, bound, out);
+            merge_clauses
+                .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+            outer_merge_keys
+                .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+            inner_merge_keys
+                .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+            join_qual
+                .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+            qual.iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+        }
+        Plan::Aggregate {
+            input,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            having,
+            ..
+        } => {
+            collect_plan_external_exec_paramids(input, bound, out);
+            group_by
+                .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+            passthrough_exprs
+                .iter()
+                .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out));
+            accumulators
+                .iter()
+                .for_each(|accum| collect_agg_accum_exec_paramids(accum, out));
+            if let Some(having) = having {
+                collect_external_expr_exec_paramids(having, bound, out);
+            }
+        }
+        Plan::WindowAgg { input, clause, .. } => {
+            collect_plan_external_exec_paramids(input, bound, out);
+            collect_window_clause_exec_paramids(clause, out);
+        }
+        Plan::FunctionScan { call, .. } => {
+            collect_set_returning_call_external_exec_paramids(call, bound, out)
+        }
+        Plan::Values { rows, .. } => rows
+            .iter()
+            .flatten()
+            .for_each(|expr| collect_external_expr_exec_paramids(expr, bound, out)),
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            collect_plan_external_exec_paramids(anchor, bound, out);
+            collect_plan_external_exec_paramids(recursive, bound, out);
+        }
+    }
+}
+
+fn collect_plan_exec_paramids(plan: &Plan, out: &mut BTreeSet<usize>) {
+    collect_plan_external_exec_paramids(plan, &BTreeSet::new(), out);
+}
+
+fn plan_contains_exec_param_id(plan: &Plan, target_paramid: usize) -> bool {
+    let mut params = BTreeSet::new();
+    collect_plan_exec_paramids(plan, &mut params);
+    params.contains(&target_paramid)
+}
+
 fn validate_executable_index_scan_keys(
     keys: &[IndexScanKey],
     plan_node: &str,
@@ -2988,6 +4275,20 @@ fn validate_set_returning_call(
     use crate::include::nodes::primnodes::SetReturningCall;
 
     match call {
+        SetReturningCall::RowsFrom { items, .. } => {
+            for item in items {
+                match &item.source {
+                    RowsFromSource::Function(call) => {
+                        validate_set_returning_call(call, plan_node, field, allowed_exec_params);
+                    }
+                    RowsFromSource::Project { output_exprs, .. } => {
+                        for expr in output_exprs {
+                            validate_executable_expr(expr, plan_node, field, allowed_exec_params);
+                        }
+                    }
+                }
+            }
+        }
         SetReturningCall::GenerateSeries {
             start,
             stop,
@@ -3138,6 +4439,20 @@ fn validate_executable_plan_with_params(plan: &Plan, allowed_exec_params: &BTree
             hash_keys.iter().for_each(|expr| {
                 validate_executable_expr(expr, "Hash", "hash_keys", allowed_exec_params)
             });
+            validate_executable_plan_with_params(input, allowed_exec_params);
+        }
+        Plan::Materialize { input, .. } => {
+            validate_executable_plan_with_params(input, allowed_exec_params);
+        }
+        Plan::Memoize {
+            input, cache_keys, ..
+        } => {
+            cache_keys.iter().for_each(|expr| {
+                validate_executable_expr(expr, "Memoize", "cache_keys", allowed_exec_params)
+            });
+            validate_executable_plan_with_params(input, allowed_exec_params);
+        }
+        Plan::Gather { input, .. } => {
             validate_executable_plan_with_params(input, allowed_exec_params);
         }
         Plan::NestedLoopJoin {
@@ -3366,6 +4681,10 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
             paramkind: ParamKind::Exec,
             ..
         }) => panic!("planner path contains PARAM_EXEC in {path_node}.{field}: {expr:?}"),
+        Expr::Param(Param {
+            paramkind: ParamKind::External,
+            ..
+        }) => {}
         Expr::WindowFunc(window_func) => {
             for arg in &window_func.args {
                 validate_planner_expr(arg, path_node, field);
@@ -3515,6 +4834,20 @@ fn validate_planner_set_returning_call(
     use crate::include::nodes::primnodes::SetReturningCall;
 
     match call {
+        SetReturningCall::RowsFrom { items, .. } => {
+            for item in items {
+                match &item.source {
+                    RowsFromSource::Function(call) => {
+                        validate_planner_set_returning_call(call, path_node, field);
+                    }
+                    RowsFromSource::Project { output_exprs, .. } => {
+                        for expr in output_exprs {
+                            validate_planner_expr(expr, path_node, field);
+                        }
+                    }
+                }
+            }
+        }
         SetReturningCall::GenerateSeries {
             start,
             stop,
@@ -3875,6 +5208,7 @@ fn set_append_references(
     source_id: usize,
     desc: crate::include::nodes::primnodes::RelationDesc,
     child_roots: Vec<Option<PlannerSubroot>>,
+    partition_prune: Option<PartitionPrunePlan>,
     children: Vec<Path>,
 ) -> Plan {
     assert!(
@@ -3886,27 +5220,137 @@ fn set_append_references(
     let single_child_root_alias = (children.len() == 1)
         .then(|| append_source_alias(ctx, source_id))
         .flatten();
+    let children = children
+        .into_iter()
+        .enumerate()
+        .map(|(index, child)| {
+            let child_root = child_roots
+                .get(index)
+                .and_then(Option::as_ref)
+                .map(PlannerSubroot::as_ref)
+                .or(ctx.root);
+            let mut child_plan = recurse_with_root(ctx, child_root, child);
+            if let Some(alias) = single_child_root_alias.as_deref() {
+                apply_single_append_scan_alias(&mut child_plan, alias);
+            }
+            child_plan
+        })
+        .collect();
+    let (partition_prune, mut children) =
+        flatten_partition_append_children(partition_prune, children);
+    if partition_prune.is_some()
+        && let Some(alias) = append_source_alias(ctx, source_id)
+    {
+        for (index, child) in children.iter_mut().enumerate() {
+            apply_single_append_scan_alias(child, &format!("{alias}_{}", index + 1));
+        }
+    }
     Plan::Append {
         plan_info,
         source_id,
         desc,
-        children: children
-            .into_iter()
-            .enumerate()
-            .map(|(index, child)| {
-                let child_root = child_roots
-                    .get(index)
-                    .and_then(Option::as_ref)
-                    .map(PlannerSubroot::as_ref)
-                    .or(ctx.root);
-                let mut child_plan = recurse_with_root(ctx, child_root, child);
-                if let Some(alias) = single_child_root_alias.as_deref() {
-                    apply_single_append_scan_alias(&mut child_plan, alias);
-                }
-                child_plan
-            })
-            .collect(),
+        partition_prune,
+        children,
     }
+}
+
+fn partition_prune_child_domains(
+    info: &PartitionPrunePlan,
+    child_index: usize,
+) -> Vec<PartitionPruneChildDomain> {
+    info.child_domains
+        .get(child_index)
+        .filter(|domains| !domains.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            vec![PartitionPruneChildDomain {
+                spec: info.spec.clone(),
+                sibling_bounds: info.sibling_bounds.clone(),
+                bound: info.child_bounds.get(child_index).cloned().flatten(),
+            }]
+        })
+}
+
+fn flatten_partition_append_children(
+    mut partition_prune: Option<PartitionPrunePlan>,
+    children: Vec<Plan>,
+) -> (Option<PartitionPrunePlan>, Vec<Plan>) {
+    let Some(info) = partition_prune.as_mut() else {
+        return (partition_prune, children);
+    };
+    if children.is_empty() {
+        return (partition_prune, children);
+    }
+
+    let mut flattened_children = Vec::new();
+    let mut flattened_bounds = Vec::new();
+    let mut flattened_domains = Vec::new();
+    let mut changed = false;
+
+    for (index, child) in children.into_iter().enumerate() {
+        let parent_domains = partition_prune_child_domains(info, index);
+        let parent_bound = info.child_bounds.get(index).cloned().flatten();
+        match child {
+            Plan::Append {
+                partition_prune: Some(child_prune),
+                children: nested_children,
+                ..
+            } if !nested_children.is_empty() => {
+                changed = true;
+                for (nested_index, nested_child) in nested_children.into_iter().enumerate() {
+                    let mut domains = parent_domains.clone();
+                    domains.extend(partition_prune_child_domains(&child_prune, nested_index));
+                    flattened_domains.push(domains);
+                    flattened_bounds.push(parent_bound.clone());
+                    flattened_children.push(nested_child);
+                }
+            }
+            Plan::Projection {
+                plan_info,
+                input,
+                targets,
+            } => match *input {
+                Plan::Append {
+                    partition_prune: Some(child_prune),
+                    children: nested_children,
+                    ..
+                } if !nested_children.is_empty() => {
+                    changed = true;
+                    for (nested_index, nested_child) in nested_children.into_iter().enumerate() {
+                        let mut domains = parent_domains.clone();
+                        domains.extend(partition_prune_child_domains(&child_prune, nested_index));
+                        flattened_domains.push(domains);
+                        flattened_bounds.push(parent_bound.clone());
+                        flattened_children.push(Plan::Projection {
+                            plan_info,
+                            input: Box::new(nested_child),
+                            targets: targets.clone(),
+                        });
+                    }
+                }
+                input => {
+                    flattened_domains.push(parent_domains);
+                    flattened_bounds.push(parent_bound);
+                    flattened_children.push(Plan::Projection {
+                        plan_info,
+                        input: Box::new(input),
+                        targets,
+                    });
+                }
+            },
+            other => {
+                flattened_domains.push(parent_domains);
+                flattened_bounds.push(parent_bound);
+                flattened_children.push(other);
+            }
+        }
+    }
+
+    if changed {
+        info.child_bounds = flattened_bounds;
+        info.child_domains = flattened_domains;
+    }
+    (partition_prune, flattened_children)
 }
 
 fn append_source_alias(ctx: &SetRefsContext<'_>, source_id: usize) -> Option<String> {
@@ -3961,6 +5405,7 @@ fn set_merge_append_references(
     source_id: usize,
     desc: crate::include::nodes::primnodes::RelationDesc,
     items: Vec<OrderByEntry>,
+    partition_prune: Option<PartitionPrunePlan>,
     children: Vec<Path>,
 ) -> Plan {
     let lowered_items = if let Some(first_child) = children.first() {
@@ -3981,16 +5426,109 @@ fn set_merge_append_references(
     } else {
         Vec::new()
     };
+    let children = children
+        .into_iter()
+        .map(|child| set_plan_refs(ctx, child))
+        .collect();
+    let (partition_prune, mut children) =
+        flatten_partition_merge_append_children(partition_prune, children);
+    if partition_prune.is_some()
+        && let Some(alias) = append_source_alias(ctx, source_id)
+    {
+        for (index, child) in children.iter_mut().enumerate() {
+            apply_single_append_scan_alias(child, &format!("{alias}_{}", index + 1));
+        }
+    }
     Plan::MergeAppend {
         plan_info,
         source_id,
         desc,
         items: lowered_items,
-        children: children
-            .into_iter()
-            .map(|child| set_plan_refs(ctx, child))
-            .collect(),
+        partition_prune,
+        children,
     }
+}
+
+fn flatten_partition_merge_append_children(
+    mut partition_prune: Option<PartitionPrunePlan>,
+    children: Vec<Plan>,
+) -> (Option<PartitionPrunePlan>, Vec<Plan>) {
+    let Some(info) = partition_prune.as_mut() else {
+        return (partition_prune, children);
+    };
+    if children.is_empty() {
+        return (partition_prune, children);
+    }
+
+    let mut flattened_children = Vec::new();
+    let mut flattened_bounds = Vec::new();
+    let mut flattened_domains = Vec::new();
+    let mut changed = false;
+
+    for (index, child) in children.into_iter().enumerate() {
+        let parent_domains = partition_prune_child_domains(info, index);
+        let parent_bound = info.child_bounds.get(index).cloned().flatten();
+        match child {
+            Plan::MergeAppend {
+                partition_prune: Some(child_prune),
+                children: nested_children,
+                ..
+            } if !nested_children.is_empty() => {
+                changed = true;
+                for (nested_index, nested_child) in nested_children.into_iter().enumerate() {
+                    let mut domains = parent_domains.clone();
+                    domains.extend(partition_prune_child_domains(&child_prune, nested_index));
+                    flattened_domains.push(domains);
+                    flattened_bounds.push(parent_bound.clone());
+                    flattened_children.push(nested_child);
+                }
+            }
+            Plan::Projection {
+                plan_info,
+                input,
+                targets,
+            } => match *input {
+                Plan::MergeAppend {
+                    partition_prune: Some(child_prune),
+                    children: nested_children,
+                    ..
+                } if !nested_children.is_empty() => {
+                    changed = true;
+                    for (nested_index, nested_child) in nested_children.into_iter().enumerate() {
+                        let mut domains = parent_domains.clone();
+                        domains.extend(partition_prune_child_domains(&child_prune, nested_index));
+                        flattened_domains.push(domains);
+                        flattened_bounds.push(parent_bound.clone());
+                        flattened_children.push(Plan::Projection {
+                            plan_info,
+                            input: Box::new(nested_child),
+                            targets: targets.clone(),
+                        });
+                    }
+                }
+                input => {
+                    flattened_domains.push(parent_domains);
+                    flattened_bounds.push(parent_bound);
+                    flattened_children.push(Plan::Projection {
+                        plan_info,
+                        input: Box::new(input),
+                        targets,
+                    });
+                }
+            },
+            other => {
+                flattened_domains.push(parent_domains);
+                flattened_bounds.push(parent_bound);
+                flattened_children.push(other);
+            }
+        }
+    }
+
+    if changed {
+        info.child_bounds = flattened_bounds;
+        info.child_domains = flattened_domains;
+    }
+    (partition_prune, flattened_children)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4082,6 +5620,7 @@ fn set_set_op_references(
 }
 
 fn set_seq_scan_references(
+    ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
     source_id: usize,
     rel: crate::RelFileLocator,
@@ -4091,8 +5630,20 @@ fn set_seq_scan_references(
     relispopulated: bool,
     disabled: bool,
     toast: Option<crate::include::nodes::primnodes::ToastRelationRef>,
+    tablesample: Option<TableSampleClause>,
     desc: crate::include::nodes::primnodes::RelationDesc,
 ) -> Plan {
+    let tablesample = tablesample.map(|sample| TableSampleClause {
+        method: sample.method,
+        args: sample
+            .args
+            .into_iter()
+            .map(|expr| lower_expr(ctx, expr, LowerMode::Scalar))
+            .collect(),
+        repeatable: sample
+            .repeatable
+            .map(|expr| lower_expr(ctx, expr, LowerMode::Scalar)),
+    });
     Plan::SeqScan {
         plan_info,
         source_id,
@@ -4103,6 +5654,7 @@ fn set_seq_scan_references(
         relispopulated,
         disabled,
         toast,
+        tablesample,
         desc,
     }
 }
@@ -4276,20 +5828,32 @@ fn set_nested_loop_join_references(
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Plan {
     let left_tlist = build_path_tlist(ctx.root, &left);
+    let left_rows = left.plan_info().plan_rows.as_f64();
     let (join_restrict_clauses, other_restrict_clauses) =
         split_join_restrict_clauses(kind, &restrict_clauses);
     let join_qual = lower_join_clause_list(ctx, join_restrict_clauses, &left, &right);
     let qual = lower_join_clause_list(ctx, other_restrict_clauses, &left, &right);
-    let (right_plan, nest_params) = {
+    let inherited_param_ids = ctx
+        .ext_params
+        .iter()
+        .map(|param| param.paramid)
+        .collect::<Vec<_>>();
+    let (mut right_plan, nest_params) = {
+        let inherited_params = ctx.ext_params.clone();
         let mut right_ctx = SetRefsContext {
             root: ctx.root,
             catalog: ctx.catalog,
             subplans: ctx.subplans,
             next_param_id: ctx.next_param_id,
-            ext_params: Vec::new(),
+            ext_params: inherited_params,
         };
         let plan = set_plan_refs(&mut right_ctx, *right);
         ctx.next_param_id = right_ctx.next_param_id;
+        let right_ext_params = right_ctx
+            .ext_params
+            .into_iter()
+            .filter(|param| !inherited_param_ids.contains(&param.paramid))
+            .collect::<Vec<_>>();
         if matches!(
             kind,
             crate::include::nodes::primnodes::JoinType::Right
@@ -4299,13 +5863,13 @@ fn set_nested_loop_join_references(
             // inner side parameterized by the current outer row. Keep those params
             // as ancestor-supplied exec params instead of turning them into
             // immediate nestloop params for this join.
-            ctx.ext_params.extend(right_ctx.ext_params);
+            ctx.ext_params.extend(right_ext_params);
             (plan, Vec::new())
         } else {
             let mut consumed_parent_params = Vec::new();
             let mut propagated_params = Vec::new();
             let mut params = Vec::new();
-            for param in right_ctx.ext_params {
+            for param in right_ext_params {
                 let mut param_consumed_parent_params = Vec::new();
                 let rebased_expr = inline_exec_params(
                     decrement_outer_expr_levels(param.expr),
@@ -4314,10 +5878,9 @@ fn set_nested_loop_join_references(
                 );
                 let fixed_expr =
                     fix_upper_expr_for_input(ctx.root, rebased_expr.clone(), &left, &left_tlist);
-                if expr_contains_local_semantic_var(&rebased_expr)
-                    && !expr_contains_local_semantic_var(&fixed_expr)
-                {
+                if can_bind_as_nest_param(&rebased_expr, &fixed_expr) {
                     consumed_parent_params.extend(param_consumed_parent_params);
+                    let label = label_for_expr(ctx, &rebased_expr).or(param.label.clone());
                     params.push(ExecParamSource {
                         paramid: param.paramid,
                         expr: lower_expr(
@@ -4328,11 +5891,13 @@ fn set_nested_loop_join_references(
                                 tlist: &left_tlist,
                             },
                         ),
+                        label,
                     });
                 } else {
                     propagated_params.push(ExecParamSource {
                         paramid: param.paramid,
                         expr: rebased_expr,
+                        label: param.label,
                     });
                 }
             }
@@ -4342,7 +5907,46 @@ fn set_nested_loop_join_references(
             (plan, params)
         }
     };
+    let left_for_late_params = left.clone();
     let left_plan = set_plan_refs(ctx, *left);
+    let mut nest_params = nest_params;
+    let mut retained_ext_params = Vec::new();
+    for param in std::mem::take(&mut ctx.ext_params) {
+        if inherited_param_ids.contains(&param.paramid) {
+            retained_ext_params.push(param);
+            continue;
+        }
+        if !plan_contains_exec_param_id(&right_plan, param.paramid) {
+            retained_ext_params.push(param);
+            continue;
+        }
+        let fixed_expr = fix_upper_expr_for_input(
+            ctx.root,
+            param.expr.clone(),
+            &left_for_late_params,
+            &left_tlist,
+        );
+        if can_bind_as_nest_param(&param.expr, &fixed_expr) {
+            let label = label_for_expr(ctx, &param.expr).or(param.label.clone());
+            nest_params.push(ExecParamSource {
+                paramid: param.paramid,
+                expr: lower_expr(
+                    ctx,
+                    fixed_expr,
+                    LowerMode::Input {
+                        path: Some(&left_for_late_params),
+                        tlist: &left_tlist,
+                    },
+                ),
+                label,
+            });
+        } else {
+            retained_ext_params.push(param);
+        }
+    }
+    ctx.ext_params = retained_ext_params;
+    right_plan =
+        maybe_wrap_nested_loop_inner_plan(ctx.root, kind, right_plan, &nest_params, left_rows);
     Plan::NestedLoopJoin {
         plan_info,
         left: Box::new(left_plan),
@@ -4354,6 +5958,344 @@ fn set_nested_loop_join_references(
     }
 }
 
+fn maybe_wrap_nested_loop_inner_plan(
+    root: Option<&PlannerInfo>,
+    kind: crate::include::nodes::primnodes::JoinType,
+    mut right_plan: Plan,
+    nest_params: &[ExecParamSource],
+    _outer_rows: f64,
+) -> Plan {
+    let enable_material = root.is_none_or(|root| root.config.enable_material);
+    if enable_material
+        && matches!(
+            kind,
+            crate::include::nodes::primnodes::JoinType::Inner
+                | crate::include::nodes::primnodes::JoinType::Cross
+        )
+        && nest_params.is_empty()
+        && plan_is_plain_seq_scan(&right_plan)
+    {
+        return Plan::Materialize {
+            plan_info: right_plan.plan_info(),
+            input: Box::new(right_plan),
+        };
+    }
+
+    if !root.is_some_and(|root| root.config.enable_memoize) || nest_params.is_empty() {
+        return right_plan;
+    }
+    let mut dependent_paramids = BTreeSet::new();
+    collect_plan_exec_paramids(&right_plan, &mut dependent_paramids);
+    if dependent_paramids.is_empty() {
+        return right_plan;
+    }
+    let key_paramids = nest_params
+        .iter()
+        .filter_map(|param| {
+            dependent_paramids
+                .contains(&param.paramid)
+                .then_some(param.paramid)
+        })
+        .collect::<Vec<_>>();
+    if key_paramids.is_empty() {
+        return right_plan;
+    }
+    let cache_keys = key_paramids
+        .iter()
+        .filter_map(|paramid| {
+            nest_params
+                .iter()
+                .find(|source| source.paramid == *paramid)
+                .map(|source| source.expr.clone())
+        })
+        .collect::<Vec<_>>();
+    let param_labels = nest_params
+        .iter()
+        .filter_map(|source| source.label.clone().map(|label| (source.paramid, label)))
+        .collect::<BTreeMap<_, _>>();
+    annotate_runtime_index_labels(&mut right_plan, &param_labels);
+    let cache_key_labels = key_paramids
+        .iter()
+        .filter_map(|paramid| {
+            nest_params
+                .iter()
+                .find(|source| source.paramid == *paramid)
+                .map(|source| {
+                    runtime_label_for_single_param(&right_plan, *paramid, &param_labels)
+                        .or_else(|| source.label.clone())
+                        .unwrap_or_else(|| format!("${}", source.paramid))
+                })
+        })
+        .collect::<Vec<_>>();
+    let binary_mode = memoize_uses_binary_mode(&right_plan);
+    Plan::Memoize {
+        plan_info: right_plan.plan_info(),
+        input: Box::new(right_plan),
+        cache_keys,
+        cache_key_labels,
+        key_paramids,
+        dependent_paramids: dependent_paramids.into_iter().collect(),
+        binary_mode,
+        single_row: false,
+        est_entries: 0,
+    }
+}
+
+fn annotate_runtime_index_labels(plan: &mut Plan, param_labels: &BTreeMap<usize, String>) {
+    match plan {
+        Plan::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        }
+        | Plan::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        } => {
+            annotate_runtime_index_key_labels(keys, param_labels);
+            annotate_runtime_index_key_labels(order_by_keys, param_labels);
+        }
+        Plan::BitmapIndexScan { keys, .. } => {
+            annotate_runtime_index_key_labels(keys, param_labels);
+        }
+        Plan::BitmapOr { children, .. }
+        | Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => {
+            children
+                .iter_mut()
+                .for_each(|child| annotate_runtime_index_labels(child, param_labels));
+        }
+        Plan::BitmapHeapScan { bitmapqual, .. } => {
+            annotate_runtime_index_labels(bitmapqual, param_labels);
+        }
+        Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        }
+        | Plan::Unique { input, .. } => annotate_runtime_index_labels(input, param_labels),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            annotate_runtime_index_labels(left, param_labels);
+            annotate_runtime_index_labels(right, param_labels);
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            annotate_runtime_index_labels(anchor, param_labels);
+            annotate_runtime_index_labels(recursive, param_labels);
+        }
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::Values { .. }
+        | Plan::WorkTableScan { .. } => {}
+    }
+}
+
+fn runtime_label_for_single_param(
+    plan: &Plan,
+    paramid: usize,
+    param_labels: &BTreeMap<usize, String>,
+) -> Option<String> {
+    match plan {
+        Plan::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        }
+        | Plan::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        } => keys
+            .iter()
+            .chain(order_by_keys.iter())
+            .find_map(|key| runtime_key_label_for_single_param(key, paramid, param_labels)),
+        Plan::BitmapIndexScan { keys, .. } => keys
+            .iter()
+            .find_map(|key| runtime_key_label_for_single_param(key, paramid, param_labels)),
+        Plan::BitmapOr { children, .. }
+        | Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. } => children
+            .iter()
+            .find_map(|child| runtime_label_for_single_param(child, paramid, param_labels)),
+        Plan::BitmapHeapScan { bitmapqual, .. } => {
+            runtime_label_for_single_param(bitmapqual, paramid, param_labels)
+        }
+        Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        }
+        | Plan::Unique { input, .. } => {
+            runtime_label_for_single_param(input, paramid, param_labels)
+        }
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            runtime_label_for_single_param(left, paramid, param_labels)
+                .or_else(|| runtime_label_for_single_param(right, paramid, param_labels))
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => runtime_label_for_single_param(anchor, paramid, param_labels)
+            .or_else(|| runtime_label_for_single_param(recursive, paramid, param_labels)),
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::Values { .. }
+        | Plan::WorkTableScan { .. } => None,
+    }
+}
+
+fn runtime_key_label_for_single_param(
+    key: &IndexScanKey,
+    paramid: usize,
+    param_labels: &BTreeMap<usize, String>,
+) -> Option<String> {
+    let IndexScanKeyArgument::Runtime(expr) = &key.argument else {
+        return None;
+    };
+    let mut paramids = BTreeSet::new();
+    collect_expr_exec_paramids(expr, &mut paramids);
+    (paramids.len() == 1 && paramids.contains(&paramid))
+        .then(|| render_runtime_param_label(expr, param_labels))
+        .flatten()
+}
+
+fn annotate_runtime_index_key_labels(
+    keys: &mut [IndexScanKey],
+    param_labels: &BTreeMap<usize, String>,
+) {
+    for key in keys {
+        if let IndexScanKeyArgument::Runtime(expr) = &key.argument
+            && let Some(label) = render_runtime_param_label(expr, param_labels)
+        {
+            key.runtime_label = Some(label);
+        }
+    }
+}
+
+fn render_runtime_param_label(
+    expr: &Expr,
+    param_labels: &BTreeMap<usize, String>,
+) -> Option<String> {
+    match expr {
+        Expr::Param(param) if matches!(param.paramkind, ParamKind::Exec) => {
+            param_labels.get(&param.paramid).cloned()
+        }
+        Expr::Cast(inner, ty) => render_runtime_param_label(inner, param_labels)
+            .map(|inner| format!("({inner})::{}", param_label_type_name(*ty))),
+        Expr::Collate { expr: inner, .. } => render_runtime_param_label(inner, param_labels),
+        Expr::Op(op) => {
+            let has_param_label = op
+                .args
+                .iter()
+                .any(|arg| render_runtime_param_label(arg, param_labels).is_some());
+            if !has_param_label {
+                return None;
+            }
+            let op_text = match op.op {
+                crate::include::nodes::primnodes::OpExprKind::Add => "+",
+                crate::include::nodes::primnodes::OpExprKind::Sub => "-",
+                crate::include::nodes::primnodes::OpExprKind::Mul => "*",
+                crate::include::nodes::primnodes::OpExprKind::Div => "/",
+                crate::include::nodes::primnodes::OpExprKind::Mod => "%",
+                crate::include::nodes::primnodes::OpExprKind::Eq => "=",
+                crate::include::nodes::primnodes::OpExprKind::NotEq => "<>",
+                crate::include::nodes::primnodes::OpExprKind::Lt => "<",
+                crate::include::nodes::primnodes::OpExprKind::LtEq => "<=",
+                crate::include::nodes::primnodes::OpExprKind::Gt => ">",
+                crate::include::nodes::primnodes::OpExprKind::GtEq => ">=",
+                _ => return None,
+            };
+            match op.args.as_slice() {
+                [left, right] => Some(format!(
+                    "({} {op_text} {})",
+                    render_runtime_param_label_operand(left, param_labels),
+                    render_runtime_param_label_operand(right, param_labels)
+                )),
+                [inner] => Some(format!(
+                    "({op_text}{})",
+                    render_runtime_param_label_operand(inner, param_labels)
+                )),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn render_runtime_param_label_operand(
+    expr: &Expr,
+    param_labels: &BTreeMap<usize, String>,
+) -> String {
+    render_runtime_param_label(expr, param_labels).unwrap_or_else(|| {
+        let rendered = crate::backend::executor::render_explain_expr(expr, &[]);
+        rendered
+            .strip_prefix('(')
+            .and_then(|value| value.strip_suffix(')'))
+            .unwrap_or(&rendered)
+            .to_string()
+    })
+}
+
+fn memoize_uses_binary_mode(plan: &Plan) -> bool {
+    match plan {
+        Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => {
+            keys.iter().any(|key| key.strategy != 3)
+        }
+        Plan::Projection { .. } | Plan::Limit { .. } => true,
+        Plan::Filter { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::LockRows { input, .. } => memoize_uses_binary_mode(input),
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+            children.iter().any(memoize_uses_binary_mode)
+        }
+        _ => false,
+    }
+}
+
+fn plan_is_plain_seq_scan(plan: &Plan) -> bool {
+    match plan {
+        Plan::SeqScan { .. } => true,
+        Plan::Filter { input, .. } | Plan::Projection { input, .. } => {
+            plan_is_plain_seq_scan(input)
+        }
+        _ => false,
+    }
+}
 fn set_hash_join_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
@@ -4466,6 +6408,7 @@ fn set_merge_join_references(
     merge_clauses: Vec<RestrictInfo>,
     outer_merge_keys: Vec<Expr>,
     inner_merge_keys: Vec<Expr>,
+    merge_key_descending: Vec<bool>,
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Plan {
     let left_tlist = build_path_tlist(ctx.root, &left);
@@ -4545,6 +6488,7 @@ fn set_merge_join_references(
         merge_clauses: lowered_merge_clauses,
         outer_merge_keys,
         inner_merge_keys,
+        merge_key_descending,
         join_qual,
         qual,
     }
@@ -4726,26 +6670,41 @@ fn set_aggregate_references(
     plan_info: PlanEstimate,
     slot_id: usize,
     strategy: crate::include::nodes::plannodes::AggregateStrategy,
+    phase: crate::include::nodes::plannodes::AggregatePhase,
     disabled: bool,
     input: Box<Path>,
     group_by: Vec<Expr>,
     passthrough_exprs: Vec<Expr>,
     accumulators: Vec<AggAccum>,
+    semantic_accumulators: Option<Vec<AggAccum>>,
     having: Option<Expr>,
     output_columns: Vec<QueryColumn>,
 ) -> Plan {
     let input_tlist = build_path_tlist(ctx.root, &input);
     let aggregate_layout =
-        aggregate_output_vars(slot_id, &group_by, &passthrough_exprs, &accumulators);
+        aggregate_output_vars(slot_id, phase, &group_by, &passthrough_exprs, &accumulators);
     let aggregate_tlist = build_aggregate_tlist(
         ctx.root,
         slot_id,
+        phase,
         &group_by,
         &passthrough_exprs,
         &accumulators,
+        semantic_accumulators.as_deref(),
     );
     let semantic_group_by = group_by.clone();
     let semantic_passthrough_exprs = passthrough_exprs.clone();
+    let semantic_output_names = (phase
+        == crate::include::nodes::plannodes::AggregatePhase::Finalize
+        || semantic_accumulators.is_some())
+    .then(|| {
+        aggregate_semantic_output_names(
+            ctx.root,
+            &semantic_group_by,
+            &semantic_passthrough_exprs,
+            semantic_accumulators.as_deref().unwrap_or(&accumulators),
+        )
+    });
     let root = ctx.root;
     let group_by = group_by
         .into_iter()
@@ -4808,11 +6767,14 @@ fn set_aggregate_references(
     Plan::Aggregate {
         plan_info,
         strategy,
+        phase,
         disabled,
         input: Box::new(set_plan_refs(ctx, *input)),
         group_by,
         passthrough_exprs,
         accumulators,
+        semantic_accumulators,
+        semantic_output_names,
         having,
         output_columns,
     }
@@ -5006,6 +6968,61 @@ fn set_subquery_scan_references(
     filter: Option<Expr>,
     force_display: bool,
 ) -> Plan {
+    if filter.is_none() && !force_display {
+        let input_columns = input.columns();
+        if input_columns == output_columns {
+            return recurse_with_root(ctx, Some(subroot.as_ref()), *input);
+        }
+        if input_columns.len() == output_columns.len() {
+            let input_target = input.semantic_output_target();
+            let input_tlist = build_path_tlist(Some(subroot.as_ref()), &input);
+            let targets = output_columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| {
+                    let expr = input_target.exprs.get(index).cloned().unwrap_or_else(|| {
+                        Expr::Var(Var {
+                            varno: rtindex,
+                            varattno: user_attrno(index),
+                            varlevelsup: 0,
+                            vartype: column.sql_type,
+                        })
+                    });
+                    let ressortgroupref =
+                        input_target.sortgrouprefs.get(index).copied().unwrap_or(0);
+                    TargetEntry::new(column.name.clone(), expr, column.sql_type, index + 1)
+                        .with_sort_group_ref(ressortgroupref)
+                        .with_input_resno(index + 1)
+                })
+                .map(|target| TargetEntry {
+                    expr: fix_upper_expr_for_input(
+                        Some(subroot.as_ref()),
+                        target.expr,
+                        &input,
+                        &input_tlist,
+                    ),
+                    ..target
+                })
+                .map(|target| TargetEntry {
+                    expr: lower_expr(
+                        ctx,
+                        target.expr,
+                        LowerMode::Input {
+                            path: Some(&input),
+                            tlist: &input_tlist,
+                        },
+                    ),
+                    ..target
+                })
+                .collect();
+            let input = recurse_with_root(ctx, Some(subroot.as_ref()), *input);
+            return Plan::Projection {
+                plan_info,
+                input: Box::new(input),
+                targets,
+            };
+        }
+    }
     let input = recurse_with_root(ctx, Some(subroot.as_ref()), *input);
     if input.columns() == output_columns && filter.is_none() && !force_display {
         input
@@ -5126,17 +7143,35 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             source_id,
             desc,
             child_roots,
+            partition_prune,
             children,
             ..
-        } => set_append_references(ctx, plan_info, source_id, desc, child_roots, children),
+        } => set_append_references(
+            ctx,
+            plan_info,
+            source_id,
+            desc,
+            child_roots,
+            partition_prune,
+            children,
+        ),
         Path::MergeAppend {
             plan_info,
             source_id,
             desc,
             items,
+            partition_prune,
             children,
             ..
-        } => set_merge_append_references(ctx, plan_info, source_id, desc, items, children),
+        } => set_merge_append_references(
+            ctx,
+            plan_info,
+            source_id,
+            desc,
+            items,
+            partition_prune,
+            children,
+        ),
         Path::Unique {
             plan_info,
             key_indices,
@@ -5170,9 +7205,11 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relispopulated,
             disabled,
             toast,
+            tablesample,
             desc,
             ..
         } => set_seq_scan_references(
+            ctx,
             plan_info,
             source_id,
             rel,
@@ -5182,6 +7219,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relispopulated,
             disabled,
             toast,
+            tablesample,
             desc,
         ),
         Path::IndexOnlyScan {
@@ -5360,6 +7398,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             restrict_clauses,
             ..
         } => set_merge_join_references(
@@ -5371,6 +7410,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             restrict_clauses,
         ),
         Path::Projection {
@@ -5420,11 +7460,13 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             slot_id,
             strategy,
+            phase,
             disabled,
             input,
             group_by,
             passthrough_exprs,
             accumulators,
+            semantic_accumulators,
             having,
             output_columns,
             ..
@@ -5433,11 +7475,13 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             slot_id,
             strategy,
+            phase,
             disabled,
             input,
             group_by,
             passthrough_exprs,
             accumulators,
+            semantic_accumulators,
             having,
             output_columns,
         ),
@@ -5656,7 +7700,14 @@ fn exprs_equivalent(root: Option<&PlannerInfo>, left: &Expr, right: &Expr) -> bo
     let Some(root) = root else {
         return false;
     };
-    flatten_join_alias_vars(root, left.clone()) == flatten_join_alias_vars(root, right.clone())
+    let flattened_left = maybe_flatten_join_alias_vars(root, left);
+    let flattened_right = maybe_flatten_join_alias_vars(root, right);
+    match (flattened_left.as_ref(), flattened_right.as_ref()) {
+        (None, None) => false,
+        (Some(left), None) => left == right,
+        (None, Some(right)) => left == right,
+        (Some(left), Some(right)) => left == right,
+    }
 }
 
 fn rebuild_setrefs_expr(
@@ -5784,6 +7835,22 @@ fn rebuild_setrefs_expr(
         } => Expr::ArrayLiteral {
             elements: elements.into_iter().map(recurse).collect(),
             array_type,
+        },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, recurse(expr)))
+                .collect(),
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(recurse(*expr)),
+            field,
+            field_type,
         },
         Expr::Coalesce(left, right) => {
             Expr::Coalesce(Box::new(recurse(*left)), Box::new(recurse(*right)))
@@ -5953,6 +8020,22 @@ fn fully_expand_output_expr(expr: Expr, path: &Path) -> Expr {
                 .collect(),
             array_type,
         },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, fully_expand_output_expr(expr, path)))
+                .collect(),
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(fully_expand_output_expr(*expr, path)),
+            field,
+            field_type,
+        },
         Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
             array: Box::new(fully_expand_output_expr(*array, path)),
             subscripts: subscripts
@@ -5973,10 +8056,9 @@ fn fully_expand_output_expr(expr: Expr, path: &Path) -> Expr {
 }
 
 fn fully_expand_output_expr_with_root(root: Option<&PlannerInfo>, expr: Expr, path: &Path) -> Expr {
-    let expr = match root {
-        Some(root) => flatten_join_alias_vars(root, expr),
-        None => expr,
-    };
+    let expr = root
+        .and_then(|root| maybe_flatten_join_alias_vars(root, &expr))
+        .unwrap_or(expr);
     fully_expand_output_expr(expr, path)
 }
 

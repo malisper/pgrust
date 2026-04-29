@@ -8,13 +8,13 @@ use crate::backend::rewrite::{
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::PolicyCommand;
 use crate::include::executor::execdesc::CommandType;
-use crate::include::nodes::plannodes::PlannedStmt;
+use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     INNER_VAR, OUTER_VAR, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, TargetEntry, Var,
     expr_contains_set_returning,
 };
 use crate::include::nodes::primnodes::{
-    JoinType, RelationPrivilegeMask, RelationPrivilegeRequirement,
+    JoinType, QueryColumn, RelationPrivilegeMask, RelationPrivilegeRequirement,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +73,8 @@ pub struct BoundUpdateTarget {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
     pub relkind: char,
+    pub partition_update_root_oid: Option<u32>,
+    pub allow_partition_routing: bool,
     pub toast: Option<ToastRelationRef>,
     pub toast_index: Option<BoundIndexRelation>,
     pub desc: RelationDesc,
@@ -111,6 +113,7 @@ pub struct BoundDeleteTarget {
     pub desc: RelationDesc,
     pub referenced_by_foreign_keys: Vec<BoundReferencedByForeignKey>,
     pub row_source: BoundModifyRowSource,
+    pub parent_visible_exprs: Vec<Expr>,
     pub predicate: Option<Expr>,
 }
 
@@ -118,6 +121,11 @@ pub struct BoundDeleteTarget {
 pub struct BoundDeleteStatement {
     pub targets: Vec<BoundDeleteTarget>,
     pub returning: Vec<TargetEntry>,
+    pub input_plan: Option<PlannedStmt>,
+    pub target_visible_count: usize,
+    pub visible_column_count: usize,
+    pub target_ctid_index: usize,
+    pub target_tableoid_index: usize,
     pub required_privileges: Vec<RelationPrivilegeRequirement>,
     pub subplans: Vec<Plan>,
 }
@@ -1033,9 +1041,9 @@ fn with_merge_target_ctid(from: AnalyzedFrom, target_desc: &RelationDesc) -> (An
                 varno: 1,
                 varattno: SELF_ITEM_POINTER_ATTR_NO,
                 varlevelsup: 0,
-                vartype: SqlType::new(SqlTypeKind::Text),
+                vartype: SqlType::new(SqlTypeKind::Tid),
             }),
-            SqlType::new(SqlTypeKind::Text),
+            SqlType::new(SqlTypeKind::Tid),
             ctid_resno,
         )
         .with_input_resno(ctid_resno),
@@ -1174,14 +1182,16 @@ fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>
         distinct_on: Vec::new(),
         where_qual,
         group_by: Vec::new(),
+        grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
         having_qual: None,
         sort_clause: Vec::new(),
         constraint_deps: Vec::new(),
         limit_count: None,
-        limit_offset: 0,
+        limit_offset: None,
         locking_clause: None,
+        locking_targets: Vec::new(),
         row_marks: Vec::new(),
         has_target_srfs: false,
         recursive_union: None,
@@ -1606,7 +1616,7 @@ pub fn plan_merge(
         TargetEntry::new(
             merge_hidden_ctid_name(),
             joined_output_exprs[target_visible_count].clone(),
-            SqlType::new(SqlTypeKind::Text),
+            SqlType::new(SqlTypeKind::Tid),
             projection_targets.len() + 1,
         )
         .with_input_resno(target_visible_count + 1),
@@ -1783,6 +1793,8 @@ fn build_update_target(
     parent_assignments: &[BoundAssignment],
     parent_predicate: Option<&Expr>,
     parent_rls_write_checks: &[RlsWriteCheck],
+    partition_update_root_oid: Option<u32>,
+    allow_partition_routing: bool,
     child: &BoundRelation,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundUpdateTarget, ParseError> {
@@ -1834,6 +1846,8 @@ fn build_update_target(
         rel: child.rel,
         relation_oid: child.relation_oid,
         relkind: child.relkind,
+        partition_update_root_oid,
+        allow_partition_routing,
         toast: child.toast,
         toast_index: first_toast_index(catalog, child.toast),
         desc: child.desc.clone(),
@@ -1863,6 +1877,8 @@ fn build_update_target_from_joined_input(
     parent_assignments: &[BoundAssignment],
     parent_predicate: Option<&Expr>,
     parent_rls_write_checks: &[RlsWriteCheck],
+    partition_update_root_oid: Option<u32>,
+    allow_partition_routing: bool,
     child: &BoundRelation,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundUpdateTarget, ParseError> {
@@ -1902,6 +1918,8 @@ fn build_update_target_from_joined_input(
         rel: child.rel,
         relation_oid: child.relation_oid,
         relkind: child.relkind,
+        partition_update_root_oid,
+        allow_partition_routing,
         toast: child.toast,
         toast_index: first_toast_index(catalog, child.toast),
         desc: child.desc.clone(),
@@ -2022,19 +2040,20 @@ fn reject_duplicate_auto_view_targets(
 
 fn rewrite_auto_view_returning_targets(
     targets: Vec<TargetEntry>,
-    output_exprs: &[Expr],
+    local_output_exprs: &[Expr],
+    view_output_exprs: &[Expr],
     base_desc: &RelationDesc,
 ) -> Vec<TargetEntry> {
     let old_view_output_exprs =
-        view_returning_pseudo_output_exprs(output_exprs, base_desc, OUTER_VAR);
+        view_returning_pseudo_output_exprs(view_output_exprs, base_desc, OUTER_VAR);
     let new_view_output_exprs =
-        view_returning_pseudo_output_exprs(output_exprs, base_desc, INNER_VAR);
+        view_returning_pseudo_output_exprs(view_output_exprs, base_desc, INNER_VAR);
     targets
         .into_iter()
         .map(|target| TargetEntry {
             expr: rewrite_local_vars_for_output_exprs(
                 rewrite_local_vars_for_output_exprs(
-                    rewrite_local_vars_for_output_exprs(target.expr, 1, output_exprs),
+                    rewrite_local_vars_for_output_exprs(target.expr, 1, local_output_exprs),
                     OUTER_VAR,
                     &old_view_output_exprs,
                 ),
@@ -2042,6 +2061,498 @@ fn rewrite_auto_view_returning_targets(
                 &new_view_output_exprs,
             ),
             ..target
+        })
+        .collect()
+}
+
+fn update_auto_view_input_output_exprs(
+    stmt: &BoundUpdateStatement,
+    view_output_exprs: &[Expr],
+) -> Vec<Expr> {
+    let input_columns = stmt
+        .input_plan
+        .as_ref()
+        .map(|plan| plan.columns())
+        .unwrap_or_default();
+    let width = stmt
+        .visible_column_count
+        .max(stmt.target_ctid_index.saturating_add(1))
+        .max(stmt.target_tableoid_index.saturating_add(1));
+    (0..width)
+        .map(|index| {
+            if index < stmt.target_visible_count
+                && let Some(expr) = view_output_exprs.get(index)
+            {
+                expr.clone()
+            } else {
+                update_input_identity_expr(index, &input_columns)
+            }
+        })
+        .collect()
+}
+
+fn update_input_identity_expr(index: usize, input_columns: &[QueryColumn]) -> Expr {
+    Expr::Var(Var {
+        varno: 1,
+        varattno: user_attrno(index),
+        varlevelsup: 0,
+        vartype: input_columns
+            .get(index)
+            .map(|column| column.sql_type)
+            .unwrap_or_else(|| SqlType::new(SqlTypeKind::AnyElement)),
+    })
+}
+
+fn rewrite_auto_view_update_input_plan(
+    input_plan: Option<PlannedStmt>,
+    view_relation_oid: u32,
+    view_desc: &RelationDesc,
+    base_relation_name: &str,
+    resolved: &crate::backend::rewrite::ResolvedAutoViewTarget,
+) -> Option<PlannedStmt> {
+    input_plan.map(|mut planned| {
+        planned.plan_tree = rewrite_auto_view_scan_plan(
+            planned.plan_tree,
+            view_relation_oid,
+            view_desc,
+            base_relation_name,
+            resolved,
+        );
+        planned
+    })
+}
+
+fn rewrite_auto_view_scan_plan(
+    plan: Plan,
+    view_relation_oid: u32,
+    view_desc: &RelationDesc,
+    base_relation_name: &str,
+    resolved: &crate::backend::rewrite::ResolvedAutoViewTarget,
+) -> Plan {
+    match plan {
+        Plan::SeqScan {
+            plan_info,
+            source_id,
+            relation_oid,
+            disabled,
+            ..
+        } if relation_oid == view_relation_oid => {
+            let base_scan = Plan::SeqScan {
+                plan_info,
+                source_id,
+                rel: resolved.base_relation.rel,
+                relation_name: base_relation_name.to_string(),
+                relation_oid: resolved.base_relation.relation_oid,
+                relkind: resolved.base_relation.relkind,
+                relispopulated: resolved.base_relation.relispopulated,
+                toast: resolved.base_relation.toast,
+                tablesample: None,
+                desc: resolved.base_relation.desc.clone(),
+                disabled,
+            };
+            if view_output_is_base_identity(
+                &resolved.visible_output_exprs,
+                &resolved.base_relation.desc,
+            ) {
+                base_scan
+            } else {
+                Plan::Projection {
+                    plan_info,
+                    input: Box::new(base_scan),
+                    targets: view_projection_targets(view_desc, &resolved.visible_output_exprs),
+                }
+            }
+        }
+        Plan::Append {
+            plan_info,
+            source_id,
+            desc,
+            partition_prune,
+            children,
+        } => Plan::Append {
+            plan_info,
+            source_id,
+            desc,
+            partition_prune,
+            children: children
+                .into_iter()
+                .map(|child| {
+                    rewrite_auto_view_scan_plan(
+                        child,
+                        view_relation_oid,
+                        view_desc,
+                        base_relation_name,
+                        resolved,
+                    )
+                })
+                .collect(),
+        },
+        Plan::MergeAppend {
+            plan_info,
+            source_id,
+            desc,
+            items,
+            partition_prune,
+            children,
+        } => Plan::MergeAppend {
+            plan_info,
+            source_id,
+            desc,
+            items,
+            partition_prune,
+            children: children
+                .into_iter()
+                .map(|child| {
+                    rewrite_auto_view_scan_plan(
+                        child,
+                        view_relation_oid,
+                        view_desc,
+                        base_relation_name,
+                        resolved,
+                    )
+                })
+                .collect(),
+        },
+        Plan::Unique {
+            plan_info,
+            key_indices,
+            input,
+        } => Plan::Unique {
+            plan_info,
+            key_indices,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+        },
+        Plan::Hash {
+            plan_info,
+            input,
+            hash_keys,
+        } => Plan::Hash {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            hash_keys,
+        },
+        Plan::NestedLoopJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            nest_params,
+            join_qual,
+            qual,
+        } => Plan::NestedLoopJoin {
+            plan_info,
+            left: Box::new(rewrite_auto_view_scan_plan(
+                *left,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            right: Box::new(rewrite_auto_view_scan_plan(
+                *right,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            kind,
+            nest_params,
+            join_qual,
+            qual,
+        },
+        Plan::HashJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+            qual,
+        } => Plan::HashJoin {
+            plan_info,
+            left: Box::new(rewrite_auto_view_scan_plan(
+                *left,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            right: Box::new(rewrite_auto_view_scan_plan(
+                *right,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            kind,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+            qual,
+        },
+        Plan::MergeJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            merge_key_descending,
+            join_qual,
+            qual,
+        } => Plan::MergeJoin {
+            plan_info,
+            left: Box::new(rewrite_auto_view_scan_plan(
+                *left,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            right: Box::new(rewrite_auto_view_scan_plan(
+                *right,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            kind,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            merge_key_descending,
+            join_qual,
+            qual,
+        },
+        Plan::Filter {
+            plan_info,
+            input,
+            predicate,
+        } => Plan::Filter {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            predicate,
+        },
+        Plan::OrderBy {
+            plan_info,
+            input,
+            items,
+            display_items,
+        } => Plan::OrderBy {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            items,
+            display_items,
+        },
+        Plan::IncrementalSort {
+            plan_info,
+            input,
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+        } => Plan::IncrementalSort {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            items,
+            presorted_count,
+            display_items,
+            presorted_display_items,
+        },
+        Plan::Limit {
+            plan_info,
+            input,
+            limit,
+            offset,
+        } => Plan::Limit {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            limit,
+            offset,
+        },
+        Plan::LockRows {
+            plan_info,
+            input,
+            row_marks,
+        } => Plan::LockRows {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            row_marks,
+        },
+        Plan::Projection {
+            plan_info,
+            input,
+            targets,
+        } => Plan::Projection {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            targets,
+        },
+        Plan::Aggregate {
+            plan_info,
+            strategy,
+            phase,
+            disabled,
+            input,
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            semantic_accumulators,
+            semantic_output_names,
+            having,
+            output_columns,
+        } => Plan::Aggregate {
+            plan_info,
+            strategy,
+            phase,
+            disabled,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            group_by,
+            passthrough_exprs,
+            accumulators,
+            semantic_accumulators,
+            semantic_output_names,
+            having,
+            output_columns,
+        },
+        Plan::WindowAgg {
+            plan_info,
+            input,
+            clause,
+            output_columns,
+        } => Plan::WindowAgg {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            clause,
+            output_columns,
+        },
+        Plan::SubqueryScan {
+            plan_info,
+            input,
+            scan_name,
+            filter,
+            output_columns,
+        } => Plan::SubqueryScan {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            scan_name,
+            filter,
+            output_columns,
+        },
+        Plan::ProjectSet {
+            plan_info,
+            input,
+            targets,
+        } => Plan::ProjectSet {
+            plan_info,
+            input: Box::new(rewrite_auto_view_scan_plan(
+                *input,
+                view_relation_oid,
+                view_desc,
+                base_relation_name,
+                resolved,
+            )),
+            targets,
+        },
+        other => other,
+    }
+}
+
+fn view_output_is_base_identity(output_exprs: &[Expr], base_desc: &RelationDesc) -> bool {
+    output_exprs.len() == base_desc.columns.len()
+        && output_exprs.iter().enumerate().all(|(index, expr)| {
+            matches!(
+                expr,
+                Expr::Var(var)
+                    if var.varno == 1
+                        && var.varlevelsup == 0
+                        && var.varattno == user_attrno(index)
+            )
+        })
+}
+
+fn view_projection_targets(view_desc: &RelationDesc, output_exprs: &[Expr]) -> Vec<TargetEntry> {
+    view_desc
+        .columns
+        .iter()
+        .zip(output_exprs.iter())
+        .enumerate()
+        .map(|(index, (column, expr))| {
+            TargetEntry::new(
+                column.name.clone(),
+                expr.clone(),
+                column.sql_type,
+                index + 1,
+            )
+            .with_input_resno(index + 1)
         })
         .collect()
 }
@@ -2354,6 +2865,7 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         returning: rewrite_auto_view_returning_targets(
             stmt.returning,
             &resolved.visible_output_exprs,
+            &resolved.visible_output_exprs,
             &resolved.base_relation.desc,
         ),
         rls_write_checks: stmt
@@ -2407,6 +2919,8 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         resolved.base_relation.relation_oid,
         &target.relation_name,
     );
+    let input_output_exprs =
+        update_auto_view_input_output_exprs(&stmt, &resolved.visible_output_exprs);
     let assignments = target
         .assignments
         .iter()
@@ -2420,18 +2934,18 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
                 )?,
                 subscripts: rewrite_assignment_subscripts(
                     &assignment.subscripts,
-                    &resolved.visible_output_exprs,
+                    &input_output_exprs,
                 ),
                 field_path: assignment.field_path.clone(),
                 indirection: rewrite_assignment_indirection(
                     &assignment.indirection,
-                    &resolved.visible_output_exprs,
+                    &input_output_exprs,
                 ),
                 target_sql_type: assignment.target_sql_type,
                 expr: rewrite_local_vars_for_output_exprs(
                     assignment.expr.clone(),
                     1,
-                    &resolved.visible_output_exprs,
+                    &input_output_exprs,
                 ),
             })
         })
@@ -2454,24 +2968,44 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         ));
     }
     let predicate = and_predicates(
-        target.predicate.as_ref().map(|expr| {
-            rewrite_local_vars_for_output_exprs(expr.clone(), 1, &resolved.visible_output_exprs)
-        }),
         resolved.combined_predicate.clone(),
+        target
+            .predicate
+            .as_ref()
+            .map(|expr| rewrite_local_vars_for_output_exprs(expr.clone(), 1, &input_output_exprs)),
     );
 
     let targets = auto_view_base_children(&resolved, catalog)?
         .into_iter()
         .map(|child| {
-            build_update_target(
-                &relation_name,
-                &resolved.base_relation.desc,
-                &assignments,
-                predicate.as_ref(),
-                &target.rls_write_checks,
-                &child,
-                catalog,
-            )
+            let allow_partition_routing = resolved.base_relation.relkind == 'p';
+            let partition_update_root_oid =
+                allow_partition_routing.then_some(resolved.base_relation.relation_oid);
+            if stmt.input_plan.is_some() {
+                build_update_target_from_joined_input(
+                    &relation_name,
+                    &resolved.base_relation.desc,
+                    &assignments,
+                    predicate.as_ref(),
+                    &target.rls_write_checks,
+                    partition_update_root_oid,
+                    allow_partition_routing,
+                    &child,
+                    catalog,
+                )
+            } else {
+                build_update_target(
+                    &relation_name,
+                    &resolved.base_relation.desc,
+                    &assignments,
+                    predicate.as_ref(),
+                    &target.rls_write_checks,
+                    partition_update_root_oid,
+                    allow_partition_routing,
+                    &child,
+                    catalog,
+                )
+            }
             .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))
         })
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
@@ -2480,11 +3014,16 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         targets
             .into_iter()
             .map(|mut target| {
+                let parent_visible_exprs = target.parent_visible_exprs.clone();
                 target
                     .rls_write_checks
                     .extend(resolved.view_check_options.iter().cloned().map(|check| {
                         RlsWriteCheck {
-                            expr: check.expr,
+                            expr: rewrite_local_vars_for_output_exprs(
+                                check.expr,
+                                1,
+                                &parent_visible_exprs,
+                            ),
                             policy_name: None,
                             source: crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(
                                 check.view_name,
@@ -2499,8 +3038,16 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         targets,
         returning: rewrite_auto_view_returning_targets(
             stmt.returning,
+            &input_output_exprs,
             &resolved.visible_output_exprs,
             &resolved.base_relation.desc,
+        ),
+        input_plan: rewrite_auto_view_update_input_plan(
+            stmt.input_plan,
+            target.relation_oid,
+            &target.desc,
+            &relation_name,
+            &resolved,
         ),
         required_privileges,
         ..stmt
@@ -2549,10 +3096,10 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
         ));
     }
     let predicate = and_predicates(
+        resolved.combined_predicate.clone(),
         target.predicate.as_ref().map(|expr| {
             rewrite_local_vars_for_output_exprs(expr.clone(), 1, &resolved.visible_output_exprs)
         }),
-        resolved.combined_predicate.clone(),
     );
 
     let targets = auto_view_base_children(&resolved, catalog)?
@@ -2574,8 +3121,14 @@ pub(crate) fn rewrite_bound_delete_auto_view_target(
         returning: rewrite_auto_view_returning_targets(
             stmt.returning,
             &resolved.visible_output_exprs,
+            &resolved.visible_output_exprs,
             &resolved.base_relation.desc,
         ),
+        input_plan: None,
+        target_visible_count: resolved.base_relation.desc.columns.len(),
+        visible_column_count: resolved.base_relation.desc.columns.len(),
+        target_ctid_index: resolved.base_relation.desc.columns.len(),
+        target_tableoid_index: resolved.base_relation.desc.columns.len() + 1,
         required_privileges,
         subplans: stmt.subplans,
     })
@@ -2640,6 +3193,7 @@ fn build_delete_target(
             catalog,
         )?,
         row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
+        parent_visible_exprs: translation_exprs,
         predicate,
     })
 }
@@ -2736,6 +3290,47 @@ fn bind_insert_assignment_expr(
     }
 
     bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, None, local_ctes)
+}
+
+fn bind_insert_values_whole_row_star_rows(
+    rows: &[Vec<SqlExpr>],
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+) -> Result<Option<Vec<Vec<Expr>>>, ParseError> {
+    let mut relation_names = Vec::with_capacity(rows.len());
+    for row in rows {
+        let [expr] = row.as_slice() else {
+            return Ok(None);
+        };
+        let Some(name) = whole_row_star_relation_name(expr) else {
+            return Ok(None);
+        };
+        relation_names.push(name);
+    }
+
+    relation_names
+        .into_iter()
+        .map(|name| {
+            resolve_relation_row_expr_with_outer(scope, outer_scopes, name)
+                .map(|fields| fields.into_iter().map(|(_, expr)| expr).collect())
+                .ok_or_else(|| ParseError::UnknownColumn(format!("{name}.*")))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn whole_row_star_relation_name(expr: &SqlExpr) -> Option<&str> {
+    match expr {
+        SqlExpr::Column(name) => name.strip_suffix(".*"),
+        SqlExpr::FieldSelect { expr, field } if field == "*" => {
+            if let SqlExpr::Column(name) = expr.as_ref() {
+                Some(name.as_str())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn ensure_generated_assignment_allowed(
@@ -3048,71 +3643,98 @@ pub(crate) fn bind_insert_with_outer_scopes_and_ctes(
 
     let source = match &stmt.source {
         InsertSource::Values(rows) => {
-            let target_columns = if let Some(columns) = &stmt.columns {
-                columns
-                    .iter()
-                    .map(|column| {
-                        bind_assignment_target(column, &target_scope, catalog, &visible_ctes)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
+            if stmt.columns.is_none()
+                && let Some(bound_rows) =
+                    bind_insert_values_whole_row_star_rows(rows, &expr_scope, outer_scopes)?
+            {
+                let target_columns = visible_assignment_targets(&entry.desc);
+                for row in &bound_rows {
+                    if target_columns.len() != row.len() {
+                        return Err(ParseError::InvalidInsertTargetCount {
+                            expected: target_columns.len(),
+                            actual: row.len(),
+                        });
+                    }
+                }
+                let source = if bound_rows.iter().flatten().any(expr_contains_set_returning) {
+                    BoundInsertSource::ProjectSetValues(bound_rows)
+                } else {
+                    BoundInsertSource::Values(bound_rows)
+                };
+                (target_columns, source)
             } else {
-                let visible_targets = visible_assignment_targets(&entry.desc);
-                let width = rows.first().map(Vec::len).unwrap_or(0);
-                if width > visible_targets.len() {
-                    return Err(ParseError::InvalidInsertTargetCount {
-                        expected: visible_targets.len(),
-                        actual: width,
-                    });
-                }
-                visible_targets.into_iter().take(width).collect()
-            };
-            for row in rows {
-                if target_columns.len() != row.len() {
-                    return Err(ParseError::InvalidInsertTargetCount {
-                        expected: target_columns.len(),
-                        actual: row.len(),
-                    });
-                }
-            }
-            let bound_rows = rows
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .zip(target_columns.iter())
-                        .map(|(expr, target)| {
-                            ensure_generated_assignment_allowed(&entry.desc, target, Some(expr))?;
-                            if matches!(expr, SqlExpr::Default) {
-                                reject_default_indirection_assignment(target)?;
-                                return Ok(column_defaults[target.column_index].clone());
-                            }
-                            match normalize_identity_insert_expr(
-                                &entry.desc,
-                                target,
-                                expr,
-                                stmt.overriding,
-                            )? {
-                                NormalizedInsertExpr::Default => {
-                                    Ok(column_defaults[target.column_index].clone())
-                                }
-                                NormalizedInsertExpr::Expr(expr) => bind_insert_assignment_expr(
-                                    expr,
-                                    target,
-                                    &expr_scope,
-                                    catalog,
-                                    outer_scopes,
-                                    &visible_ctes,
-                                ),
-                            }
+                let target_columns = if let Some(columns) = &stmt.columns {
+                    columns
+                        .iter()
+                        .map(|column| {
+                            bind_assignment_target(column, &target_scope, catalog, &visible_ctes)
                         })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let source = if bound_rows.iter().flatten().any(expr_contains_set_returning) {
-                BoundInsertSource::ProjectSetValues(bound_rows)
-            } else {
-                BoundInsertSource::Values(bound_rows)
-            };
-            (target_columns, source)
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    let visible_targets = visible_assignment_targets(&entry.desc);
+                    let width = rows.first().map(Vec::len).unwrap_or(0);
+                    if width > visible_targets.len() {
+                        return Err(ParseError::InvalidInsertTargetCount {
+                            expected: visible_targets.len(),
+                            actual: width,
+                        });
+                    }
+                    visible_targets.into_iter().take(width).collect()
+                };
+                for row in rows {
+                    if target_columns.len() != row.len() {
+                        return Err(ParseError::InvalidInsertTargetCount {
+                            expected: target_columns.len(),
+                            actual: row.len(),
+                        });
+                    }
+                }
+                let bound_rows = rows
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .zip(target_columns.iter())
+                            .map(|(expr, target)| {
+                                ensure_generated_assignment_allowed(
+                                    &entry.desc,
+                                    target,
+                                    Some(expr),
+                                )?;
+                                if matches!(expr, SqlExpr::Default) {
+                                    reject_default_indirection_assignment(target)?;
+                                    return Ok(column_defaults[target.column_index].clone());
+                                }
+                                match normalize_identity_insert_expr(
+                                    &entry.desc,
+                                    target,
+                                    expr,
+                                    stmt.overriding,
+                                )? {
+                                    NormalizedInsertExpr::Default => {
+                                        Ok(column_defaults[target.column_index].clone())
+                                    }
+                                    NormalizedInsertExpr::Expr(expr) => {
+                                        bind_insert_assignment_expr(
+                                            expr,
+                                            target,
+                                            &expr_scope,
+                                            catalog,
+                                            outer_scopes,
+                                            &visible_ctes,
+                                        )
+                                    }
+                                }
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let source = if bound_rows.iter().flatten().any(expr_contains_set_returning) {
+                    BoundInsertSource::ProjectSetValues(bound_rows)
+                } else {
+                    BoundInsertSource::Values(bound_rows)
+                };
+                (target_columns, source)
+            }
         }
         InsertSource::DefaultValues => (
             visible_assignment_targets(&entry.desc),
@@ -3312,7 +3934,7 @@ fn bind_simple_update(
         catalog,
     )?;
     let predicate = match (predicate, target_rls.visibility_qual) {
-        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(predicate, visibility_qual)),
+        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(visibility_qual, predicate)),
         (Some(predicate), None) => Some(predicate),
         (None, Some(visibility_qual)) => Some(visibility_qual),
         (None, None) => None,
@@ -3371,6 +3993,8 @@ fn bind_simple_update(
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
 
+    let partition_update_root_oid =
+        (entry.relkind == 'p' && !stmt.only).then_some(entry.relation_oid);
     let targets = partitioned_update_target_oids(catalog, &entry, stmt.only)
         .into_iter()
         .map(|relation_oid| {
@@ -3383,6 +4007,8 @@ fn bind_simple_update(
                 &assignments,
                 predicate.as_ref(),
                 &target_rls.write_checks,
+                partition_update_root_oid,
+                entry.relkind == 'p' && !stmt.only,
                 &child,
                 catalog,
             )
@@ -3444,7 +4070,7 @@ fn bind_update_from(
         entry.relkind,
         entry.relispopulated,
         entry.toast,
-        !stmt.only && entry.relkind == 'r',
+        !stmt.only && matches!(entry.relkind, 'r' | 'p'),
         entry.desc.clone(),
     );
     target_base.output_exprs = generated_relation_output_exprs(&entry.desc, catalog)?;
@@ -3560,6 +4186,8 @@ fn bind_update_from(
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
         .map(|query| crate::backend::optimizer::planner(query, catalog))??;
 
+    let partition_update_root_oid =
+        (entry.relkind == 'p' && !stmt.only).then_some(entry.relation_oid);
     let targets = if stmt.only {
         vec![entry.relation_oid]
     } else {
@@ -3576,6 +4204,8 @@ fn bind_update_from(
             &assignments,
             predicate.as_ref(),
             &target_rls.write_checks,
+            partition_update_root_oid,
+            entry.relkind == 'p' && !stmt.only,
             &child,
             catalog,
         )
@@ -3728,6 +4358,9 @@ pub(crate) fn bind_delete_with_outer_scopes(
         &[],
     )?;
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
+    if stmt.using.is_some() {
+        return bind_delete_using(stmt, catalog, outer_scopes, &local_ctes, &entry);
+    }
     let scope = scope_for_relation_with_generated(Some(&stmt.table_name), &entry.desc, catalog)?;
     let returning_scope = scope_with_returning_pseudo_rows(scope.clone(), &entry.desc);
     let predicate = stmt
@@ -3756,7 +4389,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
         catalog,
     )?;
     let predicate = match (predicate, target_rls.visibility_qual) {
-        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(predicate, visibility_qual)),
+        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(visibility_qual, predicate)),
         (Some(predicate), None) => Some(predicate),
         (None, Some(visibility_qual)) => Some(visibility_qual),
         (None, None) => None,
@@ -3781,7 +4414,159 @@ pub(crate) fn bind_delete_with_outer_scopes(
     Ok(BoundDeleteStatement {
         targets,
         returning,
+        input_plan: None,
+        target_visible_count: entry.desc.columns.len(),
+        visible_column_count: entry.desc.columns.len(),
+        target_ctid_index: entry.desc.columns.len(),
+        target_tableoid_index: entry.desc.columns.len() + 1,
         required_privileges: vec![delete_privilege_requirement(&entry, &stmt.table_name)],
         subplans: Vec::new(),
+    })
+}
+
+fn bind_delete_using(
+    stmt: &DeleteStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    local_ctes: &[BoundCte],
+    entry: &BoundRelation,
+) -> Result<BoundDeleteStatement, ParseError> {
+    let target_scope = scope_for_base_relation_with_generated(
+        &stmt.table_name,
+        &entry.desc,
+        Some(entry.relation_oid),
+        catalog,
+    )?;
+    let source_stmt = stmt.using.as_ref().expect("checked above");
+    let (source_from, source_scope_raw) =
+        bind_from_item_with_ctes(source_stmt, catalog, outer_scopes, None, local_ctes, &[])?;
+
+    let mut target_base = AnalyzedFrom::relation(
+        stmt.table_name.clone(),
+        entry.rel,
+        entry.relation_oid,
+        entry.relkind,
+        entry.relispopulated,
+        entry.toast,
+        !stmt.only && entry.relkind == 'r',
+        entry.desc.clone(),
+    );
+    target_base.output_exprs = generated_relation_output_exprs(&entry.desc, catalog)?;
+    let (target_from, _, _) = with_update_target_identity(target_base, &entry.desc);
+    let source_scope = shift_scope_rtindexes(source_scope_raw, target_from.rtable.len());
+    let source_visible_count = source_scope.desc.columns.len();
+    let joined = AnalyzedFrom::join(
+        target_from,
+        source_from,
+        JoinType::Cross,
+        Expr::Const(Value::Bool(true)),
+        None,
+    );
+    let target_visible_count = entry.desc.columns.len();
+    let visible_column_count = target_visible_count + source_visible_count;
+    let projection =
+        update_from_projection_targets(&joined, target_visible_count, source_visible_count);
+    let projected = joined.with_projection(projection);
+    let mut eval_scope = combine_scopes(&target_scope, &source_scope);
+    eval_scope.output_exprs = projected.output_exprs[..visible_column_count].to_vec();
+    let returning_scope = scope_with_returning_pseudo_rows(eval_scope.clone(), &entry.desc);
+
+    let target_rls = build_target_relation_row_security(
+        &stmt.table_name,
+        entry.relation_oid,
+        &entry.desc,
+        PolicyCommand::Delete,
+        true,
+        false,
+        catalog,
+    )?;
+    let predicate = stmt
+        .where_clause
+        .as_ref()
+        .map(|expr| {
+            bind_expr_with_outer_and_ctes(
+                expr,
+                &eval_scope,
+                catalog,
+                outer_scopes,
+                None,
+                local_ctes,
+            )
+        })
+        .transpose()?;
+    let predicate = match (predicate, target_rls.visibility_qual) {
+        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(predicate, visibility_qual)),
+        (Some(predicate), None) => Some(predicate),
+        (None, Some(visibility_qual)) => Some(visibility_qual),
+        (None, None) => None,
+    };
+    let returning = bind_returning_targets(
+        &stmt.returning,
+        &returning_scope,
+        catalog,
+        outer_scopes,
+        local_ctes,
+    )?;
+    let query = query_from_projection_with_qual(projected, predicate.clone());
+    let input_plan = crate::backend::optimizer::fold_query_constants(query)
+        .map(|query| crate::backend::optimizer::planner(query, catalog))??;
+
+    let targets = partitioned_update_target_oids(catalog, &entry, stmt.only)
+        .into_iter()
+        .map(|relation_oid| {
+            let child = catalog
+                .relation_by_oid(relation_oid)
+                .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
+            build_delete_target_from_joined_input(
+                &stmt.table_name,
+                &entry.desc,
+                predicate.as_ref(),
+                &child,
+                catalog,
+            )
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+
+    Ok(BoundDeleteStatement {
+        targets,
+        returning,
+        input_plan: Some(input_plan),
+        target_visible_count,
+        visible_column_count,
+        target_ctid_index: visible_column_count,
+        target_tableoid_index: visible_column_count + 1,
+        required_privileges: vec![delete_privilege_requirement(&entry, &stmt.table_name)],
+        subplans: Vec::new(),
+    })
+}
+
+fn build_delete_target_from_joined_input(
+    base_relation_name: &str,
+    parent_desc: &RelationDesc,
+    parent_predicate: Option<&Expr>,
+    child: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundDeleteTarget, ParseError> {
+    let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
+    let translation_exprs = inheritance_translation_exprs(
+        &child.desc,
+        &inheritance_translation_indexes(parent_desc, &child.desc),
+        catalog,
+    )?;
+    Ok(BoundDeleteTarget {
+        relation_name,
+        rel: child.rel,
+        relation_oid: child.relation_oid,
+        relkind: child.relkind,
+        toast: child.toast,
+        desc: child.desc.clone(),
+        referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
+            child.relation_oid,
+            &child.desc,
+            catalog,
+        )?,
+        row_source: BoundModifyRowSource::Heap,
+        parent_visible_exprs: translation_exprs,
+        predicate: parent_predicate.cloned(),
     })
 }

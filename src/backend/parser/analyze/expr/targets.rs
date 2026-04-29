@@ -331,6 +331,31 @@ pub(crate) fn root_call_returns_set(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> bool {
+    let original_actual_types = args
+        .iter()
+        .map(|arg| {
+            infer_sql_expr_function_arg_type_with_ctes(
+                &arg.value,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
+        })
+        .collect::<Vec<_>>();
+    if resolve_function_call_with_arg_defaults(
+        catalog,
+        name,
+        args,
+        &original_actual_types,
+        func_variadic,
+    )
+    .ok()
+    .is_some_and(|normalized| normalized.resolved.prokind == 'f' && normalized.resolved.proretset)
+    {
+        return true;
+    }
     let Ok(lowered_args) = lower_named_table_function_args(name, args) else {
         return false;
     };
@@ -366,14 +391,50 @@ fn bind_select_list_srf_call(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<SetReturningCall, ParseError> {
-    let args = lower_named_table_function_args(name, args)?;
-    let actual_types = args
+    let original_actual_types = args
         .iter()
         .map(|arg| {
-            infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)
+            super::super::infer::infer_sql_expr_function_arg_type_with_ctes(
+                &arg.value,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )
         })
         .collect::<Vec<_>>();
-    let resolved = resolve_function_call(catalog, name, &actual_types, func_variadic).ok();
+    let default_resolved = resolve_function_call_with_arg_defaults(
+        catalog,
+        name,
+        args,
+        &original_actual_types,
+        func_variadic,
+    )
+    .ok()
+    .filter(|normalized| normalized.resolved.prokind == 'f' && normalized.resolved.proretset);
+    let (args, resolved) = if let Some(normalized) = default_resolved {
+        (normalized.args, Some(normalized.resolved))
+    } else {
+        let lowered_args = lower_named_table_function_args(name, args)?;
+        let actual_types = lowered_args
+            .iter()
+            .map(|arg| {
+                super::super::infer::infer_sql_expr_function_arg_type_with_ctes(
+                    arg,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+            })
+            .collect::<Vec<_>>();
+        (
+            lowered_args,
+            resolve_function_call(catalog, name, &actual_types, func_variadic).ok(),
+        )
+    };
     let resolved_proc_oid = resolved.as_ref().map(|call| call.proc_oid).unwrap_or(0);
     let resolved_func_variadic = resolved
         .as_ref()
@@ -1111,6 +1172,7 @@ fn bind_select_list_srf_call(
                         function_name: other.to_string(),
                         func_variadic: resolved.func_variadic,
                         args: bound_args,
+                        inlined_expr: None,
                         output_columns,
                         with_ordinality: false,
                     })

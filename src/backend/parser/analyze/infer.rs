@@ -1,3 +1,4 @@
+use super::expr::resolve_bound_field_select_type;
 use super::functions::{resolve_function_call, resolve_scalar_function};
 use super::multiranges::infer_multirange_special_expr_type_with_ctes;
 use super::ranges::infer_range_special_expr_type_with_ctes;
@@ -9,7 +10,7 @@ use crate::backend::parser::gram::{
 use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
 };
-use crate::include::catalog::range_type_ref_for_sql_type;
+use crate::include::catalog::{UNKNOWN_TYPE_OID, range_type_ref_for_sql_type};
 use crate::include::nodes::datum::RecordDescriptor;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 
@@ -19,6 +20,7 @@ fn array_subscript_element_type(array_type: SqlType) -> SqlType {
     }
     match array_type.kind {
         SqlTypeKind::Jsonb => SqlType::new(SqlTypeKind::Jsonb),
+        SqlTypeKind::Box => SqlType::new(SqlTypeKind::Point),
         SqlTypeKind::Point => SqlType::new(SqlTypeKind::Float8),
         SqlTypeKind::Int2Vector => SqlType::new(SqlTypeKind::Int2),
         SqlTypeKind::OidVector => SqlType::new(SqlTypeKind::Oid),
@@ -116,6 +118,16 @@ fn signed_integer_literal_type(expr: &SqlExpr) -> Option<SqlTypeKind> {
     }
 }
 
+fn infer_sql_function_inline_named_field_type(
+    name: &str,
+    catalog: &dyn CatalogLookup,
+) -> Option<SqlType> {
+    let (arg_name, field) = name.split_once('.')?;
+    let arg = current_sql_function_inline_named_arg(arg_name)
+        .or_else(current_sql_function_inline_single_arg)?;
+    resolve_bound_field_select_type(&arg.expr, field, catalog).ok()
+}
+
 fn infer_random_function_return_type_with_ctes(
     args: &[SqlFunctionArg],
     scope: &BoundScope,
@@ -174,6 +186,34 @@ pub(super) fn infer_sql_expr_type(
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> SqlType {
     infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, &[])
+}
+
+pub(super) fn unknown_sql_type() -> SqlType {
+    SqlType::new(SqlTypeKind::Text).with_identity(UNKNOWN_TYPE_OID, 0)
+}
+
+pub(super) fn is_unknown_literal_expr(expr: &SqlExpr) -> bool {
+    matches!(
+        expr,
+        SqlExpr::Const(Value::Null)
+            | SqlExpr::Const(Value::Text(_))
+            | SqlExpr::Const(Value::TextRef(_, _))
+    )
+}
+
+pub(super) fn infer_sql_expr_function_arg_type_with_ctes(
+    expr: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> SqlType {
+    if is_unknown_literal_expr(expr) {
+        unknown_sql_type()
+    } else {
+        infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
+    }
 }
 
 fn child_outer_scopes(scope: &BoundScope, outer_scopes: &[BoundScope]) -> Vec<BoundScope> {
@@ -310,8 +350,14 @@ fn infer_visible_outer_aggregate_type(
             )
         })
         .collect::<Vec<_>>();
-    if !direct_args.is_empty() {
-        resolve_hypothetical_aggregate_call(name).map(|resolved| resolved.result_type)
+    if !direct_args.is_empty()
+        && let Some(resolved) = resolve_hypothetical_aggregate_call(name)
+    {
+        Some(resolved.result_type)
+    } else if !direct_args.is_empty()
+        && let Some(resolved) = resolve_ordered_set_aggregate_call(name, &arg_types)
+    {
+        Some(resolved.result_type)
     } else {
         resolve_aggregate_call(catalog, name, &arg_types, func_variadic)
             .map(|resolved| resolved.result_type)
@@ -383,6 +429,21 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                                 .and_then(|s| s.desc.columns.get(index).map(|c| c.sql_type)),
                             Err(ParseError::UnknownColumn(_)) => {
                                 infer_relation_row_expr_type(scope, catalog, outer_scopes, name)
+                                    .or_else(|| {
+                                        current_sql_function_inline_named_arg(name)
+                                            .map(|arg| arg.sql_type)
+                                            .or_else(|| {
+                                                (!name.contains('.'))
+                                                    .then(current_sql_function_inline_single_arg)
+                                                    .flatten()
+                                                    .map(|arg| arg.sql_type)
+                                            })
+                                            .or_else(|| {
+                                                infer_sql_function_inline_named_field_type(
+                                                    name, catalog,
+                                                )
+                                            })
+                                    })
                             }
                             Err(_) => None,
                         }
@@ -390,8 +451,14 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     .unwrap_or(SqlType::new(SqlTypeKind::Text))
             }
         }
+        SqlExpr::ParamRef(index) => current_sql_function_inline_arg(*index)
+            .map(|arg| arg.sql_type)
+            .unwrap_or(SqlType::new(SqlTypeKind::Text)),
         SqlExpr::Default => SqlType::new(SqlTypeKind::Text),
-        SqlExpr::Parameter(_) => SqlType::new(SqlTypeKind::Text),
+        SqlExpr::Parameter(index) => current_sql_function_inline_arg(*index)
+            .map(|arg| arg.sql_type)
+            .or_else(|| external_param_type(*index))
+            .unwrap_or_else(|| SqlType::new(SqlTypeKind::Text)),
         SqlExpr::Const(Value::Int16(_)) => SqlType::new(SqlTypeKind::Int2),
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
         SqlExpr::Const(Value::Int64(_)) => SqlType::new(SqlTypeKind::Int8),
@@ -410,6 +477,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Bit(v)) => SqlType::with_bit_len(SqlTypeKind::VarBit, v.bit_len),
         SqlExpr::Const(Value::Bytea(_)) => SqlType::new(SqlTypeKind::Bytea),
         SqlExpr::Const(Value::Uuid(_)) => SqlType::new(SqlTypeKind::Uuid),
+        SqlExpr::Const(Value::Tid(_)) => SqlType::new(SqlTypeKind::Tid),
         SqlExpr::Const(Value::Inet(_)) => SqlType::new(SqlTypeKind::Inet),
         SqlExpr::Const(Value::Cidr(_)) => SqlType::new(SqlTypeKind::Cidr),
         SqlExpr::Const(Value::MacAddr(_)) => SqlType::new(SqlTypeKind::MacAddr),
@@ -454,6 +522,22 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 ),
                 catalog,
             );
+            if !array_type.is_array
+                && matches!(array_type.kind, SqlTypeKind::Box | SqlTypeKind::Point)
+            {
+                let mut current_type = array_type.element_type();
+                for subscript in subscripts {
+                    if subscript.is_slice {
+                        return SqlType::array_of(current_type);
+                    }
+                    current_type = match current_type.kind {
+                        SqlTypeKind::Box => SqlType::new(SqlTypeKind::Point),
+                        SqlTypeKind::Point => SqlType::new(SqlTypeKind::Float8),
+                        _ => current_type.element_type(),
+                    };
+                }
+                return current_type;
+            }
             let element_type = array_subscript_element_type(array_type);
             if subscripts.iter().any(|subscript| subscript.upper.is_some()) {
                 SqlType::array_of(element_type)
@@ -818,6 +902,12 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             {
                 return resolved.result_type;
             }
+            if within_group.is_some()
+                && let Some(resolved) =
+                    resolve_ordered_set_aggregate_call(name, &aggregate_arg_types)
+            {
+                return resolved.result_type;
+            }
             if let Some(resolved) =
                 resolve_aggregate_call(catalog, name, &aggregate_arg_types, *func_variadic)
             {
@@ -887,7 +977,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 .args()
                 .iter()
                 .map(|arg| {
-                    infer_sql_expr_type_with_ctes(
+                    infer_sql_expr_function_arg_type_with_ctes(
                         &arg.value,
                         scope,
                         catalog,
@@ -1442,6 +1532,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::Factorial) => SqlType::new(SqlTypeKind::Numeric),
                 Some(
                     BuiltinScalarFunction::Cbrt
+                    | BuiltinScalarFunction::Sin
                     | BuiltinScalarFunction::Sinh
                     | BuiltinScalarFunction::Cosh
                     | BuiltinScalarFunction::Tanh

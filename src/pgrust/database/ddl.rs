@@ -16,9 +16,8 @@ use crate::backend::parser::{
 };
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
-    SysCacheId, SysCacheTuple, ensure_class_rows, ensure_depend_rows, ensure_namespace_rows,
-    ensure_rewrite_rows, search_sys_cache_list1_db, search_sys_cache_list2_db,
-    search_sys_cache1_db,
+    SearchSysCache1, SearchSysCacheList1, SearchSysCacheList2, SysCacheId, SysCacheTuple,
+    ensure_class_rows, ensure_depend_rows, ensure_namespace_rows, ensure_rewrite_rows,
 };
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::access::htup::{AttributeCompression, AttributeStorage};
@@ -152,7 +151,7 @@ pub(super) fn lookup_index_relation_for_alter_index(
     if_exists: bool,
 ) -> Result<Option<BoundRelation>, ExecError> {
     match catalog.lookup_any_relation(name) {
-        Some(entry) if entry.relkind == 'i' => Ok(Some(entry)),
+        Some(entry) if matches!(entry.relkind, 'i' | 'I') => Ok(Some(entry)),
         Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
             name: name.to_string(),
             expected: "index",
@@ -235,11 +234,11 @@ fn role_row_by_oid_for_ddl(
     client_id: ClientId,
     role_oid: u32,
 ) -> Result<Option<crate::include::catalog::PgAuthIdRow>, ExecError> {
-    Ok(search_sys_cache1_db(
+    Ok(SearchSysCache1(
         db,
         client_id,
         None,
-        SysCacheId::AuthIdOid,
+        SysCacheId::AUTHOID,
         ddl_oid_key(role_oid),
     )
     .map_err(map_catalog_error)?
@@ -255,11 +254,11 @@ fn membership_rows_for_member_for_ddl(
     client_id: ClientId,
     member_oid: u32,
 ) -> Result<Vec<crate::include::catalog::PgAuthMembersRow>, ExecError> {
-    Ok(search_sys_cache_list1_db(
+    Ok(SearchSysCacheList1(
         db,
         client_id,
         None,
-        SysCacheId::AuthMembersMemberRole,
+        SysCacheId::AUTHMEMMEMROLE,
         ddl_oid_key(member_oid),
     )
     .map_err(map_catalog_error)?
@@ -473,11 +472,11 @@ fn rewrite_row_by_oid_for_ddl(
     txn_ctx: CatalogTxnContext,
     rewrite_oid: u32,
 ) -> Option<crate::include::catalog::PgRewriteRow> {
-    search_sys_cache1_db(
+    SearchSysCache1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::RewriteOid,
+        SysCacheId::REWRITEOID,
         ddl_oid_key(rewrite_oid),
     )
     .ok()?
@@ -494,11 +493,11 @@ fn class_row_by_oid_for_ddl(
     txn_ctx: CatalogTxnContext,
     relation_oid: u32,
 ) -> Option<crate::include::catalog::PgClassRow> {
-    search_sys_cache1_db(
+    SearchSysCache1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::RelOid,
+        SysCacheId::RELOID,
         ddl_oid_key(relation_oid),
     )
     .ok()?
@@ -515,11 +514,11 @@ fn rewrite_dependency_rows_for_relation(
     txn_ctx: CatalogTxnContext,
     relation_oid: u32,
 ) -> Vec<crate::include::catalog::PgDependRow> {
-    search_sys_cache_list2_db(
+    SearchSysCacheList2(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::DependReference,
+        SysCacheId::DEPENDREFERENCE,
         ddl_oid_key(PG_CLASS_RELATION_OID),
         ddl_oid_key(relation_oid),
     )
@@ -977,7 +976,7 @@ pub(crate) fn reject_column_with_trigger_dependencies(
     let relation_name = relation_name_for_oid(catalog, relation_oid);
     let trigger_rows = catalog.trigger_rows_for_relation(relation_oid);
     let details = catalog
-        .depend_rows()
+        .depend_rows_referencing(PG_CLASS_RELATION_OID, relation_oid, Some(i32::from(attnum)))
         .into_iter()
         .filter(|row| {
             row.classid == PG_TRIGGER_RELATION_OID
@@ -1563,6 +1562,7 @@ pub(crate) fn format_sql_type_name(sql_type: SqlType) -> String {
         SqlTypeKind::Internal => "internal",
         SqlTypeKind::Cstring => "cstring",
         SqlTypeKind::Trigger => "trigger",
+        SqlTypeKind::EventTrigger => "event_trigger",
         SqlTypeKind::Void => "void",
         SqlTypeKind::FdwHandler => "fdw_handler",
         SqlTypeKind::Int2 => "smallint",
@@ -1707,6 +1707,23 @@ pub(super) fn automatic_alter_type_cast_allowed(
     if from.kind == to.kind && from.is_array == to.is_array {
         return true;
     }
+    if !from.is_array
+        && !to.is_array
+        && matches!(from.kind, SqlTypeKind::Float4 | SqlTypeKind::Float8)
+        && matches!(to.kind, SqlTypeKind::Numeric)
+    {
+        return true;
+    }
+    if !from.is_array
+        && !to.is_array
+        && matches!(
+            (from.kind, to.kind),
+            (SqlTypeKind::Timestamp, SqlTypeKind::TimestampTz)
+                | (SqlTypeKind::TimestampTz, SqlTypeKind::Timestamp)
+        )
+    {
+        return true;
+    }
     if is_text_like_type(from) && is_text_like_type(to) {
         return true;
     }
@@ -1719,6 +1736,26 @@ pub(super) fn automatic_alter_type_cast_allowed(
     catalog
         .cast_by_source_target(source_oid, target_oid)
         .is_some_and(|row| row.castcontext != 'e')
+}
+
+fn literal_default_cast_input(expr: &SqlExpr) -> Option<Value> {
+    match expr {
+        SqlExpr::Const(value) => Some(value.clone()),
+        SqlExpr::IntegerLiteral(value) | SqlExpr::NumericLiteral(value) => {
+            Some(Value::Text(value.clone().into()))
+        }
+        SqlExpr::UnaryPlus(inner) => literal_default_cast_input(inner),
+        SqlExpr::Negate(inner) => match literal_default_cast_input(inner)? {
+            Value::Text(text) => Some(Value::Text(format!("-{}", text.as_str()).into())),
+            Value::Int16(value) => Some(Value::Int16(value.saturating_neg())),
+            Value::Int32(value) => Some(Value::Int32(value.saturating_neg())),
+            Value::Int64(value) => Some(Value::Int64(value.saturating_neg())),
+            Value::Float64(value) => Some(Value::Float64(-value)),
+            Value::Numeric(value) => Some(Value::Numeric(value.negate())),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 pub(super) fn validate_alter_table_alter_column_default(
@@ -1769,6 +1806,14 @@ pub(super) fn validate_alter_table_alter_column_default(
             bind_scalar_expr_in_scope(expr, &[], catalog).map_err(ExecError::Parse)?;
         if !automatic_alter_type_cast_allowed(catalog, default_type, current_column.sql_type) {
             if let Some(sql) = default_expr_sql
+                && let Some(value) = literal_default_cast_input(expr)
+            {
+                crate::backend::executor::cast_value(value, current_column.sql_type)?;
+                normalized_default_expr_sql = Some(format!(
+                    "({sql})::{}",
+                    format_sql_type_name(current_column.sql_type)
+                ));
+            } else if let Some(sql) = default_expr_sql
                 && (current_column.sql_type.is_range() || current_column.sql_type.is_multirange())
                 && let SqlExpr::Const(value) = expr
                 && let Some(text) = value.as_text()
@@ -2069,6 +2114,14 @@ pub(super) fn validate_alter_index_alter_column_statistics(
             hint: None,
             sqlstate: "42809",
         })?;
+    if column_number < 1 {
+        return Err(ExecError::DetailedError {
+            message: "column number must be in range from 1 to 32767".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
     let column_index = usize::try_from(column_number - 1).unwrap_or(usize::MAX);
     let column = entry
         .desc
@@ -2133,12 +2186,13 @@ pub(super) fn validate_alter_table_alter_column_type(
     desc: &RelationDesc,
     column_name: &str,
     ty: &RawTypeName,
+    collation: Option<&str>,
     using_expr: Option<&SqlExpr>,
 ) -> Result<AlterColumnTypePlan, ExecError> {
     if is_system_column_name(column_name) {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "user column name for ALTER COLUMN TYPE",
-            actual: column_name.to_string(),
+            actual: format!("cannot alter system column \"{column_name}\""),
         }));
     }
 
@@ -2248,6 +2302,21 @@ pub(super) fn validate_alter_table_alter_column_type(
         target_sql_type,
         current_column.storage.nullable,
     );
+    if let Some(collation) = collation {
+        if !is_collatable_type(target_sql_type) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "collations are not supported by type {}",
+                    sql_type_name(target_sql_type)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+        new_column.collation_oid =
+            resolve_collation_oid(collation, catalog).map_err(ExecError::Parse)?;
+    }
     new_column.storage.attstorage = current_column.storage.attstorage;
     new_column.storage.attcompression = current_column.storage.attcompression;
     new_column.attstattarget = current_column.attstattarget;
@@ -2258,6 +2327,7 @@ pub(super) fn validate_alter_table_alter_column_type(
     new_column.attrdef_oid = current_column.attrdef_oid;
     new_column.default_expr = current_column.default_expr.clone();
     new_column.default_sequence_oid = current_column.default_sequence_oid;
+    new_column.identity = current_column.identity;
     new_column.fdw_options = current_column.fdw_options.clone();
     new_column.generated = current_column.generated;
     new_column.missing_default_value = if current_column.default_sequence_oid.is_some() {

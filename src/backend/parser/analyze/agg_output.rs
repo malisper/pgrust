@@ -115,6 +115,24 @@ pub(super) fn grouped_infer_sql_expr_type(
     )
 }
 
+fn grouped_infer_sql_expr_function_arg_type(
+    expr: &SqlExpr,
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> SqlType {
+    let visible_ctes = current_grouped_agg_visible_ctes();
+    super::infer::infer_sql_expr_function_arg_type_with_ctes(
+        expr,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        &visible_ctes,
+    )
+}
+
 pub(super) fn grouped_infer_common_scalar_expr_type(
     exprs: &[SqlExpr],
     input_scope: &BoundScope,
@@ -356,9 +374,9 @@ fn query_references_local_cte(
                     | SetReturningCall::StringTableFunction { args, .. }
                     | SetReturningCall::TextSearchTableFunction { args, .. }
                     | SetReturningCall::UserDefined { args, .. } => args.iter().collect(),
-                    SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_) => {
-                        set_returning_call_exprs(call)
-                    }
+                    SetReturningCall::RowsFrom { .. }
+                    | SetReturningCall::SqlJsonTable(_)
+                    | SetReturningCall::SqlXmlTable(_) => set_returning_call_exprs(call),
                 };
                 if let Some(name) = args
                     .into_iter()
@@ -635,6 +653,117 @@ fn bind_grouped_window_agg_call(
     ))
 }
 
+fn bind_resolved_grouped_custom_window_agg_call(
+    name: &str,
+    resolved: &ResolvedFunctionCall,
+    args: &[SqlFunctionArg],
+    filter: Option<&SqlExpr>,
+    over: &RawWindowSpec,
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    agg_list: &[CollectedAggregate],
+    n_keys: usize,
+) -> Result<Expr, ParseError> {
+    let state = current_window_state_or_error()?;
+    if aggregate_args_are_named(args) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "aggregate arguments without names",
+            actual: name.into(),
+        });
+    }
+
+    let arg_values = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
+    let arg_types = arg_values
+        .iter()
+        .map(|expr| {
+            grouped_infer_sql_expr_type(expr, input_scope, catalog, outer_scopes, grouped_outer)
+        })
+        .collect::<Vec<_>>();
+    let bound_args = arg_values
+        .iter()
+        .map(|expr| {
+            with_windows_disallowed(|| {
+                bind_agg_output_expr(
+                    expr,
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for arg in &bound_args {
+        reject_nested_local_ctes_in_agg_expr(arg)?;
+    }
+    let coerced_args = bound_args
+        .into_iter()
+        .zip(arg_types.iter().copied())
+        .zip(resolved.declared_arg_types.iter().copied())
+        .map(|((arg, actual_type), declared_type)| {
+            coerce_bound_expr(arg, actual_type, declared_type)
+        })
+        .collect::<Vec<_>>();
+    let bound_filter = filter
+        .map(|expr| {
+            with_windows_disallowed(|| {
+                bind_agg_output_expr(
+                    expr,
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )
+            })
+        })
+        .transpose()?;
+    let spec = bind_window_spec(over, catalog, |expr| {
+        bind_agg_output_expr(
+            expr,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        )
+    })?;
+    let kind = WindowFuncKind::Aggregate(crate::include::nodes::primnodes::Aggref {
+        aggfnoid: resolved.proc_oid,
+        aggtype: resolved.result_type,
+        aggvariadic: resolved.func_variadic,
+        aggdistinct: false,
+        direct_args: Vec::new(),
+        args: coerced_args.clone(),
+        aggorder: Vec::new(),
+        aggfilter: bound_filter,
+        agglevelsup: 0,
+        aggno: 0,
+    });
+    Ok(register_window_expr(
+        &state,
+        spec,
+        kind,
+        coerced_args,
+        resolved.result_type,
+        false,
+    ))
+}
+
 fn bind_grouped_visible_outer_aggregate_call(
     name: &str,
     direct_args: &[SqlFunctionArg],
@@ -651,6 +780,8 @@ fn bind_grouped_visible_outer_aggregate_call(
     let visible_ctes = current_grouped_agg_visible_ctes();
     let hypothetical =
         resolve_builtin_hypothetical_aggregate(name).is_some() && !direct_args.is_empty();
+    let ordered_set =
+        resolve_builtin_ordered_set_aggregate(name).is_some() && !direct_args.is_empty();
     let Some((aggno, visible_scope)) = match_visible_aggregate_call(
         name,
         direct_args,
@@ -668,7 +799,10 @@ fn bind_grouped_visible_outer_aggregate_call(
     let owner_scope = &visible_scope.input_scope;
     let owner_outer_scopes = outer_scopes.get(visible_scope.levelsup..).unwrap_or(&[]);
     let arg_values: Vec<SqlExpr> = args.args().iter().map(|arg| arg.value.clone()).collect();
-    if !hypothetical && let Some(func) = resolve_builtin_aggregate(name) {
+    if !hypothetical
+        && !ordered_set
+        && let Some(func) = resolve_builtin_aggregate(name)
+    {
         validate_aggregate_arity(func, &arg_values)?;
     }
     let arg_types = arg_values
@@ -684,7 +818,7 @@ fn bind_grouped_visible_outer_aggregate_call(
             )
         })
         .collect::<Vec<_>>();
-    let resolved = if hypothetical {
+    let resolved = if hypothetical || ordered_set {
         None
     } else {
         Some(
@@ -729,7 +863,7 @@ fn bind_grouped_visible_outer_aggregate_call(
             return Err(set_returning_not_allowed_error("aggregate arguments"));
         }
     }
-    let bound_direct_args = if hypothetical {
+    let bound_direct_args = if hypothetical || ordered_set {
         if aggregate_args_are_named(direct_args) {
             return Err(ParseError::UnexpectedToken {
                 expected: "aggregate arguments without names",
@@ -823,6 +957,32 @@ fn bind_grouped_visible_outer_aggregate_call(
             bound_order_exprs,
             catalog,
         )?
+    } else if ordered_set {
+        let direct_arg_types = direct_args
+            .iter()
+            .map(|arg| {
+                infer_sql_expr_type_with_ctes(
+                    &arg.value,
+                    owner_scope,
+                    catalog,
+                    owner_outer_scopes,
+                    None,
+                    &visible_ctes,
+                )
+            })
+            .collect::<Vec<_>>();
+        coerce_ordered_set_aggregate_inputs(
+            name,
+            direct_args,
+            &direct_arg_types,
+            bound_direct_args,
+            args.args(),
+            &arg_types,
+            bound_args,
+            order_by,
+            bound_order_exprs,
+            catalog,
+        )?
     } else {
         let bound_order_by = bound_order_exprs
             .into_iter()
@@ -846,6 +1006,14 @@ fn bind_grouped_visible_outer_aggregate_call(
     };
     let (aggfnoid, aggtype, aggvariadic) = if hypothetical {
         let resolved = resolve_hypothetical_aggregate_call(name).ok_or_else(|| {
+            ParseError::UnexpectedToken {
+                expected: "supported aggregate",
+                actual: name.to_string(),
+            }
+        })?;
+        (resolved.proc_oid, resolved.result_type, false)
+    } else if ordered_set {
+        let resolved = resolve_ordered_set_aggregate_call(name, &arg_types).ok_or_else(|| {
             ParseError::UnexpectedToken {
                 expected: "supported aggregate",
                 actual: name.to_string(),
@@ -910,7 +1078,7 @@ fn bind_grouped_window_func_call(
     let actual_types = args
         .iter()
         .map(|arg| {
-            grouped_infer_sql_expr_type(
+            grouped_infer_sql_expr_function_arg_type(
                 &arg.value,
                 input_scope,
                 catalog,
@@ -1018,9 +1186,21 @@ fn bind_grouped_window_func_call(
                 n_keys,
             );
         }
-        return Err(ParseError::FeatureNotSupported(format!(
-            "window execution for custom aggregate {name}"
-        )));
+        return bind_resolved_grouped_custom_window_agg_call(
+            name,
+            &resolved,
+            args,
+            None,
+            over,
+            group_by_exprs,
+            group_key_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        );
     }
     Err(ParseError::FeatureNotSupported(format!(
         "window function {name}"
@@ -1281,12 +1461,14 @@ pub(super) fn bind_agg_output_expr_in_clause(
             agg_list,
             n_keys,
         ),
-        SqlExpr::Parameter(index) => Err(ParseError::DetailedError {
-            message: format!("there is no parameter ${index}"),
-            detail: None,
-            hint: None,
-            sqlstate: "42P02",
-        }),
+        SqlExpr::Parameter(_) => bind_expr_with_outer_and_ctes(
+            expr,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            &[],
+        ),
         SqlExpr::Default => Err(ParseError::UnexpectedToken {
             expected: "expression",
             actual: "DEFAULT".into(),
@@ -1355,11 +1537,15 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 normalize_aggregate_call(args, order_by, within_group.as_deref());
             if over.is_none()
                 && within_group.is_none()
-                && resolve_builtin_hypothetical_aggregate(name).is_some()
+                && (resolve_builtin_hypothetical_aggregate(name).is_some()
+                    || resolve_builtin_ordered_set_aggregate(name).is_some())
             {
                 return Err(ordered_set_requires_within_group_error(name));
             }
-            if within_group.is_some() && resolve_builtin_hypothetical_aggregate(name).is_none() {
+            if within_group.is_some()
+                && resolve_builtin_hypothetical_aggregate(name).is_none()
+                && resolve_builtin_ordered_set_aggregate(name).is_none()
+            {
                 return Err(not_ordered_set_aggregate_error(name));
             }
             if let Some(func) = resolve_builtin_aggregate(name) {
@@ -1408,12 +1594,14 @@ pub(super) fn bind_agg_output_expr_in_clause(
             }) {
                 let hypothetical = resolve_builtin_hypothetical_aggregate(name).is_some()
                     && !direct_args.is_empty();
+                let ordered_set = resolve_builtin_ordered_set_aggregate(name).is_some()
+                    && !direct_args.is_empty();
                 let arg_values: Vec<SqlExpr> = aggregate_args
                     .args()
                     .iter()
                     .map(|arg| arg.value.clone())
                     .collect();
-                if !hypothetical {
+                if !hypothetical && !ordered_set {
                     validate_distinct_aggregate_order_by(
                         &arg_values,
                         &aggregate_order_by,
@@ -1432,7 +1620,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         )
                     })
                     .collect::<Vec<_>>();
-                let resolved = if hypothetical {
+                let resolved = if hypothetical || ordered_set {
                     None
                 } else {
                     Some(
@@ -1461,7 +1649,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         return Err(set_returning_not_allowed_error("aggregate arguments"));
                     }
                 }
-                let bound_direct_args = if hypothetical {
+                let bound_direct_args = if hypothetical || ordered_set {
                     if aggregate_args_are_named(&direct_args) {
                         return Err(ParseError::UnexpectedToken {
                             expected: "aggregate arguments without names",
@@ -1557,6 +1745,31 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         bound_order_exprs,
                         catalog,
                     )?
+                } else if ordered_set {
+                    let direct_arg_types = direct_args
+                        .iter()
+                        .map(|arg| {
+                            grouped_infer_sql_expr_type(
+                                &arg.value,
+                                input_scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    coerce_ordered_set_aggregate_inputs(
+                        name,
+                        &direct_args,
+                        &direct_arg_types,
+                        bound_direct_args,
+                        aggregate_args.args(),
+                        &arg_types,
+                        bound_args,
+                        &aggregate_order_by,
+                        bound_order_exprs,
+                        catalog,
+                    )?
                 } else {
                     let bound_order_by = bound_order_exprs
                         .into_iter()
@@ -1590,6 +1803,13 @@ pub(super) fn bind_agg_output_expr_in_clause(
                             actual: name.clone(),
                         }
                     })?;
+                    (resolved.proc_oid, resolved.result_type, false)
+                } else if ordered_set {
+                    let resolved = resolve_ordered_set_aggregate_call(name, &arg_types)
+                        .ok_or_else(|| ParseError::UnexpectedToken {
+                            expected: "supported aggregate",
+                            actual: name.clone(),
+                        })?;
                     (resolved.proc_oid, resolved.result_type, false)
                 } else {
                     let resolved = resolved
@@ -3438,6 +3658,12 @@ pub(super) fn bind_agg_output_expr_in_clause(
         SqlExpr::LocalTimestamp { precision } => Ok(Expr::LocalTimestamp {
             precision: *precision,
         }),
+        SqlExpr::ParamRef(index) => Err(ParseError::DetailedError {
+            message: format!("there is no parameter ${index}"),
+            detail: None,
+            hint: None,
+            sqlstate: "42P02",
+        }),
     }
 }
 
@@ -3602,7 +3828,7 @@ fn bind_grouped_generate_series_srf(
     let actual_types = args
         .iter()
         .map(|arg| {
-            grouped_infer_sql_expr_type(
+            grouped_infer_sql_expr_function_arg_type(
                 &arg.value,
                 input_scope,
                 catalog,

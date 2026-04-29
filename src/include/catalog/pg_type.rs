@@ -369,6 +369,11 @@ fn build_builtin_type_rows() -> Vec<PgTypeRow> {
             TRIGGER_TYPE_OID,
             SqlType::new(SqlTypeKind::Trigger),
         ),
+        builtin_type_row(
+            "event_trigger",
+            EVENT_TRIGGER_TYPE_OID,
+            SqlType::new(SqlTypeKind::EventTrigger),
+        ),
         fixed_builtin_type_row(
             "fdw_handler",
             FDW_HANDLER_TYPE_OID,
@@ -1728,6 +1733,7 @@ fn typtype_for_sql_type(sql_type: SqlType) -> char {
         | SqlTypeKind::Record
         | SqlTypeKind::Shell
         | SqlTypeKind::Trigger
+        | SqlTypeKind::EventTrigger
         | SqlTypeKind::Void => 'p',
         _ => 'b',
     }

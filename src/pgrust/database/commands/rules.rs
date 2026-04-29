@@ -435,11 +435,6 @@ pub(crate) fn prepare_bound_update_for_execution(
     stmt: crate::backend::parser::BoundUpdateStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<PreparedBoundStatement<crate::backend::parser::BoundUpdateStatement>, ExecError> {
-    if stmt.input_plan.is_some() && stmt.targets.iter().any(|target| target.relkind != 'r') {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
-            "UPDATE ... FROM is not yet supported for views".into(),
-        )));
-    }
     let Some(view_target) = stmt.targets.iter().find(|target| target.relkind == 'v') else {
         return Ok(PreparedBoundStatement {
             stmt,
@@ -528,15 +523,26 @@ pub(crate) fn execute_bound_insert_with_rules(
     let result = (|| {
         let rules = load_prepared_rules(stmt.relation_oid, RuleEvent::Insert, &stmt.desc, catalog)?;
         let rows = materialize_insert_rows(&stmt, catalog, ctx)?;
+        // :HACK: PostgreSQL's rule rewriter duplicates the original INSERT
+        // expressions into DO ALSO rule actions. Until pgrust stores and
+        // executes rewritten query trees, re-evaluate the INSERT source for
+        // table DO ALSO rules so volatile defaults such as serial nextval()
+        // behave like the duplicated rule expansion.
+        let rule_new_rows =
+            if matches!(stmt.relkind, 'r' | 'p') && rules.iter().any(|rule| !rule.is_instead) {
+                materialize_insert_rows(&stmt, catalog, ctx)?
+            } else {
+                rows.clone()
+            };
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
         let null_old = vec![Value::Null; stmt.desc.columns.len()];
 
-        for row in rows {
+        for (row, rule_new_row) in rows.into_iter().zip(rule_new_rows.into_iter()) {
             let outcome = execute_matching_rules(
                 &rules,
                 &null_old,
-                &row,
+                &rule_new_row,
                 catalog,
                 ctx,
                 xid,
@@ -919,6 +925,11 @@ pub(crate) fn execute_bound_delete_with_rules(
                 &crate::backend::parser::BoundDeleteStatement {
                     targets: vec![target.clone()],
                     returning: Vec::new(),
+                    input_plan: None,
+                    target_visible_count: target.desc.columns.len(),
+                    visible_column_count: target.desc.columns.len(),
+                    target_ctid_index: target.desc.columns.len(),
+                    target_tableoid_index: target.desc.columns.len() + 1,
                     required_privileges: Vec::new(),
                     subplans: Vec::new(),
                 },
@@ -1432,6 +1443,7 @@ fn materialize_view_rows(
         limit: None,
         offset: None,
         locking_clause: None,
+        locking_targets: Vec::new(),
         set_operation: None,
     };
     let planned = crate::backend::parser::pg_plan_query(&select, catalog)?;

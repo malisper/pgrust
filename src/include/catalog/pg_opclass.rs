@@ -4,6 +4,7 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::*;
 
 pub const ARRAY_BTREE_OPCLASS_OID: u32 = 76012;
+pub const ARRAY_HASH_OPCLASS_OID: u32 = 76235;
 pub const BOOL_BTREE_OPCLASS_OID: u32 = 424;
 pub const INT2_BTREE_OPCLASS_OID: u32 = 1979;
 pub const INT4_BTREE_OPCLASS_OID: u32 = 1978;
@@ -761,6 +762,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BOX_TYPE_OID,
         ),
         hash_row(
+            ARRAY_HASH_OPCLASS_OID,
+            "array_ops",
+            HASH_ARRAY_FAMILY_OID,
+            ANYARRAYOID,
+        ),
+        hash_row(
             BOOL_HASH_OPCLASS_OID,
             "bool_ops",
             HASH_BOOL_FAMILY_OID,
@@ -1049,9 +1056,31 @@ pub fn default_opclass_oid_for_am(am_oid: u32, type_oid: u32, sql_type: SqlType)
                 && (row.opcintype == type_oid
                     || (row.opcintype == ANYARRAYOID && sql_type.is_array)
                     || (row.opcintype == ANYRANGEOID && is_range)
-                    || (row.opcintype == ANYMULTIRANGEOID && is_multirange))
+                    || (row.opcintype == ANYMULTIRANGEOID && is_multirange)
+                    || (row.opcintype == RECORD_TYPE_OID
+                        && matches!(sql_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite)))
         })
         .map(|row| row.oid)
+}
+
+pub fn index_opclass_is_implicit_for_definition(
+    am_oid: u32,
+    type_oid: u32,
+    sql_type: SqlType,
+    opclass_oid: u32,
+    indisexclusion: bool,
+) -> bool {
+    if default_opclass_oid_for_am(am_oid, type_oid, sql_type) == Some(opclass_oid) {
+        return true;
+    }
+    // :HACK: PostgreSQL temporal/exclusion GiST indexes use btree_gist default
+    // opclasses for scalar equality columns. pgrust currently stores the
+    // matching btree opclass OID as the executor stand-in, so hide it from
+    // pg_get_indexdef/psql output the same way PostgreSQL hides an implicit
+    // default GiST opclass.
+    am_oid == GIST_AM_OID
+        && indisexclusion
+        && default_btree_opclass_oid(type_oid) == Some(opclass_oid)
 }
 
 pub fn default_btree_opclass_oid(type_oid: u32) -> Option<u32> {
@@ -1098,6 +1127,7 @@ pub fn default_btree_opclass_oid(type_oid: u32) -> Option<u32> {
 
 pub fn default_hash_opclass_oid(type_oid: u32) -> Option<u32> {
     Some(match type_oid {
+        ANYARRAYOID => ARRAY_HASH_OPCLASS_OID,
         BOOL_TYPE_OID => BOOL_HASH_OPCLASS_OID,
         INT2_TYPE_OID => INT2_HASH_OPCLASS_OID,
         INT4_TYPE_OID => INT4_HASH_OPCLASS_OID,
@@ -1227,6 +1257,14 @@ mod tests {
         assert_eq!(
             default_hash_opclass_oid(MACADDR8_TYPE_OID),
             Some(MACADDR8_HASH_OPCLASS_OID)
+        );
+    }
+
+    #[test]
+    fn named_composite_uses_record_btree_opclass() {
+        assert_eq!(
+            default_opclass_oid_for_am(BTREE_AM_OID, 76000, SqlType::named_composite(76000, 76001)),
+            Some(RECORD_BTREE_OPCLASS_OID)
         );
     }
 }

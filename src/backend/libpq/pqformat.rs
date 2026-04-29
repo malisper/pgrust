@@ -17,8 +17,8 @@ use crate::backend::statistics::{
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::TupleError;
 use crate::include::catalog::{
-    PG_DEPENDENCIES_TYPE_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID, TRIGGER_TYPE_OID,
-    builtin_type_rows, range_type_ref_for_sql_type,
+    EVENT_TRIGGER_TYPE_OID, PG_DEPENDENCIES_TYPE_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
+    TRIGGER_TYPE_OID, builtin_type_rows, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::InetValue;
 use crate::include::nodes::parsenodes::CopyFormat;
@@ -45,7 +45,8 @@ impl Default for FloatFormatOptions {
 
 pub(crate) fn format_exec_error(e: &ExecError) -> String {
     match e {
-        ExecError::WithContext { source, .. } => format_exec_error(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => format_exec_error(source),
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
             format_exec_error(&ExecError::Parse((**source).clone()))
         }
@@ -169,7 +170,8 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
 
 pub(crate) fn format_exec_error_hint(e: &ExecError) -> Option<String> {
     match e {
-        ExecError::WithContext { source, .. } => format_exec_error_hint(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => format_exec_error_hint(source),
         ExecError::Parse(crate::backend::parser::ParseError::Positioned { source, .. }) => {
             format_exec_error_hint(&ExecError::Parse((**source).clone()))
         }
@@ -620,6 +622,9 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
     {
         return (multirange_type.type_oid() as i32, -1, col.sql_type.typmod);
     }
+    if let Some(oid) = col.wire_type_oid {
+        return (oid as i32, -1, col.sql_type.typmod);
+    }
     if !col.sql_type.is_array && col.sql_type.type_oid != 0 {
         return (col.sql_type.type_oid as i32, -1, col.sql_type.typmod);
     }
@@ -709,6 +714,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             }
             SqlTypeKind::AnyArray => unreachable!("anyarray is not a concrete SQL array type"),
             SqlTypeKind::Trigger => unreachable!("trigger arrays are unsupported"),
+            SqlTypeKind::EventTrigger => unreachable!("event_trigger arrays are unsupported"),
             SqlTypeKind::Record | SqlTypeKind::Composite => {
                 crate::include::catalog::RECORD_ARRAY_TYPE_OID as i32
             }
@@ -744,6 +750,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             -1,
         ),
         SqlTypeKind::Trigger => (TRIGGER_TYPE_OID as i32, -1, -1),
+        SqlTypeKind::EventTrigger => (EVENT_TRIGGER_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Internal => (crate::include::catalog::INTERNAL_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Shell => (col.sql_type.type_oid as i32, -1, -1),
         SqlTypeKind::Cstring => (crate::include::catalog::CSTRING_TYPE_OID as i32, -2, -1),
@@ -849,11 +856,11 @@ fn format_typed_oid_text(
         SqlTypeKind::RegNamespace => Some(format_catalog_oid_text(oid, namespace_names, true)),
         SqlTypeKind::RegProc => Some(
             crate::backend::executor::expr_reg::format_regproc_oid_optional(oid, None)
-                .unwrap_or_else(|| format_catalog_oid_text(oid, proc_names, true)),
+                .unwrap_or_else(|| format_proc_oid_text(oid, proc_names, true)),
         ),
         SqlTypeKind::RegProcedure => Some(
             crate::backend::executor::expr_reg::format_regprocedure_oid_optional(oid, None)
-                .or_else(|| proc_names.and_then(|names| names.get(&oid).cloned()))
+                .or_else(|| format_proc_oid_text_optional(oid, proc_names))
                 .unwrap_or_else(|| format_catalog_oid_text(oid, None, true)),
         ),
         SqlTypeKind::RegOper => Some(
@@ -876,6 +883,26 @@ fn format_typed_oid_text(
         ),
         _ => None,
     }
+}
+
+fn format_proc_oid_text(
+    oid: u32,
+    proc_names: Option<&HashMap<u32, String>>,
+    dash_on_zero: bool,
+) -> String {
+    if dash_on_zero && oid == 0 {
+        return "-".to_string();
+    }
+    format_proc_oid_text_optional(oid, proc_names).unwrap_or_else(|| oid.to_string())
+}
+
+fn format_proc_oid_text_optional(
+    oid: u32,
+    proc_names: Option<&HashMap<u32, String>>,
+) -> Option<String> {
+    proc_names
+        .and_then(|names| names.get(&oid))
+        .map(|name| crate::backend::executor::expr_reg::quote_identifier_if_needed(name))
 }
 
 pub(crate) fn send_typed_data_row(
@@ -1169,6 +1196,11 @@ pub(crate) fn send_typed_data_row(
             }
             Value::PgLsn(v) => {
                 let text = render_pg_lsn_text(*v);
+                buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
+                buf.extend_from_slice(text.as_bytes());
+            }
+            Value::Tid(v) => {
+                let text = crate::backend::executor::value_io::render_tid_text(v);
                 buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
                 buf.extend_from_slice(text.as_bytes());
             }
@@ -1819,6 +1851,22 @@ pub(crate) fn send_error_with_fields(
     context: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
+    send_error_with_internal_fields(
+        w, sqlstate, message, detail, hint, context, position, None, None,
+    )
+}
+
+pub(crate) fn send_error_with_internal_fields(
+    w: &mut impl Write,
+    sqlstate: &str,
+    message: &str,
+    detail: Option<&str>,
+    hint: Option<&str>,
+    context: Option<&str>,
+    position: Option<usize>,
+    internal_query: Option<&str>,
+    internal_position: Option<usize>,
+) -> io::Result<()> {
     let mut body = Vec::new();
     body.push(b'S');
     body.extend_from_slice(b"ERROR\0");
@@ -1848,6 +1896,16 @@ pub(crate) fn send_error_with_fields(
     if let Some(position) = position {
         body.push(b'P');
         body.extend_from_slice(position.to_string().as_bytes());
+        body.push(0);
+    }
+    if let Some(internal_position) = internal_position {
+        body.push(b'p');
+        body.extend_from_slice(internal_position.to_string().as_bytes());
+        body.push(0);
+    }
+    if let Some(internal_query) = internal_query {
+        body.push(b'q');
+        body.extend_from_slice(internal_query.as_bytes());
         body.push(0);
     }
     body.push(0);

@@ -49,15 +49,15 @@ use crate::backend::utils::time::timestamp::{
     is_valid_finite_timestamp_usecs, parse_timestamp_text, parse_timestamptz_text,
 };
 use crate::include::catalog::{
-    INT2_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID, UNKNOWN_TYPE_OID, XID8_TYPE_OID,
-    bootstrap_pg_cast_rows, builtin_type_rows, multirange_type_ref_for_sql_type,
+    INT2_TYPE_OID, OID_TYPE_OID, PG_TOAST_NAMESPACE_OID, TEXT_TYPE_OID, UNKNOWN_TYPE_OID,
+    XID8_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows, multirange_type_ref_for_sql_type,
     range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT,
     USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
 };
-use crate::include::nodes::datum::{ArrayDimension, BitString};
+use crate::include::nodes::datum::{ArrayDimension, BitString, RecordDescriptor, RecordValue};
 use crate::pgrust::compact_string::CompactString;
 use num_bigint::BigInt;
 use num_integer::Integer;
@@ -593,8 +593,24 @@ fn cast_regclass_to_text(
         return Ok(Value::Text("-".into()));
     }
     Ok(catalog
-        .and_then(|catalog| catalog.class_row_by_oid(oid))
-        .map(|row| Value::Text(expr_reg::quote_identifier_if_needed(&row.relname).into()))
+        .and_then(|catalog| {
+            let row = catalog.class_row_by_oid(oid)?;
+            let relname = expr_reg::quote_identifier_if_needed(&row.relname);
+            if row.relnamespace == PG_TOAST_NAMESPACE_OID {
+                let nspname = catalog
+                    .namespace_row_by_oid(row.relnamespace)
+                    .map(|namespace| namespace.nspname)
+                    .unwrap_or_else(|| "pg_toast".into());
+                return Some(Value::Text(
+                    format!(
+                        "{}.{relname}",
+                        expr_reg::quote_identifier_if_needed(&nspname)
+                    )
+                    .into(),
+                ));
+            }
+            Some(Value::Text(relname.into()))
+        })
         .unwrap_or_else(|| Value::Text(oid.to_string().into())))
 }
 
@@ -3159,6 +3175,15 @@ fn validate_composite_text_input(
     catalog: Option<&dyn CatalogLookup>,
     config: &DateTimeConfig,
 ) -> Result<(), ExecError> {
+    cast_text_to_composite(text, ty, catalog, config).map(|_| ())
+}
+
+fn cast_text_to_composite(
+    text: &str,
+    ty: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
+    config: &DateTimeConfig,
+) -> Result<RecordValue, ExecError> {
     let Some(catalog) = catalog else {
         return Err(unsupported_record_input());
     };
@@ -3185,18 +3210,31 @@ fn validate_composite_text_input(
             sqlstate: "22P02",
         });
     }
+    let descriptor = RecordDescriptor::named(
+        ty.type_oid,
+        ty.typrelid,
+        ty.typmod,
+        columns
+            .iter()
+            .map(|column| (column.name.clone(), column.sql_type))
+            .collect(),
+    );
+    let mut values = Vec::with_capacity(fields.len());
     for (column, raw) in columns.into_iter().zip(fields) {
-        if let Some(raw) = raw {
+        let value = if let Some(raw) = raw {
             cast_value_with_source_type_catalog_and_config(
                 Value::Text(raw.into()),
                 Some(SqlType::new(SqlTypeKind::Text)),
                 column.sql_type,
                 Some(catalog),
                 config,
-            )?;
-        }
+            )?
+        } else {
+            Value::Null
+        };
+        values.push(value);
     }
-    Ok(())
+    Ok(RecordValue::from_descriptor(descriptor, values))
 }
 
 fn parse_composite_literal_fields(text: &str) -> Result<Vec<Option<String>>, ExecError> {
@@ -4244,6 +4282,11 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             return cast_text_to_enum(text, ty, catalog);
         }
     }
+    if matches!(ty.kind, SqlTypeKind::Composite) && !ty.is_array {
+        if let Some(text) = value.as_text() {
+            return cast_text_to_composite(text, ty, catalog, config).map(Value::Record);
+        }
+    }
     if let Some(text) = value.as_text()
         && let Some(result) = eval_user_defined_type_input(text, ty, catalog, config)?
     {
@@ -4342,7 +4385,10 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind: SqlTypeKind::Numeric,
                 ..
-            } => Ok(Value::Numeric(NumericValue::from_i64(v as i64))),
+            } => Ok(Value::Numeric(coerce_numeric_value(
+                NumericValue::from_i64(v as i64),
+                ty,
+            )?)),
             SqlType {
                 kind: SqlTypeKind::Money,
                 ..
@@ -4430,7 +4476,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Err(unsupported_record_input()),
             SqlType {
-                kind: SqlTypeKind::Trigger,
+                kind: SqlTypeKind::Trigger | SqlTypeKind::EventTrigger,
                 ..
             } => Err(unsupported_trigger_input()),
             SqlType {
@@ -4494,7 +4540,10 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind: SqlTypeKind::Numeric,
                 ..
-            } => Ok(Value::Numeric(NumericValue::from_i64(v as i64))),
+            } => Ok(Value::Numeric(coerce_numeric_value(
+                NumericValue::from_i64(v as i64),
+                ty,
+            )?)),
             SqlType {
                 kind: SqlTypeKind::Money,
                 ..
@@ -4582,7 +4631,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Err(unsupported_record_input()),
             SqlType {
-                kind: SqlTypeKind::Trigger,
+                kind: SqlTypeKind::Trigger | SqlTypeKind::EventTrigger,
                 ..
             } => Err(unsupported_trigger_input()),
             SqlType {
@@ -4710,7 +4759,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Err(unsupported_record_input()),
             SqlType {
-                kind: SqlTypeKind::Trigger,
+                kind: SqlTypeKind::Trigger | SqlTypeKind::EventTrigger,
                 ..
             } => Err(unsupported_trigger_input()),
             SqlType {
@@ -5126,6 +5175,19 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 right: Value::Null,
             }),
         },
+        Value::Tid(value) => match ty.kind {
+            SqlTypeKind::Tid => Ok(Value::Tid(value)),
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => {
+                Ok(Value::Text(CompactString::from_owned(
+                    crate::backend::executor::value_io::render_tid_text(&value),
+                )))
+            }
+            _ => Err(ExecError::TypeMismatch {
+                op: "::tid",
+                left: Value::Tid(value),
+                right: Value::Null,
+            }),
+        },
         Value::Xid8(value) => match ty {
             ty if ty.is_range() => cast_text_value(&value.to_string(), ty, true),
             ty if ty.is_multirange() => cast_text_value(&value.to_string(), ty, true),
@@ -5308,7 +5370,10 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind: SqlTypeKind::Numeric,
                 ..
-            } => Ok(Value::Numeric(NumericValue::from_i64(v))),
+            } => Ok(Value::Numeric(coerce_numeric_value(
+                NumericValue::from_i64(v),
+                ty,
+            )?)),
             SqlType {
                 kind: SqlTypeKind::Money,
                 ..
@@ -5404,7 +5469,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Err(unsupported_record_input()),
             SqlType {
-                kind: SqlTypeKind::Trigger,
+                kind: SqlTypeKind::Trigger | SqlTypeKind::EventTrigger,
                 ..
             } => Err(unsupported_trigger_input()),
             SqlType {
@@ -5557,7 +5622,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => Err(unsupported_record_input()),
             SqlType {
-                kind: SqlTypeKind::Trigger,
+                kind: SqlTypeKind::Trigger | SqlTypeKind::EventTrigger,
                 ..
             } => Err(unsupported_trigger_input()),
             SqlType {
@@ -5900,7 +5965,7 @@ pub(crate) fn cast_text_value_with_config(
             left: Value::Text(CompactString::new(text)),
             right: Value::Null,
         }),
-        SqlTypeKind::Trigger => Err(unsupported_trigger_input()),
+        SqlTypeKind::Trigger | SqlTypeKind::EventTrigger => Err(unsupported_trigger_input()),
         SqlTypeKind::Internal => Err(ExecError::TypeMismatch {
             op: "::internal",
             left: Value::Text(CompactString::new(text)),
@@ -6077,7 +6142,7 @@ pub(super) fn cast_numeric_value(
             left: Value::Numeric(value.clone()),
             right: Value::Null,
         }),
-        SqlTypeKind::Trigger => Err(unsupported_trigger_input()),
+        SqlTypeKind::Trigger | SqlTypeKind::EventTrigger => Err(unsupported_trigger_input()),
         SqlTypeKind::Internal => Err(ExecError::TypeMismatch {
             op: "::internal",
             left: Value::Numeric(value),

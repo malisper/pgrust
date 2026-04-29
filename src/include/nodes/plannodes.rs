@@ -1,10 +1,11 @@
 use crate::RelFileLocator;
+use crate::backend::parser::{LoweredPartitionSpec, PartitionBoundSpec};
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::parsenodes::{SelectLockingClause, SetOperator};
+use crate::include::nodes::parsenodes::{SelectLockingClause, SetOperator, TableSampleClause};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
     RelationPrivilegeRequirement, SetReturningCall, TargetEntry, ToastRelationRef, WindowClause,
@@ -50,6 +51,7 @@ impl PlanEstimate {
 pub struct ExecParamSource {
     pub paramid: usize,
     pub expr: Expr,
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +74,14 @@ pub enum AggregateStrategy {
     Plain,
     Sorted,
     Hashed,
+    Mixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregatePhase {
+    Complete,
+    Partial,
+    Finalize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +96,7 @@ pub struct IndexScanKey {
     pub strategy: u16,
     pub argument: IndexScanKeyArgument,
     pub display_expr: Option<Expr>,
+    pub runtime_label: Option<String>,
 }
 
 impl IndexScanKey {
@@ -95,11 +106,17 @@ impl IndexScanKey {
             strategy,
             argument,
             display_expr: None,
+            runtime_label: None,
         }
     }
 
     pub fn with_display_expr(mut self, display_expr: Option<Expr>) -> Self {
         self.display_expr = display_expr;
+        self
+    }
+
+    pub fn with_runtime_label(mut self, runtime_label: Option<String>) -> Self {
+        self.runtime_label = runtime_label;
         self
     }
 
@@ -150,6 +167,23 @@ impl PlannedStmt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionPruneChildDomain {
+    pub spec: LoweredPartitionSpec,
+    pub sibling_bounds: Vec<PartitionBoundSpec>,
+    pub bound: Option<PartitionBoundSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionPrunePlan {
+    pub spec: LoweredPartitionSpec,
+    pub sibling_bounds: Vec<PartitionBoundSpec>,
+    pub filter: Expr,
+    pub child_bounds: Vec<Option<PartitionBoundSpec>>,
+    pub child_domains: Vec<Vec<PartitionPruneChildDomain>>,
+    pub subplans_removed: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
     Result {
         plan_info: PlanEstimate,
@@ -158,6 +192,7 @@ pub enum Plan {
         plan_info: PlanEstimate,
         source_id: usize,
         desc: RelationDesc,
+        partition_prune: Option<PartitionPrunePlan>,
         children: Vec<Plan>,
     },
     MergeAppend {
@@ -165,6 +200,7 @@ pub enum Plan {
         source_id: usize,
         desc: RelationDesc,
         items: Vec<OrderByEntry>,
+        partition_prune: Option<PartitionPrunePlan>,
         children: Vec<Plan>,
     },
     Unique {
@@ -181,6 +217,7 @@ pub enum Plan {
         relkind: char,
         relispopulated: bool,
         toast: Option<ToastRelationRef>,
+        tablesample: Option<TableSampleClause>,
         desc: RelationDesc,
         disabled: bool,
     },
@@ -254,6 +291,27 @@ pub enum Plan {
         input: Box<Plan>,
         hash_keys: Vec<Expr>,
     },
+    Materialize {
+        plan_info: PlanEstimate,
+        input: Box<Plan>,
+    },
+    Memoize {
+        plan_info: PlanEstimate,
+        input: Box<Plan>,
+        cache_keys: Vec<Expr>,
+        cache_key_labels: Vec<String>,
+        key_paramids: Vec<usize>,
+        dependent_paramids: Vec<usize>,
+        binary_mode: bool,
+        single_row: bool,
+        est_entries: usize,
+    },
+    Gather {
+        plan_info: PlanEstimate,
+        input: Box<Plan>,
+        workers_planned: usize,
+        single_copy: bool,
+    },
     NestedLoopJoin {
         plan_info: PlanEstimate,
         left: Box<Plan>,
@@ -281,6 +339,7 @@ pub enum Plan {
         merge_clauses: Vec<Expr>,
         outer_merge_keys: Vec<Expr>,
         inner_merge_keys: Vec<Expr>,
+        merge_key_descending: Vec<bool>,
         join_qual: Vec<Expr>,
         qual: Vec<Expr>,
     },
@@ -322,11 +381,14 @@ pub enum Plan {
     Aggregate {
         plan_info: PlanEstimate,
         strategy: AggregateStrategy,
+        phase: AggregatePhase,
         disabled: bool,
         input: Box<Plan>,
         group_by: Vec<Expr>,
         passthrough_exprs: Vec<Expr>,
         accumulators: Vec<AggAccum>,
+        semantic_accumulators: Option<Vec<AggAccum>>,
+        semantic_output_names: Option<Vec<String>>,
         having: Option<Expr>,
         output_columns: Vec<QueryColumn>,
     },
@@ -401,6 +463,9 @@ impl Plan {
             | Plan::BitmapOr { plan_info, .. }
             | Plan::BitmapHeapScan { plan_info, .. }
             | Plan::Hash { plan_info, .. }
+            | Plan::Materialize { plan_info, .. }
+            | Plan::Memoize { plan_info, .. }
+            | Plan::Gather { plan_info, .. }
             | Plan::NestedLoopJoin { plan_info, .. }
             | Plan::HashJoin { plan_info, .. }
             | Plan::MergeJoin { plan_info, .. }
@@ -436,6 +501,9 @@ impl Plan {
             | Plan::BitmapOr { plan_info, .. }
             | Plan::BitmapHeapScan { plan_info, .. }
             | Plan::Hash { plan_info, .. }
+            | Plan::Materialize { plan_info, .. }
+            | Plan::Memoize { plan_info, .. }
+            | Plan::Gather { plan_info, .. }
             | Plan::NestedLoopJoin { plan_info, .. }
             | Plan::HashJoin { plan_info, .. }
             | Plan::MergeJoin { plan_info, .. }
@@ -499,7 +567,10 @@ impl Plan {
                     wire_type_oid: None,
                 })
                 .collect(),
-            Plan::Hash { input, .. } => input.columns(),
+            Plan::Hash { input, .. }
+            | Plan::Materialize { input, .. }
+            | Plan::Memoize { input, .. }
+            | Plan::Gather { input, .. } => input.columns(),
             Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
             | Plan::IncrementalSort { input, .. }

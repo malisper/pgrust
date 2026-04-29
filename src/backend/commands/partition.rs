@@ -9,11 +9,14 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::{
     BoundRelation, CatalogLookup, LoweredPartitionSpec, PartitionBoundSpec,
-    PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue,
+    PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue, SqlType,
     deserialize_partition_bound, partition_value_to_value, relation_partition_spec,
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
-use crate::include::catalog::{ANYOID, BOOTSTRAP_SUPERUSER_OID};
+use crate::include::catalog::{
+    ANYARRAYOID, ANYOID, BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL,
+    PgConstraintRow,
+};
 use crate::include::nodes::datum::Value;
 
 fn relation_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
@@ -301,6 +304,10 @@ fn child_partition_bound(child: &BoundRelation) -> Result<PartitionBoundSpec, Ex
         });
     };
     deserialize_partition_bound(bound).map_err(ExecError::Parse)
+}
+
+pub(crate) fn partition_relation_is_default(child: &BoundRelation) -> Result<bool, ExecError> {
+    Ok(child_partition_bound(child)?.is_default())
 }
 
 fn key_values(
@@ -618,6 +625,28 @@ fn partition_constraint_violation(
     }
 }
 
+fn attach_partition_constraint_violation(relation_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "partition constraint of relation \"{relation_name}\" is violated by some row"
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "23514",
+    }
+}
+
+fn default_partition_constraint_violation(relation_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "updated partition constraint for default partition \"{relation_name}\" would be violated by some row"
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "23514",
+    }
+}
+
 fn no_partition_for_row(relation_name: &str, detail: Option<String>) -> ExecError {
     ExecError::DetailedError {
         message: format!("no partition of relation \"{relation_name}\" found for row"),
@@ -748,18 +777,24 @@ fn hash_support_proc(
         .opclass_rows()
         .into_iter()
         .find(|row| row.oid == opclass_oid)?;
-    let key_type_oid =
-        crate::backend::utils::cache::catcache::sql_type_oid(*spec.key_types.get(key_index)?);
+    let key_type = *spec.key_types.get(key_index)?;
+    let key_type_oid = crate::backend::utils::cache::catcache::sql_type_oid(key_type);
     catalog
         .amproc_rows()
         .into_iter()
         .find(|row| {
             row.amprocfamily == opclass.opcfamily
                 && row.amprocnum == 2
-                && (row.amproclefttype == key_type_oid || row.amproclefttype == ANYOID)
-                && (row.amprocrighttype == key_type_oid || row.amprocrighttype == ANYOID)
+                && hash_amproc_type_matches(row.amproclefttype, key_type_oid, key_type)
+                && hash_amproc_type_matches(row.amprocrighttype, key_type_oid, key_type)
         })
         .map(|row| row.amproc)
+}
+
+fn hash_amproc_type_matches(proc_type_oid: u32, key_type_oid: u32, key_type: SqlType) -> bool {
+    proc_type_oid == key_type_oid
+        || proc_type_oid == ANYOID
+        || (key_type.is_array && proc_type_oid == ANYARRAYOID)
 }
 
 fn execute_partition_hash_support_proc(
@@ -1160,17 +1195,202 @@ fn format_range_bound_for_error(bound: &[PartitionRangeDatumValue]) -> String {
         .join(", ")
 }
 
-pub(crate) fn validate_partition_relation_compatibility(
+fn column_attnum_by_name(relation: &BoundRelation, column_name: &str) -> Option<i16> {
+    relation
+        .desc
+        .columns
+        .iter()
+        .enumerate()
+        .find_map(|(index, column)| {
+            (!column.dropped && column.name.eq_ignore_ascii_case(column_name))
+                .then_some(index.saturating_add(1) as i16)
+        })
+}
+
+fn column_name_for_attnum(relation: &BoundRelation, attnum: i16) -> Option<&str> {
+    relation
+        .desc
+        .columns
+        .get(attnum.saturating_sub(1) as usize)
+        .filter(|column| !column.dropped)
+        .map(|column| column.name.as_str())
+}
+
+fn not_null_constraint_for_attnum(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    attnum: i16,
+) -> Option<PgConstraintRow> {
+    catalog
+        .constraint_rows_for_relation(relation_oid)
+        .into_iter()
+        .find(|row| {
+            row.contype == CONSTRAINT_NOTNULL
+                && row
+                    .conkey
+                    .as_ref()
+                    .is_some_and(|keys| keys.contains(&attnum))
+        })
+}
+
+fn validate_attach_check_constraints(
     catalog: &dyn CatalogLookup,
     parent: &BoundRelation,
-    parent_name: &str,
     child: &BoundRelation,
     child_name: &str,
 ) -> Result<(), ExecError> {
+    let child_constraints = catalog
+        .constraint_rows_for_relation(child.relation_oid)
+        .into_iter()
+        .filter(|row| row.contype == CONSTRAINT_CHECK)
+        .collect::<Vec<_>>();
+    for parent_constraint in catalog
+        .constraint_rows_for_relation(parent.relation_oid)
+        .into_iter()
+        .filter(|row| row.contype == CONSTRAINT_CHECK && !row.connoinherit)
+    {
+        let Some(child_constraint) = child_constraints
+            .iter()
+            .find(|row| row.conname.eq_ignore_ascii_case(&parent_constraint.conname))
+        else {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "child table is missing constraint \"{}\"",
+                    parent_constraint.conname
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        };
+        if child_constraint.conbin != parent_constraint.conbin {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "child table \"{child_name}\" has different definition for check constraint \"{}\"",
+                    parent_constraint.conname
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+        validate_attach_constraint_merge_state(&parent_constraint, child_constraint, child_name)?;
+    }
+    Ok(())
+}
+
+fn validate_attach_not_null_constraints(
+    catalog: &dyn CatalogLookup,
+    parent: &BoundRelation,
+    child: &BoundRelation,
+    child_name: &str,
+) -> Result<(), ExecError> {
+    for parent_constraint in catalog
+        .constraint_rows_for_relation(parent.relation_oid)
+        .into_iter()
+        .filter(|row| row.contype == CONSTRAINT_NOTNULL && !row.connoinherit)
+    {
+        let Some(parent_attnum) = parent_constraint
+            .conkey
+            .as_ref()
+            .and_then(|keys| keys.first())
+            .copied()
+        else {
+            continue;
+        };
+        let Some(column_name) = column_name_for_attnum(parent, parent_attnum) else {
+            continue;
+        };
+        let Some(child_attnum) = column_attnum_by_name(child, column_name) else {
+            continue;
+        };
+        let Some(child_constraint) =
+            not_null_constraint_for_attnum(catalog, child.relation_oid, child_attnum)
+        else {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "column \"{column_name}\" in child table \"{child_name}\" must be marked NOT NULL"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        };
+        validate_attach_constraint_merge_state(&parent_constraint, &child_constraint, child_name)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_attach_partition_constraints(
+    catalog: &dyn CatalogLookup,
+    parent: &BoundRelation,
+    child: &BoundRelation,
+) -> Result<(), ExecError> {
+    let child_name = relation_name_for_oid(catalog, child.relation_oid);
+    validate_attach_check_constraints(catalog, parent, child, &child_name)?;
+    validate_attach_not_null_constraints(catalog, parent, child, &child_name)?;
+    Ok(())
+}
+
+fn validate_attach_constraint_merge_state(
+    parent_constraint: &PgConstraintRow,
+    child_constraint: &PgConstraintRow,
+    child_name: &str,
+) -> Result<(), ExecError> {
+    if child_constraint.connoinherit {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "constraint \"{}\" conflicts with non-inherited constraint on child table \"{child_name}\"",
+                child_constraint.conname
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
+    if parent_constraint.convalidated
+        && child_constraint.conenforced
+        && !child_constraint.convalidated
+    {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "constraint \"{}\" conflicts with NOT VALID constraint on child table \"{child_name}\"",
+                child_constraint.conname
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
+    if parent_constraint.conenforced && !child_constraint.conenforced {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "constraint \"{}\" conflicts with NOT ENFORCED constraint on child table \"{child_name}\"",
+                child_constraint.conname
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_partition_relation_compatibility(
+    catalog: &dyn CatalogLookup,
+    parent: &BoundRelation,
+    _parent_name: &str,
+    child: &BoundRelation,
+    _child_name: &str,
+) -> Result<(), ExecError> {
+    let parent_name = relation_name_for_oid(catalog, parent.relation_oid);
+    let child_name = relation_name_for_oid(catalog, child.relation_oid);
     if parent.relkind != 'p' || parent.partitioned_table.is_none() {
         return Err(ExecError::DetailedError {
-            message: format!("\"{parent_name}\" is not partitioned"),
-            detail: None,
+            message: format!(
+                "ALTER action ATTACH PARTITION cannot be performed on relation \"{parent_name}\""
+            ),
+            detail: Some("This operation is not supported for tables.".into()),
             hint: None,
             sqlstate: "42809",
         });
@@ -1183,14 +1403,48 @@ pub(crate) fn validate_partition_relation_compatibility(
             },
         ));
     }
-    if child.relpersistence != parent.relpersistence {
+    if child.relispartition {
         return Err(ExecError::DetailedError {
-            message: format!(
-                "partition \"{child_name}\" would have different persistence than partitioned table \"{parent_name}\""
-            ),
+            message: format!("\"{child_name}\" is already a partition"),
             detail: None,
             hint: None,
             sqlstate: "42P16",
+        });
+    }
+    if !catalog.inheritance_parents(child.relation_oid).is_empty() {
+        return Err(ExecError::DetailedError {
+            message: "cannot attach inheritance child as partition".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+    if child.relkind == 'r' && !catalog.inheritance_children(child.relation_oid).is_empty() {
+        return Err(ExecError::DetailedError {
+            message: "cannot attach inheritance parent as partition".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+    if child.relpersistence != parent.relpersistence {
+        let child_persistence = if child.relpersistence == 't' {
+            "temporary"
+        } else {
+            "permanent"
+        };
+        let parent_persistence = if parent.relpersistence == 't' {
+            "temporary"
+        } else {
+            "permanent"
+        };
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "cannot attach a {child_persistence} relation as partition of {parent_persistence} relation \"{parent_name}\""
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
         });
     }
     let parent_columns = parent
@@ -1205,64 +1459,59 @@ pub(crate) fn validate_partition_relation_compatibility(
         .iter()
         .filter(|column| !column.dropped)
         .collect::<Vec<_>>();
-    if parent_columns.len() != child_columns.len() {
+    for child_column in &child_columns {
+        if parent_columns
+            .iter()
+            .any(|column| column.name.eq_ignore_ascii_case(&child_column.name))
+        {
+            continue;
+        }
         return Err(ExecError::DetailedError {
             message: format!(
-                "partition \"{child_name}\" has different column count than partitioned table \"{parent_name}\""
+                "table \"{child_name}\" contains column \"{}\" not found in parent \"{parent_name}\"",
+                child_column.name
             ),
-            detail: None,
+            detail: Some(
+                "The new partition may contain only the columns present in parent.".into(),
+            ),
             hint: None,
-            sqlstate: "42P16",
+            sqlstate: "42804",
         });
     }
-    for parent_column in parent_columns {
+    for parent_column in &parent_columns {
         let Some(child_column) = child_columns
             .iter()
             .find(|column| column.name.eq_ignore_ascii_case(&parent_column.name))
         else {
             return Err(ExecError::DetailedError {
-                message: format!(
-                    "partition \"{child_name}\" has different column layout than partitioned table \"{parent_name}\""
-                ),
+                message: format!("child table is missing column \"{}\"", parent_column.name),
                 detail: None,
                 hint: None,
-                sqlstate: "42P16",
+                sqlstate: "42804",
             });
         };
         if parent_column.sql_type != child_column.sql_type {
             return Err(ExecError::DetailedError {
                 message: format!(
-                    "partition \"{child_name}\" has different column layout than partitioned table \"{parent_name}\""
+                    "child table \"{child_name}\" has different type for column \"{}\"",
+                    parent_column.name
                 ),
                 detail: None,
                 hint: None,
-                sqlstate: "42P16",
+                sqlstate: "42804",
             });
         }
-    }
-    if child.relispartition {
-        return Err(ExecError::DetailedError {
-            message: format!("table \"{child_name}\" is already a partition"),
-            detail: None,
-            hint: None,
-            sqlstate: "42P16",
-        });
-    }
-    if !catalog.inheritance_parents(child.relation_oid).is_empty() {
-        return Err(ExecError::DetailedError {
-            message: format!("table \"{child_name}\" is already a child of another relation"),
-            detail: None,
-            hint: None,
-            sqlstate: "42P16",
-        });
-    }
-    if child.relkind == 'r' && !catalog.inheritance_children(child.relation_oid).is_empty() {
-        return Err(ExecError::DetailedError {
-            message: format!("table \"{child_name}\" is already an inheritance parent"),
-            detail: None,
-            hint: None,
-            sqlstate: "42P16",
-        });
+        if parent_column.collation_oid != child_column.collation_oid {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "child table \"{child_name}\" has different collation for column \"{}\"",
+                    parent_column.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P21",
+            });
+        }
     }
     Ok(())
 }
@@ -1299,11 +1548,11 @@ pub(crate) fn validate_default_partition_rows_for_new_bound(
         for (_, row) in
             collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, ctx)?
         {
-            if candidate_row_matches_partition(catalog, parent, bound, &row, None, ctx)? {
-                return Err(partition_constraint_violation(
+            let parent_row =
+                remap_partition_row_to_parent_layout(&row, &relation.desc, &parent.desc)?;
+            if candidate_row_matches_partition(catalog, parent, bound, &parent_row, None, ctx)? {
+                return Err(default_partition_constraint_violation(
                     &relation_name_for_oid(catalog, relation_oid),
-                    &row,
-                    &ctx.datetime_config,
                 ));
             }
         }
@@ -1339,11 +1588,11 @@ pub(crate) fn validate_relation_rows_for_partition_bound(
         for (_, row) in
             collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, ctx)?
         {
-            if !candidate_row_matches_partition(catalog, parent, bound, &row, None, ctx)? {
-                return Err(partition_constraint_violation(
-                    &relation_name_for_oid(catalog, child.relation_oid),
-                    &row,
-                    &ctx.datetime_config,
+            let parent_row =
+                remap_partition_row_to_parent_layout(&row, &relation.desc, &parent.desc)?;
+            if !candidate_row_matches_partition(catalog, parent, bound, &parent_row, None, ctx)? {
+                return Err(attach_partition_constraint_violation(
+                    &relation_name_for_oid(catalog, relation_oid),
                 ));
             }
         }
@@ -1419,7 +1668,7 @@ pub(crate) fn exec_find_partition(
     }
 }
 
-fn remap_partition_row_to_child_layout(
+pub(crate) fn remap_partition_row_to_child_layout(
     row: &[Value],
     parent_desc: &RelationDesc,
     child_desc: &RelationDesc,
@@ -1465,7 +1714,7 @@ fn remap_partition_row_to_child_layout(
     Ok(child_row)
 }
 
-fn remap_partition_row_to_parent_layout(
+pub(crate) fn remap_partition_row_to_parent_layout(
     row: &[Value],
     child_desc: &RelationDesc,
     parent_desc: &RelationDesc,

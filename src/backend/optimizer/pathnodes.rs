@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo};
-use crate::include::nodes::plannodes::{AggregateStrategy, Plan, PlanEstimate};
+use crate::include::nodes::plannodes::{AggregatePhase, AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr,
     ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SubLinkType, TargetEntry, Var, WindowClause,
@@ -196,11 +196,12 @@ impl Path {
                 .collect(),
             Self::Aggregate {
                 slot_id,
+                phase,
                 group_by,
                 passthrough_exprs,
                 accumulators,
                 ..
-            } => aggregate_output_vars(*slot_id, group_by, passthrough_exprs, accumulators),
+            } => aggregate_output_vars(*slot_id, *phase, group_by, passthrough_exprs, accumulators),
             Self::WindowAgg {
                 slot_id,
                 output_columns,
@@ -352,7 +353,6 @@ impl Path {
     pub fn pathkeys(&self) -> Vec<PathKey> {
         match self {
             Self::Result { .. }
-            | Self::Append { .. }
             | Self::SeqScan { .. }
             | Self::BitmapIndexScan { .. }
             | Self::BitmapOr { .. }
@@ -364,6 +364,7 @@ impl Path {
             | Self::Values { .. }
             | Self::FunctionScan { .. }
             | Self::ProjectSet { .. } => Vec::new(),
+            Self::Append { pathkeys, .. } => pathkeys.clone(),
             Self::Aggregate {
                 strategy, pathkeys, ..
             } if *strategy == AggregateStrategy::Sorted => pathkeys.clone(),
@@ -758,6 +759,7 @@ fn window_semantic_output_target(input: &Path, clause: &WindowClause) -> PathTar
 
 pub(super) fn aggregate_output_vars(
     slot_id: usize,
+    phase: AggregatePhase,
     group_by: &[Expr],
     passthrough_exprs: &[Expr],
     accumulators: &[AggAccum],
@@ -775,10 +777,15 @@ pub(super) fn aggregate_output_vars(
         ));
     }
     for (index, accum) in accumulators.iter().enumerate() {
+        let sql_type = if phase == AggregatePhase::Partial {
+            SqlType::new(SqlTypeKind::Record)
+        } else {
+            accum.sql_type
+        };
         vars.push(slot_var(
             slot_id,
             user_attrno(group_by.len() + passthrough_exprs.len() + index),
-            accum.sql_type,
+            sql_type,
         ));
     }
     vars

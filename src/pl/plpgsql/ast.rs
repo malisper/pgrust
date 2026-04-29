@@ -46,9 +46,9 @@ pub enum Decl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RaiseLevel {
     Info,
+    Log,
     Notice,
     Warning,
-    Log,
     Exception,
 }
 
@@ -119,16 +119,21 @@ pub enum Stmt {
         source: ForQuerySource,
         body: Vec<Stmt>,
     },
+    ExitWhen {
+        condition: Option<String>,
+    },
     Raise {
         level: RaiseLevel,
         sqlstate: Option<String>,
         message: String,
         params: Vec<String>,
+        line: usize,
     },
     Assert {
         condition: String,
         message: Option<String>,
     },
+    Continue,
     Return {
         expr: Option<String>,
     },
@@ -147,6 +152,7 @@ pub enum Stmt {
         sql_expr: String,
         into_targets: Vec<AssignTarget>,
         using_exprs: Vec<String>,
+        line: usize,
     },
     GetDiagnostics {
         stacked: bool,

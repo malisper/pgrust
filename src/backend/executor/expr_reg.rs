@@ -5,8 +5,8 @@ use crate::backend::parser::{
 };
 use crate::include::catalog::{
     ACLITEM_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_TYPE_OID,
-    FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID,
-    INTERNAL_CHAR_TYPE_OID, NUMERIC_TYPE_OID, OID_TYPE_OID, REGCOLLATION_TYPE_OID,
+    FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
+    INT8_TYPE_OID, INTERNAL_CHAR_TYPE_OID, NUMERIC_TYPE_OID, OID_TYPE_OID, REGCOLLATION_TYPE_OID,
     REGOPER_TYPE_OID, REGOPERATOR_TYPE_OID, REGPROC_TYPE_OID, REGPROCEDURE_TYPE_OID, TEXT_TYPE_OID,
     TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, VARBIT_TYPE_OID,
     VARCHAR_TYPE_OID,
@@ -618,11 +618,8 @@ pub(crate) fn format_type_text(
         _ => catalog
             .type_by_oid(oid)
             .map(|row| {
-                if row.typelem != 0
-                    && row.typname.starts_with('_')
-                    && let Some(element) = catalog.type_by_oid(row.typelem)
-                {
-                    return format!("{}[]", quote_identifier_if_needed(&element.typname));
+                if row.typelem != 0 && row.typname.starts_with('_') {
+                    return format!("{}[]", format_type_text(row.typelem, None, catalog));
                 }
                 let name = quote_identifier_if_needed(&row.typname);
                 if let Some(typmod) = typmod
@@ -662,7 +659,9 @@ pub(crate) fn format_regproc_oid(oid: u32, catalog: &dyn CatalogLookup) -> Optio
     if oid == 0 {
         return Some("-".into());
     }
-    catalog.proc_row_by_oid(oid).map(|row| row.proname)
+    catalog
+        .proc_row_by_oid(oid)
+        .map(|row| quote_identifier_if_needed(&row.proname))
 }
 
 pub(crate) fn format_regproc_oid_optional(
@@ -1086,6 +1085,10 @@ mod tests {
         assert_eq!(
             format_type_text(INT4_TYPE_OID, None, &BOOTSTRAP_LOOKUP),
             "integer"
+        );
+        assert_eq!(
+            format_type_text(INT4_ARRAY_TYPE_OID, None, &BOOTSTRAP_LOOKUP),
+            "integer[]"
         );
         assert_eq!(
             format_type_text(NUMERIC_TYPE_OID, None, &BOOTSTRAP_LOOKUP),

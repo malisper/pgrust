@@ -17,24 +17,29 @@ use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::pg_depend::collect_sql_expr_column_names;
-use crate::backend::optimizer::{finalize_expr_subqueries, planner};
+use crate::backend::executor::value_io::format_failing_row_detail;
+use crate::backend::optimizer::{
+    finalize_expr_subqueries, planner, relation_may_satisfy_own_partition_bound,
+};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
     BoundAssignmentTargetIndirection, BoundDeleteStatement, BoundDeleteTarget,
     BoundExclusionConstraint, BoundForeignKeyConstraint, BoundIndexRelation, BoundInsertSource,
     BoundInsertStatement, BoundMergeAction, BoundMergeStatement, BoundMergeWhenClause,
     BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey, BoundRelation,
-    BoundRelationConstraints, BoundTemporalConstraint, BoundUpdateStatement, BoundUpdateTarget,
-    Catalog, CatalogLookup, CreateTableAsStatement, DomainConstraintLookupKind, DropTableStatement,
-    ExplainFormat, ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement,
-    OverridingKind, ParseError, SelectStatement, SqlType, SqlTypeKind, Statement,
-    TableAsObjectType, TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table,
+    BoundRelationConstraints, BoundRuleAction, BoundTemporalConstraint, BoundUpdateStatement,
+    BoundUpdateTarget, Catalog, CatalogLookup, CreateTableAsStatement, DeleteStatement,
+    DomainConstraintLookupKind, DropTableStatement, ExplainFormat, ExplainStatement,
+    ForeignKeyAction, MaintenanceTarget, MergeStatement, OverridingKind, ParseError, RuleEvent,
+    SelectStatement, SqlType, SqlTypeKind, Statement, TableAsObjectType, TruncateTableStatement,
+    UpdateStatement, VacuumStatement, bind_create_table, bind_delete,
     bind_expr_with_outer_and_ctes, bind_generated_expr, bind_referenced_by_foreign_keys,
-    bind_relation_constraints, bind_scalar_expr_in_scope, bind_update, parse_expr,
-    scope_for_relation,
+    bind_relation_constraints, bind_rule_action_statement, bind_scalar_expr_in_scope, bind_update,
+    parse_expr, scope_for_relation,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
+use crate::backend::rewrite::split_stored_rule_action_sql;
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
 use crate::backend::utils::time::instant::Instant;
@@ -45,12 +50,15 @@ use crate::pl::plpgsql::TriggerOperation;
 
 use super::copyto::{capture_copy_to_dml_notices, capture_copy_to_dml_returning_row};
 use super::explain::{
-    format_buffer_usage, format_explain_lines_with_costs, format_explain_lines_with_options,
-    format_explain_plan_with_subplans, format_verbose_explain_plan_json_with_catalog,
+    apply_runtime_pruning_for_explain_plan, format_buffer_usage,
+    format_explain_child_plan_with_subplans, format_explain_lines_with_costs,
+    format_explain_lines_with_options, format_explain_plan_with_subplans,
+    format_explain_plan_with_subplans_and_catalog, format_verbose_explain_plan_json_with_catalog,
     format_verbose_explain_plan_with_catalog, push_explain_line,
 };
 use super::partition::{
     exec_find_partition, exec_setup_partition_tuple_routing, partition_root_oid,
+    remap_partition_row_to_child_layout, remap_partition_row_to_parent_layout,
 };
 use super::trigger::RuntimeTriggers;
 use super::upsert::execute_insert_on_conflict_rows;
@@ -77,21 +85,22 @@ use crate::include::catalog::{
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GTSVECTOR_TYPE_OID, HASH_AM_OID,
     PG_AUTH_MEMBERS_RELATION_OID, PG_CATALOG_NAMESPACE_OID, PG_MAINTAIN_OID, PG_READ_ALL_DATA_OID,
     PG_TOAST_NAMESPACE_OID, PG_WRITE_ALL_DATA_OID, PUBLISH_GENCOLS_STORED, PgAmRow, PgOpclassRow,
-    PgPublicationRelRow, PgPublicationRow, SPGIST_AM_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
-    bootstrap_pg_am_rows, builtin_range_name_for_sql_type, multirange_type_ref_for_sql_type,
-    range_type_ref_for_sql_type,
+    PgPublicationRelRow, PgPublicationRow, RECORD_TYPE_OID, SPGIST_AM_OID, TEXT_TYPE_OID,
+    VARCHAR_TYPE_OID, bootstrap_pg_am_rows, builtin_range_name_for_sql_type,
+    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
 };
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
-use crate::include::nodes::parsenodes::{IndexColumnDef, RelOption};
+use crate::include::nodes::parsenodes::{FromItem, IndexColumnDef, RelOption, SqlExpr};
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    QueryColumn, RelationPrivilegeMask, RelationPrivilegeRequirement, TargetEntry,
-    expr_sql_type_hint,
+    BoolExpr, BoolExprType, OUTER_VAR, ParamKind, QueryColumn, RelationPrivilegeMask,
+    RelationPrivilegeRequirement, SubLinkType, TargetEntry, Var, attrno_index, expr_sql_type_hint,
+    user_attrno,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::database::commands::privilege::{
@@ -360,6 +369,9 @@ fn finalize_bound_delete(
             ..target
         })
         .collect();
+    if let Some(input_plan) = &mut stmt.input_plan {
+        input_plan.subplans = subplans.clone();
+    }
     stmt.subplans = subplans;
     stmt
 }
@@ -446,11 +458,15 @@ pub(crate) fn execute_explain(
     } = stmt;
     let statement = *statement;
     if let Statement::Update(update) = statement {
-        return execute_explain_update(update, analyze, costs, verbose, catalog);
+        return execute_explain_update(update, analyze, costs, verbose, catalog, ctx);
+    }
+    if let Statement::Delete(delete) = statement {
+        return execute_explain_delete(delete, analyze, costs, verbose, catalog, planner_config);
     }
 
     let explain_target = match statement {
         Statement::Select(select) => EitherExplainTarget::Select(select),
+        Statement::DeclareCursor(declare) => EitherExplainTarget::Select(declare.query),
         Statement::Insert(_) => {
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "EXPLAIN INSERT".into(),
@@ -469,7 +485,7 @@ pub(crate) fn execute_explain(
         }
         _ => {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "SELECT, UPDATE, or MERGE statement after EXPLAIN",
+                expected: "SELECT, UPDATE, MERGE, or DECLARE CURSOR statement after EXPLAIN",
                 actual: "unsupported statement".into(),
             }));
         }
@@ -511,9 +527,12 @@ pub(crate) fn execute_explain(
                         crate::include::nodes::parsenodes::CreateTableAsQuery::Select(query) => {
                             query
                         }
-                        crate::include::nodes::parsenodes::CreateTableAsQuery::Execute(name) => {
+                        crate::include::nodes::parsenodes::CreateTableAsQuery::Execute(execute) => {
                             return Err(ExecError::Parse(ParseError::DetailedError {
-                                message: format!("prepared statement \"{name}\" does not exist"),
+                                message: format!(
+                                    "prepared statement \"{}\" does not exist",
+                                    execute.name
+                                ),
                                 detail: None,
                                 hint: None,
                                 sqlstate: "26000",
@@ -588,7 +607,8 @@ pub(crate) fn execute_explain(
             lines.push(format!("Result Rows: {}", row_count));
         }
     } else {
-        let plan_tree = query_desc.planned_stmt.plan_tree;
+        let plan_tree =
+            apply_runtime_pruning_for_explain_plan(query_desc.planned_stmt.plan_tree, ctx);
         let subplans = query_desc.planned_stmt.subplans;
         if let Some(target_name) = merge_target_name {
             let state = executor_start(plan_tree);
@@ -611,7 +631,9 @@ pub(crate) fn execute_explain(
                     &plan_tree, &subplans, 0, costs, catalog, &mut lines,
                 );
             } else {
-                format_explain_plan_with_subplans(&plan_tree, &subplans, 0, costs, &mut lines);
+                format_explain_plan_with_subplans_and_catalog(
+                    &plan_tree, &subplans, 0, costs, catalog, &mut lines,
+                );
             }
         }
     }
@@ -711,14 +733,14 @@ fn execute_explain_update(
     costs: bool,
     verbose: bool,
     catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
-    if analyze {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "EXPLAIN ANALYZE UPDATE".into(),
-        )));
-    }
-
     let bound = finalize_bound_update_stmt(bind_update(&stmt, catalog)?, catalog);
+    if analyze {
+        let xid = ctx.ensure_write_xid()?;
+        let cid = ctx.next_command_id;
+        execute_update(bound.clone(), catalog, ctx, xid, cid)?;
+    }
     let lines = explain_update_lines(&stmt, &bound, costs, verbose);
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("QUERY PLAN")],
@@ -728,6 +750,653 @@ fn execute_explain_update(
             .map(|line| vec![Value::Text(line.into())])
             .collect(),
     })
+}
+
+fn execute_explain_delete(
+    stmt: DeleteStatement,
+    analyze: bool,
+    costs: bool,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+    _planner_config: PlannerConfig,
+) -> Result<StatementResult, ExecError> {
+    if analyze {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "EXPLAIN ANALYZE DELETE".into(),
+        )));
+    }
+
+    let bound = finalize_bound_delete_stmt(bind_delete(&stmt, catalog)?, catalog);
+    let lines = explain_delete_lines(&stmt, &bound, catalog, costs, verbose)?;
+    Ok(StatementResult::Query {
+        columns: vec![QueryColumn::text("QUERY PLAN")],
+        column_names: vec!["QUERY PLAN".into()],
+        rows: lines
+            .into_iter()
+            .map(|line| vec![Value::Text(line.into())])
+            .collect(),
+    })
+}
+
+#[derive(Clone)]
+struct ExplainRewriteRule {
+    is_instead: bool,
+    actions: Vec<BoundRuleAction>,
+}
+
+fn explain_delete_lines(
+    stmt: &DeleteStatement,
+    bound: &BoundDeleteStatement,
+    catalog: &dyn CatalogLookup,
+    show_costs: bool,
+    verbose: bool,
+) -> Result<Vec<String>, ExecError> {
+    let mut target_rules = Vec::with_capacity(bound.targets.len());
+    for target in &bound.targets {
+        target_rules.push((target, load_explain_delete_rules(target, catalog)?));
+    }
+    if target_rules.iter().any(|(_, rules)| !rules.is_empty()) {
+        return explain_delete_rule_lines(target_rules, show_costs, verbose, catalog);
+    }
+    Ok(explain_delete_base_lines(
+        stmt, bound, catalog, show_costs, verbose,
+    ))
+}
+
+fn explain_delete_rule_lines(
+    target_rules: Vec<(&BoundDeleteTarget, Vec<ExplainRewriteRule>)>,
+    show_costs: bool,
+    verbose: bool,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<String>, ExecError> {
+    let mut lines = Vec::new();
+    for (target, rules) in target_rules {
+        let mut saw_instead = false;
+        for rule in rules {
+            saw_instead |= rule.is_instead;
+            for action in rule.actions {
+                let BoundRuleAction::Delete(action) = action else {
+                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                        "EXPLAIN rule action".into(),
+                    )));
+                };
+                let action = finalize_bound_delete_stmt(action, catalog);
+                for action_target in &action.targets {
+                    if !lines.is_empty() {
+                        lines.push(String::new());
+                    }
+                    explain_rule_delete_action_lines(
+                        target,
+                        action_target,
+                        show_costs,
+                        verbose,
+                        &mut lines,
+                    );
+                }
+            }
+        }
+        if !saw_instead {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            explain_delete_target_lines(target, show_costs, verbose, &mut lines);
+        }
+    }
+    Ok(lines)
+}
+
+fn explain_delete_base_lines(
+    stmt: &DeleteStatement,
+    bound: &BoundDeleteStatement,
+    catalog: &dyn CatalogLookup,
+    show_costs: bool,
+    verbose: bool,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    push_explain_line(
+        &format!(
+            "Delete on {}",
+            explain_update_target_name(&stmt.table_name, verbose)
+        ),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        &mut lines,
+    );
+    if verbose && !bound.returning.is_empty() {
+        lines.push(format!(
+            "  Output: {}",
+            render_update_returning_targets(&stmt.table_name, &bound.returning)
+        ));
+    }
+    let child_targets = bound
+        .targets
+        .iter()
+        .filter(|target| {
+            target.relation_name != stmt.table_name && delete_target_can_match(target, catalog)
+        })
+        .collect::<Vec<_>>();
+    for (index, target) in child_targets.iter().enumerate() {
+        push_explain_line(
+            &format!(
+                "  Delete on {} {}_{}",
+                target.relation_name,
+                stmt.table_name.trim_matches('"'),
+                index + 1
+            ),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            &mut lines,
+        );
+    }
+    let live_targets = bound
+        .targets
+        .iter()
+        .filter(|target| delete_target_can_match(target, catalog))
+        .collect::<Vec<_>>();
+    let has_subplans = !bound.subplans.is_empty();
+    if has_subplans {
+        let lateral_subquery_alias = delete_explain_lateral_subquery_alias(stmt);
+        push_explain_line(
+            "  ->  Nested Loop Semi Join",
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            &mut lines,
+        );
+        push_delete_target_scan_lines(stmt, &live_targets, show_costs, 4, &mut lines);
+        push_explain_line(
+            "        ->  Materialize",
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            &mut lines,
+        );
+        if let Some(subplan) = bound.subplans.first() {
+            let subplan = delete_explain_subplan_without_target_filter(subplan);
+            let subplan =
+                wrap_delete_explain_lateral_subquery(subplan.clone(), lateral_subquery_alias);
+            format_explain_child_plan_with_subplans(
+                &subplan,
+                &bound.subplans,
+                3,
+                show_costs,
+                &mut lines,
+            );
+        }
+    } else {
+        push_delete_target_scan_lines(stmt, &live_targets, show_costs, 2, &mut lines);
+    }
+    lines
+}
+
+fn load_explain_delete_rules(
+    target: &BoundDeleteTarget,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<ExplainRewriteRule>, ExecError> {
+    catalog
+        .rewrite_rows_for_relation(target.relation_oid)
+        .into_iter()
+        .filter(|row| {
+            row.rulename != "_RETURN" && row.ev_type == rule_event_code(RuleEvent::Delete)
+        })
+        .map(|row| {
+            let mut actions = Vec::new();
+            for sql in split_stored_rule_action_sql(&row.ev_action) {
+                let statement = crate::backend::parser::parse_statement(sql)?;
+                actions.push(bind_rule_action_statement(
+                    &statement,
+                    &target.desc,
+                    catalog,
+                )?);
+            }
+            Ok(ExplainRewriteRule {
+                is_instead: row.is_instead,
+                actions,
+            })
+        })
+        .collect::<Result<Vec<_>, ParseError>>()
+        .map_err(ExecError::Parse)
+}
+
+fn rule_event_code(event: RuleEvent) -> char {
+    match event {
+        RuleEvent::Select => '1',
+        RuleEvent::Update => '2',
+        RuleEvent::Insert => '3',
+        RuleEvent::Delete => '4',
+    }
+}
+
+fn explain_delete_target_lines(
+    target: &BoundDeleteTarget,
+    show_costs: bool,
+    verbose: bool,
+    lines: &mut Vec<String>,
+) {
+    push_explain_line(
+        &format!(
+            "Delete on {}",
+            explain_update_target_name(&target.relation_name, verbose)
+        ),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    push_delete_single_target_scan(target, None, show_costs, 2, lines);
+}
+
+fn explain_rule_delete_action_lines(
+    event_target: &BoundDeleteTarget,
+    action_target: &BoundDeleteTarget,
+    show_costs: bool,
+    verbose: bool,
+    lines: &mut Vec<String>,
+) {
+    push_explain_line(
+        &format!(
+            "Delete on {}",
+            explain_update_target_name(&action_target.relation_name, verbose)
+        ),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    push_explain_line(
+        "  ->  Nested Loop",
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    push_delete_single_target_scan(event_target, None, show_costs, 8, lines);
+    let action_filter = action_target
+        .predicate
+        .as_ref()
+        .map(|expr| substitute_old_constants_for_explain(expr, event_target))
+        .and_then(|expr| delete_target_filter_expr(&expr));
+    push_delete_single_target_scan_with_filter(
+        action_target,
+        None,
+        action_filter.as_ref(),
+        show_costs,
+        8,
+        lines,
+    );
+}
+
+fn delete_explain_subplan_without_target_filter(plan: &Plan) -> &Plan {
+    match plan {
+        Plan::Projection { input, .. } => delete_explain_subplan_without_target_filter(input),
+        Plan::Filter {
+            input, predicate, ..
+        } if is_delete_explain_target_param_filter(predicate)
+            || matches!(input.as_ref(), Plan::NestedLoopJoin { .. }) =>
+        {
+            input
+        }
+        _ => plan,
+    }
+}
+
+fn is_delete_explain_target_param_filter(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::IsNull(inner)
+            if matches!(
+                inner.as_ref(),
+                Expr::Param(param) if matches!(param.paramkind, ParamKind::Exec)
+            )
+    )
+}
+
+fn wrap_delete_explain_lateral_subquery(plan: Plan, alias: Option<String>) -> Plan {
+    let Some(alias) = alias else {
+        return plan;
+    };
+
+    match plan {
+        Plan::NestedLoopJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            nest_params,
+            join_qual,
+            qual,
+        } if !matches!(right.as_ref(), Plan::SubqueryScan { .. }) => {
+            let subquery_plan_info = right.plan_info();
+            let output_columns = right.columns();
+            Plan::NestedLoopJoin {
+                plan_info,
+                left,
+                right: Box::new(Plan::SubqueryScan {
+                    plan_info: subquery_plan_info,
+                    input: right,
+                    scan_name: Some(alias),
+                    filter: None,
+                    output_columns,
+                }),
+                kind,
+                nest_params,
+                join_qual,
+                qual,
+            }
+        }
+        other => other,
+    }
+}
+
+fn delete_explain_lateral_subquery_alias(stmt: &DeleteStatement) -> Option<String> {
+    stmt.where_clause
+        .as_ref()
+        .and_then(first_lateral_derived_table_alias_in_expr)
+        .map(str::to_owned)
+}
+
+fn first_lateral_derived_table_alias_in_expr(expr: &SqlExpr) -> Option<&str> {
+    match expr {
+        SqlExpr::Exists(select)
+        | SqlExpr::ScalarSubquery(select)
+        | SqlExpr::ArraySubquery(select) => first_lateral_derived_table_alias_in_select(select),
+        SqlExpr::InSubquery { expr, subquery, .. } => {
+            first_lateral_derived_table_alias_in_expr(expr)
+                .or_else(|| first_lateral_derived_table_alias_in_select(subquery))
+        }
+        SqlExpr::QuantifiedSubquery { left, subquery, .. } => {
+            first_lateral_derived_table_alias_in_expr(left)
+                .or_else(|| first_lateral_derived_table_alias_in_select(subquery))
+        }
+        SqlExpr::And(left, right) | SqlExpr::Or(left, right) => {
+            first_lateral_derived_table_alias_in_expr(left)
+                .or_else(|| first_lateral_derived_table_alias_in_expr(right))
+        }
+        SqlExpr::Not(expr)
+        | SqlExpr::IsNull(expr)
+        | SqlExpr::IsNotNull(expr)
+        | SqlExpr::UnaryPlus(expr)
+        | SqlExpr::Negate(expr)
+        | SqlExpr::BitNot(expr)
+        | SqlExpr::PrefixOperator { expr, .. }
+        | SqlExpr::Cast(expr, _)
+        | SqlExpr::Collate { expr, .. } => first_lateral_derived_table_alias_in_expr(expr),
+        _ => None,
+    }
+}
+
+fn first_lateral_derived_table_alias_in_select(select: &SelectStatement) -> Option<&str> {
+    select
+        .from
+        .as_ref()
+        .and_then(first_lateral_derived_table_alias_in_from_item)
+        .or_else(|| {
+            select
+                .where_clause
+                .as_ref()
+                .and_then(first_lateral_derived_table_alias_in_expr)
+        })
+}
+
+fn first_lateral_derived_table_alias_in_from_item(item: &FromItem) -> Option<&str> {
+    match item {
+        FromItem::Alias { source, alias, .. }
+            if matches!(source.as_ref(), FromItem::DerivedTable(_))
+                || from_item_is_lateral_derived_table(source.as_ref()) =>
+        {
+            Some(alias)
+        }
+        FromItem::Alias { source, .. }
+        | FromItem::Lateral(source)
+        | FromItem::TableSample { source, .. } => {
+            first_lateral_derived_table_alias_in_from_item(source)
+        }
+        FromItem::Join { left, right, .. } => first_lateral_derived_table_alias_in_from_item(left)
+            .or_else(|| first_lateral_derived_table_alias_in_from_item(right)),
+        FromItem::DerivedTable(select) => first_lateral_derived_table_alias_in_select(select),
+        FromItem::Table { .. }
+        | FromItem::Values { .. }
+        | FromItem::RowsFrom { .. }
+        | FromItem::FunctionCall { .. }
+        | FromItem::JsonTable(_)
+        | FromItem::XmlTable(_) => None,
+    }
+}
+
+fn from_item_is_lateral_derived_table(item: &FromItem) -> bool {
+    match item {
+        FromItem::Lateral(source) => {
+            matches!(source.as_ref(), FromItem::DerivedTable(_))
+                || from_item_is_lateral_derived_table(source)
+        }
+        FromItem::TableSample { source, .. } | FromItem::Alias { source, .. } => {
+            from_item_is_lateral_derived_table(source)
+        }
+        _ => false,
+    }
+}
+
+fn delete_target_can_match(target: &BoundDeleteTarget, catalog: &dyn CatalogLookup) -> bool {
+    if is_const_false(target.predicate.as_ref()) {
+        return false;
+    }
+    let filter = target
+        .predicate
+        .as_ref()
+        .and_then(delete_target_filter_expr);
+    relation_may_satisfy_own_partition_bound(catalog, target.relation_oid, filter.as_ref())
+}
+
+fn push_delete_target_scan_lines(
+    stmt: &DeleteStatement,
+    targets: &[&BoundDeleteTarget],
+    show_costs: bool,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
+    if targets.is_empty() {
+        push_explain_line(
+            &format!("{}->  Result", " ".repeat(indent)),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            lines,
+        );
+        lines.push(format!("{}One-Time Filter: false", " ".repeat(indent + 6)));
+        return;
+    }
+
+    if targets.len() > 1 {
+        push_explain_line(
+            &format!("{}->  Append", " ".repeat(indent)),
+            crate::include::nodes::plannodes::PlanEstimate::default(),
+            show_costs,
+            lines,
+        );
+        for (index, target) in targets.iter().enumerate() {
+            let alias = target
+                .relation_name
+                .ne(&stmt.table_name)
+                .then(|| format!("{}_{}", stmt.table_name.trim_matches('"'), index + 1));
+            push_delete_single_target_scan(target, alias.as_deref(), show_costs, indent + 6, lines);
+        }
+    } else {
+        let alias = targets[0]
+            .relation_name
+            .ne(&stmt.table_name)
+            .then(|| format!("{}_1", stmt.table_name.trim_matches('"')));
+        push_delete_single_target_scan(targets[0], alias.as_deref(), show_costs, indent, lines);
+    }
+}
+
+fn push_delete_single_target_scan(
+    target: &BoundDeleteTarget,
+    alias: Option<&str>,
+    show_costs: bool,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
+    push_explain_line(
+        &format!(
+            "{}->  {}",
+            " ".repeat(indent),
+            explain_delete_scan_label(target, alias)
+        ),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    let filter = target
+        .predicate
+        .as_ref()
+        .and_then(delete_target_filter_expr);
+    push_delete_scan_detail_lines(target, filter.as_ref(), indent, lines);
+}
+
+fn push_delete_single_target_scan_with_filter(
+    target: &BoundDeleteTarget,
+    alias: Option<&str>,
+    filter: Option<&Expr>,
+    show_costs: bool,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
+    push_explain_line(
+        &format!(
+            "{}->  {}",
+            " ".repeat(indent),
+            explain_delete_scan_label(target, alias)
+        ),
+        crate::include::nodes::plannodes::PlanEstimate::default(),
+        show_costs,
+        lines,
+    );
+    push_delete_scan_detail_lines(target, filter, indent, lines);
+}
+
+fn push_delete_scan_detail_lines(
+    target: &BoundDeleteTarget,
+    filter: Option<&Expr>,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
+    let detail_prefix = " ".repeat(indent + 6);
+    if let Some(index_cond) = explain_delete_index_cond(target) {
+        lines.push(format!("{detail_prefix}Index Cond: {index_cond}"));
+    } else if let Some(predicate) = filter {
+        let column_names = target
+            .desc
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        lines.push(format!(
+            "{detail_prefix}Filter: {}",
+            crate::backend::executor::render_explain_expr(predicate, &column_names)
+        ));
+    }
+}
+
+fn explain_delete_index_cond(target: &BoundDeleteTarget) -> Option<String> {
+    let BoundModifyRowSource::Index { index, keys } = &target.row_source else {
+        return None;
+    };
+    let rendered = keys
+        .iter()
+        .filter_map(|key| {
+            let index_attno = usize::try_from(key.attribute_number).ok()?.checked_sub(1)?;
+            let heap_attno = usize::try_from(*index.index_meta.indkey.get(index_attno)?)
+                .ok()?
+                .checked_sub(1)?;
+            let column_name = target.desc.columns.get(heap_attno)?.name.clone();
+            Some(format!(
+                "({column_name} {} {})",
+                explain_strategy_operator(key.strategy),
+                render_explain_index_value(&key.argument)
+            ))
+        })
+        .collect::<Vec<_>>();
+    format_explain_index_quals(rendered)
+}
+
+fn substitute_old_constants_for_explain(expr: &Expr, event_target: &BoundDeleteTarget) -> Expr {
+    match expr {
+        Expr::Var(var) if var.varno == OUTER_VAR => {
+            explain_delete_target_constant(event_target, var.varattno)
+                .map(Expr::Const)
+                .unwrap_or_else(|| expr.clone())
+        }
+        Expr::Op(op) => {
+            let mut op = (**op).clone();
+            op.args = op
+                .args
+                .iter()
+                .map(|arg| substitute_old_constants_for_explain(arg, event_target))
+                .collect();
+            Expr::Op(Box::new(op))
+        }
+        Expr::Bool(bool_expr) => {
+            let mut bool_expr = (**bool_expr).clone();
+            bool_expr.args = bool_expr
+                .args
+                .iter()
+                .map(|arg| substitute_old_constants_for_explain(arg, event_target))
+                .collect();
+            Expr::Bool(Box::new(bool_expr))
+        }
+        Expr::Cast(inner, ty) => Expr::Cast(
+            Box::new(substitute_old_constants_for_explain(inner, event_target)),
+            *ty,
+        ),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(substitute_old_constants_for_explain(expr, event_target)),
+            collation_oid: *collation_oid,
+        },
+        _ => expr.clone(),
+    }
+}
+
+fn explain_delete_target_constant(target: &BoundDeleteTarget, attno: i32) -> Option<Value> {
+    let column_index = attrno_index(attno)?;
+    match &target.row_source {
+        BoundModifyRowSource::Index { index, keys } => keys.iter().find_map(|key| {
+            let index_attno = usize::try_from(key.attribute_number).ok()?.checked_sub(1)?;
+            let heap_attno = usize::try_from(*index.index_meta.indkey.get(index_attno)?)
+                .ok()?
+                .checked_sub(1)?;
+            (heap_attno == column_index).then(|| key.argument.clone())
+        }),
+        BoundModifyRowSource::Heap => None,
+    }
+}
+
+fn delete_target_filter_expr(expr: &Expr) -> Option<Expr> {
+    match expr {
+        Expr::SubPlan(subplan) if matches!(subplan.sublink_type, SubLinkType::ExistsSubLink) => {
+            // :HACK: EXPLAIN DELETE currently displays from bound DELETE targets
+            // rather than a full ModifyTable plan.  Correlated EXISTS filters
+            // such as `WHERE target.c IS NULL` are represented as one subplan
+            // argument plus a `$0 IS NULL` filter in the subplan.  Recover the
+            // target-side filter for partition pruning and scan display.
+            match subplan.args.as_slice() {
+                [arg] => Some(Expr::IsNull(Box::new(arg.clone()))),
+                _ => None,
+            }
+        }
+        Expr::Bool(bool_expr) if matches!(bool_expr.boolop, BoolExprType::And) => {
+            let args = bool_expr
+                .args
+                .iter()
+                .filter_map(delete_target_filter_expr)
+                .collect::<Vec<_>>();
+            match args.as_slice() {
+                [] => None,
+                [single] => Some(single.clone()),
+                _ => Some(Expr::Bool(Box::new(BoolExpr {
+                    boolop: BoolExprType::And,
+                    args,
+                }))),
+            }
+        }
+        other => Some(other.clone()),
+    }
 }
 
 fn explain_update_lines(
@@ -776,13 +1445,13 @@ fn explain_update_lines(
         if let Some(alias) = &alias {
             lines.push(format!("  Update on {} {}", target.relation_name, alias));
         }
-        push_explain_line(
-            "  ->  Result",
-            crate::include::nodes::plannodes::PlanEstimate::default(),
-            show_costs,
-            &mut lines,
-        );
         if is_const_false(target.predicate.as_ref()) {
+            push_explain_line(
+                "  ->  Result",
+                crate::include::nodes::plannodes::PlanEstimate::default(),
+                show_costs,
+                &mut lines,
+            );
             if verbose {
                 lines.push(format!(
                     "        Output: {}",
@@ -794,7 +1463,7 @@ fn explain_update_lines(
         }
         push_explain_line(
             &format!(
-                "        ->  {}",
+                "  ->  {}",
                 explain_update_scan_label(target, alias.as_deref())
             ),
             crate::include::nodes::plannodes::PlanEstimate::default(),
@@ -802,10 +1471,10 @@ fn explain_update_lines(
             &mut lines,
         );
         if let Some(index_cond) = explain_update_index_cond(target) {
-            lines.push(format!("              Index Cond: {index_cond}"));
+            lines.push(format!("        Index Cond: {index_cond}"));
         } else if let Some(predicate) = &target.predicate {
             lines.push(format!(
-                "              Filter: {}",
+                "        Filter: {}",
                 crate::backend::executor::render_explain_expr(
                     predicate,
                     &target
@@ -833,6 +1502,23 @@ fn explain_update_scan_target<'a>(
     base_name: &str,
     targets: &'a [BoundUpdateTarget],
 ) -> Option<&'a BoundUpdateTarget> {
+    targets
+        .iter()
+        .find(|target| {
+            target.relation_name != base_name && !is_const_false(target.predicate.as_ref())
+        })
+        .or_else(|| {
+            targets
+                .iter()
+                .find(|target| !is_const_false(target.predicate.as_ref()))
+        })
+        .or_else(|| targets.first())
+}
+
+fn explain_delete_scan_target<'a>(
+    base_name: &str,
+    targets: &'a [BoundDeleteTarget],
+) -> Option<&'a BoundDeleteTarget> {
     targets
         .iter()
         .find(|target| {
@@ -904,6 +1590,25 @@ fn explain_update_scan_label(target: &BoundUpdateTarget, alias: Option<&str>) ->
     }
 }
 
+fn explain_delete_scan_label(target: &BoundDeleteTarget, alias: Option<&str>) -> String {
+    match &target.row_source {
+        BoundModifyRowSource::Heap => match alias {
+            Some(alias) => format!("Seq Scan on {} {alias}", target.relation_name),
+            None => format!("Seq Scan on {}", target.relation_name),
+        },
+        BoundModifyRowSource::Index { index, .. } => match alias {
+            Some(alias) => format!(
+                "Index Scan using {} on {} {alias}",
+                index.name, target.relation_name
+            ),
+            None => format!(
+                "Index Scan using {} on {}",
+                index.name, target.relation_name
+            ),
+        },
+    }
+}
+
 fn explain_update_index_cond(target: &BoundUpdateTarget) -> Option<String> {
     let BoundModifyRowSource::Index { index, keys } = &target.row_source else {
         return None;
@@ -923,11 +1628,24 @@ fn explain_update_index_cond(target: &BoundUpdateTarget) -> Option<String> {
             ))
         })
         .collect::<Vec<_>>();
-    (!rendered.is_empty()).then(|| format!("({})", rendered.join(" AND ")))
+    format_explain_index_quals(rendered)
+}
+
+fn format_explain_index_quals(rendered: Vec<String>) -> Option<String> {
+    match rendered.as_slice() {
+        [] => None,
+        [single] => Some(single.clone()),
+        _ => Some(format!("({})", rendered.join(" AND "))),
+    }
 }
 
 fn render_explain_index_value(value: &Value) -> String {
-    crate::backend::executor::render_explain_expr(&Expr::Const(value.clone()), &[])
+    let rendered = crate::backend::executor::render_explain_expr(&Expr::Const(value.clone()), &[]);
+    rendered
+        .strip_prefix('(')
+        .and_then(|inner| inner.strip_suffix(')'))
+        .unwrap_or(&rendered)
+        .to_string()
 }
 
 fn explain_strategy_operator(strategy: u16) -> &'static str {
@@ -1727,7 +2445,7 @@ pub(crate) fn index_key_values_for_row(
                 })
             })?;
             let mut index_meta = index.index_meta.clone();
-            fallback_exprs = crate::backend::parser::relation_get_index_expressions(
+            fallback_exprs = crate::backend::parser::RelationGetIndexExpressions(
                 &mut index_meta,
                 heap_desc,
                 catalog,
@@ -1940,6 +2658,7 @@ pub(crate) fn rollback_inserted_row(
 
 struct PartitionUpdateDestination {
     relation_info: PartitionResultRelInfo,
+    parent_values: Vec<Value>,
     values: Vec<Value>,
 }
 
@@ -1947,6 +2666,7 @@ fn route_updated_partition_row(
     catalog: &dyn CatalogLookup,
     relation_name: &str,
     relation_oid: u32,
+    partition_update_root_oid: Option<u32>,
     relation_constraints: &BoundRelationConstraints,
     indexes: &[BoundIndexRelation],
     toast_index: Option<&BoundIndexRelation>,
@@ -1959,21 +2679,26 @@ fn route_updated_partition_row(
     if !current_relation.relispartition {
         return Ok(None);
     }
-    let root_oid = partition_root_oid(catalog, relation_oid)?.unwrap_or(relation_oid);
+    let Some(root_oid) = partition_update_root_oid else {
+        let mut proute = exec_setup_partition_tuple_routing(catalog, &current_relation)?;
+        exec_find_partition(catalog, &mut proute, &current_relation, current_values, ctx)?;
+        return Ok(None);
+    };
     let Some(root_relation) = catalog.relation_by_oid(root_oid) else {
         return Ok(None);
     };
-    let Some(root_values) =
-        remap_child_row_to_parent(current_values, &current_relation.desc, &root_relation.desc)
-    else {
-        return Ok(None);
-    };
+    let root_values = remap_partition_row_to_parent_layout(
+        current_values,
+        &current_relation.desc,
+        &root_relation.desc,
+    )?;
     let mut proute = exec_setup_partition_tuple_routing(catalog, &root_relation)?;
     let routed = exec_find_partition(catalog, &mut proute, &root_relation, &root_values, ctx)?;
     if routed.relation_oid == relation_oid {
         return Ok(None);
     }
-    let routed_values = remap_partition_row(&root_values, &root_relation.desc, &routed.desc)?;
+    let routed_values =
+        remap_partition_row_to_child_layout(&root_values, &root_relation.desc, &routed.desc)?;
     let relation_info = PartitionResultRelInfo::new(
         catalog,
         relation_name,
@@ -1985,8 +2710,61 @@ fn route_updated_partition_row(
     )?;
     Ok(Some(PartitionUpdateDestination {
         relation_info,
+        parent_values: root_values,
         values: routed_values,
     }))
+}
+
+fn enforce_direct_partition_update_constraint(
+    relation_oid: u32,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let Some(catalog) = ctx.catalog.clone() else {
+        return Ok(());
+    };
+    let Some(target) = catalog.relation_by_oid(relation_oid) else {
+        return Ok(());
+    };
+    if !target.relispartition {
+        return Ok(());
+    }
+    let mut proute = exec_setup_partition_tuple_routing(catalog.as_ref(), &target)?;
+    exec_find_partition(catalog.as_ref(), &mut proute, &target, values, ctx)?;
+    Ok(())
+}
+
+fn remap_root_partition_update_error_detail(
+    err: ExecError,
+    allow_partition_routing: bool,
+    relation_oid: u32,
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> ExecError {
+    if !allow_partition_routing {
+        return err;
+    }
+    let Some(catalog) = ctx.catalog.as_deref() else {
+        return err;
+    };
+    let Some(current_relation) = catalog.relation_by_oid(relation_oid) else {
+        return err;
+    };
+    if !current_relation.relispartition {
+        return err;
+    }
+    let Ok(Some(root_oid)) = partition_root_oid(catalog, relation_oid) else {
+        return err;
+    };
+    let Some(root_relation) = catalog.relation_by_oid(root_oid) else {
+        return err;
+    };
+    let Ok(root_values) =
+        remap_partition_row_to_parent_layout(values, &current_relation.desc, &root_relation.desc)
+    else {
+        return err;
+    };
+    remap_routed_insert_error_detail(err, &root_values, ctx)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2034,7 +2812,8 @@ fn move_updated_row_to_partition(
         ctx,
         xid,
         cid,
-    )?;
+    )
+    .map_err(|err| remap_routed_insert_error_detail(err, &destination.parent_values, ctx))?;
     maintain_indexes_for_row(
         destination.relation_info.relation.rel,
         &destination.relation_info.relation.desc,
@@ -2149,6 +2928,8 @@ pub(crate) fn write_updated_row(
     relation_name: &str,
     rel: crate::backend::storage::smgr::RelFileLocator,
     relation_oid: u32,
+    partition_update_root_oid: Option<u32>,
+    allow_partition_routing: bool,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
     desc: &RelationDesc,
@@ -2199,10 +2980,12 @@ pub(crate) fn write_updated_row(
         ctx,
     )?;
     if let Some(catalog) = ctx.catalog.clone()
+        && allow_partition_routing
         && let Some(destination) = route_updated_partition_row(
             catalog.as_ref(),
             relation_name,
             relation_oid,
+            partition_update_root_oid,
             relation_constraints,
             indexes,
             toast_index,
@@ -2226,13 +3009,25 @@ pub(crate) fn write_updated_row(
             waiter,
         );
     }
-    crate::backend::executor::enforce_relation_constraints(
+    if !allow_partition_routing {
+        enforce_direct_partition_update_constraint(relation_oid, &current_values, ctx)?;
+    }
+    let constraint_result = crate::backend::executor::enforce_relation_constraints(
         relation_name,
         desc,
         relation_constraints,
         &current_values,
         ctx,
-    )?;
+    );
+    if let Err(err) = constraint_result {
+        return Err(remap_root_partition_update_error_detail(
+            err,
+            allow_partition_routing,
+            relation_oid,
+            &current_values,
+            ctx,
+        ));
+    }
     enforce_temporal_constraints_for_write(
         relation_name,
         rel,
@@ -2758,6 +3553,8 @@ fn eval_exclusion_operator(proc_oid: u32, left: &Value, right: &Value) -> Result
             &[left.clone(), right.clone()],
             None,
             false,
+            None,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         )
     {
         return result;
@@ -3029,7 +3826,7 @@ fn constraint_columns(
         .collect()
 }
 
-fn collect_matching_rows_index(
+pub(crate) fn collect_matching_rows_index(
     rel: crate::backend::storage::smgr::RelFileLocator,
     desc: &RelationDesc,
     toast: Option<ToastRelationRef>,
@@ -3152,15 +3949,13 @@ fn key_columns_changed(previous_values: &[Value], values: &[Value], indexes: &[u
     indexes.iter().any(|index| {
         let previous = previous_values.get(*index).unwrap_or(&Value::Null);
         let current = values.get(*index).unwrap_or(&Value::Null);
-        compare_order_values(previous, current, None, None, false)
-            .expect("foreign-key key comparisons use implicit default collation")
-            != std::cmp::Ordering::Equal
+        previous != current
     })
 }
 
-fn relation_write_state_for_foreign_key(
-    constraint: &BoundReferencedByForeignKey,
-    ctx: &ExecutorContext,
+fn relation_write_state_for_relation(
+    relation: &BoundRelation,
+    catalog: &dyn CatalogLookup,
 ) -> Result<
     (
         BoundRelationConstraints,
@@ -3170,19 +3965,10 @@ fn relation_write_state_for_foreign_key(
     ),
     ExecError,
 > {
-    let catalog = ctx
-        .catalog
-        .as_deref()
-        .ok_or_else(|| ExecError::DetailedError {
-            message: "foreign key action failed".into(),
-            detail: Some("executor context missing visible catalog".into()),
-            hint: None,
-            sqlstate: "XX000",
-        })?;
     let constraints = BoundRelationConstraints {
-        relation_oid: Some(constraint.child_relation_oid),
-        not_nulls: constraint
-            .child_desc
+        relation_oid: Some(relation.relation_oid),
+        not_nulls: relation
+            .desc
             .columns
             .iter()
             .enumerate()
@@ -3203,38 +3989,50 @@ fn relation_write_state_for_foreign_key(
         temporal: Vec::new(),
         exclusions: Vec::new(),
     };
-    let referenced_by = bind_referenced_by_foreign_keys(
-        constraint.child_relation_oid,
-        &constraint.child_desc,
-        catalog,
-    )
-    .map_err(ExecError::Parse)?;
+    let referenced_by =
+        bind_referenced_by_foreign_keys(relation.relation_oid, &relation.desc, catalog)
+            .map_err(ExecError::Parse)?;
     Ok((
         constraints,
         referenced_by,
-        catalog.index_relations_for_heap(constraint.child_relation_oid),
-        first_toast_index(catalog, constraint.child_toast),
+        catalog.index_relations_for_heap(relation.relation_oid),
+        first_toast_index(catalog, relation.toast),
     ))
+}
+
+#[derive(Clone)]
+struct ReferencingRow {
+    relation: BoundRelation,
+    child_column_indexes: Vec<usize>,
+    on_delete_set_column_indexes: Option<Vec<usize>>,
+    tid: ItemPointerData,
+    values: Vec<Value>,
 }
 
 fn collect_referencing_rows(
     constraint: &BoundReferencedByForeignKey,
     key_values: &[Value],
+    catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
-) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
+) -> Result<Vec<ReferencingRow>, ExecError> {
     if key_values.iter().any(|value| matches!(value, Value::Null)) {
         return Ok(Vec::new());
     }
     let original_snapshot = ctx.snapshot.clone();
     ctx.snapshot.current_cid = CommandId::MAX;
-    let partitioned_catalog = ctx.catalog.as_ref().and_then(|catalog| {
-        catalog
-            .relation_by_oid(constraint.child_relation_oid)
-            .is_some_and(|relation| relation.relkind == 'p')
-            .then(|| catalog.clone())
-    });
-    let result = if let Some(catalog) = partitioned_catalog {
-        partitioned_referencing_rows(constraint, key_values, catalog.as_ref(), ctx)
+    let child_relation = catalog
+        .relation_by_oid(constraint.child_relation_oid)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "foreign key action failed".into(),
+            detail: Some(format!(
+                "missing relation for foreign key action target {}",
+                constraint.child_relation_oid
+            )),
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    let result = if child_relation.relkind == 'p' {
+        partitioned_referencing_rows(constraint, key_values, catalog, ctx)
     } else if let Some(index) = &constraint.child_index {
         collect_matching_rows_index(
             constraint.child_rel,
@@ -3245,6 +4043,17 @@ fn collect_referencing_rows(
             None,
             ctx,
         )
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(tid, values)| ReferencingRow {
+                    relation: child_relation.clone(),
+                    child_column_indexes: constraint.child_column_indexes.clone(),
+                    on_delete_set_column_indexes: constraint.on_delete_set_column_indexes.clone(),
+                    tid,
+                    values,
+                })
+                .collect()
+        })
     } else {
         collect_matching_rows_heap(
             constraint.child_rel,
@@ -3258,6 +4067,13 @@ fn collect_referencing_rows(
                 .filter(|(_, values)| {
                     row_matches_key(values, &constraint.child_column_indexes, key_values)
                 })
+                .map(|(tid, values)| ReferencingRow {
+                    relation: child_relation.clone(),
+                    child_column_indexes: constraint.child_column_indexes.clone(),
+                    on_delete_set_column_indexes: constraint.on_delete_set_column_indexes.clone(),
+                    tid,
+                    values,
+                })
                 .collect()
         })
     };
@@ -3265,12 +4081,22 @@ fn collect_referencing_rows(
     result
 }
 
+fn remap_optional_column_indexes_by_name(
+    parent_desc: &RelationDesc,
+    child_desc: &RelationDesc,
+    parent_indexes: Option<&[usize]>,
+) -> Result<Option<Vec<usize>>, ExecError> {
+    parent_indexes
+        .map(|indexes| map_column_indexes_by_name(parent_desc, child_desc, indexes))
+        .transpose()
+}
+
 fn partitioned_referencing_rows(
     constraint: &BoundReferencedByForeignKey,
     key_values: &[Value],
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
-) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
+) -> Result<Vec<ReferencingRow>, ExecError> {
     let mut rows = Vec::new();
     for leaf in partition_leaf_relations(catalog, constraint.child_relation_oid)? {
         let leaf_key_indexes = map_column_indexes_by_name(
@@ -3278,10 +4104,22 @@ fn partitioned_referencing_rows(
             &leaf.desc,
             &constraint.child_column_indexes,
         )?;
+        let leaf_delete_set_column_indexes = remap_optional_column_indexes_by_name(
+            &constraint.child_desc,
+            &leaf.desc,
+            constraint.on_delete_set_column_indexes.as_deref(),
+        )?;
         rows.extend(
             collect_matching_rows_heap(leaf.rel, &leaf.desc, leaf.toast, None, ctx)?
                 .into_iter()
-                .filter(|(_, values)| row_matches_key(values, &leaf_key_indexes, key_values)),
+                .filter(|(_, values)| row_matches_key(values, &leaf_key_indexes, key_values))
+                .map(|(tid, values)| ReferencingRow {
+                    relation: leaf.clone(),
+                    child_column_indexes: leaf_key_indexes.clone(),
+                    on_delete_set_column_indexes: leaf_delete_set_column_indexes.clone(),
+                    tid,
+                    values,
+                }),
         );
     }
     Ok(rows)
@@ -3370,6 +4208,45 @@ fn evaluate_default_value(
     let (bound, _) = bind_scalar_expr_in_scope(&parsed, &[], catalog).map_err(ExecError::Parse)?;
     let mut slot = TupleSlot::virtual_row(vec![Value::Null; desc.columns.len()]);
     eval_expr(&bound, &mut slot, ctx)
+}
+
+fn evaluate_referencing_default_value(
+    constraint: &BoundReferencedByForeignKey,
+    row: &ReferencingRow,
+    column_index: usize,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    if constraint.child_relation_oid == row.relation.relation_oid {
+        return evaluate_default_value(&row.relation.desc, column_index, ctx);
+    }
+    let root_index = map_column_indexes_by_name(
+        &row.relation.desc,
+        &constraint.child_desc,
+        std::slice::from_ref(&column_index),
+    )?
+    .into_iter()
+    .next()
+    .ok_or_else(|| ExecError::DetailedError {
+        message: "foreign key action failed".into(),
+        detail: Some("missing root column for partition default".into()),
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    evaluate_default_value(&constraint.child_desc, root_index, ctx)
+}
+
+fn recheck_values_for_referencing_row(
+    constraint: &BoundReferencedByForeignKey,
+    write_info: &UpdatedRowWriteInfo,
+) -> Result<Vec<Value>, ExecError> {
+    if write_info.relation_oid == constraint.child_relation_oid {
+        return Ok(write_info.values.clone());
+    }
+    remap_partition_row_to_parent_layout(
+        &write_info.values,
+        &write_info.desc,
+        &constraint.child_desc,
+    )
 }
 
 pub(super) fn materialize_generated_columns(
@@ -3663,6 +4540,24 @@ fn defer_foreign_key_if_needed(
     true
 }
 
+fn foreign_key_constraint_ancestor_oids(
+    catalog: &dyn CatalogLookup,
+    constraint_oid: u32,
+) -> BTreeSet<u32> {
+    let mut oids = BTreeSet::from([constraint_oid]);
+    let mut current_oid = constraint_oid;
+    while let Some(row) = catalog.constraint_row_by_oid(current_oid) {
+        if row.conparentid == 0 {
+            break;
+        }
+        if !oids.insert(row.conparentid) {
+            break;
+        }
+        current_oid = row.conparentid;
+    }
+    oids
+}
+
 fn collect_no_action_checks_on_update(
     relation_name: &str,
     constraints: &[BoundReferencedByForeignKey],
@@ -3788,49 +4683,41 @@ fn apply_referential_action_to_rows(
         &crate::backend::utils::misc::interrupts::InterruptState,
     )>,
 ) -> Result<Option<AppliedSetDefaultAction>, ExecError> {
-    let rows = collect_referencing_rows(constraint, key_values, ctx)?;
-    if rows.is_empty() {
-        return Ok(None);
-    }
     let catalog = ctx
         .catalog
-        .as_deref()
+        .clone()
         .ok_or_else(|| ExecError::DetailedError {
             message: "foreign key action failed".into(),
             detail: Some("executor context missing visible catalog".into()),
             hint: None,
             sqlstate: "XX000",
         })?;
-    let (relation_constraints, referenced_by_foreign_keys, indexes, toast_index) =
-        relation_write_state_for_foreign_key(constraint, ctx)?;
+    let rows = collect_referencing_rows(constraint, key_values, catalog.as_ref(), ctx)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
     let full_relation_constraints = matches!(action, ForeignKeyAction::SetDefault)
         .then(|| {
             bind_relation_constraints(
                 Some(&constraint.child_relation_name),
                 constraint.child_relation_oid,
                 &constraint.child_desc,
-                catalog,
+                catalog.as_ref(),
             )
             .map_err(ExecError::Parse)
         })
         .transpose()?;
+    let outbound_constraint_oids =
+        foreign_key_constraint_ancestor_oids(catalog.as_ref(), constraint.constraint_oid);
     let outbound_constraint = full_relation_constraints.as_ref().and_then(|constraints| {
         constraints
             .foreign_keys
             .iter()
-            .find(|foreign_key| foreign_key.constraint_oid == constraint.constraint_oid)
+            .find(|foreign_key| outbound_constraint_oids.contains(&foreign_key.constraint_oid))
             .cloned()
-    });
-    let sibling_outbound_constraints = full_relation_constraints.as_ref().map(|constraints| {
-        constraints
-            .foreign_keys
-            .iter()
-            .filter(|foreign_key| foreign_key.constraint_oid != constraint.constraint_oid)
-            .cloned()
-            .collect::<Vec<_>>()
     });
     let triggers = RuntimeTriggers::load(
-        catalog,
+        catalog.as_ref(),
         constraint.child_relation_oid,
         &constraint.child_relation_name,
         &constraint.child_desc,
@@ -3841,17 +4728,45 @@ fn apply_referential_action_to_rows(
     triggers.before_statement(ctx)?;
     let mut transition_capture = triggers.new_transition_capture();
     let mut updated_rows = Vec::new();
-    for (tid, current_values) in rows {
+    for row in rows {
         ctx.check_for_interrupts()?;
         match action {
             ForeignKeyAction::Cascade
             | ForeignKeyAction::SetNull
             | ForeignKeyAction::SetDefault => {
+                let relation_name = catalog
+                    .class_row_by_oid(row.relation.relation_oid)
+                    .map(|class| class.relname)
+                    .unwrap_or_else(|| constraint.child_relation_name.clone());
+                let (relation_constraints, referenced_by_foreign_keys, indexes, toast_index) =
+                    relation_write_state_for_relation(&row.relation, catalog.as_ref())?;
+                let row_full_relation_constraints = matches!(action, ForeignKeyAction::SetDefault)
+                    .then(|| {
+                        bind_relation_constraints(
+                            Some(&relation_name),
+                            row.relation.relation_oid,
+                            &row.relation.desc,
+                            catalog.as_ref(),
+                        )
+                        .map_err(ExecError::Parse)
+                    })
+                    .transpose()?;
+                let row_sibling_outbound_constraints =
+                    row_full_relation_constraints.as_ref().map(|constraints| {
+                        constraints
+                            .foreign_keys
+                            .iter()
+                            .filter(|foreign_key| {
+                                !outbound_constraint_oids.contains(&foreign_key.constraint_oid)
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    });
+                let current_values = row.values.clone();
                 let mut updated_values = current_values.clone();
                 match action {
                     ForeignKeyAction::Cascade => {
-                        for (position, column_index) in
-                            constraint.child_column_indexes.iter().enumerate()
+                        for (position, column_index) in row.child_column_indexes.iter().enumerate()
                         {
                             updated_values[*column_index] = replacement_key_values
                                 .and_then(|values| values.get(position))
@@ -3861,13 +4776,19 @@ fn apply_referential_action_to_rows(
                         }
                     }
                     ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault => {
-                        let target_columns =
-                            delete_set_column_indexes.unwrap_or(&constraint.child_column_indexes);
+                        let target_columns = if delete_set_column_indexes.is_some() {
+                            row.on_delete_set_column_indexes
+                                .as_deref()
+                                .unwrap_or(&row.child_column_indexes)
+                        } else {
+                            &row.child_column_indexes
+                        };
                         for column_index in target_columns {
                             updated_values[*column_index] = match action {
                                 ForeignKeyAction::SetNull => Value::Null,
-                                ForeignKeyAction::SetDefault => evaluate_default_value(
-                                    &constraint.child_desc,
+                                ForeignKeyAction::SetDefault => evaluate_referencing_default_value(
+                                    constraint,
+                                    &row,
                                     *column_index,
                                     ctx,
                                 )?,
@@ -3884,17 +4805,18 @@ fn apply_referential_action_to_rows(
                 else {
                     continue;
                 };
-                if let Some(full_relation_constraints) = full_relation_constraints.as_ref() {
+                if let Some(row_full_relation_constraints) = row_full_relation_constraints.as_ref()
+                {
                     crate::backend::executor::enforce_relation_constraints(
-                        &constraint.child_relation_name,
-                        &constraint.child_desc,
-                        full_relation_constraints,
+                        &relation_name,
+                        &row.relation.desc,
+                        row_full_relation_constraints,
                         &updated_values,
                         ctx,
                     )?;
                     crate::backend::executor::enforce_outbound_foreign_keys(
-                        &constraint.child_relation_name,
-                        sibling_outbound_constraints
+                        &relation_name,
+                        row_sibling_outbound_constraints
                             .as_deref()
                             .expect("sibling outbound constraints must be present"),
                         Some(&current_values),
@@ -3902,18 +4824,20 @@ fn apply_referential_action_to_rows(
                         ctx,
                     )?;
                 }
-                let _ = write_updated_row(
-                    &constraint.child_relation_name,
-                    constraint.child_rel,
-                    constraint.child_relation_oid,
-                    constraint.child_toast,
+                let write_result = write_updated_row(
+                    &relation_name,
+                    row.relation.rel,
+                    row.relation.relation_oid,
+                    Some(constraint.child_relation_oid),
+                    true,
+                    row.relation.toast,
                     toast_index.as_ref(),
-                    &constraint.child_desc,
+                    &row.relation.desc,
                     &relation_constraints,
                     &[],
                     &referenced_by_foreign_keys,
                     &indexes,
-                    tid,
+                    row.tid,
                     &current_values,
                     &updated_values,
                     ctx,
@@ -3927,8 +4851,10 @@ fn apply_referential_action_to_rows(
                     &updated_values,
                 );
                 triggers.after_row_update(&current_values, &updated_values, ctx)?;
-                if matches!(action, ForeignKeyAction::SetDefault) {
-                    updated_rows.push(updated_values);
+                if matches!(action, ForeignKeyAction::SetDefault)
+                    && let WriteUpdatedRowResult::Updated(_, write_info, _, _) = write_result
+                {
+                    updated_rows.push(recheck_values_for_referencing_row(constraint, &write_info)?);
                 }
             }
             ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => unreachable!(),
@@ -4104,18 +5030,19 @@ fn apply_inbound_foreign_key_actions_on_delete(
                     .iter()
                     .map(|index| values.get(*index).cloned().unwrap_or(Value::Null))
                     .collect::<Vec<_>>();
-                let rows = collect_referencing_rows(constraint, &key_values, ctx)?;
                 let catalog = ctx
                     .catalog
-                    .as_deref()
+                    .clone()
                     .ok_or_else(|| ExecError::DetailedError {
                         message: "foreign key action failed".into(),
                         detail: Some("executor context missing visible catalog".into()),
                         hint: None,
                         sqlstate: "XX000",
                     })?;
+                let rows =
+                    collect_referencing_rows(constraint, &key_values, catalog.as_ref(), ctx)?;
                 let triggers = RuntimeTriggers::load(
-                    catalog,
+                    catalog.as_ref(),
                     constraint.child_relation_oid,
                     &constraint.child_relation_name,
                     &constraint.child_desc,
@@ -4125,27 +5052,45 @@ fn apply_inbound_foreign_key_actions_on_delete(
                 )?;
                 triggers.before_statement(ctx)?;
                 let mut transition_capture = triggers.new_transition_capture();
-                for (tid, child_values) in rows {
+                for row in rows {
+                    let relation_name = catalog
+                        .class_row_by_oid(row.relation.relation_oid)
+                        .map(|class| class.relname)
+                        .unwrap_or_else(|| constraint.child_relation_name.clone());
+                    let referenced_by_foreign_keys =
+                        relation_write_state_for_relation(&row.relation, catalog.as_ref())?.1;
+                    let child_values = row.values;
                     if !triggers.before_row_delete(&child_values, ctx)? {
                         continue;
                     }
                     let target = BoundDeleteTarget {
-                        relation_name: constraint.child_relation_name.clone(),
-                        rel: constraint.child_rel,
-                        relation_oid: constraint.child_relation_oid,
+                        relation_name,
+                        rel: row.relation.rel,
+                        relation_oid: row.relation.relation_oid,
                         relkind: 'r',
-                        toast: constraint.child_toast,
-                        desc: constraint.child_desc.clone(),
-                        referenced_by_foreign_keys: relation_write_state_for_foreign_key(
-                            constraint, ctx,
-                        )?
-                        .1,
+                        toast: row.relation.toast,
+                        desc: row.relation.desc.clone(),
+                        referenced_by_foreign_keys,
                         row_source: BoundModifyRowSource::Heap,
+                        parent_visible_exprs: constraint
+                            .child_desc
+                            .columns
+                            .iter()
+                            .enumerate()
+                            .map(|(index, column)| {
+                                Expr::Var(Var {
+                                    varno: 1,
+                                    varattno: user_attrno(index),
+                                    varlevelsup: 0,
+                                    vartype: column.sql_type,
+                                })
+                            })
+                            .collect(),
                         predicate: None,
                     };
                     let _ = apply_base_delete_row(
                         &target,
-                        tid,
+                        row.tid,
                         child_values.clone(),
                         ctx,
                         xid,
@@ -4381,6 +5326,11 @@ fn collect_vacuum_stats_for_relations_with_truncate_policy(
             relation_vacuum_truncate(entry.relation_oid, catalog, truncate, default_truncate),
         )
         .map_err(ExecError::Heap)?;
+        {
+            let mut session_stats = ctx.session_stats.write();
+            session_stats.note_io_read("client backend", "relation", "vacuum", 8192);
+            session_stats.note_io_reuse("client backend", "relation", "vacuum");
+        }
         stats.push(relation_stats);
         processed += 1;
     }
@@ -4659,6 +5609,8 @@ fn opclass_accepts_type(opclass: &PgOpclassRow, type_oid: u32, sql_type: SqlType
             && (sql_type.is_multirange() || multirange_type_ref_for_sql_type(sql_type).is_some()))
         || (opclass.opcintype == ANYENUMOID
             && matches!(sql_type.element_type().kind, SqlTypeKind::Enum))
+        || (opclass.opcintype == RECORD_TYPE_OID
+            && matches!(sql_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite))
 }
 
 fn default_opclass_for_catalog_type(
@@ -4869,12 +5821,6 @@ pub fn execute_create_index(
     }
 
     let access_method = create_index_access_method_row(stmt.using_method.as_deref())?;
-    if access_method.oid == BRIN_AM_OID && stmt.predicate.is_some() {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "BRIN partial indexes".into(),
-        )));
-    }
-
     let table_alias = stmt
         .table_name
         .rsplit('.')
@@ -5223,6 +6169,10 @@ pub fn execute_insert(
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
         let values = materialize_insert_rows(&stmt, catalog, ctx)?;
+        let relpersistence = catalog
+            .relation_by_oid(stmt.relation_oid)
+            .map(|relation| relation.relpersistence)
+            .unwrap_or('p');
 
         let returned_rows = if let Some(on_conflict) = stmt.on_conflict.as_ref() {
             let returned_rows = if catalog
@@ -5265,7 +6215,7 @@ pub fn execute_insert(
             for _ in 0..returned_rows.len() {
                 ctx.session_stats
                     .write()
-                    .note_relation_insert(stmt.relation_oid);
+                    .note_relation_insert_with_persistence(stmt.relation_oid, relpersistence);
             }
             returned_rows
         } else {
@@ -5289,7 +6239,7 @@ pub fn execute_insert(
             for _ in 0..returned_rows.len() {
                 ctx.session_stats
                     .write()
-                    .note_relation_insert(stmt.relation_oid);
+                    .note_relation_insert_with_persistence(stmt.relation_oid, relpersistence);
             }
             returned_rows
         };
@@ -5491,169 +6441,146 @@ fn execute_insert_rows_with_routing(
         );
     }
 
-    let mut routed = BTreeMap::<u32, PartitionResultRelInfo>::new();
-    let mut proute = exec_setup_partition_tuple_routing(catalog, &target_relation)?;
-    for row in rows {
-        let leaf = exec_find_partition(catalog, &mut proute, &target_relation, row, ctx)?;
-        let leaf_row = remap_partition_row(row, &target_relation.desc, &leaf.desc)?;
-        match routed.entry(leaf.relation_oid) {
-            Entry::Occupied(mut entry) => {
-                let entry = entry.get_mut();
-                entry.parent_rows.push(row.clone());
-                entry.rows.push(leaf_row);
-            }
-            Entry::Vacant(entry) => {
-                let mut result_rel_info = PartitionResultRelInfo::new(
-                    catalog,
-                    relation_name,
-                    relation_oid,
-                    relation_constraints,
-                    indexes,
-                    toast_index,
-                    leaf,
-                )?;
-                result_rel_info.parent_rows.push(row.clone());
-                result_rel_info.rows.push(leaf_row);
-                entry.insert(result_rel_info);
-            }
-        }
+    let root_statement_triggers = if target_relation.relkind == 'p' {
+        Some(RuntimeTriggers::load(
+            catalog,
+            relation_oid,
+            relation_name,
+            desc,
+            TriggerOperation::Insert,
+            &[],
+            ctx.session_replication_role,
+        )?)
+    } else {
+        None
+    };
+    if let Some(triggers) = &root_statement_triggers {
+        triggers.before_statement(ctx)?;
     }
 
-    let mut inserted_rows = Vec::new();
-    for (_, result_rel_info) in routed {
-        let leaf_inserted_rows = execute_insert_rows(
-            &result_rel_info.relation_name,
-            result_rel_info.relation.relation_oid,
-            result_rel_info.relation.rel,
-            result_rel_info.relation.toast,
-            result_rel_info.toast_index.as_ref(),
-            &result_rel_info.relation.desc,
-            &result_rel_info.relation_constraints,
-            rls_write_checks,
-            &result_rel_info.indexes,
-            &result_rel_info.rows,
-            None,
-            ctx,
-            xid,
-            cid,
-        )?;
-        if let Some(returning) = returning {
-            for (parent_row, leaf_row) in result_rel_info
+    let result = (|| {
+        let mut routed = BTreeMap::<u32, PartitionResultRelInfo>::new();
+        let mut proute = exec_setup_partition_tuple_routing(catalog, &target_relation)?;
+        for row in rows {
+            let leaf = exec_find_partition(catalog, &mut proute, &target_relation, row, ctx)?;
+            let leaf_row =
+                remap_partition_row_to_child_layout(row, &target_relation.desc, &leaf.desc)?;
+            match routed.entry(leaf.relation_oid) {
+                Entry::Occupied(mut entry) => {
+                    let entry = entry.get_mut();
+                    entry.parent_rows.push(row.clone());
+                    entry.rows.push(leaf_row);
+                }
+                Entry::Vacant(entry) => {
+                    let mut result_rel_info = PartitionResultRelInfo::new(
+                        catalog,
+                        relation_name,
+                        relation_oid,
+                        relation_constraints,
+                        indexes,
+                        toast_index,
+                        leaf,
+                    )?;
+                    result_rel_info.parent_rows.push(row.clone());
+                    result_rel_info.rows.push(leaf_row);
+                    entry.insert(result_rel_info);
+                }
+            }
+        }
+
+        let mut inserted_rows = Vec::new();
+        for (_, result_rel_info) in routed {
+            for (parent_row, leaf_input_row) in result_rel_info
                 .parent_rows
                 .iter()
-                .zip(leaf_inserted_rows.iter())
+                .zip(result_rel_info.rows.iter())
             {
-                let projected_row =
-                    remap_child_row_to_parent(leaf_row, &result_rel_info.relation.desc, desc)
-                        .unwrap_or_else(|| parent_row.clone());
-                let row = project_returning_row_with_old_new(
-                    returning,
-                    &projected_row,
+                let leaf_inserted_rows = execute_insert_rows(
+                    &result_rel_info.relation_name,
+                    result_rel_info.relation.relation_oid,
+                    result_rel_info.relation.rel,
+                    result_rel_info.relation.toast,
+                    result_rel_info.toast_index.as_ref(),
+                    &result_rel_info.relation.desc,
+                    &result_rel_info.relation_constraints,
+                    rls_write_checks,
+                    &result_rel_info.indexes,
+                    std::slice::from_ref(leaf_input_row),
                     None,
-                    Some(result_rel_info.relation.relation_oid),
-                    None,
-                    Some(&projected_row),
                     ctx,
-                )?;
-                capture_copy_to_dml_returning_row(row.clone());
-                inserted_rows.push(row);
+                    xid,
+                    cid,
+                )
+                .map_err(|err| remap_routed_insert_error_detail(err, parent_row, ctx))?;
+                if let Some(returning) = returning {
+                    for leaf_row in leaf_inserted_rows.iter() {
+                        let projected_row = remap_partition_row_to_parent_layout(
+                            leaf_row,
+                            &result_rel_info.relation.desc,
+                            desc,
+                        )?;
+                        let row = project_returning_row_with_old_new(
+                            returning,
+                            &projected_row,
+                            None,
+                            Some(result_rel_info.relation.relation_oid),
+                            None,
+                            Some(&projected_row),
+                            ctx,
+                        )?;
+                        capture_copy_to_dml_returning_row(row.clone());
+                        inserted_rows.push(row);
+                    }
+                } else {
+                    inserted_rows.extend(leaf_inserted_rows);
+                }
             }
-        } else {
-            inserted_rows.extend(leaf_inserted_rows);
         }
+        Ok(inserted_rows)
+    })();
+    if result.is_ok()
+        && let Some(triggers) = &root_statement_triggers
+    {
+        triggers.after_statement(None, ctx)?;
     }
-    Ok(inserted_rows)
+    result
 }
 
-fn remap_partition_row(
-    row: &[Value],
-    parent_desc: &RelationDesc,
-    child_desc: &RelationDesc,
-) -> Result<Vec<Value>, ExecError> {
-    let parent_columns = parent_desc
-        .columns
-        .iter()
-        .enumerate()
-        .filter(|(_, column)| !column.dropped)
-        .collect::<Vec<_>>();
-    let child_columns = child_desc
-        .columns
-        .iter()
-        .enumerate()
-        .filter(|(_, column)| !column.dropped)
-        .collect::<Vec<_>>();
-    if parent_columns.len() != child_columns.len() {
-        return Ok(row.to_vec());
-    }
-    let identity_layout = parent_columns.iter().zip(child_columns.iter()).all(
-        |((parent_idx, parent_column), (child_idx, child_column))| {
-            parent_idx == child_idx
-                && parent_column.name.eq_ignore_ascii_case(&child_column.name)
-                && parent_column.sql_type == child_column.sql_type
+fn remap_routed_insert_error_detail(
+    err: ExecError,
+    parent_row: &[Value],
+    ctx: &ExecutorContext,
+) -> ExecError {
+    let detail = Some(format_failing_row_detail(parent_row, &ctx.datetime_config));
+    match err {
+        ExecError::CheckViolation {
+            relation,
+            constraint,
+            ..
+        } => ExecError::CheckViolation {
+            relation,
+            constraint,
+            detail,
         },
-    );
-    if identity_layout {
-        return Ok(row.to_vec());
+        ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+            ..
+        } => ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint,
+            detail,
+        },
+        other => other,
     }
-
-    let mut remapped = vec![Value::Null; child_desc.columns.len()];
-    for (child_idx, child_column) in child_columns {
-        let Some((parent_idx, parent_column)) = parent_columns
-            .iter()
-            .find(|(_, column)| column.name.eq_ignore_ascii_case(&child_column.name))
-        else {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "partition column \"{}\" is missing from partitioned table",
-                    child_column.name
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42P16",
-            });
-        };
-        if parent_column.sql_type != child_column.sql_type {
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "partition column \"{}\" has different type than partitioned table",
-                    child_column.name
-                ),
-                detail: None,
-                hint: None,
-                sqlstate: "42P16",
-            });
-        }
-        remapped[child_idx] = row.get(*parent_idx).cloned().unwrap_or(Value::Null);
-    }
-    Ok(remapped)
-}
-
-fn remap_child_row_to_parent(
-    row: &[Value],
-    child_desc: &RelationDesc,
-    parent_desc: &RelationDesc,
-) -> Option<Vec<Value>> {
-    parent_desc
-        .columns
-        .iter()
-        .filter(|column| !column.dropped)
-        .map(|parent_column| {
-            child_desc
-                .columns
-                .iter()
-                .enumerate()
-                .find(|(_, child_column)| {
-                    !child_column.dropped
-                        && child_column.name.eq_ignore_ascii_case(&parent_column.name)
-                })
-                .and_then(|(index, _)| row.get(index).cloned())
-        })
-        .collect()
 }
 
 fn parse_tid_text(value: &Value) -> Result<Option<ItemPointerData>, ExecError> {
     let text = match value {
         Value::Null => return Ok(None),
+        Value::Tid(tid) => return Ok(Some(*tid)),
         Value::Text(text) => text.as_str(),
         Value::TextRef(_, _) => {
             return Err(ExecError::DetailedError {
@@ -5838,8 +6765,11 @@ fn relation_acl_allows_as(
                 hint: None,
                 sqlstate: "XX000",
             })?;
-    let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
     let auth = auth_state_for_privilege_check(ctx, check_as_user_oid);
+    if auth.current_user_oid() == class_row.relowner {
+        return Ok(true);
+    }
+    let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
     if auth.has_effective_membership(class_row.relowner, &auth_catalog)
         || auth_catalog
             .role_by_oid(auth.current_user_oid())
@@ -5912,8 +6842,11 @@ fn relation_or_all_column_acls_allow_as(
                 hint: None,
                 sqlstate: "XX000",
             })?;
-    let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
     let auth = auth_state_for_privilege_check(ctx, check_as_user_oid);
+    if auth.current_user_oid() == class_row.relowner {
+        return Ok(true);
+    }
+    let auth_catalog = AuthCatalog::new(catalog.authid_rows(), catalog.auth_members_rows());
     if auth.has_effective_membership(class_row.relowner, &auth_catalog)
         || auth_catalog
             .role_by_oid(auth.current_user_oid())
@@ -5961,7 +6894,13 @@ pub(crate) fn relation_permission_denied(ctx: &ExecutorContext, relation_oid: u3
         .catalog
         .as_deref()
         .and_then(|catalog| catalog.class_row_by_oid(relation_oid))
-        .map(|row| row.relname)
+        .map(|row| {
+            if row.relnamespace == PG_TOAST_NAMESPACE_OID {
+                format!("pg_toast.{}", row.relname)
+            } else {
+                row.relname
+            }
+        })
         .unwrap_or_else(|| relation_oid.to_string());
     ExecError::DetailedError {
         message: format!("permission denied for table {relation_name}"),
@@ -5979,11 +6918,15 @@ fn relation_permission_denied_for_requirement(
     } else {
         "table"
     };
-    let relation_name = requirement
-        .relation_name
-        .strip_prefix("pg_catalog.")
-        .or_else(|| requirement.relation_name.strip_prefix("pg_toast."))
-        .unwrap_or(&requirement.relation_name);
+    let relation_name = if requirement.relation_name.starts_with("pg_toast.") {
+        requirement.relation_name.as_str()
+    } else {
+        requirement
+            .relation_name
+            .rsplit_once('.')
+            .map(|(_, name)| name)
+            .unwrap_or(&requirement.relation_name)
+    };
     ExecError::DetailedError {
         message: format!("permission denied for {relation_kind} {relation_name}"),
         detail: None,
@@ -6082,6 +7025,9 @@ fn collect_plan_relation_oids(plan: &Plan, oids: &mut BTreeSet<u32>) {
         }
         Plan::Unique { input, .. }
         | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -6132,6 +7078,9 @@ fn plan_contains_lock_rows(plan: &Plan) -> bool {
         | Plan::BitmapOr { children, .. } => children.iter().any(plan_contains_lock_rows),
         Plan::Unique { input, .. }
         | Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -6297,9 +7246,13 @@ fn execute_merge_insert_action(
         cid,
     )?;
     if let Some(inserted_values) = inserted.into_iter().next() {
+        let relpersistence = catalog
+            .relation_by_oid(stmt.relation_oid)
+            .map(|relation| relation.relpersistence)
+            .unwrap_or('p');
         ctx.session_stats
             .write()
-            .note_relation_insert(stmt.relation_oid);
+            .note_relation_insert_with_persistence(stmt.relation_oid, relpersistence);
         Ok(Some(inserted_values))
     } else {
         Ok(None)
@@ -7068,14 +8021,16 @@ fn execute_insert_project_set_row(
         distinct_on: Vec::new(),
         where_qual: None,
         group_by: Vec::new(),
+        grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
         having_qual: None,
         sort_clause: Vec::new(),
         constraint_deps: Vec::new(),
         limit_count: None,
-        limit_offset: 0,
+        limit_offset: None,
         locking_clause: None,
+        locking_targets: Vec::new(),
         row_marks: Vec::new(),
         has_target_srfs: true,
         recursive_union: None,
@@ -7264,6 +8219,7 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::Cstring => "cstring",
         SqlTypeKind::Void => "void",
         SqlTypeKind::Trigger => "trigger",
+        SqlTypeKind::EventTrigger => "event_trigger",
         SqlTypeKind::FdwHandler => "fdw_handler",
         SqlTypeKind::Int2 => "smallint",
         SqlTypeKind::Int2Vector => "int2vector",
@@ -8837,7 +9793,14 @@ pub fn execute_prepared_insert_row(
     )?;
     ctx.session_stats
         .write()
-        .note_relation_insert(prepared.relation_oid);
+        .note_relation_insert_with_persistence(
+            prepared.relation_oid,
+            ctx.catalog
+                .as_deref()
+                .and_then(|catalog| catalog.relation_by_oid(prepared.relation_oid))
+                .map(|relation| relation.relpersistence)
+                .unwrap_or('p'),
+        );
     if let Some(triggers) = &triggers {
         if let Some(capture) = transition_capture.as_mut() {
             triggers.capture_insert_row(capture, &values);
@@ -8895,6 +9858,36 @@ pub fn execute_update_with_waiter(
         }
         let mut affected_rows = 0;
         let mut returned_rows = Vec::new();
+        let root_update_relation = stmt
+            .targets
+            .iter()
+            .find_map(|target| target.partition_update_root_oid)
+            .and_then(|oid| catalog.relation_by_oid(oid));
+        let root_update_triggers = root_update_relation
+            .as_ref()
+            .map(|root| {
+                let modified_attnums = stmt
+                    .targets
+                    .first()
+                    .map(|target| modified_attnums_for_update(&target.assignments))
+                    .unwrap_or_default();
+                RuntimeTriggers::load(
+                    catalog,
+                    root.relation_oid,
+                    &stmt.target_relation_name,
+                    &root.desc,
+                    TriggerOperation::Update,
+                    &modified_attnums,
+                    ctx.session_replication_role,
+                )
+            })
+            .transpose()?;
+        if let Some(triggers) = &root_update_triggers {
+            triggers.before_statement(ctx)?;
+        }
+        let mut root_transition_capture = root_update_triggers
+            .as_ref()
+            .map(|triggers| triggers.new_transition_capture());
 
         for target in &stmt.targets {
             let modified_attnums = modified_attnums_for_update(&target.assignments);
@@ -9006,6 +9999,8 @@ pub fn execute_update_with_waiter(
                         &target.relation_name,
                         target.rel,
                         target.relation_oid,
+                        target.partition_update_root_oid,
+                        target.allow_partition_routing,
                         target.toast,
                         target.toast_index.as_ref(),
                         &target.desc,
@@ -9022,7 +10017,7 @@ pub fn execute_update_with_waiter(
                         waiter,
                     ) {
                         Ok(WriteUpdatedRowResult::Updated(
-                            _new_tid,
+                            new_tid,
                             write_info,
                             no_action_checks,
                             outbound_checks,
@@ -9040,13 +10035,14 @@ pub fn execute_update_with_waiter(
                                 .write()
                                 .note_relation_update(target.relation_oid);
                             if !stmt.returning.is_empty() {
-                                let row = project_returning_row_with_old_new(
-                                    &stmt.returning,
+                                let row = project_update_from_returning_row(
+                                    &stmt,
+                                    target,
+                                    &current_old_values,
                                     &triggered_values,
-                                    None,
-                                    None,
-                                    Some(&current_old_values),
-                                    Some(&triggered_values),
+                                    &[],
+                                    current_tid,
+                                    new_tid,
                                     ctx,
                                 )?;
                                 capture_copy_to_dml_returning_row(row.clone());
@@ -9066,6 +10062,27 @@ pub fn execute_update_with_waiter(
                                     ctx,
                                 )?;
                                 capture_copy_to_dml_notices();
+                            }
+                            if let (Some(root_triggers), Some(root_capture), Some(root_relation)) = (
+                                root_update_triggers.as_ref(),
+                                root_transition_capture.as_mut(),
+                                root_update_relation.as_ref(),
+                            ) {
+                                let root_old_values = remap_partition_row_to_parent_layout(
+                                    &current_old_values,
+                                    &target.desc,
+                                    &root_relation.desc,
+                                )?;
+                                let root_new_values = remap_partition_row_to_parent_layout(
+                                    &triggered_values,
+                                    &target.desc,
+                                    &root_relation.desc,
+                                )?;
+                                root_triggers.capture_update_row(
+                                    root_capture,
+                                    &root_old_values,
+                                    &root_new_values,
+                                );
                             }
                             affected_rows += 1;
                             break;
@@ -9129,6 +10146,14 @@ pub fn execute_update_with_waiter(
                 } else {
                     triggers.after_statement(None, ctx)?;
                 }
+            }
+        }
+        if let Some(triggers) = &root_update_triggers {
+            if let Some(capture) = root_transition_capture.as_ref() {
+                triggers.after_transition_rows(capture, ctx)?;
+                triggers.after_statement(Some(capture), ctx)?;
+            } else {
+                triggers.after_statement(None, ctx)?;
             }
         }
 
@@ -9246,18 +10271,23 @@ fn project_update_from_returning_row(
     old_values: &[Value],
     new_values: &[Value],
     source_values: &[Value],
-    tid: ItemPointerData,
+    old_tid: ItemPointerData,
+    new_tid: ItemPointerData,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
-    let mut visible_values = project_update_target_visible_values(target, new_values, tid, ctx)?;
-    visible_values.extend(source_values.iter().cloned());
+    let old_visible_values =
+        project_update_target_visible_values(target, old_values, old_tid, ctx)?;
+    let new_visible_values =
+        project_update_target_visible_values(target, new_values, new_tid, ctx)?;
+    let mut returning_values = new_visible_values.clone();
+    returning_values.extend(source_values.iter().cloned());
     project_returning_row_with_old_new(
         &stmt.returning,
-        &visible_values,
-        Some(tid),
+        &returning_values,
+        Some(new_tid),
         Some(target.relation_oid),
-        Some(old_values),
-        Some(new_values),
+        Some(&old_visible_values),
+        Some(&new_visible_values),
         ctx,
     )
 }
@@ -9414,6 +10444,8 @@ fn execute_update_from_joined_input(
                     &target.relation_name,
                     target.rel,
                     target.relation_oid,
+                    target.partition_update_root_oid,
+                    target.allow_partition_routing,
                     target.toast,
                     target.toast_index.as_ref(),
                     &target.desc,
@@ -9454,6 +10486,7 @@ fn execute_update_from_joined_input(
                                 &current_old_values,
                                 &triggered_values,
                                 &source_values,
+                                current_tid,
                                 new_tid,
                                 ctx,
                             )?;
@@ -9535,6 +10568,354 @@ fn execute_update_from_joined_input(
     result
 }
 
+fn fetch_delete_target_values(
+    target: &BoundDeleteTarget,
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let desc = Rc::new(target.desc.clone());
+    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+    let tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, tid)?;
+    let mut slot = TupleSlot::from_heap_tuple(desc, attr_descs, tid, tuple);
+    slot.toast = slot_toast_context(target.toast, ctx);
+    slot.into_values()
+}
+
+fn project_delete_target_visible_values(
+    target: &BoundDeleteTarget,
+    row_values: &[Value],
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let mut slot = TupleSlot::virtual_row_with_metadata(
+        row_values.to_vec(),
+        Some(tid),
+        Some(target.relation_oid),
+    );
+    let mut values = target
+        .parent_visible_exprs
+        .iter()
+        .map(|expr| eval_expr(expr, &mut slot, ctx).map(|value| value.to_owned_value()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Value::materialize_all(&mut values);
+    Ok(values)
+}
+
+fn build_delete_using_eval_row(
+    target: &BoundDeleteTarget,
+    old_values: &[Value],
+    source_values: &[Value],
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let mut values = project_delete_target_visible_values(target, old_values, tid, ctx)?;
+    values.extend(source_values.iter().cloned());
+    Ok(values)
+}
+
+fn delete_using_predicate_matches(
+    target: &BoundDeleteTarget,
+    old_values: &[Value],
+    source_values: &[Value],
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    let Some(predicate) = &target.predicate else {
+        return Ok(true);
+    };
+    let eval_row = build_delete_using_eval_row(target, old_values, source_values, tid, ctx)?;
+    let mut eval_slot =
+        TupleSlot::virtual_row_with_metadata(eval_row, Some(tid), Some(target.relation_oid));
+    Ok(matches!(
+        eval_expr(predicate, &mut eval_slot, ctx)?,
+        Value::Bool(true)
+    ))
+}
+
+fn project_delete_using_returning_row(
+    stmt: &BoundDeleteStatement,
+    target: &BoundDeleteTarget,
+    old_values: &[Value],
+    source_values: &[Value],
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let mut visible_values = project_delete_target_visible_values(target, old_values, tid, ctx)?;
+    visible_values.extend(source_values.iter().cloned());
+    project_returning_row_with_old_new(
+        &stmt.returning,
+        &visible_values,
+        Some(tid),
+        Some(target.relation_oid),
+        Some(old_values),
+        None,
+        ctx,
+    )
+}
+
+fn execute_delete_from_joined_input(
+    stmt: &BoundDeleteStatement,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+) -> Result<StatementResult, ExecError> {
+    let input_plan = stmt.input_plan.as_ref().ok_or(ExecError::DetailedError {
+        message: "DELETE ... USING is missing its input plan".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let target_indexes = stmt
+        .targets
+        .iter()
+        .enumerate()
+        .map(|(index, target)| (target.relation_oid, index))
+        .collect::<HashMap<_, _>>();
+    let mut triggers = stmt
+        .targets
+        .iter()
+        .map(|target| {
+            ctx.catalog
+                .as_deref()
+                .map(|catalog| {
+                    RuntimeTriggers::load(
+                        catalog,
+                        target.relation_oid,
+                        &target.relation_name,
+                        &target.desc,
+                        TriggerOperation::Delete,
+                        &[],
+                        ctx.session_replication_role,
+                    )
+                })
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for trigger in triggers.iter().flatten() {
+        trigger.before_statement(ctx)?;
+    }
+    if let Some(catalog) = ctx.catalog.as_deref() {
+        for target in &stmt.targets {
+            let namespace_oid = catalog
+                .class_row_by_oid(target.relation_oid)
+                .map(|row| row.relnamespace)
+                .unwrap_or(0);
+            let indexes = catalog.index_relations_for_heap(target.relation_oid);
+            enforce_publication_replica_identity(
+                &target.relation_name,
+                target.relation_oid,
+                namespace_oid,
+                &target.desc,
+                &indexes,
+                catalog,
+                PublicationDmlAction::Delete,
+                true,
+            )?;
+        }
+    }
+    let mut transition_captures = triggers
+        .iter()
+        .map(|trigger| {
+            trigger
+                .as_ref()
+                .map(|trigger| trigger.new_transition_capture())
+        })
+        .collect::<Vec<_>>();
+
+    let result = (|| {
+        let mut state = executor_start(input_plan.plan_tree.clone());
+        let mut affected_rows = 0usize;
+        let mut returned_rows = Vec::new();
+        let mut pending_no_action_checks = Vec::new();
+        let snapshot = ctx.snapshot.clone();
+
+        while let Some(slot) = state.exec_proc_node(ctx)? {
+            ctx.check_for_interrupts()?;
+            let mut row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+            Value::materialize_all(&mut row_values);
+            let target_tid = row_values
+                .get(stmt.target_ctid_index)
+                .ok_or(ExecError::DetailedError {
+                    message: "delete input row is missing target ctid marker".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })
+                .and_then(parse_tid_text)?
+                .ok_or(ExecError::DetailedError {
+                    message: "delete input row is missing target ctid marker".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+            let target_tableoid = row_values
+                .get(stmt.target_tableoid_index)
+                .ok_or(ExecError::DetailedError {
+                    message: "delete input row is missing target tableoid marker".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })
+                .and_then(parse_update_tableoid)?;
+            let target_index =
+                *target_indexes
+                    .get(&target_tableoid)
+                    .ok_or(ExecError::DetailedError {
+                        message: format!(
+                            "delete input row referenced unexpected target relation OID {target_tableoid}"
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "XX000",
+                    })?;
+            let target = &stmt.targets[target_index];
+            let source_values =
+                row_values[stmt.target_visible_count..stmt.visible_column_count].to_vec();
+            let mut current_tid = target_tid;
+            let mut current_values = fetch_delete_target_values(target, current_tid, ctx)?;
+
+            loop {
+                ctx.check_for_interrupts()?;
+                if let Some(trigger) = triggers[target_index].as_ref()
+                    && !trigger.before_row_delete(&current_values, ctx)?
+                {
+                    break;
+                }
+                capture_copy_to_dml_notices();
+                apply_inbound_foreign_key_actions_on_delete(
+                    &target.relation_name,
+                    &target.referenced_by_foreign_keys,
+                    &current_values,
+                    ForeignKeyActionPhase::BeforeParentWrite,
+                    ctx,
+                    xid,
+                    waiter,
+                )?;
+                let old_tuple = if target.toast.is_some() {
+                    Some(heap_fetch(
+                        &*ctx.pool,
+                        ctx.client_id,
+                        target.rel,
+                        current_tid,
+                    )?)
+                } else {
+                    None
+                };
+                match heap_delete_with_waiter(
+                    &*ctx.pool,
+                    ctx.client_id,
+                    target.rel,
+                    &ctx.txns,
+                    xid,
+                    current_tid,
+                    &snapshot,
+                    waiter,
+                ) {
+                    Ok(()) => {
+                        if let (Some(toast), Some(old_tuple)) = (target.toast, old_tuple.as_ref()) {
+                            delete_external_from_tuple(ctx, toast, &target.desc, old_tuple, xid)?;
+                        }
+                        let pending_set_default_rechecks =
+                            apply_inbound_foreign_key_actions_on_delete(
+                                &target.relation_name,
+                                &target.referenced_by_foreign_keys,
+                                &current_values,
+                                ForeignKeyActionPhase::AfterParentWrite,
+                                ctx,
+                                xid,
+                                waiter,
+                            )?;
+                        validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
+                        pending_no_action_checks.extend(collect_no_action_checks_on_delete(
+                            &target.relation_name,
+                            &target.referenced_by_foreign_keys,
+                            &current_values,
+                            ctx,
+                        )?);
+                        ctx.session_stats
+                            .write()
+                            .note_relation_delete(target.relation_oid);
+                        if !stmt.returning.is_empty() {
+                            let row = project_delete_using_returning_row(
+                                stmt,
+                                target,
+                                &current_values,
+                                &source_values,
+                                current_tid,
+                                ctx,
+                            )?;
+                            capture_copy_to_dml_returning_row(row.clone());
+                            returned_rows.push(row);
+                        }
+                        if let Some(trigger) = triggers[target_index].as_ref() {
+                            if let Some(capture) = transition_captures[target_index].as_mut() {
+                                trigger.capture_delete_row(capture, &current_values);
+                            }
+                            trigger.after_row_delete(&current_values, ctx)?;
+                            capture_copy_to_dml_notices();
+                        }
+                        affected_rows += 1;
+                        break;
+                    }
+                    Err(HeapError::TupleAlreadyModified(_)) => {
+                        if ctx.uses_transaction_snapshot() {
+                            return Err(serialization_failure_due_to_concurrent_delete());
+                        }
+                        break;
+                    }
+                    Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+                        if ctx.uses_transaction_snapshot() {
+                            return Err(serialization_failure_due_to_concurrent_update());
+                        }
+                        let new_values = fetch_delete_target_values(target, new_ctid, ctx)?;
+                        if !delete_using_predicate_matches(
+                            target,
+                            &new_values,
+                            &source_values,
+                            new_ctid,
+                            ctx,
+                        )? {
+                            break;
+                        }
+                        current_values = new_values;
+                        current_tid = new_ctid;
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
+
+        validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
+
+        if stmt.returning.is_empty() {
+            Ok(StatementResult::AffectedRows(affected_rows))
+        } else {
+            Ok(build_returning_result(
+                returning_result_columns(&stmt.returning),
+                returned_rows,
+            ))
+        }
+    })();
+
+    if result.is_ok() {
+        for (trigger, capture) in triggers.iter_mut().zip(transition_captures.iter()) {
+            if let Some(trigger) = trigger {
+                if let Some(capture) = capture.as_ref() {
+                    trigger.after_transition_rows(capture, ctx)?;
+                    trigger.after_statement(Some(capture), ctx)?;
+                } else {
+                    trigger.after_statement(None, ctx)?;
+                }
+            }
+        }
+    }
+    result
+}
+
 pub(crate) fn execute_delete(
     stmt: BoundDeleteStatement,
     catalog: &dyn CatalogLookup,
@@ -9556,12 +10937,23 @@ pub fn execute_delete_with_waiter(
     )>,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_delete(stmt, catalog);
+    let target_oids = stmt
+        .targets
+        .iter()
+        .map(|target| target.relation_oid)
+        .collect::<BTreeSet<_>>();
     check_relation_privilege_requirements(ctx, &stmt.required_privileges)?;
     for subplan in &stmt.subplans {
         check_plan_relation_privileges(subplan, ctx, 'r')?;
     }
+    if let Some(input_plan) = &stmt.input_plan {
+        check_planned_stmt_relation_privileges_except(input_plan, ctx, &target_oids)?;
+    }
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
+        if stmt.input_plan.is_some() {
+            return execute_delete_from_joined_input(&stmt, ctx, xid, waiter);
+        }
         let mut affected_rows = 0;
         let mut returned_rows = Vec::new();
         for target in &stmt.targets {
@@ -10163,6 +11555,9 @@ pub(crate) fn materialize_delete_row_events(
     stmt: &BoundDeleteStatement,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<DeleteRowEvent>, ExecError> {
+    if stmt.input_plan.is_some() {
+        return materialize_delete_from_joined_input_events(stmt, ctx);
+    }
     let mut events = Vec::new();
     for target in &stmt.targets {
         let rows = match &target.row_source {
@@ -10190,6 +11585,73 @@ pub(crate) fn materialize_delete_row_events(
                 old_values,
             });
         }
+    }
+    Ok(events)
+}
+
+fn materialize_delete_from_joined_input_events(
+    stmt: &BoundDeleteStatement,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<DeleteRowEvent>, ExecError> {
+    let input_plan = stmt.input_plan.as_ref().ok_or(ExecError::DetailedError {
+        message: "DELETE ... USING is missing its input plan".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let target_indexes = stmt
+        .targets
+        .iter()
+        .enumerate()
+        .map(|(index, target)| (target.relation_oid, index))
+        .collect::<HashMap<_, _>>();
+    let mut state = executor_start(input_plan.plan_tree.clone());
+    let mut events = Vec::new();
+    while let Some(slot) = state.exec_proc_node(ctx)? {
+        ctx.check_for_interrupts()?;
+        let mut row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+        Value::materialize_all(&mut row_values);
+        let tid = row_values
+            .get(stmt.target_ctid_index)
+            .ok_or(ExecError::DetailedError {
+                message: "delete input row is missing target ctid marker".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })
+            .and_then(parse_tid_text)?
+            .ok_or(ExecError::DetailedError {
+                message: "delete input row is missing target ctid marker".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        let relation_oid = row_values
+            .get(stmt.target_tableoid_index)
+            .ok_or(ExecError::DetailedError {
+                message: "delete input row is missing target tableoid marker".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })
+            .and_then(parse_update_tableoid)?;
+        let target_index = *target_indexes
+            .get(&relation_oid)
+            .ok_or(ExecError::DetailedError {
+                message: format!(
+                    "delete input row referenced unexpected target relation OID {relation_oid}"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        let target = &stmt.targets[target_index];
+        let old_values = fetch_delete_target_values(target, tid, ctx)?;
+        events.push(DeleteRowEvent {
+            target: target.clone(),
+            tid,
+            old_values,
+        });
     }
     Ok(events)
 }
@@ -10285,6 +11747,7 @@ pub(crate) fn apply_base_delete_row(
                     ctx,
                 )?;
                 validate_pending_no_action_checks(pending_no_action_checks, ctx)?;
+                cancel_deferred_foreign_key_checks_for_deleted_row(target, &current_values, ctx)?;
                 return Ok(true);
             }
             Err(HeapError::TupleAlreadyModified(_)) => {
@@ -10318,4 +11781,23 @@ pub(crate) fn apply_base_delete_row(
             Err(err) => return Err(err.into()),
         }
     }
+}
+
+fn cancel_deferred_foreign_key_checks_for_deleted_row(
+    target: &BoundDeleteTarget,
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<(), ExecError> {
+    let Some(tracker) = ctx.deferred_foreign_keys.as_ref() else {
+        return Ok(());
+    };
+    let Some(catalog) = ctx.catalog.as_deref() else {
+        return Ok(());
+    };
+    let constraints = bind_relation_constraints(None, target.relation_oid, &target.desc, catalog)
+        .map_err(ExecError::Parse)?;
+    for constraint in constraints.foreign_keys {
+        tracker.cancel_foreign_key_check(constraint.constraint_oid, values);
+    }
+    Ok(())
 }

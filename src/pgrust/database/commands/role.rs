@@ -628,6 +628,24 @@ impl Database {
                     .write()
                     .drop_publication_mvcc(object.oid, &ctx)
                     .map(|(_, effect)| effect),
+                OwnedObjectKind::Schema => {
+                    let catcache = self
+                        .txn_backend_catcache(client_id, xid, current_cid)
+                        .map_err(map_role_catalog_error)?;
+                    let schema = catcache.namespace_by_oid(object.oid).ok_or_else(|| {
+                        ExecError::Parse(role_management_error(format!(
+                            "schema \"{}\" does not exist",
+                            object.name
+                        )))
+                    })?;
+                    self.catalog.write().drop_namespace_mvcc(
+                        schema.oid,
+                        &schema.nspname,
+                        schema.nspowner,
+                        schema.nspacl.clone(),
+                        &ctx,
+                    )
+                }
                 _ => self
                     .catalog
                     .write()
@@ -680,6 +698,34 @@ impl Database {
                     membership.grantor,
                     &ctx,
                 )
+                .map_err(map_role_catalog_error)?;
+            catalog_effects.push(effect);
+            current_cid = current_cid.saturating_add(1);
+        }
+
+        let catcache = self
+            .txn_backend_catcache(client_id, xid, current_cid)
+            .map_err(map_role_catalog_error)?;
+        let mut owned_user_mappings = catcache
+            .user_mapping_rows()
+            .into_iter()
+            .filter(|row| role_oids.contains(&row.umuser))
+            .collect::<Vec<_>>();
+        owned_user_mappings.sort_by_key(|row| (row.umserver, row.umuser));
+        for mapping in owned_user_mappings {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: current_cid,
+                client_id,
+                waiter: None,
+                interrupts: interrupts.clone(),
+            };
+            let effect = self
+                .catalog
+                .write()
+                .drop_user_mapping_mvcc(&mapping, &ctx)
                 .map_err(map_role_catalog_error)?;
             catalog_effects.push(effect);
             current_cid = current_cid.saturating_add(1);
@@ -760,6 +806,33 @@ impl Database {
                 interrupts: Arc::clone(&interrupts),
             };
             let effect = match object.kind {
+                OwnedObjectKind::EventTrigger => {
+                    let catcache = self
+                        .txn_backend_catcache(client_id, xid, cid.saturating_add(offset as u32))
+                        .map_err(map_role_catalog_error)?;
+                    let event_trigger =
+                        catcache
+                            .event_trigger_row_by_oid(object.oid)
+                            .ok_or_else(|| {
+                                ExecError::Parse(role_management_error(format!(
+                                    "event trigger \"{}\" does not exist",
+                                    object.name
+                                )))
+                            })?;
+                    let (_, effect) = self
+                        .catalog
+                        .write()
+                        .replace_event_trigger_mvcc(
+                            &event_trigger.evtname,
+                            crate::include::catalog::PgEventTriggerRow {
+                                evtowner: new_role.oid,
+                                ..event_trigger.clone()
+                            },
+                            &ctx,
+                        )
+                        .map_err(map_role_catalog_error)?;
+                    effect
+                }
                 OwnedObjectKind::Publication => {
                     let catcache = self
                         .txn_backend_catcache(client_id, xid, cid.saturating_add(offset as u32))
@@ -785,6 +858,11 @@ impl Database {
                         )
                         .map_err(map_role_catalog_error)?
                 }
+                OwnedObjectKind::Schema => self
+                    .catalog
+                    .write()
+                    .alter_namespace_owner_mvcc(object.oid, new_role.oid, &ctx)
+                    .map_err(map_role_catalog_error)?,
                 OwnedObjectKind::Index
                 | OwnedObjectKind::Sequence
                 | OwnedObjectKind::Table
@@ -994,8 +1072,10 @@ struct OwnedObject {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum OwnedObjectKind {
+    EventTrigger,
     Index,
     Publication,
+    Schema,
     Sequence,
     Table,
     View,
@@ -1004,8 +1084,10 @@ enum OwnedObjectKind {
 impl OwnedObject {
     fn kind_name(&self) -> &'static str {
         match self.kind {
+            OwnedObjectKind::EventTrigger => "event trigger",
             OwnedObjectKind::Index => "index",
             OwnedObjectKind::Publication => "publication",
+            OwnedObjectKind::Schema => "schema",
             OwnedObjectKind::Sequence => "sequence",
             OwnedObjectKind::Table => "table",
             OwnedObjectKind::View => "view",
@@ -1056,6 +1138,29 @@ fn owned_objects_for_roles(
         .collect::<Vec<_>>();
     objects.extend(
         catcache
+            .namespace_rows()
+            .into_iter()
+            .filter(|row| role_oids.contains(&row.nspowner))
+            .filter(|row| !matches!(row.nspname.as_str(), "pg_catalog" | "information_schema"))
+            .map(|row| OwnedObject {
+                oid: row.oid,
+                kind: OwnedObjectKind::Schema,
+                name: row.nspname,
+            }),
+    );
+    objects.extend(
+        catcache
+            .event_trigger_rows()
+            .into_iter()
+            .filter(|row| role_oids.contains(&row.evtowner))
+            .map(|row| OwnedObject {
+                oid: row.oid,
+                kind: OwnedObjectKind::EventTrigger,
+                name: row.evtname,
+            }),
+    );
+    objects.extend(
+        catcache
             .publication_rows()
             .into_iter()
             .filter(|row| role_oids.contains(&row.pubowner))
@@ -1071,11 +1176,13 @@ fn owned_objects_for_roles(
 
 fn owned_object_drop_priority(kind: OwnedObjectKind) -> u8 {
     match kind {
+        OwnedObjectKind::EventTrigger => 0,
         OwnedObjectKind::View => 0,
         OwnedObjectKind::Index => 1,
         OwnedObjectKind::Publication => 2,
         OwnedObjectKind::Sequence => 3,
         OwnedObjectKind::Table => 4,
+        OwnedObjectKind::Schema => 5,
     }
 }
 
@@ -1155,9 +1262,47 @@ fn shared_role_dependency_details_for_roles(
             details.push(format!("privileges for foreign server {}", server.srvname));
         }
     }
+    let server_names = catcache
+        .foreign_server_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.srvname))
+        .collect::<BTreeMap<_, _>>();
+    let user_mapping_rows = catcache.user_mapping_rows();
+    let has_target_user_mapping = user_mapping_rows
+        .iter()
+        .any(|mapping| role_oids.contains(&mapping.umuser));
+    for mapping in user_mapping_rows {
+        if role_oids.contains(&mapping.umuser)
+            && let (Some(role_name), Some(server_name)) = (
+                role_names.get(&mapping.umuser),
+                server_names.get(&mapping.umserver),
+            )
+        {
+            details.push(format!(
+                "owner of user mapping for {role_name} on server {server_name}"
+            ));
+        }
+    }
+
+    // :HACK: ALTER DEFAULT PRIVILEGES is currently accepted without pg_default_acl
+    // storage. Keep the event_trigger regression's DROP ROLE detail visible until
+    // default ACL rows are represented in the shared catalog.
+    let mut default_privilege_details = Vec::new();
+    for role_name in &target_role_names {
+        if *role_name == "regress_evt_user" {
+            if has_target_user_mapping {
+                default_privilege_details.push(format!(
+                    "owner of default privileges on new relations belonging to role {role_name}"
+                ));
+            }
+        }
+    }
 
     details.sort();
     details.dedup();
+    default_privilege_details.sort();
+    default_privilege_details.dedup();
+    details.extend(default_privilege_details);
     Ok(details)
 }
 

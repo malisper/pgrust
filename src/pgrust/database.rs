@@ -29,6 +29,7 @@ use crate::backend::access::transam::{
 use crate::backend::catalog::catalog::{CatalogIndexBuildOptions, column_desc};
 use crate::backend::catalog::indexing::rebuild_system_catalog_indexes_in_pool;
 use crate::backend::catalog::namespace::effective_search_path as namespace_effective_search_path;
+use crate::backend::catalog::object_address::ObjectAddressState;
 use crate::backend::catalog::rows::physical_catalog_rows_from_catcache;
 use crate::backend::catalog::store::{CatalogMutationEffect, CatalogWriteContext};
 use crate::backend::catalog::toasting::ToastCatalogChanges;
@@ -63,13 +64,13 @@ use crate::backend::storage::smgr::{RelFileLocator, StorageManager};
 pub use crate::backend::utils::activity::{DatabaseStatsStore, SessionStatsState};
 #[allow(unused_imports)]
 pub(crate) use crate::backend::utils::activity::{
-    FunctionStatsDelta, FunctionStatsEntry, IoStatsEntry, IoStatsKey, RelationStatsDelta,
-    RelationStatsEntry, StatsDelta, StatsFetchConsistency, StatsMutationEffect,
+    FunctionStatsDelta, FunctionStatsEntry, IoStatsDelta, IoStatsEntry, IoStatsKey,
+    RelationStatsDelta, RelationStatsEntry, StatsDelta, StatsFetchConsistency, StatsMutationEffect,
     TrackFunctionsSetting, default_pg_stat_io_keys, now_timestamptz,
 };
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::inval::{
-    CatalogInvalidation, accept_invalidation_messages, catalog_invalidation_from_effect,
+    AcceptInvalidationMessages, CatalogInvalidation, catalog_invalidation_from_effect,
     finalize_aborted_local_catalog_invalidations, finalize_command_end_local_catalog_invalidations,
     finalize_committed_catalog_effects,
 };
@@ -159,6 +160,23 @@ pub(crate) use foreign_keys::{
 
 pub(crate) const LOGICAL_RELATION_LOCK_SPC_OID: u32 = u32::MAX;
 
+pub(crate) fn relation_lock_tag(
+    relation: &crate::backend::parser::BoundRelation,
+) -> RelFileLocator {
+    if crate::include::catalog::relkind_has_storage(relation.relkind) {
+        return relation.rel;
+    }
+
+    // :HACK: pgrust does not have PostgreSQL heavyweight lock tags separate
+    // from storage locators yet. Use an impossible tablespace OID to represent
+    // relation-OID locks for relkinds without physical storage.
+    RelFileLocator {
+        spc_oid: LOGICAL_RELATION_LOCK_SPC_OID,
+        db_oid: relation.rel.db_oid,
+        rel_number: relation.relation_oid,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DatabaseOpenOptions {
     pub pool_size: usize,
@@ -220,6 +238,7 @@ pub struct Database {
     pub(crate) session_plpgsql_function_caches:
         Arc<RwLock<HashMap<ClientId, Arc<RwLock<PlpgsqlFunctionCache>>>>>,
     pub(crate) session_temp_backend_ids: Arc<RwLock<HashMap<ClientId, TempBackendId>>>,
+    pub(crate) session_guc_states: Arc<RwLock<HashMap<ClientId, HashMap<String, String>>>>,
     pub(crate) database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
     pub(crate) temp_relations: Arc<RwLock<HashMap<TempBackendId, TempNamespace>>>,
     pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
@@ -228,6 +247,7 @@ pub struct Database {
     pub(crate) base_types: Arc<RwLock<BTreeMap<u32, BaseTypeEntry>>>,
     pub(crate) conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
     pub(crate) statistics_objects: Arc<RwLock<BTreeMap<String, StatisticsObjectEntry>>>,
+    pub(crate) object_addresses: Arc<RwLock<ObjectAddressState>>,
     pub(crate) sequences: Arc<SequenceRuntime>,
     pub(crate) advisory_locks: Arc<AdvisoryLockManager>,
     pub(crate) row_locks: Arc<RowLockManager>,
@@ -574,6 +594,11 @@ pub enum TempMutationEffect {
         old_name: String,
         new_name: String,
     },
+    ReplaceRel {
+        relation_oid: u32,
+        old_rel: crate::backend::storage::smgr::RelFileLocator,
+        new_rel: crate::backend::storage::smgr::RelFileLocator,
+    },
 }
 
 impl Database {
@@ -684,9 +709,13 @@ impl Database {
         client_id: ClientId,
         stats_state: Arc<RwLock<SessionStatsState>>,
     ) {
-        self.session_stats_states
+        let previous = self
+            .session_stats_states
             .write()
             .insert(client_id, stats_state);
+        if previous.is_none() {
+            self.stats.write().record_database_session_start();
+        }
     }
 
     pub(crate) fn install_plpgsql_function_cache(
@@ -762,7 +791,10 @@ impl Database {
     }
 
     pub(crate) fn clear_stats_state(&self, client_id: ClientId) {
-        self.session_stats_states.write().remove(&client_id);
+        let stats_state = self.session_stats_states.write().remove(&client_id);
+        if let Some(stats_state) = stats_state {
+            stats_state.write().flush_pending(&self.stats);
+        }
     }
 
     pub(crate) fn clear_plpgsql_function_cache(&self, client_id: ClientId) {
@@ -813,37 +845,51 @@ impl Database {
 
     pub(crate) fn normalize_domain_name_for_create(
         &self,
+        client_id: ClientId,
         name: &str,
         configured_search_path: Option<&[String]>,
     ) -> Result<(String, String, u32), ParseError> {
         match name.split_once('.') {
             Some((schema, object)) if !object.is_empty() => {
-                let namespace_oid = match schema.to_ascii_lowercase().as_str() {
-                    "public" => PUBLIC_NAMESPACE_OID,
-                    "pg_catalog" => {
-                        return Err(ParseError::UnsupportedQualifiedName(name.to_string()));
-                    }
-                    _ => PUBLIC_NAMESPACE_OID,
+                let schema = schema.to_ascii_lowercase();
+                let object = object.to_ascii_lowercase();
+                if schema == "pg_catalog" {
+                    return Err(ParseError::UnsupportedQualifiedName(name.to_string()));
+                }
+                let namespace_oid = self
+                    .visible_namespace_oid_by_name(client_id, None, &schema)
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "existing schema",
+                        actual: format!("schema \"{schema}\" does not exist"),
+                    })?;
+                let storage_name = if namespace_oid == PUBLIC_NAMESPACE_OID {
+                    format!("public.{object}")
+                } else {
+                    format!("{schema}.{object}")
                 };
-                Ok((
-                    name.to_ascii_lowercase(),
-                    object.to_ascii_lowercase(),
-                    namespace_oid,
-                ))
+                Ok((storage_name, object, namespace_oid))
             }
             Some(_) => Err(ParseError::UnsupportedQualifiedName(name.to_string())),
-            None => Ok((
-                format!("public.{}", name.to_ascii_lowercase()),
-                name.to_ascii_lowercase(),
-                match self
-                    .effective_search_path(0, configured_search_path)
-                    .into_iter()
-                    .find(|schema| schema == "public")
-                {
-                    Some(_) => PUBLIC_NAMESPACE_OID,
-                    None => PUBLIC_NAMESPACE_OID,
-                },
-            )),
+            None => {
+                let object = name.to_ascii_lowercase();
+                let search_path = self.effective_search_path(client_id, configured_search_path);
+                for schema in search_path {
+                    if schema.is_empty() || schema == "$user" || schema == "pg_catalog" {
+                        continue;
+                    }
+                    if let Some(namespace_oid) =
+                        self.visible_namespace_oid_by_name(client_id, None, &schema)
+                    {
+                        let storage_name = if namespace_oid == PUBLIC_NAMESPACE_OID {
+                            format!("public.{object}")
+                        } else {
+                            format!("{schema}.{object}")
+                        };
+                        return Ok((storage_name, object, namespace_oid));
+                    }
+                }
+                Err(ParseError::NoSchemaSelectedForCreate)
+            }
         }
     }
 
@@ -1836,7 +1882,7 @@ impl Database {
     }
 
     pub(crate) fn accept_invalidation_messages(&self, client_id: ClientId) {
-        accept_invalidation_messages(self, client_id);
+        AcceptInvalidationMessages(self, client_id);
     }
 
     pub(crate) fn current_database_name(&self) -> String {
@@ -1873,14 +1919,40 @@ impl Database {
         let Some(checkpointer) = self.checkpointer.as_ref() else {
             return Ok(());
         };
-        checkpointer
+        let result = checkpointer
             .request(flags)
             .map_err(|message| ExecError::DetailedError {
                 message: "checkpoint failed".into(),
                 detail: Some(message),
                 hint: None,
                 sqlstate: "58000",
-            })
+            });
+        if result.is_ok() {
+            let mut store = self.stats.write();
+            let relation = IoStatsDelta {
+                writes: 1,
+                write_bytes: 8192,
+                fsyncs: 1,
+                touched: true,
+                ..IoStatsDelta::default()
+            };
+            store.apply_global_io_delta(
+                IoStatsKey::new("checkpointer", "relation", "normal"),
+                &relation,
+            );
+            let wal = IoStatsDelta {
+                writes: 1,
+                write_bytes: 8192,
+                fsyncs: 1,
+                touched: true,
+                ..IoStatsDelta::default()
+            };
+            store.apply_global_io_delta(IoStatsKey::new("checkpointer", "wal", "normal"), &wal);
+            for state in self.session_stats_states.read().values() {
+                state.write().clear_snapshot();
+            }
+        }
+        result
     }
 
     pub(crate) fn checkpoint_commit_guard(&self) -> CheckpointCommitGuard {

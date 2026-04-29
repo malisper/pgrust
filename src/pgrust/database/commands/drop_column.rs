@@ -10,9 +10,8 @@ use crate::backend::parser::{BoundRelation, bind_generated_expr, expr_references
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
-    is_system_column_name, lookup_table_or_partitioned_table_for_alter_table,
-    reject_column_with_publication_dependencies, reject_column_with_rule_dependencies,
-    reject_column_with_trigger_dependencies,
+    is_system_column_name, reject_column_with_publication_dependencies,
+    reject_column_with_rule_dependencies, reject_column_with_trigger_dependencies,
 };
 
 fn display_relation_name(catalog: &dyn CatalogLookup, relation: &BoundRelation) -> String {
@@ -91,6 +90,37 @@ fn relation_basename(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
+fn lookup_table_partitioned_or_view_for_drop_column(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    if_exists: bool,
+) -> Result<Option<BoundRelation>, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'f' | 'v') => Ok(Some(entry)),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table",
+        })),
+        None if if_exists => {
+            push_notice(format!(r#"relation "{name}" does not exist, skipping"#));
+            Ok(None)
+        }
+        None => Err(ExecError::Parse(ParseError::UnknownTable(name.to_string()))),
+    }
+}
+
+fn unsupported_view_drop_column_error(relation_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "ALTER action DROP COLUMN cannot be performed on relation \"{}\"",
+            relation_basename(relation_name)
+        ),
+        detail: Some("This operation is not supported for views.".into()),
+        hint: None,
+        sqlstate: "42809",
+    }
+}
+
 fn visible_column_index(relation: &BoundRelation, column_name: &str) -> Option<usize> {
     relation
         .desc
@@ -102,6 +132,33 @@ fn visible_column_index(relation: &BoundRelation, column_name: &str) -> Option<u
         })
 }
 
+fn mark_column_dropped_in_desc(
+    desc: &mut crate::backend::executor::RelationDesc,
+    column_name: &str,
+) {
+    if let Some((index, column)) = desc
+        .columns
+        .iter_mut()
+        .enumerate()
+        .find(|(_, column)| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+    {
+        let dropped_name = format!("........pg.dropped.{}........", index + 1);
+        column.name = dropped_name.clone();
+        column.storage.name = dropped_name;
+        column.storage.nullable = true;
+        column.dropped = true;
+        column.attstattarget = -1;
+        column.not_null_constraint_oid = None;
+        column.not_null_constraint_name = None;
+        column.not_null_constraint_validated = false;
+        column.not_null_primary_key_owned = false;
+        column.attrdef_oid = None;
+        column.default_expr = None;
+        column.generated = None;
+        column.missing_default_value = None;
+    }
+}
+
 fn cannot_drop_inherited_column_error(column_name: &str) -> ExecError {
     ExecError::DetailedError {
         message: format!("cannot drop inherited column \"{column_name}\""),
@@ -109,6 +166,52 @@ fn cannot_drop_inherited_column_error(column_name: &str) -> ExecError {
         hint: None,
         sqlstate: "42P16",
     }
+}
+
+fn partition_key_references_column(
+    relation: &BoundRelation,
+    column_index: usize,
+) -> Result<bool, ExecError> {
+    if relation.relkind != 'p' {
+        return Ok(false);
+    }
+    let spec =
+        crate::backend::parser::relation_partition_spec(relation).map_err(ExecError::Parse)?;
+    Ok(spec
+        .key_exprs
+        .iter()
+        .any(|expr| expr_references_column(expr, column_index)))
+}
+
+fn reject_descendant_partition_key_drop(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+    column_name: &str,
+) -> Result<(), ExecError> {
+    for descendant_oid in catalog.find_all_inheritors(relation.relation_oid) {
+        if descendant_oid == relation.relation_oid {
+            continue;
+        }
+        let Some(descendant) = catalog.lookup_relation_by_oid(descendant_oid) else {
+            continue;
+        };
+        let Some(descendant_column_index) = visible_column_index(&descendant, column_name) else {
+            continue;
+        };
+        if partition_key_references_column(&descendant, descendant_column_index)? {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot drop column \"{}\" because it is part of the partition key of relation \"{}\"",
+                    descendant.desc.columns[descendant_column_index].name,
+                    display_relation_name(catalog, &descendant)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+    }
+    Ok(())
 }
 
 fn relation_column_by_name<'a>(
@@ -191,6 +294,7 @@ impl Database {
         cid: CommandId,
         catalog: &dyn CatalogLookup,
         dependencies: &[PgConstraintRow],
+        emit_notice: bool,
         interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<CommandId, ExecError> {
@@ -206,11 +310,13 @@ impl Database {
             let constraint_relation = catalog.relation_by_oid(row.conrelid).ok_or_else(|| {
                 ExecError::Parse(ParseError::UnknownTable(row.conrelid.to_string()))
             })?;
-            push_notice(format!(
-                "drop cascades to constraint {} on table {}",
-                row.conname,
-                relation_name_for_oid(catalog, row.conrelid)
-            ));
+            if emit_notice {
+                push_notice(format!(
+                    "drop cascades to constraint {} on table {}",
+                    row.conname,
+                    relation_name_for_oid(catalog, row.conrelid)
+                ));
+            }
             if constraint_relation.relkind == 'p' {
                 next_cid = self.drop_partition_child_foreign_key_constraints_in_transaction(
                     client_id,
@@ -262,7 +368,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+        let Some(relation) = lookup_table_partitioned_or_view_for_drop_column(
             &catalog,
             &drop_stmt.table_name,
             drop_stmt.if_exists,
@@ -270,6 +376,9 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        if relation.relkind == 'v' {
+            return Err(unsupported_view_drop_column_error(&drop_stmt.table_name));
+        }
         let lock_queue = build_alter_table_work_queue(&catalog, &relation, drop_stmt.only)?;
         let lock_requests = lock_queue
             .iter()
@@ -313,7 +422,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
+        let Some(relation) = lookup_table_partitioned_or_view_for_drop_column(
             &catalog,
             &drop_stmt.table_name,
             drop_stmt.if_exists,
@@ -321,16 +430,13 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
+        if relation.relkind == 'v' {
+            return Err(unsupported_view_drop_column_error(&drop_stmt.table_name));
+        }
         if relation.namespace_oid == PG_CATALOG_NAMESPACE_OID {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "user table for ALTER TABLE DROP COLUMN",
                 actual: "system catalog".into(),
-            }));
-        }
-        if relation.relpersistence == 't' {
-            return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "permanent table for ALTER TABLE DROP COLUMN",
-                actual: "temporary table".into(),
             }));
         }
         reject_typed_table_ddl(&relation, "drop column from")?;
@@ -338,7 +444,7 @@ impl Database {
         if is_system_column_name(&drop_stmt.column_name) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "user column name for DROP COLUMN",
-                actual: drop_stmt.column_name.clone(),
+                actual: format!("cannot drop system column \"{}\"", drop_stmt.column_name),
             }));
         }
         let work_queue = build_alter_table_work_queue(&catalog, &relation, drop_stmt.only)?;
@@ -361,6 +467,18 @@ impl Database {
         if relation.desc.columns[column_index].attinhcount > 0 {
             return Err(cannot_drop_inherited_column_error(&drop_stmt.column_name));
         }
+        if partition_key_references_column(&relation, column_index)? {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot drop column \"{}\" because it is part of the partition key of relation \"{}\"",
+                    relation.desc.columns[column_index].name,
+                    display_relation_name(&catalog, &relation)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
         if drop_stmt.only
             && relation.relkind == 'p'
             && has_inheritance_children(&catalog, relation.relation_oid)
@@ -369,10 +487,11 @@ impl Database {
                 message: "cannot drop column from only the partitioned table when partitions exist"
                     .into(),
                 detail: None,
-                hint: None,
+                hint: Some("Do not specify the ONLY keyword.".into()),
                 sqlstate: "42P16",
             });
         }
+        reject_descendant_partition_key_drop(&catalog, &relation, &drop_stmt.column_name)?;
         let dependent_generated_indices =
             generated_columns_to_drop_for_column(&catalog, &relation, column_index)?;
         let relation_display_name = display_relation_name(&catalog, &relation);
@@ -398,8 +517,12 @@ impl Database {
         }
         let foreign_key_dependencies =
             foreign_key_column_dependencies(&catalog, relation.relation_oid, target_attnum);
-        if !foreign_key_dependencies.is_empty() && !drop_stmt.cascade {
-            let row = &foreign_key_dependencies[0];
+        let (local_foreign_key_dependencies, external_foreign_key_dependencies): (Vec<_>, Vec<_>) =
+            foreign_key_dependencies
+                .into_iter()
+                .partition(|row| row.conrelid == relation.relation_oid);
+        if !external_foreign_key_dependencies.is_empty() && !drop_stmt.cascade {
+            let row = &external_foreign_key_dependencies[0];
             return Err(ExecError::DetailedError {
                 message: format!(
                     "cannot drop column {} of table {} because other objects depend on it",
@@ -424,13 +547,26 @@ impl Database {
             target_attnum,
         )?;
         let mut next_cid = cid;
+        if !local_foreign_key_dependencies.is_empty() {
+            next_cid = self.drop_foreign_key_dependencies_for_column_in_transaction(
+                client_id,
+                xid,
+                next_cid,
+                &catalog,
+                &local_foreign_key_dependencies,
+                false,
+                interrupts.clone(),
+                catalog_effects,
+            )?;
+        }
         if drop_stmt.cascade {
             next_cid = self.drop_foreign_key_dependencies_for_column_in_transaction(
                 client_id,
                 xid,
                 next_cid,
                 &catalog,
-                &foreign_key_dependencies,
+                &external_foreign_key_dependencies,
+                true,
                 interrupts.clone(),
                 catalog_effects,
             )?;
@@ -631,6 +767,11 @@ impl Database {
             .alter_table_drop_column_mvcc(relation.relation_oid, &drop_stmt.column_name, &ctx)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
+        if relation.relpersistence == 't' {
+            let mut temp_desc = relation.desc.clone();
+            mark_column_dropped_in_desc(&mut temp_desc, &drop_stmt.column_name);
+            self.replace_temp_entry_desc(client_id, relation.relation_oid, temp_desc)?;
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 }

@@ -71,6 +71,7 @@ pub use driver::{
     exec_next, execute_plan, execute_planned_stmt, execute_readonly_statement,
     execute_readonly_statement_with_config, execute_sql, execute_statement,
 };
+pub(crate) use exec_expr::clear_subquery_eval_cache;
 pub use exec_expr::{eval_expr, eval_plpgsql_expr};
 pub(crate) use expr_agg_support::build_aggregate_runtime;
 pub(crate) use expr_agg_support::execute_scalar_function_value_call;
@@ -121,10 +122,11 @@ pub(crate) use expr_txid::{
 pub(crate) use expr_xml::{render_xml_output_text, strip_xml_declaration, validate_xml_input};
 pub use fmgr::ScalarFunctionCallInfo;
 pub(crate) use nodes::{
-    render_explain_expr, render_explain_join_expr, render_explain_projection_expr_with_qualifier,
-    render_index_order_by, render_index_scan_condition_with_key_names,
+    pg_sql_sort_by, render_explain_expr, render_explain_join_expr, render_explain_literal,
+    render_explain_projection_expr_with_qualifier, render_index_order_by,
+    render_index_scan_condition_with_key_names,
     render_index_scan_condition_with_key_names_and_runtime_renderer,
-    render_verbose_range_support_expr,
+    render_verbose_range_support_expr, runtime_pruned_startup_child_indexes,
 };
 pub use random::PgPrngState;
 pub(crate) use sqlfunc::{render_sql_literal, substitute_named_arg, substitute_positional_args};
@@ -195,13 +197,14 @@ pub(crate) use foreign_keys::{
     enforce_inbound_foreign_key_reference, enforce_inbound_foreign_keys_on_delete,
     enforce_inbound_foreign_keys_on_update, enforce_outbound_foreign_keys,
     enforce_outbound_foreign_keys_for_insert, foreign_key_action_trigger_enabled_on_delete,
-    foreign_key_action_trigger_enabled_on_update,
+    foreign_key_action_trigger_enabled_on_update, validate_outbound_foreign_key_for_ddl,
 };
 pub(crate) use permissions::relation_values_visible_for_error_detail;
 
 #[derive(Debug, Clone, Default)]
 pub struct ExprEvalBindings {
     pub exec_params: HashMap<usize, Value>,
+    pub external_params: HashMap<usize, Value>,
     pub outer_tuple: Option<Vec<Value>>,
     pub outer_system_bindings: Vec<SystemVarBinding>,
     pub inner_tuple: Option<Vec<Value>>,
@@ -230,13 +233,26 @@ pub struct PendingParentForeignKeyCheck {
     pub replacement_parent_values: Option<Vec<Value>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingForeignKeyCheck {
+    pub constraint_oid: u32,
+    pub relation_name: String,
+    pub values: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Default)]
 struct DeferredConstraintState {
     all_override: Option<ConstraintTiming>,
     named_overrides: BTreeMap<u32, ConstraintTiming>,
     affected_constraint_oids: BTreeSet<u32>,
+    pending_foreign_key_checks: Vec<PendingForeignKeyCheck>,
     pending_parent_foreign_key_checks: Vec<PendingParentForeignKeyCheck>,
     pending_unique_checks: HashMap<u32, HashSet<PendingUniqueCheck>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DeferredConstraintSnapshot {
+    state: DeferredConstraintState,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -255,6 +271,39 @@ impl DeferredConstraintTracker {
             .lock()
             .affected_constraint_oids
             .insert(constraint_oid);
+    }
+
+    pub fn record_foreign_key_check(
+        &self,
+        constraint_oid: u32,
+        relation_name: String,
+        mut values: Vec<Value>,
+    ) {
+        if constraint_oid == 0 {
+            return;
+        }
+        Value::materialize_all(&mut values);
+        let mut state = self.state.lock();
+        state.affected_constraint_oids.insert(constraint_oid);
+        state
+            .pending_foreign_key_checks
+            .push(PendingForeignKeyCheck {
+                constraint_oid,
+                relation_name,
+                values,
+            });
+    }
+
+    pub fn cancel_foreign_key_check(&self, constraint_oid: u32, values: &[Value]) {
+        if constraint_oid == 0 {
+            return;
+        }
+        let mut values = values.iter().map(Value::to_owned_value).collect::<Vec<_>>();
+        Value::materialize_all(&mut values);
+        self.state
+            .lock()
+            .pending_foreign_key_checks
+            .retain(|check| check.constraint_oid != constraint_oid || check.values != values);
     }
 
     pub fn record_parent_foreign_key_check(
@@ -312,6 +361,10 @@ impl DeferredConstraintTracker {
             .collect()
     }
 
+    pub fn pending_foreign_key_checks(&self) -> Vec<PendingForeignKeyCheck> {
+        self.state.lock().pending_foreign_key_checks.clone()
+    }
+
     pub fn pending_unique_constraint_oids(&self) -> Vec<u32> {
         self.state
             .lock()
@@ -339,6 +392,13 @@ impl DeferredConstraintTracker {
         for constraint_oid in constraint_oids {
             state.affected_constraint_oids.remove(constraint_oid);
         }
+    }
+
+    pub fn clear_foreign_key_checks(&self, constraint_oids: &BTreeSet<u32>) {
+        self.state
+            .lock()
+            .pending_foreign_key_checks
+            .retain(|check| !constraint_oids.contains(&check.constraint_oid));
     }
 
     pub fn clear_parent_foreign_key_checks(&self, constraint_oids: &BTreeSet<u32>) {
@@ -393,9 +453,20 @@ impl DeferredConstraintTracker {
             })
     }
 
+    pub fn snapshot(&self) -> DeferredConstraintSnapshot {
+        DeferredConstraintSnapshot {
+            state: self.state.lock().clone(),
+        }
+    }
+
+    pub fn restore(&self, snapshot: DeferredConstraintSnapshot) {
+        *self.state.lock() = snapshot.state;
+    }
+
     pub fn is_empty(&self) -> bool {
         let state = self.state.lock();
         state.affected_constraint_oids.is_empty()
+            && state.pending_foreign_key_checks.is_empty()
             && state.pending_parent_foreign_key_checks.is_empty()
             && state.pending_unique_checks.is_empty()
     }
@@ -496,6 +567,7 @@ pub struct ExecutorContext {
     pub pending_table_locks: Vec<RelFileLocator>,
     pub catalog: Option<ExecutorCatalog>,
     pub scalar_function_cache: HashMap<u32, ScalarFunctionCallInfo>,
+    pub srf_rows_cache: HashMap<String, Vec<TupleSlot>>,
     pub plpgsql_function_cache: Arc<parking_lot::RwLock<PlpgsqlFunctionCache>>,
     pub pinned_cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,
     pub cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,
@@ -659,6 +731,12 @@ pub enum ExecError {
     WithContext {
         source: Box<ExecError>,
         context: String,
+    },
+    WithInternalQueryContext {
+        source: Box<ExecError>,
+        context: String,
+        query: String,
+        position: Option<usize>,
     },
     Heap(HeapError),
     Tuple(TupleError),

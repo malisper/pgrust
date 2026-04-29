@@ -12,6 +12,7 @@ use crate::backend::access::transam::checkpoint::{CheckpointCommitBarrier, Check
 use crate::backend::access::transam::xact::TransactionManager;
 use crate::backend::access::transam::xlog::{WalBgWriter, WalWriter, has_wal_segments};
 use crate::backend::access::transam::{ControlFileState, ControlFileStore};
+use crate::backend::catalog::object_address::ObjectAddressState;
 use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::executor::{ExecError, SessionReplicationRole};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
@@ -105,6 +106,7 @@ pub(crate) struct OpenDatabaseState {
     pub session_plpgsql_function_caches:
         Arc<RwLock<HashMap<ClientId, Arc<RwLock<PlpgsqlFunctionCache>>>>>,
     pub session_temp_backend_ids: Arc<RwLock<HashMap<ClientId, TempBackendId>>>,
+    pub session_guc_states: Arc<RwLock<HashMap<ClientId, HashMap<String, String>>>>,
     pub database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
     pub temp_relations: Arc<RwLock<HashMap<TempBackendId, TempNamespace>>>,
     pub domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
@@ -113,6 +115,7 @@ pub(crate) struct OpenDatabaseState {
     pub base_types: Arc<RwLock<BTreeMap<u32, BaseTypeEntry>>>,
     pub conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
     pub statistics_objects: Arc<RwLock<BTreeMap<String, StatisticsObjectEntry>>>,
+    pub object_addresses: Arc<RwLock<ObjectAddressState>>,
     pub sequences: Arc<SequenceRuntime>,
     pub advisory_locks: Arc<AdvisoryLockManager>,
     pub row_locks: Arc<RowLockManager>,
@@ -142,6 +145,7 @@ impl OpenDatabaseState {
             session_stats_states: Arc::new(RwLock::new(HashMap::new())),
             session_plpgsql_function_caches: Arc::new(RwLock::new(HashMap::new())),
             session_temp_backend_ids: Arc::new(RwLock::new(HashMap::new())),
+            session_guc_states: Arc::new(RwLock::new(HashMap::new())),
             database_create_grants: Arc::new(RwLock::new(Vec::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             domains: Arc::new(RwLock::new(BTreeMap::new())),
@@ -150,6 +154,7 @@ impl OpenDatabaseState {
             base_types: Arc::new(RwLock::new(BTreeMap::new())),
             conversions: Arc::new(RwLock::new(BTreeMap::new())),
             statistics_objects: Arc::new(RwLock::new(BTreeMap::new())),
+            object_addresses: Arc::new(RwLock::new(ObjectAddressState::default())),
             sequences,
             advisory_locks: Arc::new(AdvisoryLockManager::new()),
             row_locks: Arc::new(RowLockManager::new()),
@@ -386,6 +391,7 @@ impl Cluster {
                 session_stats_states: Arc::new(RwLock::new(HashMap::new())),
                 session_plpgsql_function_caches: Arc::new(RwLock::new(HashMap::new())),
                 session_temp_backend_ids: Arc::new(RwLock::new(HashMap::new())),
+                session_guc_states: Arc::new(RwLock::new(HashMap::new())),
                 database_create_grants: Arc::new(RwLock::new(Vec::new())),
                 temp_relations: Arc::new(RwLock::new(HashMap::new())),
                 domains: Arc::new(RwLock::new(BTreeMap::new())),
@@ -394,6 +400,7 @@ impl Cluster {
                 base_types: Arc::new(RwLock::new(BTreeMap::new())),
                 conversions: Arc::new(RwLock::new(BTreeMap::new())),
                 statistics_objects: Arc::new(RwLock::new(BTreeMap::new())),
+                object_addresses: Arc::new(RwLock::new(ObjectAddressState::default())),
                 sequences: Arc::new(SequenceRuntime::new_ephemeral()),
                 advisory_locks: Arc::new(AdvisoryLockManager::new()),
                 row_locks: Arc::new(RowLockManager::new()),
@@ -488,6 +495,7 @@ impl Cluster {
             session_stats_states: Arc::clone(&state.session_stats_states),
             session_plpgsql_function_caches: Arc::clone(&state.session_plpgsql_function_caches),
             session_temp_backend_ids: Arc::clone(&state.session_temp_backend_ids),
+            session_guc_states: Arc::clone(&state.session_guc_states),
             database_create_grants: Arc::clone(&state.database_create_grants),
             temp_relations: Arc::clone(&state.temp_relations),
             domains: Arc::clone(&state.domains),
@@ -496,6 +504,7 @@ impl Cluster {
             base_types: Arc::clone(&state.base_types),
             conversions: Arc::clone(&state.conversions),
             statistics_objects: Arc::clone(&state.statistics_objects),
+            object_addresses: Arc::clone(&state.object_addresses),
             sequences: Arc::clone(&state.sequences),
             advisory_locks: Arc::clone(&state.advisory_locks),
             row_locks: Arc::clone(&state.row_locks),

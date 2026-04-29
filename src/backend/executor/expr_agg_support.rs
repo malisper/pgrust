@@ -1,16 +1,32 @@
 use super::agg::{AccumState, AggregateRuntime, CustomAggregateRuntime};
+use super::exec_expr::append_array_value;
+use super::exec_expr::{
+    eval_pg_describe_object, eval_pg_get_object_address, eval_pg_identify_object,
+    eval_pg_identify_object_as_address,
+};
 use super::expr_casts::cast_value;
-use super::expr_ops::{add_values, div_values, sub_values};
-use super::sqlfunc::execute_user_defined_sql_scalar_function_values;
+use super::expr_math::eval_abs_function;
+use super::expr_ops::{add_values, compare_order_values, div_values, sub_values};
+use super::sqlfunc::{
+    execute_user_defined_sql_scalar_function_values,
+    execute_user_defined_sql_scalar_function_values_with_arg_type_oids,
+};
 use super::{ExecError, ExecutorContext};
-use crate::backend::parser::CatalogLookup;
+use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    INT8_TYPE_OID, PG_LANGUAGE_SQL_OID, builtin_aggregate_function_for_proc_oid,
-    builtin_hypothetical_aggregate_function_for_proc_oid, builtin_scalar_function_for_proc_oid,
+    BPCHAR_HASH_OPCLASS_OID, INT8_TYPE_OID, PG_LANGUAGE_SQL_OID,
+    builtin_aggregate_function_for_proc_oid, builtin_hypothetical_aggregate_function_for_proc_oid,
+    builtin_ordered_set_aggregate_function_for_proc_oid, builtin_scalar_function_for_proc_oid,
 };
 use crate::include::nodes::datum::{ArrayValue, NumericValue, Value};
-use crate::include::nodes::primnodes::{AggAccum, BuiltinScalarFunction};
-use crate::pl::plpgsql::execute_user_defined_scalar_function_values;
+use crate::include::nodes::primnodes::{
+    AggAccum, BuiltinScalarFunction, HashFunctionKind, expr_sql_type_hint,
+};
+use crate::pl::plpgsql::{
+    execute_user_defined_scalar_function_values,
+    execute_user_defined_scalar_function_values_with_arg_types,
+};
+use std::cmp::Ordering;
 
 pub(crate) fn build_aggregate_runtime(
     accum: &AggAccum,
@@ -24,6 +40,9 @@ pub(crate) fn build_aggregate_runtime(
     }
     if let Some(func) = builtin_hypothetical_aggregate_function_for_proc_oid(accum.aggfnoid) {
         return Ok(AggregateRuntime::Hypothetical { func });
+    }
+    if let Some(func) = builtin_ordered_set_aggregate_function_for_proc_oid(accum.aggfnoid) {
+        return Ok(AggregateRuntime::OrderedSet { func });
     }
 
     let catalog = ctx
@@ -72,7 +91,7 @@ pub(crate) fn build_aggregate_runtime(
                 })?,
         )
     };
-    let transtype = catalog
+    let declared_transtype = catalog
         .type_by_oid(aggregate.aggtranstype)
         .ok_or_else(|| ExecError::DetailedError {
             message: format!(
@@ -84,6 +103,16 @@ pub(crate) fn build_aggregate_runtime(
             sqlstate: "42883",
         })?
         .sql_type;
+    let input_arg_types = accum
+        .args
+        .iter()
+        .filter_map(expr_sql_type_hint)
+        .collect::<Vec<_>>();
+    let transtype = concrete_custom_aggregate_transtype(declared_transtype, &input_arg_types);
+    let mut transfn_arg_types = Vec::with_capacity(input_arg_types.len() + 1);
+    transfn_arg_types.push(transtype);
+    transfn_arg_types.extend(input_arg_types.iter().copied());
+    let finalfn_arg_types = vec![transtype];
     let init_value = aggregate
         .agginitval
         .as_ref()
@@ -96,8 +125,25 @@ pub(crate) fn build_aggregate_runtime(
         finalfn_oid: finalfn.as_ref().map(|row| row.oid),
         finalfn_strict: finalfn.as_ref().is_some_and(|row| row.proisstrict),
         transtype,
+        transfn_arg_types,
+        finalfn_arg_types,
         init_value,
     }))
+}
+
+fn concrete_custom_aggregate_transtype(
+    declared_transtype: SqlType,
+    input_arg_types: &[SqlType],
+) -> SqlType {
+    if !matches!(declared_transtype.kind, SqlTypeKind::AnyArray) {
+        return declared_transtype;
+    }
+    input_arg_types
+        .iter()
+        .copied()
+        .find(|ty| ty.is_array)
+        .or_else(|| input_arg_types.first().copied().map(SqlType::array_of))
+        .unwrap_or(declared_transtype)
 }
 
 fn load_visible_aggregate_row(
@@ -119,7 +165,31 @@ pub(crate) fn execute_scalar_function_value_call(
     arg_values: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    execute_scalar_function_value_call_with_arg_types(proc_oid, arg_values, None, ctx)
+}
+
+pub(crate) fn execute_scalar_function_value_call_with_arg_types(
+    proc_oid: u32,
+    arg_values: &[Value],
+    arg_types: Option<&[crate::backend::parser::SqlType]>,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
     if let Some(func) = builtin_scalar_function_for_proc_oid(proc_oid) {
+        match func {
+            BuiltinScalarFunction::PgDescribeObject => {
+                return eval_pg_describe_object(arg_values, ctx);
+            }
+            BuiltinScalarFunction::PgIdentifyObject => {
+                return eval_pg_identify_object(arg_values, ctx);
+            }
+            BuiltinScalarFunction::PgIdentifyObjectAsAddress => {
+                return eval_pg_identify_object_as_address(arg_values, ctx);
+            }
+            BuiltinScalarFunction::PgGetObjectAddress => {
+                return eval_pg_get_object_address(arg_values, ctx);
+            }
+            _ => {}
+        }
         return execute_builtin_scalar_function_value_call(func, arg_values);
     }
 
@@ -149,10 +219,27 @@ pub(crate) fn execute_scalar_function_value_call(
         });
     }
     match row.prolang {
-        PG_LANGUAGE_SQL_OID => {
-            execute_user_defined_sql_scalar_function_values(&row, arg_values, ctx)
-        }
-        _ => execute_user_defined_scalar_function_values(proc_oid, arg_values, ctx),
+        PG_LANGUAGE_SQL_OID => match arg_types {
+            Some(arg_types) => {
+                let arg_type_oids = arg_types
+                    .iter()
+                    .map(|ty| catalog.type_oid_for_sql_type(*ty).unwrap_or(0))
+                    .collect::<Vec<_>>();
+                execute_user_defined_sql_scalar_function_values_with_arg_type_oids(
+                    &row,
+                    arg_values,
+                    Some(&arg_type_oids),
+                    ctx,
+                )
+            }
+            None => execute_user_defined_sql_scalar_function_values(&row, arg_values, ctx),
+        },
+        _ => match arg_types {
+            Some(arg_types) => execute_user_defined_scalar_function_values_with_arg_types(
+                proc_oid, arg_values, arg_types, ctx,
+            ),
+            None => execute_user_defined_scalar_function_values(proc_oid, arg_values, ctx),
+        },
     }
 }
 
@@ -176,6 +263,23 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
         BuiltinScalarFunction::Int8IncAny => match arg_values {
             [state, _] => add_values(state.clone(), Value::Int64(1)),
             _ => malformed_aggregate_support_call("int8inc_any"),
+        },
+        BuiltinScalarFunction::ArrayAppend => match arg_values {
+            [array, element] => append_array_value(array, element, false),
+            _ => malformed_aggregate_support_call("array_append"),
+        },
+        BuiltinScalarFunction::Abs => eval_abs_function(arg_values),
+        BuiltinScalarFunction::ArrayLarger => match arg_values {
+            [left, right] => {
+                if matches!(left, Value::Null) || matches!(right, Value::Null) {
+                    Ok(Value::Null)
+                } else if compare_order_values(left, right, None, None, false)? == Ordering::Less {
+                    Ok(right.clone())
+                } else {
+                    Ok(left.clone())
+                }
+            }
+            _ => malformed_aggregate_support_call("array_larger"),
         },
         BuiltinScalarFunction::Int4AvgAccum => match arg_values {
             [state, Value::Int32(new_value)] => {
@@ -213,6 +317,12 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
             [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
             _ => malformed_aggregate_support_call("boolor_statefunc"),
         },
+        BuiltinScalarFunction::HashValue(kind) => {
+            execute_builtin_hash_value_call(kind, false, arg_values)
+        }
+        BuiltinScalarFunction::HashValueExtended(kind) => {
+            execute_builtin_hash_value_call(kind, true, arg_values)
+        }
         other => Err(ExecError::DetailedError {
             message: format!(
                 "builtin function {:?} is not supported by aggregate value execution",
@@ -222,6 +332,67 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
             hint: None,
             sqlstate: "0A000",
         }),
+    }
+}
+
+fn execute_builtin_hash_value_call(
+    kind: HashFunctionKind,
+    extended: bool,
+    arg_values: &[Value],
+) -> Result<Value, ExecError> {
+    let opclass = (kind == HashFunctionKind::BpChar).then_some(BPCHAR_HASH_OPCLASS_OID);
+    if extended {
+        let [value, seed] = arg_values else {
+            return malformed_aggregate_support_call("hash_extended");
+        };
+        if matches!(value, Value::Null) || matches!(seed, Value::Null) {
+            return Ok(Value::Null);
+        }
+        let seed = match seed {
+            Value::Int16(seed) => i64::from(*seed),
+            Value::Int32(seed) => i64::from(*seed),
+            Value::Int64(seed) => *seed,
+            _ => {
+                return Err(ExecError::TypeMismatch {
+                    op: "hash_extended",
+                    left: value.clone(),
+                    right: seed.clone(),
+                });
+            }
+        };
+        let hash = crate::backend::access::hash::hash_value_extended(value, opclass, seed as u64)
+            .map_err(|message| hash_function_error(message, true))?
+            .unwrap_or(0);
+        return Ok(Value::Int64(hash as i64));
+    }
+
+    let [value] = arg_values else {
+        return malformed_aggregate_support_call("hash");
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let hash = crate::backend::access::hash::hash_value_extended(value, opclass, 0)
+        .map_err(|message| hash_function_error(message, false))?
+        .unwrap_or(0);
+    Ok(Value::Int32(hash as u32 as i32))
+}
+
+fn hash_function_error(message: String, extended: bool) -> ExecError {
+    let message = if extended {
+        message.replacen(
+            "could not identify a hash function",
+            "could not identify an extended hash function",
+            1,
+        )
+    } else {
+        message
+    };
+    ExecError::DetailedError {
+        message,
+        detail: None,
+        hint: None,
+        sqlstate: "42883",
     }
 }
 

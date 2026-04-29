@@ -8,7 +8,7 @@ mod groupby_rewrite;
 mod inherit;
 mod joininfo;
 mod partition_cache;
-mod partition_prune;
+pub(crate) mod partition_prune;
 mod partitionwise;
 mod path;
 mod pathnodes;
@@ -21,6 +21,8 @@ mod sublink_pullup;
 mod tests;
 mod upperrels;
 mod util;
+
+pub(crate) use partition_prune::relation_may_satisfy_own_partition_bound;
 
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType};
 use crate::backend::statistics::types::{
@@ -62,6 +64,7 @@ struct ExtendedStatistic {
     target_ids: Vec<i16>,
     expressions: Vec<(i16, Expr)>,
     expression_stats: HashMap<i16, PgStatisticRow>,
+    statistics_target: usize,
     ndistinct: Option<PgNdistinctPayload>,
     dependencies: Option<PgDependenciesPayload>,
     mcv: Option<PgMcvListPayload>,

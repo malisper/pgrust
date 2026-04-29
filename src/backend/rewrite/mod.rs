@@ -26,10 +26,10 @@ pub(crate) use views::{
 use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, ExprArraySubscript, RelationPrivilegeRequirement, SetReturningCall,
-    SetReturningExpr, SortGroupClause, SqlJsonQueryFunction, SqlJsonTableBehavior,
-    SqlJsonTablePassingArg, SubLink, TargetEntry, WindowClause, WindowFrame, WindowFrameBound,
-    WindowFuncExpr, WindowFuncKind, WindowSpec,
+    AggAccum, Expr, ExprArraySubscript, RelationPrivilegeRequirement, RowsFromItem, RowsFromSource,
+    SetReturningCall, SetReturningExpr, SortGroupClause, SqlJsonQueryFunction,
+    SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink, TargetEntry, WindowClause, WindowFrame,
+    WindowFrameBound, WindowFuncExpr, WindowFuncKind, WindowSpec,
 };
 use views::rewrite_view_relation_query;
 
@@ -69,6 +69,22 @@ fn rewrite_query(
             .into_iter()
             .map(|expr| {
                 rewrite_semantic_expr(expr, catalog, expanded_views, active_policy_relations)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        grouping_sets: query
+            .grouping_sets
+            .into_iter()
+            .map(|set| {
+                set.into_iter()
+                    .map(|expr| {
+                        rewrite_semantic_expr(
+                            expr,
+                            catalog,
+                            expanded_views,
+                            active_policy_relations,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
             })
             .collect::<Result<Vec<_>, _>>()?,
         accumulators: query
@@ -253,6 +269,7 @@ fn rewrite_rte(
             relkind,
             relispopulated: _,
             toast: _,
+            tablesample: _,
         } if relkind == 'v' => {
             let mut analyzed = rewrite_view_relation_query(
                 relation_oid,
@@ -286,12 +303,14 @@ fn rewrite_rte(
             relkind,
             relispopulated,
             toast,
+            tablesample,
         } => RangeTblEntryKind::Relation {
             rel,
             relation_oid,
             relkind,
             relispopulated,
             toast,
+            tablesample,
         },
         RangeTblEntryKind::Join {
             jointype,
@@ -563,6 +582,49 @@ fn rewrite_set_returning_call(
     active_policy_relations: &mut Vec<u32>,
 ) -> Result<SetReturningCall, ParseError> {
     Ok(match call {
+        SetReturningCall::RowsFrom {
+            items,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::RowsFrom {
+            items: items
+                .into_iter()
+                .map(|item| {
+                    Ok(RowsFromItem {
+                        source: match item.source {
+                            RowsFromSource::Function(call) => {
+                                RowsFromSource::Function(rewrite_set_returning_call(
+                                    call,
+                                    catalog,
+                                    expanded_views,
+                                    active_policy_relations,
+                                )?)
+                            }
+                            RowsFromSource::Project {
+                                output_exprs,
+                                output_columns,
+                            } => RowsFromSource::Project {
+                                output_exprs: output_exprs
+                                    .into_iter()
+                                    .map(|expr| {
+                                        rewrite_semantic_expr(
+                                            expr,
+                                            catalog,
+                                            expanded_views,
+                                            active_policy_relations,
+                                        )
+                                    })
+                                    .collect::<Result<Vec<_>, ParseError>>()?,
+                                output_columns,
+                            },
+                        },
+                        column_definitions: item.column_definitions,
+                    })
+                })
+                .collect::<Result<Vec<_>, ParseError>>()?,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
@@ -788,6 +850,7 @@ fn rewrite_set_returning_call(
             function_name,
             func_variadic,
             args,
+            inlined_expr,
             output_columns,
             with_ordinality,
         } => SetReturningCall::UserDefined {
@@ -800,6 +863,12 @@ fn rewrite_set_returning_call(
                     rewrite_semantic_expr(expr, catalog, expanded_views, active_policy_relations)
                 })
                 .collect::<Result<Vec<_>, _>>()?,
+            inlined_expr: inlined_expr
+                .map(|expr| {
+                    rewrite_semantic_expr(*expr, catalog, expanded_views, active_policy_relations)
+                        .map(Box::new)
+                })
+                .transpose()?,
             output_columns,
             with_ordinality,
         },

@@ -20,7 +20,7 @@ exception_condition = { others_condition | sqlstate_condition | ident }
 others_condition = { kw_others }
 sqlstate_condition = { kw_sqlstate ~ sql_string }
 
-stmt = { nested_block_stmt | null_stmt | if_stmt | while_stmt | for_stmt | raise_stmt | assert_stmt | return_query_stmt | return_next_stmt | return_stmt | perform_stmt | dynamic_execute_stmt | get_diagnostics_stmt | open_cursor_stmt | fetch_cursor_stmt | close_cursor_stmt | assign_stmt | exec_sql_stmt }
+stmt = { nested_block_stmt | null_stmt | if_stmt | while_stmt | for_stmt | exit_stmt | raise_stmt | assert_stmt | continue_stmt | return_query_stmt | return_next_stmt | return_stmt | perform_stmt | dynamic_execute_stmt | get_diagnostics_stmt | open_cursor_stmt | fetch_cursor_stmt | close_cursor_stmt | assign_stmt | exec_sql_stmt }
 nested_block_stmt = { block ~ semi }
 null_stmt = { kw_null ~ semi }
 assign_stmt = { assign_target ~ assign_op ~ expr_until_semi ~ semi }
@@ -31,12 +31,14 @@ elsif_clause = { kw_elsif ~ expr_until_then ~ kw_then ~ stmt* }
 else_clause = { kw_else ~ stmt* }
 for_stmt = { kw_for ~ for_target_list ~ kw_in ~ expr_until_loop ~ kw_loop ~ stmt* ~ kw_end ~ kw_loop ~ semi }
 for_target_list = { assign_target ~ (comma ~ assign_target)* }
+exit_stmt = { kw_exit ~ (kw_when ~ expr_until_semi)? ~ semi }
 raise_stmt = { kw_raise ~ raise_level? ~ (raise_message_clause | raise_condition_clause) ~ semi }
 raise_message_clause = { sql_string ~ (comma ~ expr_until_comma_or_semi)* }
 raise_condition_clause = { (sqlstate_condition | ident) ~ raise_using_clause? }
 raise_using_clause = { kw_using ~ raise_using_item ~ (comma ~ raise_using_item)* }
 raise_using_item = { ident ~ assign_op ~ expr_until_comma_or_semi }
 assert_stmt = { kw_assert ~ expr_until_comma_or_semi ~ (comma ~ expr_until_semi)? ~ semi }
+continue_stmt = { kw_continue ~ semi }
 return_stmt = { kw_return ~ expr_until_semi? ~ semi }
 return_next_stmt = { kw_return ~ kw_next ~ expr_until_semi? ~ semi }
 return_query_stmt = { kw_return ~ kw_query ~ return_query_sql ~ semi }
@@ -52,7 +54,7 @@ return_query_sql = @{ expr_chunk+ }
 exec_sql_text = @{ expr_chunk+ }
 positional_param = @{ "$" ~ ASCII_DIGIT+ }
 alias_target = { positional_param | ident }
-raise_level = { kw_info | kw_notice | kw_warning | kw_log | kw_exception }
+raise_level = { kw_info | kw_log | kw_notice | kw_warning | kw_exception }
 stmt_keyword_start = _{
     kw_begin
     | kw_end
@@ -63,9 +65,11 @@ stmt_keyword_start = _{
     | kw_else
     | kw_for
     | kw_loop
+    | kw_exit
     | kw_perform
     | kw_raise
     | kw_assert
+    | kw_continue
     | kw_return
     | kw_execute
     | kw_get
@@ -131,8 +135,6 @@ expr_range_chunk = _{
 expr_loop_chunk = _{
     sql_string
     | quoted_ident
-    | "(" ~ expr_until_loop? ~ ")"
-    | "[" ~ expr_until_loop? ~ "]"
     | !kw_loop ~ ANY
 }
 
@@ -157,9 +159,11 @@ kw_for = _{ kw_for_atom }
 kw_in = _{ kw_in_atom }
 kw_alias = _{ kw_alias_atom }
 kw_loop = _{ kw_loop_atom }
+kw_exit = _{ kw_exit_atom }
 kw_perform = _{ kw_perform_atom }
 kw_raise = _{ kw_raise_atom }
 kw_assert = _{ kw_assert_atom }
+kw_continue = _{ kw_continue_atom }
 kw_return = _{ kw_return_atom }
 kw_next = _{ kw_next_atom }
 kw_query = _{ kw_query_atom }
@@ -178,9 +182,9 @@ kw_or = _{ kw_or_atom }
 kw_others = _{ kw_others_atom }
 kw_sqlstate = _{ kw_sqlstate_atom }
 kw_info = _{ kw_info_atom }
+kw_log = _{ kw_log_atom }
 kw_notice = _{ kw_notice_atom }
 kw_warning = _{ kw_warning_atom }
-kw_log = _{ kw_log_atom }
 kw_exception = _{ kw_exception_atom }
 kw_values = _{ kw_values_atom }
 kw_select = _{ kw_select_atom }
@@ -201,9 +205,11 @@ kw_for_atom = @{ ^"for" ~ keyword_end }
 kw_in_atom = @{ ^"in" ~ keyword_end }
 kw_alias_atom = @{ ^"alias" ~ keyword_end }
 kw_loop_atom = @{ ^"loop" ~ keyword_end }
+kw_exit_atom = @{ ^"exit" ~ keyword_end }
 kw_perform_atom = @{ ^"perform" ~ keyword_end }
 kw_raise_atom = @{ ^"raise" ~ keyword_end }
 kw_assert_atom = @{ ^"assert" ~ keyword_end }
+kw_continue_atom = @{ ^"continue" ~ keyword_end }
 kw_return_atom = @{ ^"return" ~ keyword_end }
 kw_next_atom = @{ ^"next" ~ keyword_end }
 kw_query_atom = @{ ^"query" ~ keyword_end }
@@ -222,9 +228,9 @@ kw_or_atom = @{ ^"or" ~ keyword_end }
 kw_others_atom = @{ ^"others" ~ keyword_end }
 kw_sqlstate_atom = @{ ^"sqlstate" ~ keyword_end }
 kw_info_atom = @{ ^"info" ~ keyword_end }
+kw_log_atom = @{ ^"log" ~ keyword_end }
 kw_notice_atom = @{ ^"notice" ~ keyword_end }
 kw_warning_atom = @{ ^"warning" ~ keyword_end }
-kw_log_atom = @{ ^"log" ~ keyword_end }
 kw_exception_atom = @{ ^"exception" ~ keyword_end }
 kw_values_atom = @{ ^"values" ~ keyword_end }
 kw_select_atom = @{ ^"select" ~ keyword_end }

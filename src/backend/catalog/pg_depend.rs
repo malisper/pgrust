@@ -484,6 +484,7 @@ pub(crate) fn collect_sql_expr_column_names(expr: &SqlExpr, out: &mut BTreeSet<S
             collect_sql_expr_column_names(array, out);
         }
         SqlExpr::Default
+        | SqlExpr::ParamRef(_)
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)
         | SqlExpr::NumericLiteral(_)

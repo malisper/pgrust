@@ -40,7 +40,8 @@ pub(super) fn aggregate_call_matches_catalog(
     within_group: Option<&[OrderByItem]>,
 ) -> bool {
     if within_group.is_some() {
-        return resolve_builtin_hypothetical_aggregate(name).is_some();
+        return resolve_builtin_hypothetical_aggregate(name).is_some()
+            || resolve_builtin_ordered_set_aggregate(name).is_some();
     }
     if let Some(func) = resolve_builtin_aggregate(name) {
         return builtin_aggregate_accepts_call(func, args);
@@ -135,6 +136,7 @@ pub(super) fn expr_contains_agg(catalog: &dyn CatalogLookup, expr: &SqlExpr) -> 
     match expr {
         SqlExpr::Column(_)
         | SqlExpr::Parameter(_)
+        | SqlExpr::ParamRef(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)
@@ -322,6 +324,7 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         SqlExpr::Column(_) => true,
         SqlExpr::Parameter(_) => false,
         SqlExpr::Default => false,
+        SqlExpr::ParamRef(_) => false,
         SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)
         | SqlExpr::NumericLiteral(_)
@@ -495,6 +498,7 @@ pub(super) fn collect_aggs(
     match expr {
         SqlExpr::Column(_)
         | SqlExpr::Parameter(_)
+        | SqlExpr::ParamRef(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)

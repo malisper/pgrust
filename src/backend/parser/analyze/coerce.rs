@@ -318,6 +318,7 @@ pub(crate) fn sql_type_name(ty: SqlType) -> String {
             SqlTypeKind::Shell => "shell",
             SqlTypeKind::Internal => "internal",
             SqlTypeKind::Trigger => "trigger",
+            SqlTypeKind::EventTrigger => "event_trigger",
             SqlTypeKind::Void => "void",
             SqlTypeKind::Cstring => "cstring",
             SqlTypeKind::FdwHandler => "fdw_handler",
@@ -479,6 +480,10 @@ fn is_string_literal_expr(expr: &SqlExpr) -> bool {
     )
 }
 
+fn is_null_literal_expr(expr: &SqlExpr) -> bool {
+    matches!(expr, SqlExpr::Const(Value::Null))
+}
+
 pub(super) fn unknown_string_literal_peer_type(peer_type: SqlType) -> Option<SqlType> {
     if peer_type.is_array {
         return Some(peer_type);
@@ -503,6 +508,8 @@ pub(super) fn unknown_string_literal_peer_type(peer_type: SqlType) -> Option<Sql
         SqlTypeKind::Bytea => return Some(SqlType::new(SqlTypeKind::Bytea)),
         SqlTypeKind::Uuid => return Some(SqlType::new(SqlTypeKind::Uuid)),
         SqlTypeKind::Enum if peer_type.type_oid != 0 => return Some(peer_type),
+        SqlTypeKind::Composite if peer_type.type_oid != 0 => return Some(peer_type),
+        SqlTypeKind::Record if peer_type.type_oid != 0 => return Some(peer_type),
         SqlTypeKind::InternalChar => return Some(SqlType::new(SqlTypeKind::InternalChar)),
         SqlTypeKind::Name => return Some(SqlType::new(SqlTypeKind::Name)),
         SqlTypeKind::Inet => return Some(SqlType::new(SqlTypeKind::Inet)),
@@ -586,12 +593,28 @@ pub(super) fn coerce_unknown_string_literal_type(
     expr_type: SqlType,
     peer_type: SqlType,
 ) -> SqlType {
+    if matches!(expr, SqlExpr::Const(Value::Null)) {
+        if !matches!(peer_type.kind, SqlTypeKind::Text) || peer_type.type_oid != 0 {
+            return peer_type;
+        }
+    }
     if is_string_literal_expr(expr) {
         if let Some(coerced) = unknown_string_literal_peer_type(peer_type) {
             return coerced;
         }
     }
     expr_type
+}
+
+pub(super) fn coerce_unknown_set_operation_literal_type(
+    expr: &SqlExpr,
+    expr_type: SqlType,
+    peer_type: SqlType,
+) -> SqlType {
+    if is_null_literal_expr(expr) {
+        return peer_type;
+    }
+    coerce_unknown_string_literal_type(expr, expr_type, peer_type)
 }
 
 pub(super) fn should_use_text_concat(

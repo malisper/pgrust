@@ -17,6 +17,7 @@ use crate::backend::catalog::pg_collation::sort_pg_collation_rows;
 use crate::backend::catalog::pg_constraint::sort_pg_constraint_rows;
 use crate::backend::catalog::pg_database::sort_pg_database_rows;
 use crate::backend::catalog::pg_depend::sort_pg_depend_rows;
+use crate::backend::catalog::pg_event_trigger::sort_pg_event_trigger_rows;
 use crate::backend::catalog::pg_foreign_data_wrapper::sort_pg_foreign_data_wrapper_rows;
 use crate::backend::catalog::pg_foreign_server::sort_pg_foreign_server_rows;
 use crate::backend::catalog::pg_foreign_table::sort_pg_foreign_table_rows;
@@ -48,30 +49,31 @@ use crate::include::catalog::toasting::toast_relation_name;
 use crate::include::catalog::{
     ANYARRAYOID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
     BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID,
-    CIRCLE_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID,
-    FLOAT8_TYPE_OID, HEAP_TABLE_AM_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT4_ARRAY_TYPE_OID,
-    INT4_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID,
-    INTERNAL_CHAR_TYPE_OID, INTERVAL_ARRAY_TYPE_OID, INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID,
-    JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID,
-    JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID, MONEY_TYPE_OID,
-    NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID,
-    PG_TOAST_NAMESPACE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, PgAggregateRow, PgAmRow, PgAmopRow,
-    PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
-    PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow, PgDependRow,
-    PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow,
-    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
-    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow, PgStatisticExtRow,
-    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
-    PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow, REGCONFIG_ARRAY_TYPE_OID,
-    REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID,
-    TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
-    TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
-    UUID_ARRAY_TYPE_OID, UUID_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
-    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID,
-    XML_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_aggregate_rows, bootstrap_pg_am_rows,
+    CIRCLE_TYPE_OID, EVENT_TRIGGER_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
+    FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, HEAP_TABLE_AM_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID,
+    INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID,
+    INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, INTERVAL_ARRAY_TYPE_OID,
+    INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
+    JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID,
+    MONEY_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
+    PATH_TYPE_OID, PG_TOAST_NAMESPACE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, PgAggregateRow,
+    PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
+    PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow, PgDatabaseRow,
+    PgDependRow, PgEventTriggerRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow,
+    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
+    PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgSequenceRow, PgStatisticExtDataRow,
+    PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow, PgUserMappingRow,
+    REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
+    REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID,
+    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
+    TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, UUID_ARRAY_TYPE_OID, UUID_TYPE_OID,
+    VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
+    XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID, XML_TYPE_OID,
+    bootstrap_composite_type_rows, bootstrap_pg_aggregate_rows, bootstrap_pg_am_rows,
     bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows, bootstrap_pg_conversion_rows,
     bootstrap_pg_foreign_data_wrapper_rows, bootstrap_pg_foreign_server_rows,
     bootstrap_pg_foreign_table_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
     bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
@@ -101,6 +103,7 @@ pub struct CatCache {
     rewrite_rows: Vec<PgRewriteRow>,
     sequence_rows: Vec<PgSequenceRow>,
     trigger_rows: Vec<PgTriggerRow>,
+    event_trigger_rows: Vec<PgEventTriggerRow>,
     policy_rows: Vec<PgPolicyRow>,
     publication_rows: Vec<PgPublicationRow>,
     publication_rel_rows: Vec<PgPublicationRelRow>,
@@ -240,6 +243,8 @@ impl CatCache {
         }
         cache.cast_rows.extend(bootstrap_pg_cast_rows());
         sort_pg_cast_rows(&mut cache.cast_rows);
+        cache.conversion_rows.extend(bootstrap_pg_conversion_rows());
+        sort_pg_conversion_rows(&mut cache.conversion_rows);
         cache.collation_rows.extend(bootstrap_pg_collation_rows());
         sort_pg_collation_rows(&mut cache.collation_rows);
         cache
@@ -478,6 +483,9 @@ impl CatCache {
             .extend(catalog.rewrite_rows().iter().cloned());
         cache.trigger_rows.extend(catalog.triggers.iter().cloned());
         cache
+            .event_trigger_rows
+            .extend(catalog.event_trigger_rows().iter().cloned());
+        cache
             .policy_rows
             .extend(catalog.policy_rows().iter().cloned());
         cache
@@ -500,6 +508,7 @@ impl CatCache {
         sort_pg_inherits_rows(&mut cache.inherit_rows);
         sort_pg_rewrite_rows(&mut cache.rewrite_rows);
         sort_pg_trigger_rows(&mut cache.trigger_rows);
+        sort_pg_event_trigger_rows(&mut cache.event_trigger_rows);
         sort_pg_policy_rows(&mut cache.policy_rows);
         sort_pg_publication_rows(&mut cache.publication_rows);
         sort_pg_publication_rel_rows(&mut cache.publication_rel_rows);
@@ -526,6 +535,7 @@ impl CatCache {
             rows.rewrites,
             rows.sequences,
             rows.triggers,
+            rows.event_triggers,
             rows.policies,
             rows.publications,
             rows.publication_rels,
@@ -575,6 +585,7 @@ impl CatCache {
         rewrite_rows: Vec<PgRewriteRow>,
         sequence_rows: Vec<PgSequenceRow>,
         trigger_rows: Vec<PgTriggerRow>,
+        event_trigger_rows: Vec<PgEventTriggerRow>,
         policy_rows: Vec<PgPolicyRow>,
         publication_rows: Vec<PgPublicationRow>,
         publication_rel_rows: Vec<PgPublicationRelRow>,
@@ -652,6 +663,8 @@ impl CatCache {
         sort_pg_sequence_rows(&mut cache.sequence_rows);
         cache.trigger_rows = trigger_rows;
         sort_pg_trigger_rows(&mut cache.trigger_rows);
+        cache.event_trigger_rows = event_trigger_rows;
+        sort_pg_event_trigger_rows(&mut cache.event_trigger_rows);
         cache.policy_rows = policy_rows;
         sort_pg_policy_rows(&mut cache.policy_rows);
         cache.publication_rows = publication_rows;
@@ -708,6 +721,15 @@ impl CatCache {
         cache.cast_rows = cast_rows;
         sort_pg_cast_rows(&mut cache.cast_rows);
         cache.conversion_rows = conversion_rows;
+        for row in bootstrap_pg_conversion_rows() {
+            if !cache
+                .conversion_rows
+                .iter()
+                .any(|existing| existing.oid == row.oid)
+            {
+                cache.conversion_rows.push(row);
+            }
+        }
         sort_pg_conversion_rows(&mut cache.conversion_rows);
         cache.collation_rows = collation_rows;
         sort_pg_collation_rows(&mut cache.collation_rows);
@@ -895,6 +917,21 @@ impl CatCache {
 
     pub fn trigger_rows(&self) -> Vec<PgTriggerRow> {
         self.trigger_rows.clone()
+    }
+
+    pub fn event_trigger_rows(&self) -> Vec<PgEventTriggerRow> {
+        self.event_trigger_rows.clone()
+    }
+
+    pub fn event_trigger_row_by_name(&self, name: &str) -> Option<&PgEventTriggerRow> {
+        let normalized = normalize_catalog_name(name);
+        self.event_trigger_rows
+            .iter()
+            .find(|row| row.evtname.eq_ignore_ascii_case(normalized))
+    }
+
+    pub fn event_trigger_row_by_oid(&self, oid: u32) -> Option<&PgEventTriggerRow> {
+        self.event_trigger_rows.iter().find(|row| row.oid == oid)
     }
 
     pub fn publication_rows(&self) -> Vec<PgPublicationRow> {
@@ -1417,6 +1454,8 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::Void, true) => unreachable!("void arrays are unsupported"),
         (SqlTypeKind::Trigger, false) => crate::include::catalog::TRIGGER_TYPE_OID,
         (SqlTypeKind::Trigger, true) => unreachable!("trigger arrays are unsupported"),
+        (SqlTypeKind::EventTrigger, false) => EVENT_TRIGGER_TYPE_OID,
+        (SqlTypeKind::EventTrigger, true) => unreachable!("event_trigger arrays are unsupported"),
         (SqlTypeKind::FdwHandler, false) => crate::include::catalog::FDW_HANDLER_TYPE_OID,
         (SqlTypeKind::FdwHandler, true) => unreachable!("fdw_handler arrays are unsupported"),
         (SqlTypeKind::Int8, false) => INT8_TYPE_OID,

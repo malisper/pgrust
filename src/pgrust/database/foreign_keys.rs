@@ -9,8 +9,8 @@ use crate::backend::commands::tablecmds::{
 };
 use crate::backend::executor::{
     ConstraintTiming, DeferredForeignKeyTracker, ExecError, ExecutorContext,
-    PendingParentForeignKeyCheck, StatementResult, enforce_deferred_inbound_foreign_key_check,
-    enforce_outbound_foreign_keys,
+    PendingForeignKeyCheck, PendingParentForeignKeyCheck, StatementResult,
+    enforce_deferred_inbound_foreign_key_check, enforce_outbound_foreign_keys,
 };
 use crate::backend::parser::{
     AlterTableAddConstraintStatement, AlterTableValidateConstraintStatement, BoundDeleteStatement,
@@ -299,6 +299,7 @@ fn build_constraint_validation_context(
         pending_table_locks: Vec::new(),
         catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
         scalar_function_cache: std::collections::HashMap::new(),
+        srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: db.plpgsql_function_cache(client_id),
         pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -334,6 +335,7 @@ fn collect_constraint_validation_targets(
     target: &ConstraintValidationTarget,
 ) -> (
     BTreeSet<u32>,
+    Vec<PendingForeignKeyCheck>,
     Vec<PendingParentForeignKeyCheck>,
     BTreeSet<u32>,
 ) {
@@ -344,6 +346,11 @@ fn collect_constraint_validation_targets(
             should_validate_constraint(catalog, tracker, *constraint_oid, target)
         })
         .collect::<BTreeSet<_>>();
+    let foreign_key_checks = tracker
+        .pending_foreign_key_checks()
+        .into_iter()
+        .filter(|check| should_validate_constraint(catalog, tracker, check.constraint_oid, target))
+        .collect::<Vec<_>>();
     let parent_checks = tracker
         .pending_parent_foreign_key_checks()
         .into_iter()
@@ -356,7 +363,12 @@ fn collect_constraint_validation_targets(
             should_validate_constraint(catalog, tracker, *constraint_oid, target)
         })
         .collect::<BTreeSet<_>>();
-    (foreign_keys, parent_checks, unique_constraints)
+    (
+        foreign_keys,
+        foreign_key_checks,
+        parent_checks,
+        unique_constraints,
+    )
 }
 
 fn validate_foreign_key_constraints(
@@ -395,6 +407,42 @@ fn validate_foreign_key_constraints(
                 ctx,
             )?;
         }
+    }
+    Ok(())
+}
+
+fn validate_pending_foreign_key_checks(
+    catalog: &LazyCatalogLookup,
+    checks: &[PendingForeignKeyCheck],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for check in checks {
+        let Some(row) = catalog.constraint_row_by_oid(check.constraint_oid) else {
+            continue;
+        };
+        if row.contype != CONSTRAINT_FOREIGN {
+            continue;
+        }
+        let Some(relation) = catalog.lookup_relation_by_oid(row.conrelid) else {
+            continue;
+        };
+        let constraints =
+            bind_relation_constraints(None, relation.relation_oid, &relation.desc, catalog)
+                .map_err(ExecError::Parse)?;
+        let Some(constraint) = constraints
+            .foreign_keys
+            .iter()
+            .find(|constraint| constraint.constraint_oid == check.constraint_oid)
+        else {
+            continue;
+        };
+        enforce_outbound_foreign_keys(
+            &check.relation_name,
+            std::slice::from_ref(constraint),
+            None,
+            &check.values,
+            ctx,
+        )?;
     }
     Ok(())
 }
@@ -505,9 +553,13 @@ fn validate_constraint_target(
     tracker: &DeferredForeignKeyTracker,
     target: ConstraintValidationTarget,
 ) -> Result<(), ExecError> {
-    let (foreign_key_oids, parent_checks, unique_oids) =
+    let (foreign_key_oids, foreign_key_checks, parent_checks, unique_oids) =
         collect_constraint_validation_targets(catalog, tracker, &target);
-    if foreign_key_oids.is_empty() && parent_checks.is_empty() && unique_oids.is_empty() {
+    if foreign_key_oids.is_empty()
+        && foreign_key_checks.is_empty()
+        && parent_checks.is_empty()
+        && unique_oids.is_empty()
+    {
         return Ok(());
     }
     let mut ctx = build_constraint_validation_context(
@@ -519,14 +571,20 @@ fn validate_constraint_target(
         interrupts,
         datetime_config,
     )?;
+    validate_pending_foreign_key_checks(catalog, &foreign_key_checks, &mut ctx)?;
     validate_parent_foreign_key_checks(catalog, &parent_checks, &mut ctx)?;
     validate_foreign_key_constraints(catalog, &foreign_key_oids, &mut ctx)?;
     validate_unique_constraints(catalog, tracker, &unique_oids, &mut ctx)?;
+    let child_foreign_key_oids = foreign_key_checks
+        .iter()
+        .map(|check| check.constraint_oid)
+        .collect::<BTreeSet<_>>();
     let parent_foreign_key_oids = parent_checks
         .iter()
         .map(|check| check.constraint_oid)
         .collect::<BTreeSet<_>>();
     tracker.clear_foreign_key_constraints(&foreign_key_oids);
+    tracker.clear_foreign_key_checks(&child_foreign_key_oids);
     tracker.clear_parent_foreign_key_checks(&parent_foreign_key_oids);
     tracker.clear_unique_constraints(&unique_oids);
     Ok(())

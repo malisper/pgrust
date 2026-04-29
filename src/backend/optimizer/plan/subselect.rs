@@ -3,8 +3,9 @@
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, ExprArraySubscript, ProjectSetTarget, SetReturningCall, SqlJsonQueryFunction,
-    SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink, SubPlan,
+    AggAccum, Expr, ExprArraySubscript, ProjectSetTarget, RowsFromItem, RowsFromSource,
+    SetReturningCall, SqlJsonQueryFunction, SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLink,
+    SubPlan,
 };
 
 use super::planner::planner;
@@ -38,6 +39,7 @@ fn lower_sublink_to_subplan(
         .target_list
         .first()
         .map(|target| target.sql_type);
+    let target_width = sublink.subselect.target_list.len();
     let planned_stmt = planner(*sublink.subselect, catalog)
         .expect("locking validation should complete before subplan lowering");
     let par_param = planned_stmt
@@ -55,6 +57,7 @@ fn lower_sublink_to_subplan(
         sublink_type: sublink.sublink_type,
         testexpr,
         first_col_type,
+        target_width,
         plan_id,
         par_param,
         args,
@@ -348,6 +351,35 @@ fn finalize_set_returning_call(
     subplans: &mut Vec<Plan>,
 ) -> SetReturningCall {
     match call {
+        SetReturningCall::RowsFrom {
+            items,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::RowsFrom {
+            items: items
+                .into_iter()
+                .map(|item| RowsFromItem {
+                    source: match item.source {
+                        RowsFromSource::Function(call) => RowsFromSource::Function(
+                            finalize_set_returning_call(call, catalog, subplans),
+                        ),
+                        RowsFromSource::Project {
+                            output_exprs,
+                            output_columns,
+                        } => RowsFromSource::Project {
+                            output_exprs: output_exprs
+                                .into_iter()
+                                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                                .collect(),
+                            output_columns,
+                        },
+                    },
+                    column_definitions: item.column_definitions,
+                })
+                .collect(),
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
@@ -544,6 +576,7 @@ fn finalize_set_returning_call(
             function_name,
             func_variadic,
             args,
+            inlined_expr,
             output_columns,
             with_ordinality,
         } => SetReturningCall::UserDefined {
@@ -554,6 +587,8 @@ fn finalize_set_returning_call(
                 .into_iter()
                 .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
                 .collect(),
+            inlined_expr: inlined_expr
+                .map(|expr| Box::new(finalize_expr_subqueries(*expr, catalog, subplans))),
             output_columns,
             with_ordinality,
         },
@@ -741,6 +776,7 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
             first_col_type: subplan.first_col_type,
+            target_width: subplan.target_width,
             plan_id: subplan.plan_id + base,
             sublink_type: subplan.sublink_type,
             par_param: subplan.par_param,
@@ -870,6 +906,35 @@ fn rebase_sql_json_behavior(behavior: SqlJsonTableBehavior, base: usize) -> SqlJ
 
 fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) -> SetReturningCall {
     match call {
+        SetReturningCall::RowsFrom {
+            items,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::RowsFrom {
+            items: items
+                .into_iter()
+                .map(|item| RowsFromItem {
+                    source: match item.source {
+                        RowsFromSource::Function(call) => RowsFromSource::Function(
+                            rebase_set_returning_call_subplan_ids(call, base),
+                        ),
+                        RowsFromSource::Project {
+                            output_exprs,
+                            output_columns,
+                        } => RowsFromSource::Project {
+                            output_exprs: output_exprs
+                                .into_iter()
+                                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                                .collect(),
+                            output_columns,
+                        },
+                    },
+                    column_definitions: item.column_definitions,
+                })
+                .collect(),
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
@@ -1065,6 +1130,7 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
             function_name,
             func_variadic,
             args,
+            inlined_expr,
             output_columns,
             with_ordinality,
         } => SetReturningCall::UserDefined {
@@ -1075,6 +1141,7 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
                 .into_iter()
                 .map(|arg| rebase_expr_subplan_ids(arg, base))
                 .collect(),
+            inlined_expr: inlined_expr.map(|expr| Box::new(rebase_expr_subplan_ids(*expr, base))),
             output_columns,
             with_ordinality,
         },
@@ -1186,6 +1253,14 @@ fn rebase_window_frame_bound_subplan_ids(
     }
 }
 
+fn rebase_partition_prune_info(
+    mut info: crate::include::nodes::plannodes::PartitionPrunePlan,
+    base: usize,
+) -> crate::include::nodes::plannodes::PartitionPrunePlan {
+    info.filter = rebase_expr_subplan_ids(info.filter, base);
+    info
+}
+
 fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
     match plan {
         Plan::Result { .. }
@@ -1197,6 +1272,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             source_id,
             desc,
             items,
+            partition_prune,
             children,
         } => Plan::MergeAppend {
             plan_info,
@@ -1209,6 +1285,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                     ..item
                 })
                 .collect(),
+            partition_prune: partition_prune.map(|info| rebase_partition_prune_info(info, base)),
             children: children
                 .into_iter()
                 .map(|child| rebase_plan_subplan_ids(child, base))
@@ -1296,11 +1373,13 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             plan_info,
             source_id,
             desc,
+            partition_prune,
             children,
         } => Plan::Append {
             plan_info,
             source_id,
             desc,
+            partition_prune: partition_prune.map(|info| rebase_partition_prune_info(info, base)),
             children: children
                 .into_iter()
                 .map(|child| rebase_plan_subplan_ids(child, base))
@@ -1334,6 +1413,45 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
         },
+        Plan::Materialize { plan_info, input } => Plan::Materialize {
+            plan_info,
+            input: Box::new(rebase_plan_subplan_ids(*input, base)),
+        },
+        Plan::Memoize {
+            plan_info,
+            input,
+            cache_keys,
+            cache_key_labels,
+            key_paramids,
+            dependent_paramids,
+            binary_mode,
+            single_row,
+            est_entries,
+        } => Plan::Memoize {
+            plan_info,
+            input: Box::new(rebase_plan_subplan_ids(*input, base)),
+            cache_keys: cache_keys
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
+            cache_key_labels,
+            key_paramids,
+            dependent_paramids,
+            binary_mode,
+            single_row,
+            est_entries,
+        },
+        Plan::Gather {
+            plan_info,
+            input,
+            workers_planned,
+            single_copy,
+        } => Plan::Gather {
+            plan_info,
+            input: Box::new(rebase_plan_subplan_ids(*input, base)),
+            workers_planned,
+            single_copy,
+        },
         Plan::NestedLoopJoin {
             plan_info,
             left,
@@ -1352,6 +1470,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .map(|param| crate::include::nodes::plannodes::ExecParamSource {
                     paramid: param.paramid,
                     expr: rebase_expr_subplan_ids(param.expr, base),
+                    label: param.label,
                 })
                 .collect(),
             join_qual: join_qual
@@ -1402,6 +1521,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             join_qual,
             qual,
         } => Plan::MergeJoin {
@@ -1421,6 +1541,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
+            merge_key_descending,
             join_qual: join_qual
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
@@ -1521,16 +1642,20 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
         Plan::Aggregate {
             plan_info,
             strategy,
+            phase,
             disabled,
             input,
             group_by,
             passthrough_exprs,
             accumulators,
+            semantic_accumulators,
+            semantic_output_names,
             having,
             output_columns,
         } => Plan::Aggregate {
             plan_info,
             strategy,
+            phase,
             disabled,
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
             group_by: group_by
@@ -1545,6 +1670,13 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .into_iter()
                 .map(|accum| rebase_agg_accum_subplan_ids(accum, base))
                 .collect(),
+            semantic_accumulators: semantic_accumulators.map(|accumulators| {
+                accumulators
+                    .into_iter()
+                    .map(|accum| rebase_agg_accum_subplan_ids(accum, base))
+                    .collect()
+            }),
+            semantic_output_names,
             having: having.map(|expr| rebase_expr_subplan_ids(expr, base)),
             output_columns,
         },
@@ -1669,6 +1801,15 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
     }
 }
 
+fn finalize_partition_prune_info(
+    mut info: crate::include::nodes::plannodes::PartitionPrunePlan,
+    catalog: &dyn CatalogLookup,
+    subplans: &mut Vec<Plan>,
+) -> crate::include::nodes::plannodes::PartitionPrunePlan {
+    info.filter = finalize_expr_subqueries(info.filter, catalog, subplans);
+    info
+}
+
 pub(super) fn finalize_plan_subqueries(
     plan: Plan,
     catalog: &dyn CatalogLookup,
@@ -1696,6 +1837,7 @@ pub(super) fn finalize_plan_subqueries(
             source_id,
             desc,
             items,
+            partition_prune,
             children,
         } => Plan::MergeAppend {
             plan_info,
@@ -1708,6 +1850,8 @@ pub(super) fn finalize_plan_subqueries(
                     ..item
                 })
                 .collect(),
+            partition_prune: partition_prune
+                .map(|info| finalize_partition_prune_info(info, catalog, subplans)),
             children: children
                 .into_iter()
                 .map(|child| finalize_plan_subqueries(child, catalog, subplans))
@@ -1755,11 +1899,14 @@ pub(super) fn finalize_plan_subqueries(
             plan_info,
             source_id,
             desc,
+            partition_prune,
             children,
         } => Plan::Append {
             plan_info,
             source_id,
             desc,
+            partition_prune: partition_prune
+                .map(|info| finalize_partition_prune_info(info, catalog, subplans)),
             children: children
                 .into_iter()
                 .map(|child| finalize_plan_subqueries(child, catalog, subplans))
@@ -1793,6 +1940,45 @@ pub(super) fn finalize_plan_subqueries(
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                 .collect(),
         },
+        Plan::Materialize { plan_info, input } => Plan::Materialize {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+        },
+        Plan::Memoize {
+            plan_info,
+            input,
+            cache_keys,
+            cache_key_labels,
+            key_paramids,
+            dependent_paramids,
+            binary_mode,
+            single_row,
+            est_entries,
+        } => Plan::Memoize {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+            cache_keys: cache_keys
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
+            cache_key_labels,
+            key_paramids,
+            dependent_paramids,
+            binary_mode,
+            single_row,
+            est_entries,
+        },
+        Plan::Gather {
+            plan_info,
+            input,
+            workers_planned,
+            single_copy,
+        } => Plan::Gather {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+            workers_planned,
+            single_copy,
+        },
         Plan::NestedLoopJoin {
             plan_info,
             left,
@@ -1811,6 +1997,7 @@ pub(super) fn finalize_plan_subqueries(
                 .map(|param| crate::include::nodes::plannodes::ExecParamSource {
                     paramid: param.paramid,
                     expr: finalize_expr_subqueries(param.expr, catalog, subplans),
+                    label: param.label,
                 })
                 .collect(),
             join_qual: join_qual
@@ -1861,6 +2048,7 @@ pub(super) fn finalize_plan_subqueries(
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             join_qual,
             qual,
         } => Plan::MergeJoin {
@@ -1880,6 +2068,7 @@ pub(super) fn finalize_plan_subqueries(
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                 .collect(),
+            merge_key_descending,
             join_qual: join_qual
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
@@ -1985,16 +2174,20 @@ pub(super) fn finalize_plan_subqueries(
         Plan::Aggregate {
             plan_info,
             strategy,
+            phase,
             disabled,
             input,
             group_by,
             passthrough_exprs,
             accumulators,
+            semantic_accumulators,
+            semantic_output_names,
             having,
             output_columns,
         } => Plan::Aggregate {
             plan_info,
             strategy,
+            phase,
             disabled,
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
             group_by: group_by
@@ -2009,6 +2202,13 @@ pub(super) fn finalize_plan_subqueries(
                 .into_iter()
                 .map(|accum| finalize_agg_accum(accum, catalog, subplans))
                 .collect(),
+            semantic_accumulators: semantic_accumulators.map(|accumulators| {
+                accumulators
+                    .into_iter()
+                    .map(|accum| finalize_agg_accum(accum, catalog, subplans))
+                    .collect()
+            }),
+            semantic_output_names,
             having: having.map(|expr| finalize_expr_subqueries(expr, catalog, subplans)),
             output_columns,
         },

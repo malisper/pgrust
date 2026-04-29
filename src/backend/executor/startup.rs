@@ -3,18 +3,20 @@ use crate::backend::executor::hashjoin::HashJoinPhase;
 use crate::backend::parser::SqlType;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, BitmapOrState,
-    BitmapQualState, CteScanState, FilterState, FunctionScanState, HashJoinState, HashState,
-    IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
-    MergeAppendState, MergeJoinState, NestedLoopJoinState, NodeExecStats, OrderByState,
-    ProjectSetState, ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState,
-    SeqScanState, SetOpState, SubqueryScanState, UniqueState, ValuesState, WindowAggState,
-    WorkTableScanState,
+    BitmapQualState, CteScanState, FilterState, FunctionScanState, GatherState, HashJoinState,
+    HashState, IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
+    MaterializeState, MemoizeState, MergeAppendState, MergeJoinState, NestedLoopJoinState,
+    NodeExecStats, OrderByState, ProjectSetState, ProjectionState, RecursiveUnionState,
+    RecursiveWorkTable, ResultState, SeqScanState, SetOpState, SubqueryScanState, UniqueState,
+    ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{
-    Expr, OpExprKind, SetReturningCall, expr_sql_type_hint, set_returning_call_exprs,
+    Expr, OpExprKind, RowsFromSource, SetReturningCall, expr_sql_type_hint,
+    set_returning_call_exprs,
 };
 
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 fn expr_uses_outer_columns(expr: &Expr) -> bool {
@@ -162,6 +164,12 @@ fn recursive_union_distinct_hashable(sql_type: SqlType) -> bool {
 
 fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
     match call {
+        SetReturningCall::RowsFrom { items, .. } => items.iter().any(|item| match &item.source {
+            RowsFromSource::Function(call) => set_returning_call_uses_outer_columns(call),
+            RowsFromSource::Project { output_exprs, .. } => {
+                output_exprs.iter().any(expr_uses_outer_columns)
+            }
+        }),
         SetReturningCall::GenerateSeries {
             start,
             stop,
@@ -225,6 +233,29 @@ fn project_set_target_uses_outer_columns(
     }
 }
 
+fn expr_is_never_true(expr: &Expr) -> bool {
+    match expr {
+        Expr::Const(crate::include::nodes::datum::Value::Bool(false))
+        | Expr::Const(crate::include::nodes::datum::Value::Null) => true,
+        Expr::Bool(bool_expr)
+            if bool_expr.boolop == crate::include::nodes::primnodes::BoolExprType::And =>
+        {
+            bool_expr.args.iter().any(expr_is_never_true)
+        }
+        Expr::Bool(bool_expr)
+            if bool_expr.boolop == crate::include::nodes::primnodes::BoolExprType::Or =>
+        {
+            !bool_expr.args.is_empty() && bool_expr.args.iter().all(expr_is_never_true)
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => expr_is_never_true(inner),
+        _ => false,
+    }
+}
+
+fn qual_list_is_never_true(quals: &[Expr]) -> bool {
+    quals.iter().any(expr_is_never_true)
+}
+
 fn plan_uses_outer_columns(plan: &Plan) -> bool {
     match plan {
         Plan::Result { .. }
@@ -257,6 +288,11 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         Plan::Hash {
             input, hash_keys, ..
         } => plan_uses_outer_columns(input) || hash_keys.iter().any(expr_uses_outer_columns),
+        Plan::Materialize { input, .. } => plan_uses_outer_columns(input),
+        Plan::Memoize {
+            input, cache_keys, ..
+        } => plan_uses_outer_columns(input) || cache_keys.iter().any(expr_uses_outer_columns),
+        Plan::Gather { input, .. } => plan_uses_outer_columns(input),
         Plan::NestedLoopJoin {
             left,
             right,
@@ -291,6 +327,7 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending: _,
             join_qual,
             qual,
             ..
@@ -386,11 +423,19 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             source_id,
             desc,
+            partition_prune,
             children,
         } => Box::new(AppendState {
             source_id,
             children: children.into_iter().map(executor_start).collect(),
             current_child: 0,
+            active_children: None,
+            visible_children: None,
+            subplans_removed: partition_prune
+                .as_ref()
+                .map(|info| info.subplans_removed)
+                .unwrap_or_default(),
+            partition_prune,
             column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
             slot: TupleSlot::empty(desc.columns.len()),
             current_bindings: Vec::new(),
@@ -402,10 +447,18 @@ pub fn executor_start(plan: Plan) -> PlanState {
             source_id,
             desc,
             items,
+            partition_prune,
             children,
         } => Box::new(MergeAppendState {
             source_id,
             children: children.into_iter().map(executor_start).collect(),
+            active_children: None,
+            visible_children: None,
+            subplans_removed: partition_prune
+                .as_ref()
+                .map(|info| info.subplans_removed)
+                .unwrap_or_default(),
+            partition_prune,
             items,
             column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
             rows: None,
@@ -438,6 +491,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             relispopulated,
             disabled,
             toast,
+            tablesample: _,
             desc,
         } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
@@ -518,6 +572,9 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 order_by_keys,
                 direction,
                 scan: None,
+                pending_array_scan_keys: Vec::new(),
+                array_scan_seen_tids: Default::default(),
+                array_scan_keys_initialized: false,
                 scan_exhausted: false,
                 vm_buf: None,
                 slot,
@@ -576,6 +633,9 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 direction,
                 index_only,
                 scan: None,
+                pending_array_scan_keys: Vec::new(),
+                array_scan_seen_tids: Default::default(),
+                array_scan_keys_initialized: false,
                 scan_exhausted: false,
                 slot,
                 qual: None,
@@ -694,6 +754,61 @@ pub fn executor_start(plan: Plan) -> PlanState {
             input,
             hash_keys,
         } => Box::new(build_hash_state(plan_info, *input, hash_keys)),
+        Plan::Materialize { plan_info, input } => Box::new(MaterializeState {
+            input: executor_start(*input),
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
+        Plan::Memoize {
+            plan_info,
+            input,
+            cache_keys,
+            cache_key_labels,
+            key_paramids,
+            dependent_paramids,
+            binary_mode,
+            single_row,
+            est_entries,
+        } => {
+            let input_plan = *input;
+            let column_names = input_plan.column_names();
+            let ncols = column_names.len();
+            Box::new(MemoizeState {
+                input: executor_start(input_plan.clone()),
+                input_plan,
+                cache_keys,
+                cache_key_labels,
+                key_paramids,
+                dependent_paramids,
+                binary_mode,
+                single_row,
+                est_entries,
+                cache: HashMap::new(),
+                lru: VecDeque::new(),
+                active_rows: Vec::new(),
+                active_index: 0,
+                scan_prepared: false,
+                last_nonkey_dependents: None,
+                slot: TupleSlot::empty(ncols),
+                current_bindings: Vec::new(),
+                column_names,
+                plan_info,
+                stats: NodeExecStats::default(),
+                memoize_stats: Default::default(),
+            })
+        }
+        Plan::Gather {
+            plan_info,
+            input,
+            workers_planned,
+            single_copy,
+        } => Box::new(GatherState {
+            input: executor_start(*input),
+            workers_planned,
+            single_copy,
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
         Plan::NestedLoopJoin {
             plan_info,
             left,
@@ -728,6 +843,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 right_plan: right_uses_outer.then_some(right_plan),
                 kind,
                 nest_params,
+                join_qual_never_matches: qual_list_is_never_true(&join_qual),
                 join_qual,
                 qual,
                 combined_names,
@@ -834,6 +950,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             merge_clauses,
             outer_merge_keys,
             inner_merge_keys,
+            merge_key_descending,
             join_qual,
             qual,
         } => {
@@ -864,6 +981,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 merge_clauses,
                 outer_merge_keys,
                 inner_merge_keys,
+                merge_key_descending,
                 join_qual,
                 qual,
                 combined_names,
@@ -905,6 +1023,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 relispopulated,
                 disabled,
                 toast,
+                tablesample: _,
                 desc,
             } = *input
             else {
@@ -998,6 +1117,9 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 order_by_keys,
                 direction,
                 scan: None,
+                pending_array_scan_keys: Vec::new(),
+                array_scan_seen_tids: Default::default(),
+                array_scan_keys_initialized: false,
                 scan_exhausted: false,
                 vm_buf: None,
                 slot,
@@ -1065,6 +1187,9 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 direction,
                 index_only,
                 scan: None,
+                pending_array_scan_keys: Vec::new(),
+                array_scan_seen_tids: Default::default(),
+                array_scan_keys_initialized: false,
                 scan_exhausted: false,
                 slot,
                 qual: Some(qual),
@@ -1174,11 +1299,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::Aggregate {
             plan_info,
             strategy,
+            phase,
             disabled,
             input,
             group_by,
             passthrough_exprs,
             accumulators,
+            semantic_accumulators: _,
+            semantic_output_names: _,
             having,
             output_columns,
         } => {
@@ -1187,6 +1315,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             Box::new(AggregateState {
                 input: executor_start(*input),
                 strategy,
+                phase,
                 disabled,
                 group_by,
                 passthrough_exprs,

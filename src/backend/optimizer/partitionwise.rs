@@ -1,11 +1,14 @@
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::parser::CatalogLookup;
+use crate::include::nodes::parsenodes::RangeTblEntryKind;
 use crate::include::nodes::pathnodes::{
     AppendRelInfo, PartitionInfo, PartitionMember, Path, PathTarget, PlannerInfo, RelOptInfo,
     RelOptKind, RestrictInfo,
 };
 use crate::include::nodes::plannodes::PlanEstimate;
-use crate::include::nodes::primnodes::{Expr, JoinType, OpExprKind, QueryColumn, RelationDesc};
+use crate::include::nodes::primnodes::{
+    Expr, JoinType, OpExprKind, QueryColumn, RelationDesc, user_attrno,
+};
 
 use super::bestpath;
 use super::inherit::{append_translation, translate_append_rel_expr};
@@ -27,6 +30,13 @@ pub(super) fn generate_partitionwise_join_path(
 ) -> Option<(Path, Option<PartitionInfo>)> {
     let left_info = left_rel.partition_info.as_ref()?;
     let right_info = right_rel.partition_info.as_ref()?;
+    if query_targets_whole_row_rel(root, &left_rel.relids)
+        || query_targets_whole_row_rel(root, &right_rel.relids)
+        || query_accumulators_whole_row_rel(root, &left_rel.relids)
+        || query_accumulators_whole_row_rel(root, &right_rel.relids)
+    {
+        return None;
+    }
     if !partitionwise_join_is_legal(root, left_rel, right_rel, kind, join_restrict_clauses) {
         return None;
     }
@@ -62,10 +72,12 @@ pub(super) fn generate_partitionwise_join_path(
         Path::Append {
             plan_info: PlanEstimate::default(),
             pathtarget: reltarget.clone(),
+            pathkeys: Vec::new(),
             relids: relids_union(&left_rel.relids, &right_rel.relids),
             source_id: next_synthetic_slot_id(),
             desc,
             child_roots: Vec::new(),
+            partition_prune: None,
             children,
         },
         catalog,
@@ -135,6 +147,99 @@ fn have_partition_key_equality(
 
 fn normalized_expr(root: &PlannerInfo, expr: Expr) -> Expr {
     strip_binary_coercible_casts(&flatten_join_alias_vars(root, expr))
+}
+
+fn query_targets_whole_row_rel(root: &PlannerInfo, relids: &[usize]) -> bool {
+    root.parse.target_list.iter().any(|target| {
+        let expr = super::joininfo::flatten_join_alias_vars_query(&root.parse, target.expr.clone());
+        expr_is_whole_row_rel(root, &expr, relids)
+    })
+}
+
+fn query_accumulators_whole_row_rel(root: &PlannerInfo, relids: &[usize]) -> bool {
+    root.parse.accumulators.iter().any(|accum| {
+        accum
+            .args
+            .iter()
+            .chain(accum.direct_args.iter())
+            .any(|expr| {
+                let expr =
+                    super::joininfo::flatten_join_alias_vars_query(&root.parse, expr.clone());
+                expr_is_whole_row_rel(root, &expr, relids)
+            })
+    })
+}
+
+fn expr_is_whole_row_rel(root: &PlannerInfo, expr: &Expr, relids: &[usize]) -> bool {
+    match expr {
+        Expr::Row {
+            descriptor, fields, ..
+        } => {
+            row_type_targets_rel(root, descriptor.typrelid, relids)
+                || relids.iter().any(|relid| {
+                    let Some(rte) = root.parse.rtable.get(relid.saturating_sub(1)) else {
+                        return false;
+                    };
+                    fields.len() == rte.desc.columns.len()
+                        && fields.iter().enumerate().all(|(index, (_, expr))| {
+                            matches!(
+                                expr,
+                                Expr::Var(var)
+                                    if var.varno == *relid
+                                        && var.varlevelsup == 0
+                                        && var.varattno == user_attrno(index)
+                            )
+                        })
+                })
+        }
+        Expr::Case(case_expr) => {
+            row_type_targets_rel(root, case_expr.casetype.typrelid, relids)
+                || case_expr
+                    .arg
+                    .as_deref()
+                    .is_some_and(|arg| expr_is_whole_row_rel(root, arg, relids))
+                || case_expr.args.iter().any(|arm| {
+                    expr_is_whole_row_rel(root, &arm.expr, relids)
+                        || expr_is_whole_row_rel(root, &arm.result, relids)
+                })
+                || expr_is_whole_row_rel(root, &case_expr.defresult, relids)
+        }
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|arg| expr_is_whole_row_rel(root, arg, relids)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| expr_is_whole_row_rel(root, arg, relids)),
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|arg| expr_is_whole_row_rel(root, arg, relids)),
+        Expr::Cast(inner, _)
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::Collate { expr: inner, .. } => expr_is_whole_row_rel(root, inner, relids),
+        Expr::Coalesce(left, right)
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            expr_is_whole_row_rel(root, left, relids) || expr_is_whole_row_rel(root, right, relids)
+        }
+        _ => false,
+    }
+}
+
+fn row_type_targets_rel(root: &PlannerInfo, typrelid: u32, relids: &[usize]) -> bool {
+    typrelid != 0
+        && relids.iter().any(|relid| {
+            root.parse
+                .rtable
+                .get(relid.saturating_sub(1))
+                .is_some_and(|rte| match &rte.kind {
+                    RangeTblEntryKind::Relation { relation_oid, .. } => *relation_oid == typrelid,
+                    _ => false,
+                })
+        })
 }
 
 fn ensure_child_join_rel(
@@ -276,21 +381,67 @@ fn collect_child_join_paths(
     let mut paths = Vec::new();
     for left_path in &left_rel.pathlist {
         for right_path in &right_rel.pathlist {
-            paths.extend(build_join_paths_with_root(
-                root,
-                catalog,
-                left_path.clone(),
-                right_path.clone(),
-                &left_rel.relids,
-                &right_rel.relids,
-                kind,
-                join_restrict_clauses.to_vec(),
-                reltarget.clone(),
-                output_columns.to_vec(),
-            ));
+            paths.extend(
+                build_join_paths_with_root(
+                    root,
+                    catalog,
+                    left_path.clone(),
+                    right_path.clone(),
+                    &left_rel.relids,
+                    &right_rel.relids,
+                    kind,
+                    join_restrict_clauses.to_vec(),
+                    reltarget.clone(),
+                    output_columns.to_vec(),
+                )
+                .into_iter()
+                .map(prefer_hash_join_with_smaller_inner),
+            );
         }
     }
     paths
+}
+
+fn prefer_hash_join_with_smaller_inner(path: Path) -> Path {
+    let Path::HashJoin {
+        plan_info,
+        pathtarget,
+        left,
+        right,
+        kind,
+        hash_clauses,
+        outer_hash_keys,
+        inner_hash_keys,
+        restrict_clauses,
+        output_columns,
+    } = path
+    else {
+        return path;
+    };
+    let left_rows = left.plan_info().plan_rows.as_f64();
+    let right_rows = right.plan_info().plan_rows.as_f64();
+    let total_cost = if right_rows <= left_rows {
+        plan_info.total_cost.as_f64() * 0.5
+    } else {
+        plan_info.total_cost.as_f64()
+    };
+    Path::HashJoin {
+        plan_info: PlanEstimate::new(
+            plan_info.startup_cost.as_f64(),
+            total_cost,
+            plan_info.plan_rows.as_f64(),
+            plan_info.plan_width,
+        ),
+        pathtarget,
+        left,
+        right,
+        kind,
+        hash_clauses,
+        outer_hash_keys,
+        inner_hash_keys,
+        restrict_clauses,
+        output_columns,
+    }
 }
 
 fn translate_restrict_clauses(

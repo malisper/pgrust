@@ -125,6 +125,7 @@ impl AnalyzedFrom {
                     relkind,
                     relispopulated,
                     toast,
+                    tablesample: None,
                 },
             }],
             jointree: Some(JoinTreeNode::RangeTblRef(1)),
@@ -163,6 +164,7 @@ impl AnalyzedFrom {
     pub(super) fn function(call: SetReturningCall) -> Self {
         let output_columns = call.output_columns().to_vec();
         let relation_name = match &call {
+            SetReturningCall::RowsFrom { .. } => "rows_from",
             SetReturningCall::SqlJsonTable(_) => "json_table",
             SetReturningCall::SqlXmlTable(_) => "xmltable",
             _ => "function_call",
@@ -402,14 +404,16 @@ pub(super) fn query_from_from_projection(input: AnalyzedFrom, targets: Vec<Targe
         distinct_on: Vec::new(),
         where_qual: None,
         group_by: Vec::new(),
+        grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
         having_qual: None,
         sort_clause: Vec::new(),
         constraint_deps: Vec::new(),
         limit_count: None,
-        limit_offset: 0,
+        limit_offset: None,
         locking_clause: None,
+        locking_targets: Vec::new(),
         row_marks: Vec::new(),
         has_target_srfs: false,
         recursive_union: None,

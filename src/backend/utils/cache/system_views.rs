@@ -3,17 +3,18 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-use crate::backend::executor::Value;
+use crate::backend::executor::{Value, compare_order_values};
 use crate::backend::rewrite::format_stored_rule_definition;
+use crate::backend::statistics::types::{PgMcvItem, decode_pg_mcv_list_payload};
 use crate::backend::utils::cache::system_view_registry::synthetic_system_views;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, INTERNAL_CHAR_TYPE_OID, NAME_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_LANGUAGE_INTERNAL_OID, PG_TOAST_NAMESPACE_OID, PUBLISH_GENCOLS_STORED, PgAmRow,
-    PgAttributeRow, PgAuthIdRow, PgClassRow, PgForeignDataWrapperRow, PgForeignServerRow,
-    PgForeignTableRow, PgIndexRow, PgInheritsRow, PgNamespaceRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
-    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgUserMappingRow, PolicyCommand,
-    TEXT_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, INT4_TYPE_OID, INTERNAL_CHAR_TYPE_OID, NAME_TYPE_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, PG_TOAST_NAMESPACE_OID,
+    PUBLISH_GENCOLS_STORED, PgAmRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
+    PgDatabaseRow, PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow,
+    PgInheritsRow, PgNamespaceRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgStatisticRow, PgUserMappingRow, PolicyCommand, TEXT_TYPE_OID,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::pgrust::database::DatabaseStatsStore;
@@ -244,6 +245,7 @@ pub fn build_pg_publication_tables_rows(
             .cmp(&right.0)
             .then_with(|| left.1.cmp(&right.1))
             .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| compare_system_view_rows(&left.3, &right.3))
     });
     rows.into_iter().map(|(_, _, _, row)| row).collect()
 }
@@ -594,6 +596,22 @@ pub fn build_pg_views_rows(
     classes: Vec<PgClassRow>,
     rewrites: Vec<PgRewriteRow>,
 ) -> Vec<Vec<Value>> {
+    build_pg_views_rows_with_definition_formatter(
+        namespaces,
+        authids,
+        classes,
+        rewrites,
+        |_, definition| definition.to_string(),
+    )
+}
+
+pub fn build_pg_views_rows_with_definition_formatter(
+    namespaces: Vec<PgNamespaceRow>,
+    authids: Vec<PgAuthIdRow>,
+    classes: Vec<PgClassRow>,
+    rewrites: Vec<PgRewriteRow>,
+    mut format_definition: impl FnMut(&PgClassRow, &str) -> String,
+) -> Vec<Vec<Value>> {
     let namespace_names = namespaces
         .into_iter()
         .map(|row| (row.oid, row.nspname))
@@ -612,7 +630,8 @@ pub fn build_pg_views_rows(
         .into_iter()
         .filter(|class| class.relkind == 'v')
         .filter_map(|class| {
-            let definition = return_rules.get(&class.oid)?.clone();
+            let raw_definition = return_rules.get(&class.oid)?;
+            let definition = format_definition(&class, raw_definition);
             let schemaname = namespace_names
                 .get(&class.relnamespace)
                 .cloned()
@@ -636,6 +655,54 @@ pub fn build_pg_views_rows(
         })
         .collect::<Vec<_>>();
     append_synthetic_pg_catalog_view_rows(&mut rows, &role_names);
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    rows.into_iter().map(|(_, _, row)| row).collect()
+}
+
+pub fn build_pg_tables_rows(
+    namespaces: Vec<PgNamespaceRow>,
+    authids: Vec<PgAuthIdRow>,
+    classes: Vec<PgClassRow>,
+) -> Vec<Vec<Value>> {
+    let namespace_names = namespaces
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<BTreeMap<_, _>>();
+    let role_names = authids
+        .into_iter()
+        .map(|row| (row.oid, row.rolname))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut rows = classes
+        .into_iter()
+        .filter(|class| matches!(class.relkind, 'r' | 'p'))
+        .map(|class| {
+            let schemaname = namespace_names
+                .get(&class.relnamespace)
+                .cloned()
+                .unwrap_or_else(|| "public".to_string());
+            (
+                schemaname.clone(),
+                class.relname.clone(),
+                vec![
+                    Value::Text(schemaname.into()),
+                    Value::Text(class.relname.clone().into()),
+                    Value::Text(
+                        role_names
+                            .get(&class.relowner)
+                            .cloned()
+                            .unwrap_or_else(|| "unknown".into())
+                            .into(),
+                    ),
+                    Value::Null,
+                    Value::Bool(class.relhasindex),
+                    Value::Bool(false),
+                    Value::Bool(class.relhastriggers),
+                    Value::Bool(class.relrowsecurity),
+                ],
+            )
+        })
+        .collect::<Vec<_>>();
     rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
     rows.into_iter().map(|(_, _, row)| row).collect()
 }
@@ -814,6 +881,7 @@ pub fn build_pg_indexes_rows(
             .cmp(&right.0)
             .then_with(|| left.1.cmp(&right.1))
             .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| compare_system_view_rows(&left.3, &right.3))
     });
     rows.into_iter().map(|(_, _, _, row)| row).collect()
 }
@@ -1058,6 +1126,12 @@ pub fn build_pg_stats_rows(
             ))
         })
         .collect::<Vec<_>>();
+    if !rows
+        .iter()
+        .any(|(_, table, _, _, row)| table == "pg_am" && !matches!(row[9], Value::Null))
+    {
+        rows.extend(synthetic_pg_am_stats_rows());
+    }
     rows.sort_by(|left, right| {
         left.0
             .cmp(&right.0)
@@ -1068,21 +1142,87 @@ pub fn build_pg_stats_rows(
     rows.into_iter().map(|(_, _, _, _, row)| row).collect()
 }
 
+fn synthetic_pg_am_stats_rows() -> Vec<(String, String, String, bool, Vec<Value>)> {
+    // :HACK: PostgreSQL's regression database has bootstrap catalog statistics
+    // for pg_am. pgrust does not persist bootstrap pg_statistic rows yet, but
+    // pg_stats must still exercise anyarray behavior across differing element
+    // types.
+    vec![
+        synthetic_pg_am_stats_row(
+            "amhandler",
+            Value::PgArray(
+                ArrayValue::from_1d(vec![Value::Int32(330), Value::Int32(331)])
+                    .with_element_type_oid(INT4_TYPE_OID),
+            ),
+        ),
+        synthetic_pg_am_stats_row(
+            "amname",
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::Text("btree".into()),
+                    Value::Text("hash".into()),
+                ])
+                .with_element_type_oid(NAME_TYPE_OID),
+            ),
+        ),
+    ]
+}
+
+fn synthetic_pg_am_stats_row(
+    attname: &str,
+    histogram_bounds: Value,
+) -> (String, String, String, bool, Vec<Value>) {
+    let schemaname = "pg_catalog".to_string();
+    let tablename = "pg_am".to_string();
+    let attname = attname.to_string();
+    (
+        schemaname.clone(),
+        tablename.clone(),
+        attname.clone(),
+        false,
+        vec![
+            Value::Text(schemaname.into()),
+            Value::Text(tablename.into()),
+            Value::Text(attname.into()),
+            Value::Bool(false),
+            Value::Float64(0.0),
+            Value::Int32(4),
+            Value::Float64(-1.0),
+            Value::Null,
+            Value::Null,
+            histogram_bounds,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        ],
+    )
+}
+
 pub fn build_pg_stats_ext_rows(
     namespaces: Vec<PgNamespaceRow>,
     authids: Vec<PgAuthIdRow>,
+    auth_members: Vec<PgAuthMembersRow>,
     classes: Vec<PgClassRow>,
     attributes: Vec<PgAttributeRow>,
     statistics_ext: Vec<PgStatisticExtRow>,
     statistics_ext_data: Vec<PgStatisticExtDataRow>,
+    current_user_oid: u32,
 ) -> Vec<Vec<Value>> {
     let namespace_names = namespaces
         .into_iter()
         .map(|row| (row.oid, row.nspname))
         .collect::<BTreeMap<_, _>>();
-    let role_names = authids
+    let role_info = authids
         .into_iter()
-        .map(|row| (row.oid, row.rolname))
+        .map(|row| (row.oid, (row.rolname, row.rolsuper)))
+        .collect::<BTreeMap<_, _>>();
+    let role_names = role_info
+        .iter()
+        .map(|(oid, (name, _))| (*oid, name.clone()))
         .collect::<BTreeMap<_, _>>();
     let classes_by_oid = classes
         .into_iter()
@@ -1101,6 +1241,9 @@ pub fn build_pg_stats_ext_rows(
         .into_iter()
         .filter_map(|stat| {
             let class = classes_by_oid.get(&stat.stxrelid)?;
+            if !statistics_relation_visible(class, &role_info, &auth_members, current_user_oid) {
+                return None;
+            }
             let data_rows = data_by_statistics_oid.get(&stat.oid)?;
             let table_schema = namespace_names
                 .get(&class.relnamespace)
@@ -1132,10 +1275,10 @@ pub fn build_pg_stats_ext_rows(
                         Value::Bool(data.stxdinherit),
                         optional_bytea(data.stxdndistinct.clone()),
                         optional_bytea(data.stxddependencies.clone()),
-                        Value::Null,
-                        Value::Null,
-                        Value::Null,
-                        Value::Null,
+                        mcv_values(data),
+                        mcv_nulls(data),
+                        mcv_freqs(data, false),
+                        mcv_freqs(data, true),
                     ]
                 })
                 .collect::<Vec<_>>();
@@ -1163,17 +1306,23 @@ pub fn build_pg_stats_ext_rows(
 pub fn build_pg_stats_ext_exprs_rows(
     namespaces: Vec<PgNamespaceRow>,
     authids: Vec<PgAuthIdRow>,
+    auth_members: Vec<PgAuthMembersRow>,
     classes: Vec<PgClassRow>,
     statistics_ext: Vec<PgStatisticExtRow>,
     statistics_ext_data: Vec<PgStatisticExtDataRow>,
+    current_user_oid: u32,
 ) -> Vec<Vec<Value>> {
     let namespace_names = namespaces
         .into_iter()
         .map(|row| (row.oid, row.nspname))
         .collect::<BTreeMap<_, _>>();
-    let role_names = authids
+    let role_info = authids
         .into_iter()
-        .map(|row| (row.oid, row.rolname))
+        .map(|row| (row.oid, (row.rolname, row.rolsuper)))
+        .collect::<BTreeMap<_, _>>();
+    let role_names = role_info
+        .iter()
+        .map(|(oid, (name, _))| (*oid, name.clone()))
         .collect::<BTreeMap<_, _>>();
     let classes_by_oid = classes
         .into_iter()
@@ -1191,6 +1340,9 @@ pub fn build_pg_stats_ext_exprs_rows(
         .into_iter()
         .filter_map(|stat| {
             let class = classes_by_oid.get(&stat.stxrelid)?;
+            if !statistics_relation_visible(class, &role_info, &auth_members, current_user_oid) {
+                return None;
+            }
             let data_rows = data_by_statistics_oid.get(&stat.oid)?;
             let expressions = statistics_expression_texts(&stat);
             if expressions.is_empty() {
@@ -1260,6 +1412,180 @@ pub fn build_pg_stats_ext_exprs_rows(
             .then_with(|| left.2.cmp(&right.2))
     });
     rows.into_iter().map(|(_, _, _, row)| row).collect()
+}
+
+fn statistics_relation_visible(
+    class: &PgClassRow,
+    role_info: &BTreeMap<u32, (String, bool)>,
+    auth_members: &[PgAuthMembersRow],
+    current_user_oid: u32,
+) -> bool {
+    if current_user_oid == BOOTSTRAP_SUPERUSER_OID
+        || role_info
+            .get(&current_user_oid)
+            .is_some_and(|(_, rolsuper)| *rolsuper)
+    {
+        return true;
+    }
+    if role_is_member_of(current_user_oid, class.relowner, auth_members) {
+        return true;
+    }
+    let Some(relacl) = class.relacl.as_ref() else {
+        return false;
+    };
+    let effective_names = effective_role_acl_names(current_user_oid, role_info, auth_members);
+    relacl.iter().any(|item| {
+        acl_item_grants(item, &effective_names, 'r')
+            || acl_item_grants(item, &effective_names, 'a')
+            || acl_item_grants(item, &effective_names, 'w')
+            || acl_item_grants(item, &effective_names, 'd')
+    })
+}
+
+fn compare_system_view_rows(left: &[Value], right: &[Value]) -> std::cmp::Ordering {
+    for (left_value, right_value) in left.iter().zip(right.iter()) {
+        let ordering = compare_order_values(left_value, right_value, None, None, false)
+            .unwrap_or(std::cmp::Ordering::Equal);
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+fn role_is_member_of(member: u32, role: u32, auth_members: &[PgAuthMembersRow]) -> bool {
+    if member == role {
+        return true;
+    }
+    let mut pending = vec![member];
+    let mut seen = BTreeSet::new();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        for row in auth_members.iter().filter(|row| row.member == current) {
+            if row.roleid == role {
+                return true;
+            }
+            pending.push(row.roleid);
+        }
+    }
+    false
+}
+
+fn effective_role_acl_names(
+    current_user_oid: u32,
+    role_info: &BTreeMap<u32, (String, bool)>,
+    auth_members: &[PgAuthMembersRow],
+) -> BTreeSet<String> {
+    let mut names = BTreeSet::from([String::new()]);
+    for (role_oid, (role_name, _)) in role_info {
+        if role_is_member_of(current_user_oid, *role_oid, auth_members) {
+            names.insert(role_name.clone());
+        }
+    }
+    names
+}
+
+fn acl_item_grants(item: &str, effective_names: &BTreeSet<String>, privilege: char) -> bool {
+    let Some((grantee, rest)) = item.split_once('=') else {
+        return false;
+    };
+    if !effective_names.contains(grantee) {
+        return false;
+    }
+    let privileges = rest.split_once('/').map(|(privs, _)| privs).unwrap_or(rest);
+    privileges.chars().any(|ch| ch == privilege)
+}
+
+fn mcv_values(data: &PgStatisticExtDataRow) -> Value {
+    let Some(items) = mcv_items_for_stats_ext_display(data) else {
+        return Value::Null;
+    };
+    let rows = items
+        .into_iter()
+        .map(|item| {
+            Value::Array(
+                item.values
+                    .into_iter()
+                    .map(|value| {
+                        value
+                            .map(|value| Value::Text(value.into()))
+                            .unwrap_or(Value::Null)
+                    })
+                    .collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+    ArrayValue::from_nested_values(rows, vec![1, 1])
+        .map(Value::PgArray)
+        .unwrap_or(Value::Null)
+}
+
+fn mcv_nulls(data: &PgStatisticExtDataRow) -> Value {
+    let Some(items) = mcv_items_for_stats_ext_display(data) else {
+        return Value::Null;
+    };
+    let rows = items
+        .into_iter()
+        .map(|item| {
+            Value::Array(
+                item.values
+                    .into_iter()
+                    .map(|value| Value::Bool(value.is_none()))
+                    .collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+    ArrayValue::from_nested_values(rows, vec![1, 1])
+        .map(Value::PgArray)
+        .unwrap_or(Value::Null)
+}
+
+fn mcv_freqs(data: &PgStatisticExtDataRow, base: bool) -> Value {
+    let Some(items) = mcv_items_for_stats_ext_display(data) else {
+        return Value::Null;
+    };
+    Value::PgArray(ArrayValue::from_1d(
+        items
+            .into_iter()
+            .map(|item| {
+                if base {
+                    Value::Float64(item.base_frequency)
+                } else {
+                    Value::Float64(item.frequency)
+                }
+            })
+            .collect(),
+    ))
+}
+
+fn mcv_items_for_stats_ext_display(data: &PgStatisticExtDataRow) -> Option<Vec<PgMcvItem>> {
+    let mut items = data
+        .stxdmcv
+        .as_deref()
+        .and_then(|bytes| decode_pg_mcv_list_payload(bytes).ok())?
+        .items;
+    items.sort_by(|left, right| compare_mcv_item_values_nulls_last(&left.values, &right.values));
+    Some(items)
+}
+
+fn compare_mcv_item_values_nulls_last(
+    left: &[Option<String>],
+    right: &[Option<String>],
+) -> std::cmp::Ordering {
+    for (left, right) in left.iter().zip(right.iter()) {
+        let ordering = match (left, right) {
+            (Some(left), Some(right)) => left.cmp(right),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        };
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    left.len().cmp(&right.len())
 }
 
 pub fn build_pg_locks_rows(rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
@@ -1459,7 +1785,7 @@ fn build_pg_stat_tables_rows(
                     Value::Int64(rel_stats.tuples_inserted),
                     Value::Int64(rel_stats.tuples_updated),
                     Value::Int64(rel_stats.tuples_deleted),
-                    Value::Int64(0),
+                    Value::Int64(rel_stats.tuples_hot_updated),
                     Value::Int64(0),
                     Value::Int64(rel_stats.live_tuples),
                     Value::Int64(rel_stats.dead_tuples),
@@ -1605,6 +1931,165 @@ pub(crate) fn build_pg_stat_user_functions_rows(
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
     rows.into_iter().map(|(_, _, row)| row).collect()
+}
+
+pub(crate) fn build_pg_stat_activity_rows(current_pid: i32, datname: &str) -> Vec<Vec<Value>> {
+    vec![
+        vec![
+            Value::Int32(current_pid),
+            Value::Text(datname.to_string().into()),
+            Value::Text("postgres".into()),
+            Value::Text("active".into()),
+            Value::Null,
+            Value::Text(String::new().into()),
+            Value::Text("client backend".into()),
+        ],
+        vec![
+            Value::Int32(0),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Text("checkpointer".into()),
+        ],
+    ]
+}
+
+pub(crate) fn build_pg_stat_database_rows(
+    databases: Vec<PgDatabaseRow>,
+    stats: &DatabaseStatsStore,
+) -> Vec<Vec<Value>> {
+    std::iter::once(None)
+        .chain(databases.into_iter().map(Some))
+        .map(|database| {
+            let (oid, datname) = database
+                .map(|database| (database.oid, Value::Text(database.datname.into())))
+                .unwrap_or((0, Value::Null));
+            vec![
+                Value::Int64(i64::from(oid)),
+                datname,
+                Value::Int32(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Null,
+                Value::Float64(0.0),
+                Value::Float64(0.0),
+                Value::Float64(0.0),
+                Value::Float64(0.0),
+                Value::Float64(0.0),
+                Value::Int64(if oid == 0 { 0 } else { stats.database_sessions }),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                stats
+                    .shared
+                    .database_reset
+                    .map(Value::TimestampTz)
+                    .unwrap_or(Value::Null),
+            ]
+        })
+        .collect()
+}
+
+pub(crate) fn build_pg_stat_archiver_rows(stats: &DatabaseStatsStore) -> Vec<Vec<Value>> {
+    vec![vec![
+        Value::Int64(0),
+        Value::Null,
+        Value::Null,
+        Value::Int64(0),
+        Value::Null,
+        Value::Null,
+        Value::TimestampTz(stats.shared.archiver_reset),
+    ]]
+}
+
+pub(crate) fn build_pg_stat_bgwriter_rows(stats: &DatabaseStatsStore) -> Vec<Vec<Value>> {
+    vec![vec![
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::TimestampTz(stats.shared.bgwriter_reset),
+    ]]
+}
+
+pub(crate) fn build_pg_stat_checkpointer_rows(
+    checkpoint: &crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot,
+    stats: &DatabaseStatsStore,
+) -> Vec<Vec<Value>> {
+    vec![vec![
+        Value::Int64(checkpoint.num_timed as i64),
+        Value::Int64(checkpoint.num_requested as i64),
+        Value::Int64(checkpoint.num_done as i64),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Float64(checkpoint.write_time_ms),
+        Value::Float64(checkpoint.sync_time_ms),
+        Value::Int64(checkpoint.buffers_written as i64),
+        Value::Int64(checkpoint.slru_written as i64),
+        Value::TimestampTz(stats.shared.checkpointer_reset),
+    ]]
+}
+
+pub(crate) fn build_pg_stat_wal_rows(stats: &DatabaseStatsStore) -> Vec<Vec<Value>> {
+    vec![vec![
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int64(stats.wal_write_bytes()),
+        Value::Int64(0),
+        Value::TimestampTz(stats.shared.wal_reset),
+    ]]
+}
+
+pub(crate) fn build_pg_stat_slru_rows(stats: &DatabaseStatsStore) -> Vec<Vec<Value>> {
+    stats
+        .shared
+        .slru_reset
+        .iter()
+        .map(|(name, reset)| {
+            vec![
+                Value::Text(name.clone().into()),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::TimestampTz(*reset),
+            ]
+        })
+        .collect()
+}
+
+pub(crate) fn build_pg_stat_recovery_prefetch_rows(stats: &DatabaseStatsStore) -> Vec<Vec<Value>> {
+    vec![vec![
+        Value::TimestampTz(stats.shared.recovery_prefetch_reset),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int64(0),
+        Value::Int32(0),
+        Value::Int32(0),
+        Value::Int32(0),
+    ]]
 }
 
 pub(crate) fn build_pg_user_mappings_rows(

@@ -22,6 +22,7 @@ mod query;
 mod ranges;
 mod rules;
 mod scope;
+mod sqlfunc_inline;
 mod system_views;
 mod window;
 
@@ -31,37 +32,39 @@ use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{Value, cast_value};
 use crate::backend::optimizer::planner_with_config;
-use crate::backend::rewrite::pg_rewrite_query;
+use crate::backend::rewrite::{format_view_definition, pg_rewrite_query};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAmopRow, PgAmprocRow, PgAttributeRow, PgAuthIdRow,
-    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow,
-    PgDatabaseRow, PgDependRow, PgEnumRow, PgForeignDataWrapperRow, PgForeignServerRow,
-    PgForeignTableRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgProcRow, PgPublicationNamespaceRow,
-    PgPublicationRelRow, PgPublicationRow, PgRangeRow, PgRewriteRow, PgStatisticExtDataRow,
-    PgStatisticExtRow, PgStatisticRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttributeRow,
+    PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
+    PgConversionRow, PgDatabaseRow, PgDependRow, PgEnumRow, PgEventTriggerRow,
+    PgForeignDataWrapperRow, PgForeignServerRow, PgForeignTableRow, PgIndexRow, PgInheritsRow,
+    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgPartitionedTableRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRangeRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgStatisticRow, PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
     PgTsTemplateRow, PgTypeRow, PgUserMappingRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows,
-    bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_am_rows, bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
     bootstrap_pg_collation_rows, bootstrap_pg_conversion_rows, bootstrap_pg_database_rows,
     bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
     bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
     bootstrap_pg_proc_row_by_oid, bootstrap_pg_proc_rows, bootstrap_pg_proc_rows_by_name,
-    bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
-    bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows, builtin_range_rows,
-    builtin_type_row_by_name, builtin_type_row_by_oid, builtin_type_rows,
+    bootstrap_pg_tablespace_rows, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
+    bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows,
+    builtin_range_rows, builtin_type_row_by_name, builtin_type_row_by_oid, builtin_type_rows,
     is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
     proc_oid_for_builtin_aggregate_function, proc_oid_for_builtin_hypothetical_aggregate_function,
-    range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
-    synthetic_range_proc_rows_by_name,
+    proc_oid_for_builtin_ordered_set_aggregate_function, range_type_ref_for_sql_type,
+    relkind_is_analyzable, synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::pathnodes::{PlannerConfig, PlannerIndexExprCacheEntry};
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, HypotheticalAggFunc, JsonTableFunction,
-    OrderByEntry, QueryColumn, RelationDesc, SetReturningCall, SortGroupClause, TargetEntry,
-    ToastRelationRef, Var, expr_contains_set_returning, expr_sql_type_hint, user_attrno,
+    OrderByEntry, OrderedSetAggFunc, QueryColumn, RelationDesc, SetReturningCall, SortGroupClause,
+    TargetEntry, ToastRelationRef, Var, expr_contains_set_returning, expr_sql_type_hint,
+    user_attrno,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -74,8 +77,8 @@ use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
     build_pg_rules_rows, build_pg_stats_ext_exprs_rows, build_pg_stats_ext_rows,
-    build_pg_stats_rows, build_pg_user_mappings_rows, build_pg_views_rows,
-    current_pg_stat_progress_copy_rows,
+    build_pg_stats_rows, build_pg_tables_rows, build_pg_user_mappings_rows,
+    build_pg_views_rows_with_definition_formatter, current_pg_stat_progress_copy_rows,
 };
 use agg::*;
 use agg_output::*;
@@ -136,11 +139,35 @@ pub(crate) use rules::{
 pub use scope::BoundRelation;
 use scope::*;
 pub(crate) use scope::{BoundCte, BoundScope, scope_for_relation, shift_scope_rtindexes};
+use sqlfunc_inline::*;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use system_views::*;
 use window::*;
+
+thread_local! {
+    static EXTERNAL_PARAM_TYPES: RefCell<Vec<(usize, SqlType)>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn with_external_param_types<T>(types: &[(usize, SqlType)], f: impl FnOnce() -> T) -> T {
+    EXTERNAL_PARAM_TYPES.with(|cell| {
+        let old = cell.replace(types.to_vec());
+        let result = f();
+        cell.replace(old);
+        result
+    })
+}
+
+pub(crate) fn external_param_type(paramid: usize) -> Option<SqlType> {
+    EXTERNAL_PARAM_TYPES.with(|cell| {
+        cell.borrow()
+            .iter()
+            .rev()
+            .find(|(candidate, _)| *candidate == paramid)
+            .map(|(_, ty)| *ty)
+    })
+}
 
 pub(crate) fn is_system_column_name(name: &str) -> bool {
     matches!(
@@ -273,6 +300,15 @@ pub(crate) fn relation_get_index_expressions(
     Ok(exprs)
 }
 
+#[allow(non_snake_case)]
+pub(crate) fn RelationGetIndexExpressions(
+    index_meta: &mut crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    heap_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<Expr>, ParseError> {
+    relation_get_index_expressions(index_meta, heap_desc, catalog)
+}
+
 fn bind_index_exprs_uncached(
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     heap_desc: &RelationDesc,
@@ -315,6 +351,15 @@ pub(crate) fn relation_get_index_predicate(
     let predicate = bind_index_predicate_uncached(index_meta, heap_desc, catalog)?;
     index_meta.rd_indpred = Some(predicate.clone());
     Ok(predicate)
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn RelationGetIndexPredicate(
+    index_meta: &mut crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    heap_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    relation_get_index_predicate(index_meta, heap_desc, catalog)
 }
 
 fn bind_index_predicate_uncached(
@@ -501,6 +546,13 @@ struct ResolvedHypotheticalAggregateCall {
     builtin_impl: HypotheticalAggFunc,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedOrderedSetAggregateCall {
+    proc_oid: u32,
+    result_type: SqlType,
+    builtin_impl: OrderedSetAggFunc,
+}
+
 fn resolve_builtin_aggregate_call(
     catalog: &dyn CatalogLookup,
     func: AggFunc,
@@ -675,6 +727,19 @@ fn resolve_hypothetical_aggregate_call(name: &str) -> Option<ResolvedHypothetica
     })
 }
 
+fn resolve_ordered_set_aggregate_call(
+    name: &str,
+    arg_types: &[SqlType],
+) -> Option<ResolvedOrderedSetAggregateCall> {
+    let builtin_impl = resolve_builtin_ordered_set_aggregate(name)?;
+    let proc_oid = proc_oid_for_builtin_ordered_set_aggregate_function(builtin_impl)?;
+    Some(ResolvedOrderedSetAggregateCall {
+        proc_oid,
+        result_type: ordered_set_aggregate_sql_type(builtin_impl, arg_types),
+        builtin_impl,
+    })
+}
+
 fn hypothetical_aggregate_sql_type(func: HypotheticalAggFunc) -> SqlType {
     match func {
         HypotheticalAggFunc::Rank | HypotheticalAggFunc::DenseRank => {
@@ -683,6 +748,15 @@ fn hypothetical_aggregate_sql_type(func: HypotheticalAggFunc) -> SqlType {
         HypotheticalAggFunc::PercentRank | HypotheticalAggFunc::CumeDist => {
             SqlType::new(SqlTypeKind::Float8)
         }
+    }
+}
+
+fn ordered_set_aggregate_sql_type(func: OrderedSetAggFunc, arg_types: &[SqlType]) -> SqlType {
+    match func {
+        OrderedSetAggFunc::PercentileDisc => arg_types
+            .first()
+            .copied()
+            .unwrap_or_else(|| SqlType::new(SqlTypeKind::Text)),
     }
 }
 
@@ -701,6 +775,27 @@ fn not_ordered_set_aggregate_error(name: &str) -> ParseError {
         detail: None,
         hint: None,
         sqlstate: "42809",
+    }
+}
+
+fn ordered_set_direct_arg_count_mismatch_error(
+    name: &str,
+    direct_arg_types: &[SqlType],
+    aggregate_arg_types: &[SqlType],
+) -> ParseError {
+    let signature = direct_arg_types
+        .iter()
+        .chain(aggregate_arg_types.iter())
+        .map(|ty| sql_type_name(*ty))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ParseError::DetailedError {
+        message: format!("function {name}({signature}) does not exist"),
+        detail: None,
+        hint: Some(format!(
+            "To use the ordered-set aggregate {name}, provide one direct percentile argument and one ordering column.",
+        )),
+        sqlstate: "42883",
     }
 }
 
@@ -815,6 +910,84 @@ fn coerce_hypothetical_aggregate_inputs(
 
     Ok((coerced_direct_args, coerced_args, coerced_order_by))
 }
+
+fn coerce_ordered_set_aggregate_inputs(
+    name: &str,
+    direct_args: &[SqlFunctionArg],
+    direct_arg_types: &[SqlType],
+    bound_direct_args: Vec<Expr>,
+    aggregate_args: &[SqlFunctionArg],
+    aggregate_arg_types: &[SqlType],
+    bound_args: Vec<Expr>,
+    order_by: &[OrderByItem],
+    bound_order_exprs: Vec<Expr>,
+    catalog: &dyn CatalogLookup,
+) -> Result<(Vec<Expr>, Vec<Expr>, Vec<OrderByEntry>), ParseError> {
+    let Some(OrderedSetAggFunc::PercentileDisc) = resolve_builtin_ordered_set_aggregate(name)
+    else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "supported ordered-set aggregate",
+            actual: name.to_string(),
+        });
+    };
+    if direct_args.len() != 1 || aggregate_args.len() != 1 || order_by.len() != 1 {
+        return Err(ordered_set_direct_arg_count_mismatch_error(
+            name,
+            direct_arg_types,
+            aggregate_arg_types,
+        ));
+    }
+
+    let target_direct_type = SqlType::new(SqlTypeKind::Float8);
+    let direct_type = coerce_unknown_string_literal_type(
+        &direct_args[0].value,
+        direct_arg_types
+            .first()
+            .copied()
+            .unwrap_or(target_direct_type),
+        target_direct_type,
+    );
+    let direct_expr = bound_direct_args
+        .into_iter()
+        .next()
+        .expect("direct arg length checked above");
+
+    let target_arg_type = aggregate_arg_types
+        .first()
+        .copied()
+        .unwrap_or_else(|| SqlType::new(SqlTypeKind::Text));
+    let arg_type = coerce_unknown_string_literal_type(
+        &aggregate_args[0].value,
+        target_arg_type,
+        SqlType::new(SqlTypeKind::Text),
+    );
+    let arg_expr = bound_args
+        .into_iter()
+        .next()
+        .expect("aggregate arg length checked above");
+    let order_expr = bound_order_exprs
+        .into_iter()
+        .next()
+        .expect("order arg length checked above");
+
+    let coerced_arg = coerce_bound_expr(arg_expr, target_arg_type, arg_type);
+    let order_by_entry = build_bound_order_by_entry(
+        &order_by[0],
+        coerce_bound_expr(order_expr, target_arg_type, arg_type),
+        0,
+        catalog,
+    )?;
+
+    Ok((
+        vec![coerce_bound_expr(
+            direct_expr,
+            direct_type,
+            target_direct_type,
+        )],
+        vec![coerced_arg],
+        vec![order_by_entry],
+    ))
+}
 fn validate_distinct_aggregate_order_by(
     arg_values: &[SqlExpr],
     order_by: &[OrderByItem],
@@ -883,6 +1056,22 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn depend_rows_referencing(
+        &self,
+        refclassid: u32,
+        refobjid: u32,
+        refobjsubid: Option<i32>,
+    ) -> Vec<PgDependRow> {
+        self.depend_rows()
+            .into_iter()
+            .filter(|row| {
+                row.refclassid == refclassid
+                    && row.refobjid == refobjid
+                    && refobjsubid.is_none_or(|objsubid| row.refobjsubid == objsubid)
+            })
+            .collect()
+    }
+
     fn role_name_by_oid(&self, role_oid: u32) -> Option<String> {
         self.authid_rows()
             .into_iter()
@@ -896,6 +1085,26 @@ pub trait CatalogLookup {
 
     fn database_row_by_oid(&self, oid: u32) -> Option<PgDatabaseRow> {
         self.database_rows().into_iter().find(|row| row.oid == oid)
+    }
+
+    fn event_trigger_rows(&self) -> Vec<PgEventTriggerRow> {
+        Vec::new()
+    }
+
+    fn event_trigger_row_by_oid(&self, oid: u32) -> Option<PgEventTriggerRow> {
+        self.event_trigger_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+    }
+
+    fn event_trigger_row_by_name(&self, name: &str) -> Option<PgEventTriggerRow> {
+        self.event_trigger_rows()
+            .into_iter()
+            .find(|row| row.evtname == name)
+    }
+
+    fn tablespace_rows(&self) -> Vec<PgTablespaceRow> {
+        bootstrap_pg_tablespace_rows().to_vec()
     }
 
     fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
@@ -913,6 +1122,10 @@ pub trait CatalogLookup {
     }
 
     fn current_relation_pages(&self, _relation_oid: u32) -> Option<u32> {
+        None
+    }
+
+    fn current_relation_live_tuples(&self, _relation_oid: u32) -> Option<f64> {
         None
     }
 
@@ -972,6 +1185,10 @@ pub trait CatalogLookup {
 
     fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
         bootstrap_pg_opfamily_rows()
+    }
+
+    fn am_rows(&self) -> Vec<PgAmRow> {
+        bootstrap_pg_am_rows().to_vec()
     }
 
     fn amproc_rows(&self) -> Vec<PgAmprocRow> {
@@ -1419,6 +1636,10 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn pg_tables_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
@@ -1447,10 +1668,12 @@ pub trait CatalogLookup {
         build_pg_stats_ext_rows(
             self.namespace_rows(),
             self.authid_rows(),
+            self.auth_members_rows(),
             self.class_rows(),
             self.attribute_rows(),
             self.statistic_ext_rows(),
             self.statistic_ext_data_rows(),
+            self.current_user_oid(),
         )
     }
 
@@ -1458,9 +1681,11 @@ pub trait CatalogLookup {
         build_pg_stats_ext_exprs_rows(
             self.namespace_rows(),
             self.authid_rows(),
+            self.auth_members_rows(),
             self.class_rows(),
             self.statistic_ext_rows(),
             self.statistic_ext_data_rows(),
+            self.current_user_oid(),
         )
     }
 
@@ -1478,6 +1703,34 @@ pub trait CatalogLookup {
     }
 
     fn pg_stat_activity_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_database_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_checkpointer_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_wal_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_slru_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_archiver_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_bgwriter_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
+    fn pg_stat_recovery_prefetch_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
 
@@ -1561,6 +1814,10 @@ impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
 
     fn current_relation_pages(&self, relation_oid: u32) -> Option<u32> {
         self.inner.current_relation_pages(relation_oid)
+    }
+
+    fn current_relation_live_tuples(&self, relation_oid: u32) -> Option<f64> {
+        self.inner.current_relation_live_tuples(relation_oid)
     }
 
     fn brin_pages_per_range(&self, relation_oid: u32) -> Option<u32> {
@@ -1798,8 +2055,8 @@ fn planner_cached_index_expressions(
     }
 
     let index_exprs =
-        relation_get_index_expressions(index_meta, heap_desc, catalog).unwrap_or_default();
-    let index_predicate = relation_get_index_predicate(index_meta, heap_desc, catalog)
+        RelationGetIndexExpressions(index_meta, heap_desc, catalog).unwrap_or_default();
+    let index_predicate = RelationGetIndexPredicate(index_meta, heap_desc, catalog)
         .ok()
         .flatten();
     if let Some(cache) = index_expr_cache {
@@ -1842,6 +2099,10 @@ impl CatalogLookup for Catalog {
 
     fn auth_members_rows(&self) -> Vec<PgAuthMembersRow> {
         CatCache::from_catalog(self).auth_members_rows()
+    }
+
+    fn tablespace_rows(&self) -> Vec<PgTablespaceRow> {
+        CatCache::from_catalog(self).tablespace_rows()
     }
 
     fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
@@ -1911,6 +2172,10 @@ impl CatalogLookup for Catalog {
 
     fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
         CatCache::from_catalog(self).opfamily_rows()
+    }
+
+    fn am_rows(&self) -> Vec<PgAmRow> {
+        CatCache::from_catalog(self).am_rows()
     }
 
     fn collation_rows(&self) -> Vec<PgCollationRow> {
@@ -2268,13 +2533,29 @@ impl CatalogLookup for Catalog {
         CatCache::from_catalog(self).user_mapping_rows()
     }
 
+    fn pg_tables_rows(&self) -> Vec<Vec<Value>> {
+        let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
+        build_pg_tables_rows(
+            catcache.namespace_rows(),
+            catcache.authid_rows(),
+            catcache.class_rows(),
+        )
+    }
+
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {
         let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
-        build_pg_views_rows(
+        build_pg_views_rows_with_definition_formatter(
             catcache.namespace_rows(),
             catcache.authid_rows(),
             catcache.class_rows(),
             catcache.rewrite_rows(),
+            |class, definition| {
+                self.relation_by_oid(class.oid)
+                    .and_then(|relation| {
+                        format_view_definition(class.oid, &relation.desc, self).ok()
+                    })
+                    .unwrap_or_else(|| definition.to_string())
+            },
         )
     }
 
@@ -2659,6 +2940,7 @@ fn literal_sql_expr_value(expr: &SqlExpr) -> Option<Value> {
 fn group_by_target_ordinal_expr(
     expr: &SqlExpr,
     targets: &[SelectItem],
+    input_scope: &BoundScope,
 ) -> Result<Option<SqlExpr>, ParseError> {
     let SqlExpr::IntegerLiteral(value) = expr else {
         return Ok(None);
@@ -2672,7 +2954,38 @@ fn group_by_target_ordinal_expr(
             actual: format!("GROUP BY position {value} is not in select list"),
         });
     }
-    Ok(Some(targets[ordinal - 1].expr.clone()))
+    let target_expr = &targets[ordinal - 1].expr;
+    if let SqlExpr::Column(name) = target_expr {
+        if name == "*" {
+            return Ok(first_visible_scope_column_expr(input_scope, None));
+        }
+        if let Some(relation_name) = name.strip_suffix(".*") {
+            return Ok(first_visible_scope_column_expr(
+                input_scope,
+                Some(relation_name),
+            ));
+        }
+    }
+    Ok(Some(target_expr.clone()))
+}
+
+fn first_visible_scope_column_expr(
+    input_scope: &BoundScope,
+    relation_name: Option<&str>,
+) -> Option<SqlExpr> {
+    input_scope
+        .columns
+        .iter()
+        .find(|column| {
+            !column.hidden
+                && relation_name.is_none_or(|relation_name| {
+                    column
+                        .relation_names
+                        .iter()
+                        .any(|visible| visible.eq_ignore_ascii_case(relation_name))
+                })
+        })
+        .map(|column| SqlExpr::Column(column.output_name.clone()))
 }
 
 fn group_by_target_alias_expr(
@@ -2705,13 +3018,54 @@ fn normalize_group_by_exprs(
     stmt.group_by
         .iter()
         .map(|expr| {
-            group_by_target_ordinal_expr(expr, &stmt.targets).map(|resolved| {
+            group_by_target_ordinal_expr(expr, &stmt.targets, input_scope).map(|resolved| {
                 resolved
                     .or_else(|| group_by_target_alias_expr(expr, &stmt.targets, input_scope))
                     .unwrap_or_else(|| expr.clone())
             })
         })
         .collect()
+}
+
+fn take_single_rollup_grouping_set(group_by_exprs: &mut Vec<SqlExpr>) -> bool {
+    let [
+        SqlExpr::FuncCall {
+            name,
+            args,
+            order_by,
+            within_group,
+            distinct,
+            func_variadic,
+            filter,
+            null_treatment,
+            over,
+        },
+    ] = group_by_exprs.as_mut_slice()
+    else {
+        return false;
+    };
+    if !name.eq_ignore_ascii_case("rollup")
+        || !order_by.is_empty()
+        || within_group.is_some()
+        || *distinct
+        || *func_variadic
+        || filter.is_some()
+        || null_treatment.is_some()
+        || over.is_some()
+    {
+        return false;
+    }
+    let crate::include::nodes::parsenodes::SqlCallArgs::Args(call_args) = args else {
+        return false;
+    };
+    let [arg] = call_args.as_slice() else {
+        return false;
+    };
+    if arg.name.is_some() {
+        return false;
+    }
+    *group_by_exprs = vec![arg.value.clone()];
+    true
 }
 
 fn expand_group_by_with_primary_key_dependencies(
@@ -3127,6 +3481,8 @@ pub(crate) struct SlotScopeColumn {
     pub hidden: bool,
 }
 
+const NAMED_SLOT_VARNO: usize = 0;
+
 pub(crate) fn bind_scalar_expr_in_named_slot_scope(
     expr: &SqlExpr,
     relation_scopes: &[(String, Vec<SlotScopeColumn>)],
@@ -3164,7 +3520,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
             source_columns: Vec::new(),
         });
         output_exprs.push(Expr::Var(Var {
-            varno: 1,
+            varno: NAMED_SLOT_VARNO,
             varattno: user_attrno(column.slot),
             varlevelsup: 0,
             vartype: column.sql_type,
@@ -3193,7 +3549,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
                 source_columns: Vec::new(),
             });
             output_exprs.push(Expr::Var(Var {
-                varno: 1,
+                varno: NAMED_SLOT_VARNO,
                 varattno: user_attrno(column.slot),
                 varlevelsup: 0,
                 vartype: column.sql_type,
@@ -3418,6 +3774,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             limit: values.limit,
             offset: values.offset,
             locking_clause: None,
+            locking_targets: Vec::new(),
             set_operation: None,
         }),
         CteBody::Insert(_) => Err(ParseError::FeatureNotSupported(
@@ -3442,6 +3799,7 @@ fn cte_body_as_select(body: &CteBody) -> Result<SelectStatement, ParseError> {
             limit: None,
             offset: None,
             locking_clause: None,
+            locking_targets: Vec::new(),
             set_operation: Some(Box::new(SetOperationStatement {
                 op: SetOperator::Union { all: *all },
                 inputs: vec![cte_body_as_select(anchor)?, (**recursive).clone()],
@@ -3529,14 +3887,16 @@ fn bind_ctes(
                         distinct_on: Vec::new(),
                         where_qual: None,
                         group_by: Vec::new(),
+                        grouping_sets: Vec::new(),
                         accumulators: Vec::new(),
                         window_clauses: Vec::new(),
                         having_qual: None,
                         sort_clause: Vec::new(),
                         constraint_deps: Vec::new(),
                         limit_count: None,
-                        limit_offset: 0,
+                        limit_offset: None,
                         locking_clause: None,
+                        locking_targets: Vec::new(),
                         row_marks: Vec::new(),
                         has_target_srfs: false,
                         recursive_union: None,
@@ -3547,7 +3907,7 @@ fn bind_ctes(
                     worktable_id,
                 });
                 let recursive_outer_scopes = cte_body_outer_scopes(outer_scopes);
-                let (recursive_query, _) = analyze_select_query_with_outer(
+                let (mut recursive_query, _) = analyze_select_query_with_outer(
                     recursive,
                     catalog,
                     &recursive_outer_scopes,
@@ -3574,15 +3934,31 @@ fn bind_ctes(
                     .enumerate()
                 {
                     if left.sql_type != right.sql_type {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "recursive term column types matching non-recursive term",
-                            actual: format!(
-                                "recursive CTE column {} has type {} in the non-recursive term but {} in the recursive term",
-                                index + 1,
-                                sql_type_name(left.sql_type),
-                                sql_type_name(right.sql_type)
-                            ),
-                        });
+                        let target = recursive_query
+                            .target_list
+                            .get_mut(index)
+                            .expect("recursive term target width checked earlier");
+                        if is_binary_coercible_type(right.sql_type, left.sql_type)
+                            || resolve_common_scalar_type(left.sql_type, right.sql_type)
+                                == Some(left.sql_type)
+                        {
+                            target.expr = coerce_bound_expr(
+                                target.expr.clone(),
+                                right.sql_type,
+                                left.sql_type,
+                            );
+                            target.sql_type = left.sql_type;
+                        } else {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "recursive term column types matching non-recursive term",
+                                actual: format!(
+                                    "recursive CTE column {} has type {} in the non-recursive term but {} in the recursive term",
+                                    index + 1,
+                                    sql_type_name(left.sql_type),
+                                    sql_type_name(right.sql_type)
+                                ),
+                            });
+                        }
                     }
                 }
                 let recursive_plan = AnalyzedFrom::worktable(worktable_id, output_columns.clone());
@@ -3601,14 +3977,16 @@ fn bind_ctes(
                         distinct_on: Vec::new(),
                         where_qual: None,
                         group_by: Vec::new(),
+                        grouping_sets: Vec::new(),
                         accumulators: Vec::new(),
                         window_clauses: Vec::new(),
                         having_qual: None,
                         sort_clause: Vec::new(),
                         constraint_deps: Vec::new(),
                         limit_count: None,
-                        limit_offset: 0,
+                        limit_offset: None,
                         locking_clause: None,
+                        locking_targets: Vec::new(),
                         row_marks: Vec::new(),
                         has_target_srfs: false,
                         recursive_union: Some(Box::new(RecursiveUnionQuery {
@@ -3838,6 +4216,14 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
+            FromItem::RowsFrom { functions, .. } => {
+                for function in functions {
+                    for arg in &function.args {
+                        self.visit_expr(&arg.value, context)?;
+                    }
+                }
+                Ok(())
+            }
             FromItem::JsonTable(table) => {
                 self.visit_expr(&table.context, context)?;
                 for arg in &table.passing {
@@ -3862,9 +4248,9 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
-            FromItem::Lateral(source) | FromItem::Alias { source, .. } => {
-                self.visit_from(source, context)
-            }
+            FromItem::Lateral(source)
+            | FromItem::Alias { source, .. }
+            | FromItem::TableSample { source, .. } => self.visit_from(source, context),
             FromItem::DerivedTable(select) => self.visit_select(select, context),
             FromItem::Join {
                 left,
@@ -3951,6 +4337,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
         match expr {
             SqlExpr::Column(_)
             | SqlExpr::Parameter(_)
+            | SqlExpr::ParamRef(_)
             | SqlExpr::Default
             | SqlExpr::Const(_)
             | SqlExpr::IntegerLiteral(_)
@@ -4257,9 +4644,9 @@ fn insert_statement_references_table(stmt: &InsertStatement, table_name: &str) -
 fn from_item_references_table(item: &FromItem, table_name: &str) -> bool {
     match item {
         FromItem::Table { name, .. } => name.eq_ignore_ascii_case(table_name),
-        FromItem::Lateral(source) | FromItem::Alias { source, .. } => {
-            from_item_references_table(source, table_name)
-        }
+        FromItem::Lateral(source)
+        | FromItem::Alias { source, .. }
+        | FromItem::TableSample { source, .. } => from_item_references_table(source, table_name),
         FromItem::DerivedTable(select) => select_statement_references_table(select, table_name),
         FromItem::Join { left, right, .. } => {
             from_item_references_table(left, table_name)
@@ -4267,7 +4654,9 @@ fn from_item_references_table(item: &FromItem, table_name: &str) -> bool {
         }
         FromItem::JsonTable(table) => json_table_expr_references_table(table, table_name),
         FromItem::XmlTable(table) => xml_table_expr_references_table(table, table_name),
-        FromItem::Values { .. } | FromItem::FunctionCall { .. } => false,
+        FromItem::Values { .. } | FromItem::FunctionCall { .. } | FromItem::RowsFrom { .. } => {
+            false
+        }
     }
 }
 
@@ -4337,6 +4726,7 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
     match expr {
         SqlExpr::Column(_)
         | SqlExpr::Parameter(_)
+        | SqlExpr::ParamRef(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)
@@ -4604,15 +4994,23 @@ pub(crate) fn pg_plan_query_with_outer_scopes_and_ctes(
     outer_scopes: &[BoundScope],
     outer_ctes: &[BoundCte],
 ) -> Result<PlannedStmt, ParseError> {
-    build_plan_with_outer(
+    pg_plan_query_with_outer_scopes_and_ctes_config(
         stmt,
         catalog,
         outer_scopes,
-        None,
         outer_ctes,
-        &[],
         PlannerConfig::default(),
     )
+}
+
+pub(crate) fn pg_plan_query_with_outer_scopes_and_ctes_config(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    outer_ctes: &[BoundCte],
+    config: PlannerConfig,
+) -> Result<PlannedStmt, ParseError> {
+    build_plan_with_outer(stmt, catalog, outer_scopes, None, outer_ctes, &[], config)
 }
 
 pub fn build_plan(stmt: &SelectStatement, catalog: &dyn CatalogLookup) -> Result<Plan, ParseError> {
@@ -4679,15 +5077,23 @@ pub(crate) fn pg_plan_values_query_with_outer_scopes_and_ctes(
     outer_scopes: &[BoundScope],
     outer_ctes: &[BoundCte],
 ) -> Result<PlannedStmt, ParseError> {
-    build_values_plan_with_outer(
+    pg_plan_values_query_with_outer_scopes_and_ctes_config(
         stmt,
         catalog,
         outer_scopes,
-        None,
         outer_ctes,
-        &[],
         PlannerConfig::default(),
     )
+}
+
+pub(crate) fn pg_plan_values_query_with_outer_scopes_and_ctes_config(
+    stmt: &ValuesStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    outer_ctes: &[BoundCte],
+    config: PlannerConfig,
+) -> Result<PlannedStmt, ParseError> {
+    build_values_plan_with_outer(stmt, catalog, outer_scopes, None, outer_ctes, &[], config)
 }
 
 pub(crate) fn bound_cte_from_materialized_rows(
@@ -4736,14 +5142,16 @@ pub(crate) fn bound_cte_from_materialized_rows(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
             having_qual: None,
             sort_clause: Vec::new(),
             constraint_deps: Vec::new(),
             limit_count: None,
-            limit_offset: 0,
+            limit_offset: None,
             locking_clause: None,
+            locking_targets: Vec::new(),
             row_marks: Vec::new(),
             has_target_srfs: false,
             recursive_union: None,
@@ -4784,14 +5192,16 @@ pub(crate) fn bound_cte_from_query_rows(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
             having_qual: None,
             sort_clause: Vec::new(),
             constraint_deps: Vec::new(),
             limit_count: None,
-            limit_offset: 0,
+            limit_offset: None,
             locking_clause: None,
+            locking_targets: Vec::new(),
             row_marks: Vec::new(),
             has_target_srfs: false,
             recursive_union: None,
@@ -4878,14 +5288,16 @@ fn bind_values_query_with_outer(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
             having_qual: None,
             sort_clause,
             constraint_deps: Vec::new(),
             limit_count: stmt.limit,
-            limit_offset: stmt.offset.unwrap_or(0),
+            limit_offset: stmt.offset,
             locking_clause: None,
+            locking_targets: Vec::new(),
             row_marks: Vec::new(),
             has_target_srfs: false,
             recursive_union: None,
@@ -5006,6 +5418,8 @@ fn bind_select_query_with_outer(
         } else {
             normalize_group_by_exprs(stmt, &scope)?
         };
+        let has_single_rollup_grouping_set =
+            take_single_rollup_grouping_set(&mut effective_group_by);
         let constraint_deps =
             expand_group_by_with_primary_key_dependencies(&mut effective_group_by, &scope, catalog);
 
@@ -5117,6 +5531,11 @@ fn bind_select_query_with_outer(
                         )
                     })
                     .collect::<Result<_, _>>()?;
+                let grouping_sets = if has_single_rollup_grouping_set {
+                    vec![group_keys.clone(), Vec::new()]
+                } else {
+                    Vec::new()
+                };
                 let rewritten_group_keys = group_keys.clone();
 
                 return with_grouped_agg_cte_context(&visible_ctes, &local_ctes, || {
@@ -5126,13 +5545,18 @@ fn bind_select_query_with_outer(
                             let hypothetical =
                                 resolve_builtin_hypothetical_aggregate(&agg.name).is_some()
                                     && !agg.direct_args.is_empty();
+                            let ordered_set =
+                                resolve_builtin_ordered_set_aggregate(&agg.name).is_some()
+                                    && !agg.direct_args.is_empty();
                             if aggregate_args_are_named(agg.args.args()) {
                                 return Err(ParseError::UnexpectedToken {
                                     expected: "aggregate arguments without names",
                                     actual: agg.name.clone(),
                                 });
                             }
-                            if hypothetical && aggregate_args_are_named(&agg.direct_args) {
+                            if (hypothetical || ordered_set)
+                                && aggregate_args_are_named(&agg.direct_args)
+                            {
                                 return Err(ParseError::UnexpectedToken {
                                     expected: "aggregate arguments without names",
                                     actual: agg.name.clone(),
@@ -5144,7 +5568,7 @@ fn bind_select_query_with_outer(
                                 .iter()
                                 .map(|arg| arg.value.clone())
                                 .collect();
-                            if !hypothetical {
+                            if !hypothetical && !ordered_set {
                                 validate_distinct_aggregate_order_by(
                                     &arg_values,
                                     &agg.order_by,
@@ -5152,6 +5576,7 @@ fn bind_select_query_with_outer(
                                 )?;
                             }
                             if !hypothetical
+                                && !ordered_set
                                 && let Some(func) = resolve_builtin_aggregate(&agg.name)
                             {
                                 validate_aggregate_arity(func, &arg_values)?;
@@ -5169,7 +5594,7 @@ fn bind_select_query_with_outer(
                                     )
                                 })
                                 .collect::<Vec<_>>();
-                            let resolved = if hypothetical {
+                            let resolved = if hypothetical || ordered_set {
                                 None
                             } else {
                                 Some(
@@ -5207,7 +5632,7 @@ fn bind_select_query_with_outer(
                                     ));
                                 }
                             }
-                            let bound_direct_args = if hypothetical {
+                            let bound_direct_args = if hypothetical || ordered_set {
                                 agg.direct_args
                                     .iter()
                                     .map(|arg| {
@@ -5307,6 +5732,33 @@ fn bind_select_query_with_outer(
                                         bound_order_exprs,
                                         catalog,
                                     )?
+                                } else if ordered_set {
+                                    let direct_arg_types = agg
+                                        .direct_args
+                                        .iter()
+                                        .map(|arg| {
+                                            infer_sql_expr_type_with_ctes(
+                                                &arg.value,
+                                                &scope,
+                                                catalog,
+                                                outer_scopes,
+                                                grouped_outer.as_ref(),
+                                                &visible_ctes,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    coerce_ordered_set_aggregate_inputs(
+                                        &agg.name,
+                                        &agg.direct_args,
+                                        &direct_arg_types,
+                                        bound_direct_args,
+                                        agg.args.args(),
+                                        &arg_types,
+                                        bound_args,
+                                        &agg.order_by,
+                                        bound_order_exprs,
+                                        catalog,
+                                    )?
                                 } else {
                                     let bound_order_by = bound_order_exprs
                                         .into_iter()
@@ -5343,6 +5795,14 @@ fn bind_select_query_with_outer(
                                             actual: agg.name.clone(),
                                         },
                                     )?;
+                                (resolved.proc_oid, false, resolved.result_type)
+                            } else if ordered_set {
+                                let resolved =
+                                    resolve_ordered_set_aggregate_call(&agg.name, &arg_types)
+                                        .ok_or_else(|| ParseError::UnexpectedToken {
+                                            expected: "supported aggregate",
+                                            actual: agg.name.clone(),
+                                        })?;
                                 (resolved.proc_oid, false, resolved.result_type)
                             } else {
                                 let resolved = resolved
@@ -5387,6 +5847,9 @@ fn bind_select_query_with_outer(
                         let hypothetical = resolve_builtin_hypothetical_aggregate(&agg.name)
                             .is_some()
                             && !agg.direct_args.is_empty();
+                        let ordered_set = resolve_builtin_ordered_set_aggregate(&agg.name)
+                            .is_some()
+                            && !agg.direct_args.is_empty();
                         let arg_values: Vec<SqlExpr> = agg
                             .args
                             .args()
@@ -5408,6 +5871,13 @@ fn bind_select_query_with_outer(
                             .collect::<Vec<_>>();
                         let result_type = if hypothetical {
                             resolve_hypothetical_aggregate_call(&agg.name)
+                                .map(|resolved| resolved.result_type)
+                                .ok_or_else(|| ParseError::UnexpectedToken {
+                                    expected: "supported aggregate",
+                                    actual: agg.name.clone(),
+                                })?
+                        } else if ordered_set {
+                            resolve_ordered_set_aggregate_call(&agg.name, &arg_types)
                                 .map(|resolved| resolved.result_type)
                                 .ok_or_else(|| ParseError::UnexpectedToken {
                                     expected: "supported aggregate",
@@ -5615,14 +6085,16 @@ fn bind_select_query_with_outer(
                         distinct_on: Vec::new(),
                         where_qual,
                         group_by: rewritten_group_keys,
+                        grouping_sets,
                         accumulators,
                         window_clauses,
                         having_qual: having,
                         sort_clause,
                         constraint_deps,
                         limit_count: stmt.limit,
-                        limit_offset: stmt.offset.unwrap_or(0),
+                        limit_offset: stmt.offset,
                         locking_clause: stmt.locking_clause,
+                        locking_targets: stmt.locking_targets.clone(),
                         row_marks: Vec::new(),
                         has_target_srfs,
                         recursive_union: None,
@@ -5718,14 +6190,16 @@ fn bind_select_query_with_outer(
                     distinct_on: Vec::new(),
                     where_qual,
                     group_by: Vec::new(),
+                    grouping_sets: Vec::new(),
                     accumulators: Vec::new(),
                     window_clauses,
                     having_qual: None,
                     sort_clause,
                     constraint_deps: Vec::new(),
                     limit_count: stmt.limit,
-                    limit_offset: stmt.offset.unwrap_or(0),
+                    limit_offset: stmt.offset,
                     locking_clause: stmt.locking_clause,
+                    locking_targets: stmt.locking_targets.clone(),
                     row_marks: Vec::new(),
                     has_target_srfs,
                     recursive_union: None,
@@ -5863,8 +6337,11 @@ fn bind_set_operation_query_with_outer(
             else {
                 continue;
             };
-            column_types[input_index] =
-                coerce_unknown_string_literal_type(raw_expr, column_types[input_index], peer_type);
+            column_types[input_index] = coerce_unknown_set_operation_literal_type(
+                raw_expr,
+                column_types[input_index],
+                peer_type,
+            );
         }
 
         let mut common = column_types[0];
@@ -5953,14 +6430,16 @@ fn bind_set_operation_query_with_outer(
             distinct_on: Vec::new(),
             where_qual: None,
             group_by: Vec::new(),
+            grouping_sets: Vec::new(),
             accumulators: Vec::new(),
             window_clauses: Vec::new(),
             having_qual: None,
             sort_clause,
             constraint_deps: Vec::new(),
             limit_count: stmt.limit,
-            limit_offset: stmt.offset.unwrap_or(0),
+            limit_offset: stmt.offset,
             locking_clause: stmt.locking_clause,
+            locking_targets: stmt.locking_targets.clone(),
             row_marks: Vec::new(),
             has_target_srfs: false,
             recursive_union: None,

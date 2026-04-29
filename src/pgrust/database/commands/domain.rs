@@ -104,7 +104,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Result<String, ExecError> {
         let (normalized, _, _) =
-            self.normalize_domain_name_for_create(domain_name, configured_search_path)?;
+            self.normalize_domain_name_for_create(0, domain_name, configured_search_path)?;
         Ok(normalized)
     }
 
@@ -652,6 +652,7 @@ fn ddl_executor_context_for_domain(
         pending_table_locks: Vec::new(),
         catalog: None,
         scalar_function_cache: std::collections::HashMap::new(),
+        srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: db.plpgsql_function_cache(client_id),
         pinned_cte_tables: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),

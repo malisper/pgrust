@@ -7,12 +7,12 @@ use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::include::access::relscan::IndexScanDesc;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::tidbitmap::TidBitmap;
-use crate::include::nodes::plannodes::{IndexScanKey, PlanEstimate};
+use crate::include::nodes::plannodes::{IndexScanKey, PartitionPrunePlan, PlanEstimate};
 use crate::include::storage::buf_internals::BufferUsageStats;
 use crate::{BufferPool, ClientId, OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use parking_lot::RwLock;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,8 +20,8 @@ use std::time::Duration;
 use crate::backend::executor::{AggregateRuntime, ExecError, ExecutorContext};
 pub use crate::include::nodes::datum::{NumericValue, Value};
 pub use crate::include::nodes::parsenodes::{SetOperator, SqlType};
-use crate::include::nodes::plannodes::AggregateStrategy;
 pub use crate::include::nodes::plannodes::Plan;
+use crate::include::nodes::plannodes::{AggregatePhase, AggregateStrategy};
 pub use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, ColumnDesc, Expr, JoinType, JsonTableFunction,
     OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc, ScalarType, SetReturningCall,
@@ -203,6 +203,7 @@ pub struct NodeExecStats {
     pub first_tuple_time: Option<Duration>,
     pub rows_removed_by_filter: u64,
     pub index_searches: u64,
+    pub heap_fetches: u64,
     pub stack_depth_checked: bool,
     pub buffer_usage: BufferUsageStats,
     pub buffer_usage_start: Option<BufferUsageStats>,
@@ -219,6 +220,10 @@ pub trait PlanNode: std::fmt::Debug {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError>;
+
+    fn rescan(&mut self, _ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        Ok(())
+    }
 
     /// Re-borrow the slot from the last exec_proc_node call.
     /// Used by filter to return a reference to the child's slot
@@ -250,6 +255,9 @@ pub trait PlanNode: std::fmt::Debug {
     fn node_label(&self) -> String;
     fn explain_passthrough(&self) -> Option<&dyn PlanNode> {
         None
+    }
+    fn explain_one_time_false_input(&self) -> bool {
+        false
     }
     fn explain_details(
         &self,
@@ -297,6 +305,10 @@ pub struct AppendState {
     pub(crate) source_id: usize,
     pub(crate) children: Vec<PlanState>,
     pub(crate) current_child: usize,
+    pub(crate) active_children: Option<Vec<usize>>,
+    pub(crate) visible_children: Option<Vec<usize>>,
+    pub(crate) partition_prune: Option<PartitionPrunePlan>,
+    pub(crate) subplans_removed: usize,
     pub(crate) column_names: Vec<String>,
     pub(crate) slot: TupleSlot,
     pub(crate) current_bindings: Vec<SystemVarBinding>,
@@ -308,6 +320,10 @@ pub struct AppendState {
 pub struct MergeAppendState {
     pub(crate) source_id: usize,
     pub(crate) children: Vec<PlanState>,
+    pub(crate) active_children: Option<Vec<usize>>,
+    pub(crate) visible_children: Option<Vec<usize>>,
+    pub(crate) partition_prune: Option<PartitionPrunePlan>,
+    pub(crate) subplans_removed: usize,
     pub(crate) items: Vec<OrderByEntry>,
     pub(crate) column_names: Vec<String>,
     pub(crate) rows: Option<Vec<MaterializedRow>>,
@@ -386,6 +402,9 @@ pub struct IndexScanState {
     pub(crate) direction: ScanDirection,
     pub(crate) index_only: bool,
     pub(crate) scan: Option<IndexScanDesc>,
+    pub(crate) pending_array_scan_keys: Vec<Vec<crate::include::access::scankey::ScanKeyData>>,
+    pub(crate) array_scan_seen_tids: HashSet<ItemPointerData>,
+    pub(crate) array_scan_keys_initialized: bool,
     pub(crate) scan_exhausted: bool,
     pub(crate) slot: TupleSlot,
     pub(crate) qual: Option<crate::backend::executor::expr::CompiledPredicate>,
@@ -426,6 +445,9 @@ pub struct IndexOnlyScanState {
     pub(crate) order_by_keys: Vec<IndexScanKey>,
     pub(crate) direction: ScanDirection,
     pub(crate) scan: Option<IndexScanDesc>,
+    pub(crate) pending_array_scan_keys: Vec<Vec<crate::include::access::scankey::ScanKeyData>>,
+    pub(crate) array_scan_seen_tids: HashSet<ItemPointerData>,
+    pub(crate) array_scan_keys_initialized: bool,
     pub(crate) scan_exhausted: bool,
     pub(crate) vm_buf: Option<crate::include::access::visibilitymap::VisibilityMapBuffer>,
     pub(crate) slot: TupleSlot,
@@ -567,6 +589,7 @@ pub struct NestedLoopJoinState {
     pub(crate) kind: JoinType,
     pub(crate) nest_params: Vec<crate::include::nodes::plannodes::ExecParamSource>,
     pub(crate) join_qual: Vec<Expr>,
+    pub(crate) join_qual_never_matches: bool,
     pub(crate) qual: Vec<Expr>,
     pub(crate) combined_names: Vec<String>,
     pub(crate) output_names: Vec<String>,
@@ -585,6 +608,43 @@ pub struct NestedLoopJoinState {
     pub(crate) stats: NodeExecStats,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MemoizeCacheKey(pub(crate) Vec<Value>);
+
+#[derive(Debug, Default)]
+pub struct MemoizeInstrumentation {
+    pub(crate) hits: u64,
+    pub(crate) misses: u64,
+    pub(crate) evictions: u64,
+    pub(crate) overflows: u64,
+    pub(crate) memory_usage_bytes: usize,
+}
+
+#[derive(Debug)]
+pub struct MemoizeState {
+    pub(crate) input_plan: Plan,
+    pub(crate) input: PlanState,
+    pub(crate) cache_keys: Vec<Expr>,
+    pub(crate) cache_key_labels: Vec<String>,
+    pub(crate) key_paramids: Vec<usize>,
+    pub(crate) dependent_paramids: Vec<usize>,
+    pub(crate) binary_mode: bool,
+    pub(crate) single_row: bool,
+    pub(crate) est_entries: usize,
+    pub(crate) cache: HashMap<MemoizeCacheKey, Vec<MaterializedRow>>,
+    pub(crate) lru: VecDeque<MemoizeCacheKey>,
+    pub(crate) active_rows: Vec<MaterializedRow>,
+    pub(crate) active_index: usize,
+    pub(crate) scan_prepared: bool,
+    pub(crate) last_nonkey_dependents: Option<Vec<Value>>,
+    pub(crate) slot: TupleSlot,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) column_names: Vec<String>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+    pub(crate) memoize_stats: MemoizeInstrumentation,
+}
+
 #[derive(Debug)]
 pub struct HashState {
     pub(crate) input: PlanState,
@@ -592,6 +652,22 @@ pub struct HashState {
     pub(crate) column_names: Vec<String>,
     pub(crate) table: Option<HashJoinTable>,
     pub(crate) built: bool,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct MaterializeState {
+    pub(crate) input: PlanState,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct GatherState {
+    pub(crate) input: PlanState,
+    pub(crate) workers_planned: usize,
+    pub(crate) single_copy: bool,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
@@ -629,6 +705,7 @@ pub struct MergeJoinState {
     pub(crate) merge_clauses: Vec<Expr>,
     pub(crate) outer_merge_keys: Vec<Expr>,
     pub(crate) inner_merge_keys: Vec<Expr>,
+    pub(crate) merge_key_descending: Vec<bool>,
     pub(crate) join_qual: Vec<Expr>,
     pub(crate) qual: Vec<Expr>,
     pub(crate) combined_names: Vec<String>,
@@ -708,6 +785,7 @@ pub struct LockRowsState {
 pub struct AggregateState {
     pub(crate) input: PlanState,
     pub(crate) strategy: AggregateStrategy,
+    pub(crate) phase: AggregatePhase,
     pub(crate) disabled: bool,
     pub(crate) group_by: Vec<Expr>,
     pub(crate) passthrough_exprs: Vec<Expr>,

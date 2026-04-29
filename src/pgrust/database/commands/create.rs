@@ -15,25 +15,28 @@ use crate::backend::parser::{
 };
 use crate::backend::rewrite::render_view_query_sql;
 use crate::backend::utils::cache::syscache::{
-    SysCacheId, SysCacheTuple, search_sys_cache_list1_db, search_sys_cache1_db,
+    SearchSysCache1, SearchSysCacheList1, SysCacheId, SysCacheTuple,
 };
 use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::utils::misc::notices::{
     push_backend_notice, push_notice, push_notice_with_detail,
 };
 use crate::include::catalog::{
-    ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
-    BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_C_OID,
-    PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PgAggregateRow,
-    PgAuthIdRow, PgAuthMembersRow, PgProcRow, RECORD_TYPE_OID, VOID_TYPE_OID,
+    ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
+    ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
+    ANYNONARRAYOID, ANYOID, ANYRANGEOID, BYTEA_TYPE_OID, EVENT_TRIGGER_TYPE_OID, INTERNAL_TYPE_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_C_OID, PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID,
+    PG_LANGUAGE_SQL_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgProcRow, RECORD_TYPE_OID,
+    VOID_TYPE_OID,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
-    ForeignKeyAction, ForeignKeyMatchType, Query, RangeTblEntryKind,
+    AliasColumnSpec, ForeignKeyAction, ForeignKeyMatchType, FromItem, Query, RangeTblEntryKind,
+    SelectStatement,
 };
 use crate::include::nodes::primnodes::{
-    Expr, QueryColumn, RelationDesc, ScalarFunctionImpl, SetReturningCall, SqlJsonTableBehavior,
-    SqlJsonTableColumnKind, SqlXmlTableColumnKind, Var, attrno_index,
+    Expr, QueryColumn, RelationDesc, RowsFromSource, ScalarFunctionImpl, SetReturningCall,
+    SqlJsonTableBehavior, SqlJsonTableColumnKind, SqlXmlTableColumnKind, Var, attrno_index,
 };
 use crate::pgrust::database::ddl::{append_view_check_option, format_sql_type_name};
 use crate::pgrust::database::sequences::pg_sequence_row;
@@ -53,6 +56,39 @@ pub(super) struct CreatedOwnedSequence {
 struct EffectiveTypeAclGrantees {
     names: std::collections::BTreeSet<String>,
     is_superuser: bool,
+}
+
+fn constraint_index_columns_with_expr_types(
+    action: &crate::backend::parser::IndexBackedConstraintAction,
+    relation: &crate::backend::parser::BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<crate::backend::parser::IndexColumnDef>, ExecError> {
+    let mut columns = if action.index_columns.is_empty() {
+        action
+            .columns
+            .iter()
+            .cloned()
+            .map(crate::backend::parser::IndexColumnDef::from)
+            .collect::<Vec<_>>()
+    } else {
+        action.index_columns.clone()
+    };
+    for column in &mut columns {
+        if let Some(expr_sql) = column.expr_sql.as_deref()
+            && column.expr_type.is_none()
+        {
+            column.expr_type = Some(
+                crate::backend::parser::infer_relation_expr_sql_type(
+                    expr_sql,
+                    None,
+                    &relation.desc,
+                    catalog,
+                )
+                .map_err(ExecError::Parse)?,
+            );
+        }
+    }
+    Ok(columns)
 }
 
 fn validate_sql_procedure_body(
@@ -393,6 +429,17 @@ fn apply_create_view_column_names(
     Ok(())
 }
 
+fn apply_create_view_column_names_to_query(query: &mut Query, column_names: &[String]) {
+    for (target, name) in query
+        .target_list
+        .iter_mut()
+        .filter(|target| !target.resjunk)
+        .zip(column_names.iter())
+    {
+        target.name = name.clone();
+    }
+}
+
 fn collect_rule_dependencies_from_query(
     query: &Query,
     catalog: &dyn CatalogLookup,
@@ -696,6 +743,9 @@ fn collect_var_rule_dependency(
             collect_attnum_dependency(*relation_oid, var.varattno, &rte.desc, deps);
         }
         RangeTblEntryKind::Function { call } => {
+            if collect_set_returning_attnum_dependency(call, var.varattno, query, catalog, deps) {
+                return;
+            }
             if let Some(relation_oid) = set_returning_return_relation_oid(call, catalog, deps) {
                 collect_attnum_dependency(relation_oid, var.varattno, &rte.desc, deps);
             }
@@ -720,6 +770,82 @@ fn collect_var_rule_dependency(
         RangeTblEntryKind::Result
         | RangeTblEntryKind::Values { .. }
         | RangeTblEntryKind::WorkTable { .. } => {}
+    }
+}
+
+fn collect_set_returning_attnum_dependency(
+    call: &SetReturningCall,
+    varattno: i32,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    deps: &mut crate::backend::catalog::store::RuleDependencies,
+) -> bool {
+    let SetReturningCall::RowsFrom { items, .. } = call else {
+        return false;
+    };
+    let Some(target_index) = attrno_index(varattno) else {
+        if varattno == 0 {
+            for item in items {
+                collect_rows_from_item_attnum_dependencies(item, None, query, catalog, deps);
+            }
+            return true;
+        }
+        return false;
+    };
+
+    let mut base = 0usize;
+    for item in items {
+        let width = item.output_columns().len();
+        if target_index < base + width {
+            collect_rows_from_item_attnum_dependencies(
+                item,
+                Some(target_index - base),
+                query,
+                catalog,
+                deps,
+            );
+            return true;
+        }
+        base += width;
+    }
+    false
+}
+
+fn collect_rows_from_item_attnum_dependencies(
+    item: &crate::include::nodes::primnodes::RowsFromItem,
+    target_index: Option<usize>,
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+    deps: &mut crate::backend::catalog::store::RuleDependencies,
+) {
+    match &item.source {
+        RowsFromSource::Function(call) => {
+            if let Some(relation_oid) = set_returning_return_relation_oid(call, catalog, deps)
+                && let Some(relation) = catalog
+                    .relation_by_oid(relation_oid)
+                    .or_else(|| catalog.lookup_relation_by_oid(relation_oid))
+            {
+                match target_index {
+                    Some(index) => {
+                        let attno = index.saturating_add(1) as i32;
+                        collect_attnum_dependency(relation_oid, attno, &relation.desc, deps);
+                    }
+                    None => collect_attnum_dependency(relation_oid, 0, &relation.desc, deps),
+                }
+            }
+        }
+        RowsFromSource::Project { output_exprs, .. } => match target_index {
+            Some(index) => {
+                if let Some(expr) = output_exprs.get(index) {
+                    collect_expr_rule_dependencies(expr, &query, catalog, deps);
+                }
+            }
+            None => {
+                for expr in output_exprs {
+                    collect_expr_rule_dependencies(expr, &query, catalog, deps);
+                }
+            }
+        },
     }
 }
 
@@ -762,6 +888,20 @@ fn collect_set_returning_call_rule_dependencies(
         }
     }
     match call {
+        SetReturningCall::RowsFrom { items, .. } => {
+            for item in items {
+                match &item.source {
+                    RowsFromSource::Function(call) => {
+                        collect_set_returning_call_rule_dependencies(call, query, catalog, deps);
+                    }
+                    RowsFromSource::Project { output_exprs, .. } => {
+                        for expr in output_exprs {
+                            collect_expr_rule_dependencies(expr, query, catalog, deps);
+                        }
+                    }
+                }
+            }
+        }
         SetReturningCall::GenerateSeries {
             start,
             stop,
@@ -887,6 +1027,7 @@ fn set_returning_proc_oid(call: &SetReturningCall) -> Option<u32> {
         | SetReturningCall::PgLockStatus { func_oid, .. }
         | SetReturningCall::TxidSnapshotXip { func_oid, .. } => *func_oid,
         SetReturningCall::UserDefined { proc_oid, .. } => *proc_oid,
+        SetReturningCall::RowsFrom { .. } => 0,
         SetReturningCall::TextSearchTableFunction { .. }
         | SetReturningCall::SqlJsonTable(_)
         | SetReturningCall::SqlXmlTable(_) => 0,
@@ -1000,6 +1141,98 @@ fn validate_polymorphic_range_return_type(
     })
 }
 
+fn validate_polymorphic_output_types(
+    prorettype: u32,
+    proallargtypes: Option<&Vec<u32>>,
+    proargmodes: Option<&Vec<u8>>,
+    callable_arg_oids: &[u32],
+) -> Result<(), ExecError> {
+    let mut output_oids = vec![prorettype];
+    if let (Some(all_argtypes), Some(argmodes)) = (proallargtypes, proargmodes) {
+        output_oids.extend(
+            all_argtypes
+                .iter()
+                .zip(argmodes.iter())
+                .filter_map(|(oid, mode)| matches!(*mode, b'o' | b'b' | b't').then_some(*oid)),
+        );
+    }
+    for output_oid in output_oids {
+        match output_oid {
+            ANYELEMENTOID | ANYARRAYOID | ANYNONARRAYOID | ANYENUMOID => {
+                if !callable_arg_oids
+                    .iter()
+                    .copied()
+                    .any(is_exact_family_polymorphic_oid)
+                {
+                    return Err(cannot_determine_polymorphic_result(
+                        output_oid,
+                        "anyelement",
+                        "anyelement, anyarray, anynonarray, anyenum, anyrange, or anymultirange",
+                    ));
+                }
+            }
+            ANYCOMPATIBLEOID | ANYCOMPATIBLEARRAYOID | ANYCOMPATIBLENONARRAYOID => {
+                if !callable_arg_oids
+                    .iter()
+                    .copied()
+                    .any(is_compatible_family_polymorphic_oid)
+                {
+                    return Err(cannot_determine_polymorphic_result(
+                        output_oid,
+                        "anycompatible",
+                        "anycompatible, anycompatiblearray, anycompatiblenonarray, anycompatiblerange, or anycompatiblemultirange",
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn is_exact_family_polymorphic_oid(oid: u32) -> bool {
+    matches!(
+        oid,
+        ANYELEMENTOID | ANYARRAYOID | ANYNONARRAYOID | ANYENUMOID | ANYRANGEOID | ANYMULTIRANGEOID
+    )
+}
+
+fn is_compatible_family_polymorphic_oid(oid: u32) -> bool {
+    matches!(
+        oid,
+        ANYCOMPATIBLEOID
+            | ANYCOMPATIBLEARRAYOID
+            | ANYCOMPATIBLENONARRAYOID
+            | ANYCOMPATIBLERANGEOID
+            | ANYCOMPATIBLEMULTIRANGEOID
+    )
+}
+
+fn cannot_determine_polymorphic_result(
+    output_oid: u32,
+    fallback_name: &'static str,
+    inputs: &'static str,
+) -> ExecError {
+    let type_name = match output_oid {
+        ANYELEMENTOID => "anyelement",
+        ANYARRAYOID => "anyarray",
+        ANYNONARRAYOID => "anynonarray",
+        ANYENUMOID => "anyenum",
+        ANYCOMPATIBLEOID => "anycompatible",
+        ANYCOMPATIBLEARRAYOID => "anycompatiblearray",
+        ANYCOMPATIBLENONARRAYOID => "anycompatiblenonarray",
+        _ => fallback_name,
+    };
+    ExecError::DetailedError {
+        message: "cannot determine result data type".into(),
+        detail: Some(format!(
+            "A result of type {type_name} requires at least one input of type {inputs}."
+        )),
+        hint: None,
+        sqlstate: "42P13",
+    }
+}
+
 fn validate_polymorphic_range_output_types(
     prorettype: u32,
     proallargtypes: Option<&Vec<u32>>,
@@ -1046,6 +1279,7 @@ pub(super) fn normalize_create_proc_name_for_search_path(
             for schema in search_path {
                 match schema.as_str() {
                     "" | "$user" | "pg_temp" => continue,
+                    schema if schema.starts_with("pg_temp_") => continue,
                     "pg_catalog" => continue,
                     _ => {
                         if let Some(namespace_oid) =
@@ -1169,6 +1403,37 @@ fn aggregate_transition_input_oids(
     }
 }
 
+fn validate_polymorphic_aggregate_transition_type(
+    stype_oid: u32,
+    transition_input_oids: &[u32],
+) -> Result<(), ExecError> {
+    if stype_oid != ANYARRAYOID {
+        return Ok(());
+    }
+    if transition_input_oids.iter().copied().any(|oid| {
+        matches!(
+            oid,
+            ANYELEMENTOID
+                | ANYARRAYOID
+                | ANYNONARRAYOID
+                | ANYENUMOID
+                | ANYRANGEOID
+                | ANYMULTIRANGEOID
+        )
+    }) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: "cannot determine transition data type".into(),
+        detail: Some(
+            "A result of type anyarray requires at least one input of type anyelement, anyarray, anynonarray, anyenum, anyrange, or anymultirange."
+                .into(),
+        ),
+        hint: None,
+        sqlstate: "42P13",
+    })
+}
+
 fn aggregate_direct_arg_count(signature: &AggregateSignatureKind) -> i16 {
     match signature {
         AggregateSignatureKind::Star => 0,
@@ -1257,6 +1522,12 @@ fn aggregate_provariadic(
 }
 
 fn variadic_element_type_oid(catalog: &dyn CatalogLookup, type_oid: u32) -> u32 {
+    match type_oid {
+        ANYARRAYOID => return ANYELEMENTOID,
+        ANYCOMPATIBLEARRAYOID => return ANYCOMPATIBLEOID,
+        ANYENUMOID => return ANYENUMOID,
+        _ => {}
+    }
     catalog
         .type_rows()
         .into_iter()
@@ -1428,19 +1699,36 @@ fn lookup_aggregate_support_proc_row(
                 });
             }
         }
-        Err(err) => {
-            return Err(match err {
-                ParseError::DetailedError {
-                    message, sqlstate, ..
-                } if sqlstate == "42883" => ExecError::DetailedError {
-                    message,
-                    detail: None,
-                    hint: None,
-                    sqlstate,
-                },
-                err => ExecError::Parse(err),
-            });
+        Err(err @ ParseError::DetailedError { sqlstate, .. })
+            if matches!(sqlstate, "42804" | "42883") =>
+        {
+            if let Some(support) =
+                lookup_exact_aggregate_support_proc(catalog, proc_name, arg_oids)?
+            {
+                support
+            } else if arg_oids
+                .iter()
+                .copied()
+                .any(is_polymorphic_aggregate_signature_oid)
+            {
+                return Err(aggregate_support_proc_missing_error(
+                    catalog, proc_name, arg_oids,
+                ));
+            } else {
+                return Err(match err {
+                    ParseError::DetailedError {
+                        message, sqlstate, ..
+                    } => ExecError::DetailedError {
+                        message,
+                        detail: None,
+                        hint: None,
+                        sqlstate,
+                    },
+                    err => ExecError::Parse(err),
+                });
+            }
         }
+        Err(err) => return Err(ExecError::Parse(err)),
     };
     if support.row.prokind != 'f' {
         return Err(ExecError::DetailedError {
@@ -1500,6 +1788,40 @@ fn aggregate_support_from_resolved(
         result_type: resolved.result_type,
         declared_arg_types: resolved.declared_arg_types,
     })
+}
+
+fn aggregate_support_proc_missing_error(
+    catalog: &dyn CatalogLookup,
+    proc_name: &str,
+    arg_oids: &[u32],
+) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "function {} does not exist",
+            exact_proc_signature(catalog, proc_name, arg_oids)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42883",
+    }
+}
+
+fn is_polymorphic_aggregate_signature_oid(oid: u32) -> bool {
+    matches!(
+        oid,
+        ANYOID
+            | ANYELEMENTOID
+            | ANYARRAYOID
+            | ANYNONARRAYOID
+            | ANYENUMOID
+            | ANYRANGEOID
+            | ANYMULTIRANGEOID
+            | ANYCOMPATIBLEOID
+            | ANYCOMPATIBLENONARRAYOID
+            | ANYCOMPATIBLEARRAYOID
+            | ANYCOMPATIBLERANGEOID
+            | ANYCOMPATIBLEMULTIRANGEOID
+    )
 }
 
 fn aggregate_runtime_coercion_retry_types(actual_types: &[SqlType]) -> Option<Vec<SqlType>> {
@@ -1730,7 +2052,7 @@ fn proc_drop_signature_hint(row: &PgProcRow, catalog: &dyn CatalogLookup) -> Str
         .into_iter()
         .map(|oid| proc_signature_type_name(catalog, oid))
         .collect::<Vec<_>>()
-        .join(", ");
+        .join(",");
     format!("Use DROP FUNCTION {}({}) first.", row.proname, args)
 }
 
@@ -1739,6 +2061,15 @@ fn validate_replaced_proc_signature(
     new_row: &PgProcRow,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ExecError> {
+    if existing.prorettype != new_row.prorettype || existing.proretset != new_row.proretset {
+        return Err(ExecError::DetailedError {
+            message: "cannot change return type of existing function".into(),
+            detail: None,
+            hint: Some(proc_drop_signature_hint(existing, catalog)),
+            sqlstate: "42P13",
+        });
+    }
+
     if existing.pronargdefaults > new_row.pronargdefaults {
         return Err(ExecError::DetailedError {
             message: "cannot remove parameter defaults from existing function".into(),
@@ -1764,6 +2095,49 @@ fn validate_replaced_proc_signature(
     Ok(())
 }
 
+fn select_query_requires_original_view_sql(query: &SelectStatement) -> bool {
+    !query.with.is_empty()
+        || query
+            .from
+            .as_ref()
+            .is_some_and(from_item_requires_original_view_sql)
+        || query.set_operation.as_ref().is_some_and(|setop| {
+            setop
+                .inputs
+                .iter()
+                .any(select_query_requires_original_view_sql)
+        })
+}
+
+fn from_item_requires_original_view_sql(item: &FromItem) -> bool {
+    match item {
+        FromItem::FunctionCall {
+            with_ordinality, ..
+        } => *with_ordinality,
+        FromItem::RowsFrom { .. } => true,
+        FromItem::Alias {
+            source,
+            column_aliases,
+            ..
+        } => {
+            matches!(column_aliases, AliasColumnSpec::Definitions(_))
+                || from_item_requires_original_view_sql(source)
+        }
+        FromItem::Lateral(source) | FromItem::TableSample { source, .. } => {
+            from_item_requires_original_view_sql(source)
+        }
+        FromItem::DerivedTable(query) => select_query_requires_original_view_sql(query),
+        FromItem::Join { left, right, .. } => {
+            from_item_requires_original_view_sql(left)
+                || from_item_requires_original_view_sql(right)
+        }
+        FromItem::Table { .. }
+        | FromItem::Values { .. }
+        | FromItem::JsonTable(_)
+        | FromItem::XmlTable(_) => false,
+    }
+}
+
 fn invalid_procedure_attribute() -> ExecError {
     ExecError::DetailedError {
         message: "invalid attribute in procedure definition".into(),
@@ -1774,6 +2148,7 @@ fn invalid_procedure_attribute() -> ExecError {
 }
 
 fn validate_proc_arg_order(args: &[CreateFunctionArg], proc_kind: char) -> Result<(), ExecError> {
+    validate_proc_arg_names(args)?;
     let mut saw_variadic_input = false;
     let mut saw_default = false;
     for arg in args {
@@ -1826,6 +2201,37 @@ fn validate_proc_arg_order(args: &[CreateFunctionArg], proc_kind: char) -> Resul
         }
         if arg.variadic && is_input {
             saw_variadic_input = true;
+        }
+    }
+    Ok(())
+}
+
+fn validate_proc_arg_names(args: &[CreateFunctionArg]) -> Result<(), ExecError> {
+    for (index, arg) in args.iter().enumerate() {
+        let Some(name) = arg.name.as_deref().filter(|name| !name.is_empty()) else {
+            continue;
+        };
+        let is_input =
+            matches!(arg.mode, FunctionArgMode::In | FunctionArgMode::InOut) || arg.variadic;
+        let is_output = matches!(arg.mode, FunctionArgMode::Out | FunctionArgMode::InOut);
+        for prev in &args[..index] {
+            if prev.name.as_deref() != Some(name) {
+                continue;
+            }
+            let prev_is_input =
+                matches!(prev.mode, FunctionArgMode::In | FunctionArgMode::InOut) || prev.variadic;
+            let prev_is_output = matches!(prev.mode, FunctionArgMode::Out | FunctionArgMode::InOut);
+            if (is_input && prev_is_output && !prev_is_input && !is_output)
+                || (prev_is_input && is_output && !is_input && !prev_is_output)
+            {
+                continue;
+            }
+            return Err(ExecError::DetailedError {
+                message: format!("parameter name \"{name}\" used more than once"),
+                detail: None,
+                hint: None,
+                sqlstate: "42P13",
+            });
         }
     }
     Ok(())
@@ -2006,12 +2412,8 @@ impl Database {
                     relation.namespace_oid,
                     &constraint_name,
                 )?;
-                let index_columns = action
-                    .columns
-                    .iter()
-                    .cloned()
-                    .map(crate::backend::parser::IndexColumnDef::from)
-                    .collect::<Vec<_>>();
+                let index_columns =
+                    constraint_index_columns_with_expr_types(action, relation, &catalog)?;
                 let mut storage_columns = index_columns.clone();
                 storage_columns.extend(
                     action
@@ -2022,13 +2424,12 @@ impl Database {
                 );
                 let (access_method_oid, access_method_handler, build_options) = if action.exclusion
                 {
-                    self.resolve_simple_index_build_options(
+                    self.resolve_exclusion_index_build_options(
                         client_id,
                         Some((xid, action_cid)),
                         action.access_method.as_deref().unwrap_or("gist"),
                         relation,
                         &index_columns,
-                        &[],
                     )?
                 } else if action.without_overlaps.is_some() {
                     self.resolve_temporal_index_build_options(
@@ -2097,9 +2498,9 @@ impl Database {
                     Vec::new()
                 };
                 let conexclop = if action.exclusion {
-                    Some(self.exclusion_constraint_operator_oids_for_desc(
+                    Some(self.exclusion_constraint_operator_oids_for_index_columns(
                         &relation.desc,
-                        &action.columns,
+                        &index_columns,
                         &action.exclusion_operators,
                         &catalog,
                     )?)
@@ -2172,7 +2573,7 @@ impl Database {
                     relation.relation_oid,
                     action.constraint_name.clone(),
                     action.enforced,
-                    action.enforced && !action.not_valid,
+                    action.enforced && (action.is_local || !action.not_valid),
                     action.no_inherit,
                     action.expr_sql.clone(),
                     action.parent_constraint_oid.unwrap_or(0),
@@ -2299,6 +2700,19 @@ impl Database {
             } else {
                 constraint_cid.saturating_add(1)
             };
+            if referenced_relation.relkind == 'p' {
+                next_foreign_key_cid = self
+                    .create_referenced_partition_foreign_key_constraints_in_transaction(
+                        client_id,
+                        xid,
+                        next_foreign_key_cid,
+                        &referenced_relation,
+                        &constraint_row,
+                        &referenced_attnums,
+                        configured_search_path,
+                        catalog_effects,
+                    )?;
+            }
         }
 
         Ok(next_foreign_key_cid)
@@ -2723,8 +3137,11 @@ impl Database {
             Some(_) => None,
             None => None,
         };
-        let (normalized, object_name, namespace_oid) = self
-            .normalize_domain_name_for_create(&create_stmt.domain_name, configured_search_path)?;
+        let (normalized, object_name, namespace_oid) = self.normalize_domain_name_for_create(
+            client_id,
+            &create_stmt.domain_name,
+            configured_search_path,
+        )?;
         let domains = self.domains.write();
         if domains.contains_key(&normalized) {
             return Err(ExecError::Parse(ParseError::UnsupportedType(
@@ -3079,8 +3496,16 @@ impl Database {
                         RECORD_TYPE_OID
                     };
                     if prorettype != required_rettype {
+                        let message = if output_args.len() == 1 {
+                            format!(
+                                "function result type must be {} because of OUT parameters",
+                                proc_signature_type_name(&catalog, required_rettype)
+                            )
+                        } else {
+                            "function result type must be record because of OUT parameters".into()
+                        };
                         return Err(ExecError::DetailedError {
-                            message: "function result type must match OUT arguments".into(),
+                            message,
                             detail: None,
                             hint: None,
                             sqlstate: "42P13",
@@ -3170,6 +3595,12 @@ impl Database {
             proargmodes = Some(all_arg_modes.clone());
         }
 
+        validate_polymorphic_output_types(
+            prorettype,
+            proallargtypes.as_ref(),
+            proargmodes.as_ref(),
+            &callable_arg_oids,
+        )?;
         validate_polymorphic_range_output_types(
             prorettype,
             proallargtypes.as_ref(),
@@ -3188,6 +3619,30 @@ impl Database {
             proargmodes.as_deref(),
             &callable_arg_oids,
         )?;
+        if prorettype == EVENT_TRIGGER_TYPE_OID {
+            if !callable_arg_oids.is_empty() {
+                return Err(ExecError::WithContext {
+                    source: Box::new(ExecError::DetailedError {
+                        message: "event trigger functions cannot have declared arguments".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P13",
+                    }),
+                    context: format!(
+                        "compilation of PL/pgSQL function \"{}\" near line 1",
+                        create_stmt.function_name
+                    ),
+                });
+            }
+            if language_row.oid == PG_LANGUAGE_SQL_OID {
+                return Err(ExecError::DetailedError {
+                    message: "SQL functions cannot return type event_trigger".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                });
+            }
+        }
         if language_row.oid == PG_LANGUAGE_PLPGSQL_OID {
             validate_create_function_body(&create_stmt.body, !output_args.is_empty())
                 .map_err(ExecError::Parse)?;
@@ -3363,6 +3818,7 @@ impl Database {
         let stype_oid = catalog
             .type_oid_for_sql_type(stype)
             .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(format!("{stype:?}"))))?;
+        validate_polymorphic_aggregate_transition_type(stype_oid, &transition_input_oids)?;
         if create_stmt.serialfunc_name.is_some() != create_stmt.deserialfunc_name.is_some() {
             return Err(ExecError::DetailedError {
                 message:
@@ -4577,11 +5033,11 @@ impl Database {
         txn_ctx: Option<(TransactionId, CommandId)>,
         role_oid: u32,
     ) -> Result<Option<PgAuthIdRow>, ExecError> {
-        Ok(search_sys_cache1_db(
+        Ok(SearchSysCache1(
             self,
             client_id,
             txn_ctx,
-            SysCacheId::AuthIdOid,
+            SysCacheId::AUTHOID,
             Value::Int64(i64::from(role_oid)),
         )
         .map_err(map_catalog_error)?
@@ -4598,11 +5054,11 @@ impl Database {
         txn_ctx: Option<(TransactionId, CommandId)>,
         member_oid: u32,
     ) -> Result<Vec<PgAuthMembersRow>, ExecError> {
-        Ok(search_sys_cache_list1_db(
+        Ok(SearchSysCacheList1(
             self,
             client_id,
             txn_ctx,
-            SysCacheId::AuthMembersMemberRole,
+            SysCacheId::AUTHMEMMEMROLE,
             Value::Int64(i64::from(member_oid)),
         )
         .map_err(map_catalog_error)?
@@ -4643,17 +5099,20 @@ impl Database {
         )?;
         let constraint_oids = analyzed_query.constraint_deps.clone();
         let plan = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?.plan_tree;
-        let canonical_sql = if create_stmt.query.with.is_empty() {
-            render_view_query_sql(&analyzed_query, &catalog)
-        } else {
+        let mut stored_query = analyzed_query.clone();
+        apply_create_view_column_names_to_query(&mut stored_query, &create_stmt.column_names);
+        let canonical_sql = if select_query_requires_original_view_sql(&create_stmt.query) {
             // :HACK: The analyzed `Query` does not yet retain enough CTE
-            // structure to deparse WITH clauses. Keep the original SELECT text
-            // for those views so later updatability checks still see WITH.
+            // and table-function alias structure to deparse every stored view
+            // safely. Keep the original SELECT text for those shapes while the
+            // display deparser remains free to render PostgreSQL-style SQL.
             create_stmt
                 .query_sql
                 .trim()
                 .trim_end_matches(';')
                 .to_string()
+        } else {
+            render_view_query_sql(&stored_query, &catalog)
         };
         let canonical_query_sql = append_view_check_option(canonical_sql, create_stmt.check_option);
         let mut desc = crate::backend::executor::RelationDesc {
@@ -4938,9 +5397,9 @@ impl Database {
         }
         let select_query = match &create_stmt.query {
             CreateTableAsQuery::Select(query) => query,
-            CreateTableAsQuery::Execute(name) => {
+            CreateTableAsQuery::Execute(execute) => {
                 return Err(ExecError::Parse(ParseError::DetailedError {
-                    message: format!("prepared statement \"{name}\" does not exist"),
+                    message: format!("prepared statement \"{}\" does not exist", execute.name),
                     detail: None,
                     hint: None,
                     sqlstate: "26000",
@@ -4996,6 +5455,7 @@ impl Database {
             pending_table_locks: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: self.plpgsql_function_cache(client_id),
             pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -5193,6 +5653,7 @@ impl Database {
                 insert_catalog.clone(),
             )),
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: self.plpgsql_function_cache(client_id),
             pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -5216,6 +5677,20 @@ impl Database {
             xid,
             cid,
         )?;
+        {
+            let stats_state = self.session_stats_state(client_id);
+            let mut stats = stats_state.write();
+            for _ in 0..inserted {
+                stats.note_relation_insert_with_persistence(
+                    relation_oid,
+                    match create_stmt.persistence {
+                        TablePersistence::Temporary => 't',
+                        TablePersistence::Permanent | TablePersistence::Unlogged => 'p',
+                    },
+                );
+            }
+            stats.note_io_extend("client backend", "relation", "bulkwrite", 8192);
+        }
         Ok(StatementResult::AffectedRows(inserted))
     }
 

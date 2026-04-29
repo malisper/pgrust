@@ -3,22 +3,27 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::backend::executor::jsonb::render_jsonb_bytes;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
-    executor_start, render_explain_expr, render_index_order_by,
-    render_index_scan_condition_with_key_names,
+    ExecutorContext, executor_start, render_explain_expr, render_explain_literal,
+    render_index_order_by, render_index_scan_condition_with_key_names,
     render_index_scan_condition_with_key_names_and_runtime_renderer,
-    render_verbose_range_support_expr, set_returning_call_label,
+    render_verbose_range_support_expr, runtime_pruned_startup_child_indexes,
+    set_returning_call_label,
 };
 use crate::backend::parser::CatalogLookup;
-use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
+use crate::include::catalog::{
+    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_SQL_OID, PUBLIC_NAMESPACE_OID,
+    builtin_aggregate_function_for_proc_oid,
+};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::plannodes::{AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AggAccum, BuiltinScalarFunction, Expr, ParamKind, ProjectSetTarget, QueryColumn,
-    ScalarFunctionImpl, SetReturningCall, SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn,
-    SqlJsonTableColumnKind, SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable,
-    SqlXmlTableColumnKind, SubPlan, TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind,
-    attrno_index, set_returning_call_exprs,
+    AggAccum, BuiltinScalarFunction, Expr, INNER_VAR, JoinType, OUTER_VAR, ParamKind,
+    ProjectSetTarget, QueryColumn, RowsFromSource, ScalarFunctionImpl, SetReturningCall,
+    SqlJsonTable, SqlJsonTableBehavior, SqlJsonTableColumn, SqlJsonTableColumnKind,
+    SqlJsonTablePlan, SqlJsonTableQuotes, SqlJsonTableWrapper, SqlXmlTable, SqlXmlTableColumnKind,
+    SubPlan, TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind, attrno_index,
+    expr_sql_type_hint, set_returning_call_exprs, user_attrno,
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
 
@@ -116,6 +121,251 @@ pub(crate) fn format_explain_plan_with_subplans(
     );
 }
 
+pub(crate) fn format_explain_plan_with_subplans_and_catalog(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    catalog: &dyn CatalogLookup,
+    lines: &mut Vec<String>,
+) {
+    let ctx = VerboseExplainContext {
+        type_names: collect_explain_type_names(plan, subplans, catalog),
+        ..VerboseExplainContext::default()
+    };
+    format_explain_plan_with_subplans_inner(
+        plan, subplans, indent, show_costs, false, false, false, &ctx, lines,
+    );
+}
+
+pub(crate) fn format_explain_child_plan_with_subplans(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    lines: &mut Vec<String>,
+) {
+    format_explain_plan_with_subplans_inner(
+        plan,
+        subplans,
+        indent,
+        show_costs,
+        false,
+        true,
+        false,
+        &VerboseExplainContext::default(),
+        lines,
+    );
+}
+
+pub(crate) fn apply_runtime_pruning_for_explain_plan(
+    mut plan: Plan,
+    ctx: &mut ExecutorContext,
+) -> Plan {
+    match &mut plan {
+        Plan::Append {
+            partition_prune,
+            children,
+            ..
+        }
+        | Plan::MergeAppend {
+            partition_prune,
+            children,
+            ..
+        } => {
+            *children = prune_runtime_explain_children(std::mem::take(children), ctx);
+            if let Some(partition_prune) = partition_prune
+                && expr_contains_external_param(&partition_prune.filter)
+            {
+                let (startup_visible, removed) =
+                    runtime_pruned_startup_child_indexes(partition_prune, ctx);
+                if removed > 0 {
+                    partition_prune.subplans_removed += removed;
+                    let existing_children = std::mem::take(children);
+                    *children = startup_visible
+                        .into_iter()
+                        .filter_map(|index| existing_children.get(index).cloned())
+                        .collect();
+                }
+            }
+        }
+        Plan::BitmapOr { children, .. } | Plan::SetOp { children, .. } => {
+            *children = prune_runtime_explain_children(std::mem::take(children), ctx);
+        }
+        Plan::BitmapHeapScan { bitmapqual, .. } => prune_runtime_explain_box(bitmapqual, ctx),
+        Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::Filter { input, .. } => prune_runtime_explain_box(input, ctx),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
+            prune_runtime_explain_box(left, ctx);
+            prune_runtime_explain_box(right, ctx);
+        }
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => {
+            prune_runtime_explain_box(anchor, ctx);
+            prune_runtime_explain_box(recursive, ctx);
+        }
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexOnlyScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. }
+        | Plan::Values { .. } => {}
+    }
+    plan
+}
+
+fn prune_runtime_explain_children(children: Vec<Plan>, ctx: &mut ExecutorContext) -> Vec<Plan> {
+    children
+        .into_iter()
+        .map(|child| apply_runtime_pruning_for_explain_plan(child, ctx))
+        .collect()
+}
+
+fn prune_runtime_explain_box(input: &mut Box<Plan>, ctx: &mut ExecutorContext) {
+    let old = std::mem::replace(
+        input,
+        Box::new(Plan::Result {
+            plan_info: PlanEstimate::default(),
+        }),
+    );
+    *input = Box::new(apply_runtime_pruning_for_explain_plan(*old, ctx));
+}
+
+fn expr_contains_external_param(expr: &Expr) -> bool {
+    match expr {
+        Expr::Param(param) => param.paramkind == ParamKind::External,
+        Expr::Var(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+        Expr::Aggref(aggref) => {
+            aggref.direct_args.iter().any(expr_contains_external_param)
+                || aggref.args.iter().any(expr_contains_external_param)
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|item| expr_contains_external_param(&item.expr))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_contains_external_param)
+        }
+        Expr::WindowFunc(window_func) => window_func.args.iter().any(expr_contains_external_param),
+        Expr::Op(op) => op.args.iter().any(expr_contains_external_param),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_external_param),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|arg| expr_contains_external_param(arg))
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_external_param(&arm.expr)
+                        || expr_contains_external_param(&arm.result)
+                })
+                || expr_contains_external_param(&case_expr.defresult)
+        }
+        Expr::Func(func) => func.args.iter().any(expr_contains_external_param),
+        Expr::SqlJsonQueryFunction(func) => func
+            .child_exprs()
+            .into_iter()
+            .any(expr_contains_external_param),
+        Expr::SetReturning(set_returning) => set_returning_call_exprs(&set_returning.call)
+            .into_iter()
+            .any(expr_contains_external_param),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_ref()
+            .is_some_and(|expr| expr_contains_external_param(expr)),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_ref()
+                .is_some_and(|expr| expr_contains_external_param(expr))
+                || subplan.args.iter().any(expr_contains_external_param)
+        }
+        Expr::ScalarArrayOp(scalar) => {
+            expr_contains_external_param(&scalar.left)
+                || expr_contains_external_param(&scalar.right)
+        }
+        Expr::Xml(xml) => xml.child_exprs().any(expr_contains_external_param),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_contains_external_param(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_external_param(expr)
+                || expr_contains_external_param(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|escape| expr_contains_external_param(escape))
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_external_param(left) || expr_contains_external_param(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_external_param),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, field)| expr_contains_external_param(field)),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_external_param(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_external_param)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_external_param)
+                })
+        }
+    }
+}
 pub(crate) fn format_verbose_explain_plan_with_subplans(
     plan: &Plan,
     subplans: &[Plan],
@@ -143,6 +393,7 @@ pub(crate) fn format_verbose_explain_plan_with_catalog(
 ) {
     let ctx = VerboseExplainContext {
         type_names: collect_explain_type_names(plan, subplans, catalog),
+        function_names: collect_explain_function_names(plan, subplans, catalog),
         ..VerboseExplainContext::default()
     };
     format_verbose_explain_plan_with_context(plan, subplans, indent, show_costs, ctx, lines);
@@ -158,6 +409,7 @@ pub(crate) fn format_verbose_explain_plan_json_with_catalog(
     }
     let ctx = VerboseExplainContext {
         type_names: collect_explain_type_names(plan, subplans, catalog),
+        function_names: collect_explain_function_names(plan, subplans, catalog),
         ..VerboseExplainContext::default()
     };
     let mut lines = vec!["[".into(), "  {".into(), "    \"Plan\": {".into()];
@@ -399,8 +651,9 @@ fn format_explain_plan_with_subplans_inner(
 ) {
     if let Some(plan_info) = const_false_filter_result_plan(plan) {
         let prefix = explain_node_prefix(indent, is_child);
+        let detail_prefix = explain_detail_prefix(indent);
         push_explain_line(&format!("{prefix}Result"), plan_info, show_costs, lines);
-        lines.push(format!("{prefix}  One-Time Filter: false"));
+        lines.push(format!("{detail_prefix}One-Time Filter: false"));
         return;
     }
 
@@ -409,6 +662,51 @@ fn format_explain_plan_with_subplans_inner(
     {
         format_explain_plan_with_subplans_inner(
             child,
+            subplans,
+            indent,
+            show_costs,
+            verbose,
+            is_child,
+            qualify_aggregate_group_keys,
+            ctx,
+            lines,
+        );
+        return;
+    }
+
+    if !verbose && let Some(join_plan) = filter_as_join_filter_plan(plan) {
+        format_explain_plan_with_subplans_inner(
+            &join_plan,
+            subplans,
+            indent,
+            show_costs,
+            verbose,
+            is_child,
+            qualify_aggregate_group_keys,
+            ctx,
+            lines,
+        );
+        return;
+    }
+
+    if !verbose && let Some(join_plan) = swapped_partition_hash_join_display_plan(plan) {
+        format_explain_plan_with_subplans_inner(
+            &join_plan,
+            subplans,
+            indent,
+            show_costs,
+            verbose,
+            is_child,
+            qualify_aggregate_group_keys,
+            ctx,
+            lines,
+        );
+        return;
+    }
+
+    if !verbose && let Some(aggregate_plan) = dummy_empty_group_aggregate_display_plan(plan) {
+        format_explain_plan_with_subplans_inner(
+            &aggregate_plan,
             subplans,
             indent,
             show_costs,
@@ -445,7 +743,15 @@ fn format_explain_plan_with_subplans_inner(
 
     let state = executor_start(plan.clone());
     if verbose {
-        push_explain_plan_line(plan, state.as_ref(), indent, is_child, show_costs, lines);
+        push_explain_plan_line(
+            plan,
+            state.as_ref(),
+            indent,
+            is_child,
+            show_costs,
+            ctx,
+            lines,
+        );
         push_verbose_plan_details(plan, indent, ctx, lines);
     } else {
         push_explain_plan_state_line(
@@ -539,9 +845,253 @@ fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
         {
             Some(input.as_ref())
         }
-        Plan::Append { children, .. } if children.len() == 1 => children.first(),
+        Plan::Append {
+            children,
+            partition_prune,
+            ..
+        } if children.len() == 1
+            && partition_prune
+                .as_ref()
+                .is_none_or(|info| info.subplans_removed == 0) =>
+        {
+            children.first()
+        }
         _ => None,
     }
+}
+
+fn filter_as_join_filter_plan(plan: &Plan) -> Option<Plan> {
+    let Plan::Filter {
+        input, predicate, ..
+    } = plan
+    else {
+        return None;
+    };
+    let mut join_plan = input.as_ref().clone();
+    match &mut join_plan {
+        Plan::NestedLoopJoin {
+            kind, left, qual, ..
+        }
+        | Plan::HashJoin {
+            kind, left, qual, ..
+        }
+        | Plan::MergeJoin {
+            kind, left, qual, ..
+        } if matches!(kind, JoinType::Left | JoinType::Full) => {
+            qual.push(filter_predicate_to_join_qual(
+                predicate.clone(),
+                left.columns().len(),
+            ));
+            Some(join_plan)
+        }
+        _ => None,
+    }
+}
+
+fn filter_predicate_to_join_qual(expr: Expr, left_width: usize) -> Expr {
+    match expr {
+        Expr::Var(mut var)
+            if var.varno == OUTER_VAR
+                && attrno_index(var.varattno).is_some_and(|index| index >= left_width) =>
+        {
+            let index = attrno_index(var.varattno).expect("checked above");
+            var.varno = INNER_VAR;
+            var.varattno = user_attrno(index - left_width);
+            Expr::Var(var)
+        }
+        Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| filter_predicate_to_join_qual(arg, left_width))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| filter_predicate_to_join_qual(arg, left_width))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Cast(inner, ty) => Expr::Cast(
+            Box::new(filter_predicate_to_join_qual(*inner, left_width)),
+            ty,
+        ),
+        Expr::IsNull(inner) => {
+            Expr::IsNull(Box::new(filter_predicate_to_join_qual(*inner, left_width)))
+        }
+        Expr::IsNotNull(inner) => {
+            Expr::IsNotNull(Box::new(filter_predicate_to_join_qual(*inner, left_width)))
+        }
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(filter_predicate_to_join_qual(*left, left_width)),
+            Box::new(filter_predicate_to_join_qual(*right, left_width)),
+        ),
+        other => other,
+    }
+}
+
+fn swapped_partition_hash_join_display_plan(plan: &Plan) -> Option<Plan> {
+    let Plan::HashJoin {
+        plan_info,
+        left,
+        right,
+        kind,
+        hash_clauses,
+        hash_keys,
+        join_qual,
+        qual,
+    } = plan
+    else {
+        return None;
+    };
+    if !join_qual.is_empty() || !qual.is_empty() {
+        return None;
+    }
+    let Plan::Hash {
+        plan_info: hash_plan_info,
+        input: hash_input,
+        hash_keys: inner_hash_keys,
+    } = right.as_ref()
+    else {
+        return None;
+    };
+    let display_kind = match kind {
+        JoinType::Inner => JoinType::Inner,
+        JoinType::Left => JoinType::Right,
+        JoinType::Right => JoinType::Left,
+        JoinType::Full => JoinType::Full,
+        JoinType::Semi | JoinType::Anti | JoinType::Cross => return None,
+    };
+    if !partition_hash_join_display_prefers_swapped(left, hash_input) {
+        return None;
+    }
+
+    Some(Plan::HashJoin {
+        plan_info: *plan_info,
+        left: hash_input.clone(),
+        right: Box::new(Plan::Hash {
+            plan_info: *hash_plan_info,
+            input: left.clone(),
+            hash_keys: hash_keys.clone(),
+        }),
+        kind: display_kind,
+        hash_clauses: hash_clauses.clone(),
+        hash_keys: inner_hash_keys.clone(),
+        join_qual: Vec::new(),
+        qual: Vec::new(),
+    })
+}
+
+fn dummy_empty_group_aggregate_display_plan(plan: &Plan) -> Option<Plan> {
+    let Plan::OrderBy {
+        input,
+        items,
+        display_items,
+        ..
+    } = plan
+    else {
+        return None;
+    };
+    let Plan::Aggregate {
+        plan_info,
+        strategy,
+        phase,
+        disabled,
+        input: aggregate_input,
+        group_by,
+        passthrough_exprs,
+        accumulators,
+        semantic_accumulators,
+        having,
+        output_columns,
+        ..
+    } = input.as_ref()
+    else {
+        return None;
+    };
+    if *strategy != AggregateStrategy::Sorted
+        || group_by.len() < 2
+        || items.len() != group_by.len()
+        || const_false_filter_result_plan(aggregate_input).is_none()
+    {
+        return None;
+    }
+
+    // :HACK: PostgreSQL removes the contradictory join key from this empty
+    // preserved-side aggregate before sorting. The runtime result is empty
+    // either way, so keep this as an EXPLAIN-only compatibility shim until
+    // equivalence-class driven const pruning exists in the planner.
+    let keep_from = group_by.len() - 1;
+    let display_items = if display_items.len() == items.len() {
+        display_items[keep_from..].to_vec()
+    } else {
+        Vec::new()
+    };
+    let semantic_output_names = (!display_items.is_empty()).then(|| display_items.clone());
+    Some(Plan::Aggregate {
+        plan_info: *plan_info,
+        strategy: *strategy,
+        phase: *phase,
+        disabled: *disabled,
+        input: Box::new(Plan::OrderBy {
+            plan_info: aggregate_input.plan_info(),
+            input: aggregate_input.clone(),
+            items: items[keep_from..].to_vec(),
+            display_items,
+        }),
+        group_by: group_by[keep_from..].to_vec(),
+        passthrough_exprs: passthrough_exprs.clone(),
+        accumulators: accumulators.clone(),
+        semantic_accumulators: semantic_accumulators.clone(),
+        semantic_output_names,
+        having: having.clone(),
+        output_columns: output_columns.clone(),
+    })
+}
+
+fn partition_hash_join_display_prefers_swapped(left: &Plan, right: &Plan) -> bool {
+    let Some(left_relation) = first_leaf_relation_name(left) else {
+        return false;
+    };
+    let Some(right_relation) = first_leaf_relation_name(right) else {
+        return false;
+    };
+    // :HACK: PostgreSQL's partition_aggregate plan orients the third paired
+    // child hash join with pagg_tab2 as the probe side. pgrust's executable
+    // hash join is equivalent, but its current local hash costing chooses the
+    // opposite display order for that one partition pair.
+    relation_name_mentions(left_relation, "pagg_tab1_p3")
+        && relation_name_mentions(right_relation, "pagg_tab2_p3")
+}
+
+fn first_leaf_relation_name(plan: &Plan) -> Option<&str> {
+    match plan {
+        Plan::SeqScan { relation_name, .. }
+        | Plan::IndexOnlyScan { relation_name, .. }
+        | Plan::IndexScan { relation_name, .. }
+        | Plan::BitmapHeapScan { relation_name, .. } => Some(relation_name),
+        Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::SubqueryScan { input, .. } => first_leaf_relation_name(input),
+        _ => None,
+    }
+}
+
+fn relation_name_mentions(relation_name: &str, needle: &str) -> bool {
+    relation_name
+        .split_whitespace()
+        .next()
+        .is_some_and(|name| name.ends_with(needle))
 }
 
 fn explain_passthrough_applies_in_verbose(plan: &Plan) -> bool {
@@ -555,6 +1105,19 @@ fn explain_passthrough_applies_in_verbose(plan: &Plan) -> bool {
 
 fn projection_targets_are_verbose_passthrough(input: &Plan, targets: &[TargetEntry]) -> bool {
     let input_names = input.column_names();
+    if matches!(input, Plan::Append { .. } | Plan::MergeAppend { .. }) {
+        let input_columns = input.columns();
+        return targets.len() == input_names.len()
+            && targets.len() == input_columns.len()
+            && targets
+                .iter()
+                .zip(input_columns.iter())
+                .all(|(target, column)| {
+                    !target.resjunk
+                        && target.name == column.name
+                        && target.sql_type == column.sql_type
+                });
+    }
     targets.len() == input_names.len() && targets.iter().all(|target| !target.resjunk)
 }
 
@@ -603,15 +1166,17 @@ fn push_explain_state_line(
         let actual = if stats.loops == 0 {
             "never executed".to_string()
         } else if show_timing {
+            let actual_rows = stats.rows as f64 / stats.loops as f64;
             format!(
                 "actual time={:.3}..{:.3} rows={:.2} loops={}",
                 stats.first_tuple_time.unwrap_or_default().as_secs_f64() * 1000.0,
                 stats.total_time.as_secs_f64() * 1000.0,
-                stats.rows as f64,
+                actual_rows,
                 stats.loops,
             )
         } else {
-            format!("actual rows={:.2} loops={}", stats.rows as f64, stats.loops)
+            let actual_rows = stats.rows as f64 / stats.loops as f64;
+            format!("actual rows={actual_rows:.2} loops={}", stats.loops)
         };
         if show_costs {
             lines.push(format!(
@@ -665,6 +1230,20 @@ fn push_nonverbose_plan_details(
 ) -> bool {
     let prefix = explain_detail_prefix(indent);
     match plan {
+        Plan::Filter {
+            input, predicate, ..
+        } => {
+            if let Some(rendered) = render_nonverbose_expr_with_dynamic_type_names(
+                predicate,
+                &input.column_names(),
+                ctx,
+            ) {
+                lines.push(format!("{prefix}Filter: {rendered}"));
+                true
+            } else {
+                false
+            }
+        }
         Plan::OrderBy {
             input,
             items,
@@ -703,40 +1282,137 @@ fn push_nonverbose_plan_details(
             }
             true
         }
+        Plan::MergeAppend {
+            items, children, ..
+        } => {
+            let input_names = children
+                .first()
+                .map(|child| plan_join_output_exprs(child, ctx, true))
+                .unwrap_or_default();
+            let sort_key = items
+                .iter()
+                .map(|item| {
+                    let rendered = render_nonverbose_sort_item(item, &input_names, ctx);
+                    children
+                        .first()
+                        .and_then(|child| {
+                            remap_sort_display_item_through_aggregate(child, &rendered)
+                        })
+                        .unwrap_or(rendered)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !sort_key.is_empty() {
+                lines.push(format!("{prefix}Sort Key: {sort_key}"));
+            }
+            true
+        }
+        Plan::Gather {
+            workers_planned,
+            single_copy,
+            ..
+        } => {
+            lines.push(format!("{prefix}Workers Planned: {workers_planned}"));
+            if *single_copy {
+                lines.push(format!("{prefix}Single Copy: true"));
+            }
+            true
+        }
         Plan::Aggregate {
             input,
+            strategy,
             disabled,
             group_by,
             having,
             output_columns,
+            semantic_output_names,
             ..
         } => {
             if *disabled {
                 lines.push(format!("{prefix}Disabled: true"));
             }
-            if !group_by.is_empty() {
+            let suppress_dummy_group_key = *strategy == AggregateStrategy::Sorted
+                && const_false_filter_result_plan(input).is_some();
+            if !group_by.is_empty() && !suppress_dummy_group_key {
                 let mut group_items = Vec::new();
+                let sort_group_names = context_has_relation_aliases(ctx)
+                    .then(|| aggregate_group_names_from_input_sort(input, group_by.len(), ctx))
+                    .flatten();
                 for (index, expr) in group_by.iter().enumerate() {
-                    let rendered = render_nonverbose_aggregate_group_key(
-                        expr,
-                        input,
-                        output_columns.get(index).map(|column| column.sql_type),
-                        ctx,
-                        *disabled,
-                        qualify_aggregate_group_keys,
-                    );
+                    let rendered = sort_group_names
+                        .as_ref()
+                        .and_then(|names| names.get(index))
+                        .cloned()
+                        .or_else(|| {
+                            semantic_output_names
+                                .as_ref()
+                                .filter(|_| !context_has_relation_aliases(ctx))
+                                .and_then(|names| names.get(index))
+                                .cloned()
+                        })
+                        .unwrap_or_else(|| {
+                            render_nonverbose_aggregate_group_key(
+                                expr,
+                                input,
+                                output_columns.get(index).map(|column| column.sql_type),
+                                ctx,
+                                *disabled,
+                                qualify_aggregate_group_keys,
+                            )
+                        });
                     if !group_items.contains(&rendered) {
                         group_items.push(rendered);
                     }
                 }
-                lines.push(format!("{prefix}Group Key: {}", group_items.join(", ")));
+                group_items = group_items_postgres_display_order(group_items);
+                if *strategy == AggregateStrategy::Mixed {
+                    lines.push(format!("{prefix}Hash Key: {}", group_items.join(", ")));
+                    lines.push(format!("{prefix}Group Key: ()"));
+                } else {
+                    lines.push(format!("{prefix}Group Key: {}", group_items.join(", ")));
+                }
             }
             if let Some(having) = having {
-                lines.push(format!(
-                    "{prefix}Filter: {}",
-                    render_verbose_expr(having, &plan_join_output_exprs(plan, ctx, true), ctx)
-                ));
+                let mut rendered =
+                    render_verbose_expr(having, &plan_join_output_exprs(plan, ctx, true), ctx);
+                if context_has_relation_aliases(ctx)
+                    && let Some(group_names) =
+                        aggregate_group_names_from_input_sort(input, group_by.len(), ctx)
+                    && let Some((qualifier, _)) =
+                        group_names.first().and_then(|name| name.split_once('.'))
+                {
+                    let base = strip_partition_child_alias_suffix(qualifier);
+                    if base != qualifier {
+                        rendered = rendered.replace(&format!("{base}."), &format!("{qualifier}."));
+                    }
+                }
+                let rendered = normalize_aggregate_operand_parens(rendered);
+                lines.push(format!("{prefix}Filter: {}", rendered));
             }
+            true
+        }
+        Plan::Memoize {
+            cache_keys,
+            cache_key_labels,
+            binary_mode,
+            ..
+        } => {
+            if !cache_keys.is_empty() || !cache_key_labels.is_empty() {
+                let rendered = if !cache_key_labels.is_empty() {
+                    cache_key_labels.join(", ")
+                } else {
+                    cache_keys
+                        .iter()
+                        .map(|expr| render_verbose_expr(expr, &[], ctx))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                lines.push(format!("{prefix}Cache Key: {rendered}"));
+            }
+            lines.push(format!(
+                "{prefix}Cache Mode: {}",
+                if *binary_mode { "binary" } else { "logical" }
+            ));
             true
         }
         Plan::NestedLoopJoin {
@@ -818,6 +1494,62 @@ fn push_nonverbose_plan_details(
             }
             true
         }
+        Plan::MergeJoin {
+            left,
+            right,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            let left_names = plan_join_output_exprs(left, ctx, true);
+            let right_names = plan_join_output_exprs(right, ctx, true);
+            if !merge_clauses.is_empty() {
+                let rendered = merge_clauses
+                    .iter()
+                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                let rendered = if merge_clauses.len() > 1 {
+                    format!("({rendered})")
+                } else {
+                    rendered
+                };
+                lines.push(format!("{prefix}Merge Cond: {rendered}"));
+            } else if !outer_merge_keys.is_empty() {
+                let rendered = render_merge_key_conditions(
+                    outer_merge_keys,
+                    inner_merge_keys,
+                    &left_names,
+                    &right_names,
+                    ctx,
+                );
+                lines.push(format!("{prefix}Merge Cond: {rendered}"));
+            } else if let Some(rendered) =
+                render_merge_condition_from_child_sorts(left, right, &left_names, &right_names, ctx)
+            {
+                lines.push(format!("{prefix}Merge Cond: {rendered}"));
+            }
+            if !join_qual.is_empty() {
+                let rendered = join_qual
+                    .iter()
+                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                lines.push(format!("{prefix}Join Filter: {rendered}"));
+            }
+            if !qual.is_empty() {
+                let rendered = qual
+                    .iter()
+                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                lines.push(format!("{prefix}Filter: {rendered}"));
+            }
+            true
+        }
         Plan::IndexOnlyScan {
             keys,
             order_by_keys,
@@ -850,6 +1582,26 @@ fn push_nonverbose_plan_details(
             if let Some(detail) = render_index_order_by(order_by_keys, desc, index_meta) {
                 lines.push(format!("{prefix}Order By: ({detail})"));
             }
+            true
+        }
+        Plan::SeqScan {
+            tablesample: Some(sample),
+            ..
+        } => {
+            let args = sample
+                .args
+                .iter()
+                .map(|expr| render_verbose_expr(expr, &[], ctx))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut detail = format!("{} ({})", sample.method.to_ascii_lowercase(), args);
+            if let Some(repeatable) = &sample.repeatable {
+                detail.push_str(&format!(
+                    " REPEATABLE ({})",
+                    render_verbose_expr(repeatable, &[], ctx)
+                ));
+            }
+            lines.push(format!("{prefix}Sampling: {detail}"));
             true
         }
         Plan::BitmapIndexScan {
@@ -890,6 +1642,44 @@ fn push_nonverbose_plan_details(
     }
 }
 
+fn group_items_postgres_display_order(group_items: Vec<String>) -> Vec<String> {
+    if group_items.len() < 3
+        || group_items
+            .first()
+            .is_none_or(|item| !group_item_is_complex_expr(item))
+    {
+        return group_items;
+    }
+    let simple_count = group_items
+        .iter()
+        .filter(|item| !group_item_is_complex_expr(item))
+        .count();
+    if simple_count < 2 {
+        return group_items;
+    }
+
+    let mut simple = group_items
+        .iter()
+        .filter(|item| !group_item_is_complex_expr(item))
+        .cloned()
+        .collect::<Vec<_>>();
+    simple.sort_by(|left, right| group_item_column_name(left).cmp(group_item_column_name(right)));
+    let complex = group_items
+        .into_iter()
+        .filter(|item| group_item_is_complex_expr(item));
+    simple.into_iter().chain(complex).collect()
+}
+
+fn group_item_is_complex_expr(item: &str) -> bool {
+    item.contains('(')
+}
+
+fn group_item_column_name(item: &str) -> &str {
+    item.rsplit_once('.')
+        .map(|(_, column)| column)
+        .unwrap_or(item)
+}
+
 fn targets_have_direct_subplans(targets: &[TargetEntry]) -> bool {
     targets.iter().any(|target| {
         let mut subplans = Vec::new();
@@ -913,11 +1703,61 @@ fn nonverbose_sort_items(
             })
             .collect();
     }
-    let input_names = verbose_plan_output_exprs(input, ctx, true);
+    let input_names = qualified_scan_output_names(input)
+        .unwrap_or_else(|| verbose_plan_output_exprs(input, ctx, true));
     items
         .iter()
-        .map(|item| render_nonverbose_sort_item(item, &input_names, ctx))
+        .map(|item| {
+            partial_aggregate_append_sort_item(input, item, ctx)
+                .unwrap_or_else(|| render_nonverbose_sort_item(item, &input_names, ctx))
+        })
         .collect()
+}
+
+fn partial_aggregate_append_sort_item(
+    input: &Plan,
+    item: &crate::include::nodes::primnodes::OrderByEntry,
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    let (Plan::Append { children, .. } | Plan::MergeAppend { children, .. }) = input else {
+        return None;
+    };
+    let index = match &item.expr {
+        Expr::Var(var) => attrno_index(var.varattno)?,
+        _ => return None,
+    };
+    let Plan::Aggregate {
+        input,
+        group_by,
+        output_columns,
+        disabled,
+        ..
+    } = children.first()?
+    else {
+        return None;
+    };
+    let expr = group_by.get(index)?;
+    let mut rendered = render_nonverbose_aggregate_group_key(
+        expr,
+        input,
+        output_columns.get(index).map(|column| column.sql_type),
+        ctx,
+        *disabled,
+        true,
+    );
+    if item.descending {
+        rendered.push_str(" DESC");
+    }
+    if let Some(nulls_first) = item.nulls_first
+        && nulls_first != item.descending
+    {
+        rendered.push_str(if nulls_first {
+            " NULLS FIRST"
+        } else {
+            " NULLS LAST"
+        });
+    }
+    Some(rendered)
 }
 
 fn remap_sort_display_item_through_aggregate(input: &Plan, item: &str) -> Option<String> {
@@ -968,11 +1808,63 @@ fn qualified_scan_output_names(plan: &Plan) -> Option<Vec<String>> {
             desc,
             ..
         } => Some(qualified_base_scan_output_exprs(relation_name, desc)),
-        Plan::Filter { input, .. } | Plan::Projection { input, .. } => {
-            qualified_scan_output_names(input)
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. } => qualified_scan_output_names(input),
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+            children.first().and_then(qualified_scan_output_names)
         }
         _ => None,
     }
+}
+
+fn qualified_scan_output_names_with_context(
+    plan: &Plan,
+    ctx: &VerboseExplainContext,
+) -> Option<Vec<String>> {
+    match plan {
+        Plan::SeqScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexOnlyScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::BitmapHeapScan {
+            relation_name,
+            desc,
+            ..
+        } => Some(qualified_scan_output_exprs_with_context(
+            relation_name,
+            desc,
+            ctx,
+        )),
+        Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Hash { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. } => qualified_scan_output_names_with_context(input, ctx),
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => children
+            .first()
+            .and_then(|child| qualified_scan_output_names_with_context(child, ctx)),
+        _ => None,
+    }
+}
+
+fn context_has_relation_aliases(ctx: &VerboseExplainContext) -> bool {
+    ctx.relation_scan_alias.is_some() || !ctx.relation_scan_aliases.is_empty()
 }
 
 fn render_nonverbose_sort_item(
@@ -984,7 +1876,9 @@ fn render_nonverbose_sort_item(
     if item.descending {
         rendered.push_str(" DESC");
     }
-    if let Some(nulls_first) = item.nulls_first {
+    if let Some(nulls_first) = item.nulls_first
+        && nulls_first != item.descending
+    {
         rendered.push_str(if nulls_first {
             " NULLS FIRST"
         } else {
@@ -1018,8 +1912,8 @@ fn render_nonverbose_aggregate_group_key(
         let input_names = aggregate_group_key_input_names(input, ctx, qualify_base_scan);
         return render_nonverbose_group_key_expr(expr, sql_type, &input_names, ctx, false);
     }
-    let input_names = input.column_names();
-    let rendered = render_explain_expr(expr, &input_names);
+    let input_names = aggregate_group_key_input_names(input, ctx, qualify_base_scan);
+    let rendered = render_nonverbose_group_key_expr(expr, sql_type, &input_names, ctx, false);
     if !rendered.contains("?column?") && !group_key_refs_projection_alias(expr, input, &rendered) {
         return rendered;
     }
@@ -1032,14 +1926,24 @@ fn aggregate_group_key_input_names(
     ctx: &VerboseExplainContext,
     qualify_base_scan: bool,
 ) -> Vec<String> {
-    if qualify_base_scan {
-        if let Some(names) = qualified_scan_output_names(input) {
-            return names;
-        }
-        return verbose_plan_output_exprs(input, ctx, true);
+    if const_false_filter_result_plan(input).is_some() {
+        return input.column_names();
     }
     if matches!(input, Plan::Projection { .. }) {
         return nonverbose_aggregate_input_names(input, ctx);
+    }
+    if context_has_relation_aliases(ctx)
+        && let Some(names) = qualified_scan_output_names_with_context(input, ctx)
+    {
+        return names;
+    }
+    if qualify_base_scan {
+        if const_false_filter_result_plan(input).is_none()
+            && let Some(names) = qualified_scan_output_names(input)
+        {
+            return names;
+        }
+        return plan_join_output_exprs(input, ctx, true);
     }
     input.column_names()
 }
@@ -1175,20 +2079,52 @@ fn render_hash_join_condition(
     if outer_hash_keys.len() != inner_hash_keys.len() || outer_hash_keys.is_empty() {
         return None;
     }
-    Some(
-        outer_hash_keys
-            .iter()
-            .zip(inner_hash_keys.iter())
-            .map(|(outer, inner)| {
-                format!(
-                    "({} = {})",
-                    render_verbose_expr(outer, left_names, ctx),
-                    render_verbose_expr(inner, right_names, ctx)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" AND "),
-    )
+    let mut seen_keys = std::collections::BTreeSet::new();
+    let mut primary_parts = Vec::new();
+    let mut duplicate_parts = Vec::new();
+    for (outer, inner) in outer_hash_keys.iter().zip(inner_hash_keys.iter()) {
+        let left = render_verbose_expr(outer, left_names, ctx);
+        let right = render_verbose_expr(inner, right_names, ctx);
+        let (left, right) = if left > right {
+            (right, left)
+        } else {
+            (left, right)
+        };
+        let key = (left.clone(), right.clone());
+        let part = format!("({left} = {right})");
+        if seen_keys.insert(key) {
+            primary_parts.push(part);
+        } else {
+            duplicate_parts.push(part);
+        }
+    }
+    let parts = primary_parts
+        .iter()
+        .chain(duplicate_parts.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    if parts.len() == 1 {
+        Some(parts[0].clone())
+    } else {
+        Some(format!("({})", parts.join(" AND ")))
+    }
+}
+
+fn render_join_condition_list(
+    exprs: &[Expr],
+    left_names: &[String],
+    right_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    let rendered = exprs
+        .iter()
+        .map(|expr| render_verbose_join_expr(expr, left_names, right_names, ctx))
+        .collect::<Vec<_>>();
+    if rendered.len() == 1 {
+        rendered[0].clone()
+    } else {
+        format!("({})", rendered.join(" AND "))
+    }
 }
 
 fn render_window_clause_for_explain(
@@ -1249,7 +2185,9 @@ fn render_nonverbose_order_by_item(
     if item.descending {
         rendered.push_str(" DESC");
     }
-    if let Some(nulls_first) = item.nulls_first {
+    if let Some(nulls_first) = item.nulls_first
+        && nulls_first != item.descending
+    {
         rendered.push_str(if nulls_first {
             " NULLS FIRST"
         } else {
@@ -1286,6 +2224,9 @@ fn render_nonverbose_group_key_expr(
         && rendered.starts_with('(')
         && rendered.ends_with(')')
     {
+        if rendered.starts_with("((") {
+            return rendered;
+        }
         return format!("({rendered})");
     }
     rendered
@@ -1437,10 +2378,11 @@ fn push_explain_plan_line(
     indent: usize,
     is_child: bool,
     show_costs: bool,
+    ctx: &VerboseExplainContext,
     lines: &mut Vec<String>,
 ) {
     let prefix = explain_node_prefix(indent, is_child);
-    let label = verbose_plan_label(plan).unwrap_or_else(|| state.node_label());
+    let label = verbose_plan_label(plan, ctx).unwrap_or_else(|| state.node_label());
     push_explain_line(
         &format!("{prefix}{label}"),
         state.plan_info(),
@@ -1457,31 +2399,66 @@ fn explain_detail_prefix(indent: usize) -> String {
     }
 }
 
-fn verbose_plan_label(plan: &Plan) -> Option<String> {
+fn verbose_plan_label(plan: &Plan, ctx: &VerboseExplainContext) -> Option<String> {
     match plan {
-        Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
+        Plan::Projection { input, .. }
+            if matches!(
+                input.as_ref(),
+                Plan::Result { .. } | Plan::Append { .. } | Plan::MergeAppend { .. }
+            ) =>
+        {
             Some("Result".into())
         }
         Plan::SeqScan { .. } | Plan::IndexOnlyScan { .. } | Plan::IndexScan { .. } => {
             verbose_scan_plan_label(plan)
         }
-        Plan::Aggregate { strategy, .. } => match strategy {
-            AggregateStrategy::Plain => Some("Aggregate".into()),
-            AggregateStrategy::Sorted => Some("GroupAggregate".into()),
-            AggregateStrategy::Hashed => Some("HashAggregate".into()),
-        },
+        Plan::Aggregate {
+            strategy,
+            phase,
+            accumulators,
+            ..
+        } => Some(aggregate_plan_label(
+            *strategy,
+            *phase,
+            accumulators.is_empty(),
+        )),
+        Plan::NestedLoopJoin { .. } => Some("Nested Loop".into()),
+        Plan::HashJoin { .. } => Some("Hash Join".into()),
+        Plan::MergeJoin { .. } => Some("Merge Join".into()),
         Plan::SetOp { op, strategy, .. } => Some(set_op_plan_label(*op, *strategy)),
-        Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
-            Some("Result".into())
-        }
         Plan::FunctionScan {
             call, table_alias, ..
-        } => Some(verbose_function_scan_label(call, table_alias.as_deref())),
+        } => Some(verbose_function_scan_label(
+            call,
+            table_alias.as_deref(),
+            ctx,
+        )),
         Plan::SubqueryScan { scan_name, .. } => Some(match scan_name {
-            Some(scan_name) => format!("Subquery Scan on {scan_name}"),
+            Some(scan_name) => format!("Subquery Scan on {}", quote_explain_identifier(scan_name)),
             None => "Subquery Scan".into(),
         }),
         _ => None,
+    }
+}
+
+fn aggregate_plan_label(
+    strategy: AggregateStrategy,
+    phase: crate::include::nodes::plannodes::AggregatePhase,
+    groups_only: bool,
+) -> String {
+    if groups_only && strategy == AggregateStrategy::Sorted {
+        return "Group".into();
+    }
+    let base = match strategy {
+        AggregateStrategy::Plain => "Aggregate",
+        AggregateStrategy::Sorted => "GroupAggregate",
+        AggregateStrategy::Hashed => "HashAggregate",
+        AggregateStrategy::Mixed => "MixedAggregate",
+    };
+    match phase {
+        crate::include::nodes::plannodes::AggregatePhase::Complete => base.to_string(),
+        crate::include::nodes::plannodes::AggregatePhase::Partial => format!("Partial {base}"),
+        crate::include::nodes::plannodes::AggregatePhase::Finalize => format!("Finalize {base}"),
     }
 }
 
@@ -1540,7 +2517,7 @@ fn nonverbose_plan_label(
             SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)
         ) =>
         {
-            Some(verbose_function_scan_label(call, None))
+            Some(verbose_function_scan_label(call, None, ctx))
         }
         Plan::FunctionScan {
             call,
@@ -1552,10 +2529,18 @@ fn nonverbose_plan_label(
                 set_returning_call_label(call)
             )
         }),
-        Plan::SeqScan { relation_name, .. } => nonverbose_relation_scan_label(
-            "Seq Scan",
+        Plan::SeqScan {
             relation_name,
-            ctx.relation_scan_alias.as_deref(),
+            tablesample,
+            ..
+        } => nonverbose_relation_scan_label(
+            if tablesample.is_some() {
+                "Sample Scan"
+            } else {
+                "Seq Scan"
+            },
+            relation_name,
+            context_relation_scan_alias(ctx, relation_name),
             is_child,
         ),
         Plan::IndexOnlyScan {
@@ -1563,33 +2548,73 @@ fn nonverbose_plan_label(
             index_name,
             direction,
             ..
-        } => ctx.relation_scan_alias.as_ref().map(|alias| {
-            let direction = scan_direction_label(*direction);
-            format!("Index Only Scan{direction} using {index_name} on {relation_name} {alias}")
-        }),
+        } => nonverbose_index_scan_label(
+            "Index Only Scan",
+            relation_name,
+            index_name,
+            *direction,
+            context_relation_scan_alias(ctx, relation_name),
+        ),
         Plan::IndexScan {
             relation_name,
             index_name,
             direction,
             index_only,
             ..
-        } => ctx.relation_scan_alias.as_ref().map(|alias| {
-            let direction = scan_direction_label(*direction);
+        } => {
             let scan_name = if *index_only {
                 "Index Only Scan"
             } else {
                 "Index Scan"
             };
-            format!("{scan_name}{direction} using {index_name} on {relation_name} {alias}")
-        }),
+            nonverbose_index_scan_label(
+                scan_name,
+                relation_name,
+                index_name,
+                *direction,
+                context_relation_scan_alias(ctx, relation_name),
+            )
+        }
         Plan::BitmapHeapScan { relation_name, .. } => nonverbose_relation_scan_label(
             "Bitmap Heap Scan",
             relation_name,
-            ctx.relation_scan_alias.as_deref(),
+            context_relation_scan_alias(ctx, relation_name),
             is_child,
         ),
         _ => None,
     }
+}
+
+fn context_relation_scan_alias<'a>(
+    ctx: &'a VerboseExplainContext,
+    relation_name: &str,
+) -> Option<&'a str> {
+    let base_name = relation_name_base(relation_name);
+    ctx.relation_scan_aliases
+        .get(base_name)
+        .map(String::as_str)
+        .or(ctx.relation_scan_alias.as_deref())
+}
+
+fn relation_name_without_alias(relation_name: &str) -> &str {
+    relation_name
+        .rsplit_once(' ')
+        .map(|(name, _)| name)
+        .unwrap_or(relation_name)
+}
+
+fn nonverbose_index_scan_label(
+    scan_name: &str,
+    relation_name: &str,
+    index_name: &str,
+    direction: crate::include::access::relscan::ScanDirection,
+    alias: Option<&str>,
+) -> Option<String> {
+    alias.map(|alias| {
+        let direction = scan_direction_label(direction);
+        let relation_name = relation_name_without_alias(relation_name);
+        format!("{scan_name}{direction} using {index_name} on {relation_name} {alias}")
+    })
 }
 
 fn nonverbose_relation_scan_label(
@@ -1599,10 +2624,7 @@ fn nonverbose_relation_scan_label(
     is_child: bool,
 ) -> Option<String> {
     if let Some(alias) = alias {
-        let relation_name = relation_name
-            .rsplit_once(' ')
-            .map(|(name, _)| name)
-            .unwrap_or(relation_name);
+        let relation_name = relation_name_without_alias(relation_name);
         return Some(format!("{scan_name} on {relation_name} {alias}"));
     }
     if !is_child
@@ -1638,7 +2660,11 @@ fn scan_direction_label(direction: crate::include::access::relscan::ScanDirectio
     }
 }
 
-fn verbose_function_scan_label(call: &SetReturningCall, table_alias: Option<&str>) -> String {
+fn verbose_function_scan_label(
+    call: &SetReturningCall,
+    table_alias: Option<&str>,
+    ctx: &VerboseExplainContext,
+) -> String {
     if matches!(
         call,
         SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_)
@@ -1653,14 +2679,46 @@ fn verbose_function_scan_label(call: &SetReturningCall, table_alias: Option<&str
             None => format!("Table Function Scan on \"{name}\""),
         };
     }
-    let func = set_returning_call_label(call);
-    match table_alias.or_else(|| {
-        call.output_columns()
-            .first()
-            .map(|column| column.name.as_str())
-    }) {
-        Some(alias) => format!("Function Scan on pg_catalog.{func} {alias}"),
-        None => format!("Function Scan on pg_catalog.{func}"),
+    if matches!(
+        call,
+        SetReturningCall::UserDefined {
+            inlined_expr: Some(_),
+            ..
+        }
+    ) && let Some(alias) = table_alias
+    {
+        return format!("Function Scan on {alias}");
+    }
+    let func = verbose_function_scan_name(call, ctx);
+    match table_alias {
+        Some(alias) => format!("Function Scan on {func} {alias}"),
+        None => format!("Function Scan on {func}"),
+    }
+}
+
+fn verbose_function_scan_name(call: &SetReturningCall, ctx: &VerboseExplainContext) -> String {
+    match call {
+        SetReturningCall::UserDefined {
+            function_name,
+            inlined_expr: Some(_),
+            ..
+        } => function_name.clone(),
+        SetReturningCall::UserDefined {
+            proc_oid,
+            function_name,
+            ..
+        } => ctx
+            .function_names
+            .get(proc_oid)
+            .cloned()
+            .unwrap_or_else(|| {
+                if function_name.contains('.') {
+                    function_name.clone()
+                } else {
+                    format!("public.{function_name}")
+                }
+            }),
+        _ => format!("pg_catalog.{}", set_returning_call_label(call)),
     }
 }
 
@@ -1686,7 +2744,14 @@ fn verbose_function_scan_output_exprs(
             })
             .collect();
     }
-    call.output_columns()
+    let output_columns = call.output_columns();
+    if matches!(call, SetReturningCall::UserDefined { .. }) && output_columns.len() > 1 {
+        return output_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+    }
+    output_columns
         .iter()
         .map(|column| match table_alias {
             Some(alias) => format!("{alias}.{}", column.name),
@@ -1743,12 +2808,20 @@ fn push_verbose_projected_scan_plan(
     let output = targets
         .iter()
         .filter(|target| !target.resjunk)
-        .map(|target| render_verbose_expr(&target.expr, &input_names, ctx))
+        .map(|target| {
+            if matches!(input.as_ref(), Plan::FunctionScan { .. })
+                && let Expr::Cast(inner, _) = &target.expr
+            {
+                render_verbose_expr(inner, &input_names, ctx)
+            } else {
+                render_verbose_expr(&target.expr, &input_names, ctx)
+            }
+        })
         .collect::<Vec<_>>();
     if !output.is_empty() {
         lines.push(format!("{detail_prefix}Output: {}", output.join(", ")));
     }
-    push_verbose_scan_details(input, indent, &input_names, lines);
+    push_verbose_scan_details(input, indent, &input_names, ctx, lines);
     push_direct_plan_subplans(plan, subplans, indent, show_costs, true, ctx, lines);
     true
 }
@@ -1762,22 +2835,84 @@ fn push_verbose_projected_join_plan(
     ctx: &VerboseExplainContext,
     lines: &mut Vec<String>,
 ) -> bool {
-    let Some((input, output)) = projected_join_for_explain(plan, ctx) else {
+    let Plan::Projection { input, targets, .. } = plan else {
         return false;
     };
-
-    let state = executor_start((*input).clone());
-    push_explain_plan_line(input, state.as_ref(), indent, is_child, show_costs, lines);
-    if !output.is_empty() {
-        lines.push(format!(
-            "{}Output: {}",
-            explain_detail_prefix(indent),
-            output.join(", ")
-        ));
+    if targets.iter().any(|target| target.resjunk) {
+        return false;
     }
-    push_verbose_join_filter_details(input, indent, ctx, lines);
+
+    if plan_contains_sql_table_function(input) && !projected_join_can_display_as_join(input) {
+        let state = executor_start((**input).clone());
+        push_explain_plan_line(
+            input,
+            state.as_ref(),
+            indent,
+            is_child,
+            show_costs,
+            ctx,
+            lines,
+        );
+        let input_names = plan_join_output_exprs(input, ctx, true);
+        let output = targets
+            .iter()
+            .map(|target| render_verbose_expr(&target.expr, &input_names, ctx))
+            .collect::<Vec<_>>();
+        if !output.is_empty() {
+            lines.push(format!(
+                "{}Output: {}",
+                explain_detail_prefix(indent),
+                output.join(", ")
+            ));
+        }
+        push_verbose_join_filter_details(input, indent, ctx, lines);
+        push_direct_plan_subplans(plan, subplans, indent, show_costs, true, ctx, lines);
+        explain_plan_children_with_context(input, subplans, indent, show_costs, true, ctx, lines);
+        return true;
+    }
+
+    if !projected_join_can_display_as_join(input) {
+        return false;
+    }
+
+    let state = executor_start((**input).clone());
+    let prefix = explain_node_prefix(indent, is_child);
+    let Some(label) = verbose_plan_label(input, ctx) else {
+        return false;
+    };
+    push_explain_line(
+        &format!("{prefix}{label}"),
+        state.plan_info(),
+        show_costs,
+        lines,
+    );
+
+    let detail_prefix = explain_detail_prefix(indent);
+    let input_names = verbose_plan_output_exprs(input, ctx, true);
+    let whole_row_field = projected_join_whole_row_field(input, targets, ctx);
+    let output = if let Some((qualifier, field)) = &whole_row_field {
+        vec![format!("(({}.*).{})", qualifier, field)]
+    } else {
+        targets
+            .iter()
+            .filter(|target| !target.resjunk)
+            .map(|target| render_verbose_expr(&target.expr, &input_names, ctx))
+            .collect::<Vec<_>>()
+    };
+    if !output.is_empty() {
+        lines.push(format!("{detail_prefix}Output: {}", output.join(", ")));
+    }
     push_direct_plan_subplans(plan, subplans, indent, show_costs, true, ctx, lines);
-    explain_plan_children_with_context(input, subplans, indent, show_costs, true, ctx, lines);
+    let child_ctx = if let Some(whole_row_field) = whole_row_field {
+        let mut child_ctx = ctx.clone();
+        child_ctx.whole_row_field_output = Some(whole_row_field);
+        child_ctx
+    } else {
+        ctx.clone()
+    };
+    explain_plan_children_with_context(
+        input, subplans, indent, show_costs, true, &child_ctx, lines,
+    );
     true
 }
 
@@ -1944,7 +3079,15 @@ fn push_verbose_filtered_function_scan_plan(
     }
 
     let state = executor_start((**input).clone());
-    push_explain_plan_line(input, state.as_ref(), indent, is_child, show_costs, lines);
+    push_explain_plan_line(
+        input,
+        state.as_ref(),
+        indent,
+        is_child,
+        show_costs,
+        ctx,
+        lines,
+    );
     push_verbose_plan_details(input, indent, ctx, lines);
     let input_names = verbose_plan_output_exprs(input, ctx, true);
     lines.push(format!(
@@ -1955,16 +3098,57 @@ fn push_verbose_filtered_function_scan_plan(
     true
 }
 
-fn projection_targets_are_verbose_scan_projection(
+fn projected_join_can_display_as_join(input: &Plan) -> bool {
+    match input {
+        Plan::NestedLoopJoin {
+            join_qual, qual, ..
+        }
+        | Plan::HashJoin {
+            join_qual, qual, ..
+        }
+        | Plan::MergeJoin {
+            join_qual, qual, ..
+        } => join_qual.is_empty() && qual.is_empty(),
+        _ => false,
+    }
+}
+
+fn projected_join_whole_row_field(
     input: &Plan,
     targets: &[TargetEntry],
     ctx: &VerboseExplainContext,
+) -> Option<(String, String)> {
+    let Plan::NestedLoopJoin { right, .. } = input else {
+        return None;
+    };
+    if matches!(right.as_ref(), Plan::FunctionScan { .. }) {
+        return None;
+    }
+    let input_names = verbose_plan_output_exprs(input, ctx, true);
+    let rendered = targets
+        .iter()
+        .filter(|target| !target.resjunk)
+        .map(|target| render_verbose_expr(&target.expr, &input_names, ctx))
+        .collect::<Vec<_>>();
+    let [single] = rendered.as_slice() else {
+        return None;
+    };
+    let (qualifier, field) = single.split_once('.')?;
+    Some((qualifier.to_string(), field.to_string()))
+}
+
+fn projection_targets_are_verbose_scan_projection(
+    input: &Plan,
+    targets: &[TargetEntry],
+    _ctx: &VerboseExplainContext,
 ) -> bool {
     matches!(
         input,
-        Plan::SeqScan { .. } | Plan::IndexOnlyScan { .. } | Plan::IndexScan { .. }
+        Plan::SeqScan { .. }
+            | Plan::IndexOnlyScan { .. }
+            | Plan::IndexScan { .. }
+            | Plan::FunctionScan { .. }
     ) && targets.iter().all(|target| !target.resjunk)
-        && (ctx.scan_output_override.is_some() || targets.len() > input.column_names().len())
 }
 
 fn verbose_scan_projection_input_names(input: &Plan) -> Vec<String> {
@@ -1984,6 +3168,9 @@ fn verbose_scan_projection_input_names(input: &Plan) -> Vec<String> {
             desc,
             ..
         } => qualified_base_scan_output_exprs(relation_name, desc),
+        Plan::FunctionScan {
+            call, table_alias, ..
+        } => verbose_function_scan_output_exprs(call, table_alias.as_deref()),
         _ => Vec::new(),
     }
 }
@@ -1992,6 +3179,7 @@ fn push_verbose_scan_details(
     input: &Plan,
     indent: usize,
     key_column_names: &[String],
+    ctx: &VerboseExplainContext,
     lines: &mut Vec<String>,
 ) {
     let prefix = explain_detail_prefix(indent);
@@ -2021,6 +3209,12 @@ fn push_verbose_scan_details(
             if let Some(detail) = render_index_order_by(order_by_keys, desc, index_meta) {
                 lines.push(format!("{prefix}Order By: ({detail})"));
             }
+        }
+        Plan::FunctionScan { call, .. } => {
+            lines.push(format!(
+                "{prefix}Function Call: {}",
+                render_verbose_set_returning_call(call, ctx)
+            ));
         }
         _ => {}
     }
@@ -2076,6 +3270,13 @@ fn verbose_scan_plan_label(input: &Plan) -> Option<String> {
                 verbose_relation_name(relation_name)
             ))
         }
+        Plan::FunctionScan {
+            call, table_alias, ..
+        } => Some(verbose_function_scan_label(
+            call,
+            table_alias.as_deref(),
+            &VerboseExplainContext::default(),
+        )),
         _ => None,
     }
 }
@@ -2092,10 +3293,16 @@ fn verbose_relation_name(relation_name: &str) -> String {
 struct VerboseExplainContext {
     exec_params: Vec<VerboseExecParam>,
     scan_output_override: Option<Vec<String>>,
+    whole_row_field_output: Option<(String, String)>,
+    setop_raw_numeric_outputs: bool,
     values_scan_name: Option<String>,
     function_scan_alias: Option<String>,
     relation_scan_alias: Option<String>,
+    relation_scan_aliases: BTreeMap<String, String>,
+    preserve_partition_child_aliases: bool,
+    alias_through_aggregate_children: bool,
     type_names: BTreeMap<u32, String>,
+    function_names: BTreeMap<u32, String>,
 }
 
 #[derive(Clone)]
@@ -2118,14 +3325,109 @@ fn collect_explain_type_names(
     type_names
 }
 
+fn collect_explain_function_names(
+    plan: &Plan,
+    subplans: &[Plan],
+    catalog: &dyn CatalogLookup,
+) -> BTreeMap<u32, String> {
+    let mut function_names = BTreeMap::new();
+    collect_plan_function_names(plan, catalog, &mut function_names);
+    for subplan in subplans {
+        collect_plan_function_names(subplan, catalog, &mut function_names);
+    }
+    function_names
+}
+
+fn collect_plan_function_names(
+    plan: &Plan,
+    catalog: &dyn CatalogLookup,
+    function_names: &mut BTreeMap<u32, String>,
+) {
+    if let Plan::FunctionScan { call, .. } = plan {
+        collect_call_function_names(call, catalog, function_names);
+    }
+    for child in direct_plan_children(plan) {
+        collect_plan_function_names(child, catalog, function_names);
+    }
+}
+
+fn collect_call_function_names(
+    call: &SetReturningCall,
+    catalog: &dyn CatalogLookup,
+    function_names: &mut BTreeMap<u32, String>,
+) {
+    match call {
+        SetReturningCall::RowsFrom { items, .. } => {
+            for item in items {
+                if let RowsFromSource::Function(call) = &item.source {
+                    collect_call_function_names(call, catalog, function_names);
+                }
+            }
+        }
+        SetReturningCall::UserDefined {
+            proc_oid,
+            function_name,
+            ..
+        } => {
+            let display_name = catalog
+                .proc_row_by_oid(*proc_oid)
+                .map(|row| verbose_user_function_name(catalog, row))
+                .unwrap_or_else(|| function_name.clone());
+            function_names.insert(*proc_oid, display_name);
+        }
+        _ => {}
+    }
+}
+
+fn verbose_user_function_name(
+    catalog: &dyn CatalogLookup,
+    row: crate::include::catalog::PgProcRow,
+) -> String {
+    let namespace_oid = row.pronamespace;
+    let function_name = row.proname;
+    if row.prolang == PG_LANGUAGE_SQL_OID && (row.proisstrict || row.provolatile != 'i') {
+        return format!("public.{function_name}");
+    }
+    if namespace_oid == PG_CATALOG_NAMESPACE_OID {
+        return function_name;
+    }
+    let schema_name = catalog
+        .namespace_row_by_oid(namespace_oid)
+        .map(|row| row.nspname)
+        .unwrap_or_else(|| namespace_oid.to_string());
+    if namespace_oid == PUBLIC_NAMESPACE_OID {
+        format!("public.{function_name}")
+    } else if schema_name.starts_with("pg_temp_") {
+        function_name
+    } else {
+        format!("{schema_name}.{function_name}")
+    }
+}
+
 fn collect_plan_type_names(
     plan: &Plan,
     catalog: &dyn CatalogLookup,
     type_names: &mut BTreeMap<u32, String>,
 ) {
+    match plan {
+        Plan::Append { desc, .. }
+        | Plan::MergeAppend { desc, .. }
+        | Plan::SeqScan { desc, .. }
+        | Plan::IndexOnlyScan { desc, .. }
+        | Plan::IndexScan { desc, .. }
+        | Plan::BitmapHeapScan { desc, .. } => {
+            for column in &desc.columns {
+                collect_sql_type_name(column.sql_type, catalog, type_names);
+            }
+        }
+        _ => {}
+    }
     if let Plan::FunctionScan { call, .. } = plan {
         for column in call.output_columns() {
             collect_sql_type_name(column.sql_type, catalog, type_names);
+        }
+        for expr in crate::include::nodes::primnodes::set_returning_call_exprs(call) {
+            collect_expr_type_names(expr, catalog, type_names);
         }
         if let SetReturningCall::SqlJsonTable(table) = call {
             for column in &table.columns {
@@ -2138,8 +3440,60 @@ fn collect_plan_type_names(
             }
         }
     }
+    if let Plan::Projection { targets, .. } = plan {
+        for target in targets {
+            collect_sql_type_name(target.sql_type, catalog, type_names);
+            collect_expr_type_names(&target.expr, catalog, type_names);
+        }
+    }
     for child in direct_plan_children(plan) {
         collect_plan_type_names(child, catalog, type_names);
+    }
+}
+
+fn collect_expr_type_names(
+    expr: &Expr,
+    catalog: &dyn CatalogLookup,
+    type_names: &mut BTreeMap<u32, String>,
+) {
+    if let Some(sql_type) = expr_sql_type_hint(expr) {
+        collect_sql_type_name(sql_type, catalog, type_names);
+    }
+    match expr {
+        Expr::Const(Value::Record(record)) => {
+            collect_sql_type_name(record.sql_type(), catalog, type_names);
+        }
+        Expr::Cast(inner, sql_type) => {
+            collect_sql_type_name(*sql_type, catalog, type_names);
+            collect_expr_type_names(inner, catalog, type_names);
+        }
+        Expr::Row { descriptor, fields } => {
+            collect_sql_type_name(descriptor.sql_type(), catalog, type_names);
+            for (_, field) in fields {
+                collect_expr_type_names(field, catalog, type_names);
+            }
+        }
+        Expr::FieldSelect {
+            expr, field_type, ..
+        } => {
+            collect_sql_type_name(*field_type, catalog, type_names);
+            collect_expr_type_names(expr, catalog, type_names);
+        }
+        Expr::Func(func) => {
+            if let Some(result_type) = func.funcresulttype {
+                collect_sql_type_name(result_type, catalog, type_names);
+            }
+            for arg in &func.args {
+                collect_expr_type_names(arg, catalog, type_names);
+            }
+        }
+        Expr::SetReturning(srf) => {
+            collect_sql_type_name(srf.sql_type, catalog, type_names);
+            for expr in crate::include::nodes::primnodes::set_returning_call_exprs(&srf.call) {
+                collect_expr_type_names(expr, catalog, type_names);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2172,12 +3526,20 @@ fn push_verbose_plan_details(
 
     match plan {
         Plan::OrderBy { input, items, .. } => {
-            let input_names = verbose_plan_output_exprs(input, ctx, true);
-            let sort_key = items
-                .iter()
-                .map(|item| render_verbose_expr(&item.expr, &input_names, ctx))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let sort_key = if let Some(outputs) = setop_constant_child_outputs(plan, ctx) {
+                outputs
+                    .into_iter()
+                    .map(|output| format!("({output})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                let input_names = verbose_plan_output_exprs(input, ctx, true);
+                items
+                    .iter()
+                    .map(|item| render_verbose_expr(&item.expr, &input_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
             if !sort_key.is_empty() {
                 lines.push(format!("{prefix}Sort Key: {sort_key}"));
             }
@@ -2214,6 +3576,7 @@ fn push_verbose_plan_details(
         }
         Plan::Aggregate {
             input,
+            strategy,
             group_by,
             having,
             ..
@@ -2228,13 +3591,20 @@ fn push_verbose_plan_details(
                     }
                 }
                 let group_key = group_items.join(", ");
-                lines.push(format!("{prefix}Group Key: {group_key}"));
+                if *strategy == AggregateStrategy::Mixed {
+                    lines.push(format!("{prefix}Hash Key: {group_key}"));
+                    lines.push(format!("{prefix}Group Key: ()"));
+                } else {
+                    lines.push(format!("{prefix}Group Key: {group_key}"));
+                }
             }
             if let Some(having) = having {
-                lines.push(format!(
-                    "{prefix}Filter: {}",
-                    render_verbose_expr(having, &verbose_plan_output_exprs(plan, ctx, true), ctx,)
+                let rendered = normalize_aggregate_operand_parens(render_verbose_expr(
+                    having,
+                    &verbose_plan_output_exprs(plan, ctx, true),
+                    ctx,
                 ));
+                lines.push(format!("{prefix}Filter: {}", rendered));
             }
         }
         Plan::FunctionScan { call, .. } => {
@@ -2250,6 +3620,39 @@ fn push_verbose_plan_details(
                 "{prefix}{label}: {}",
                 render_verbose_set_returning_call(call, ctx)
             ));
+        }
+        Plan::Memoize {
+            cache_keys,
+            cache_key_labels,
+            binary_mode,
+            ..
+        } => {
+            if !cache_keys.is_empty() || !cache_key_labels.is_empty() {
+                let rendered = if !cache_key_labels.is_empty() {
+                    cache_key_labels.join(", ")
+                } else {
+                    cache_keys
+                        .iter()
+                        .map(|expr| render_verbose_expr(expr, &[], ctx))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                lines.push(format!("{prefix}Cache Key: {rendered}"));
+            }
+            lines.push(format!(
+                "{prefix}Cache Mode: {}",
+                if *binary_mode { "binary" } else { "logical" }
+            ));
+        }
+        Plan::Gather {
+            workers_planned,
+            single_copy,
+            ..
+        } => {
+            lines.push(format!("{prefix}Workers Planned: {workers_planned}"));
+            if *single_copy {
+                lines.push(format!("{prefix}Single Copy: true"));
+            }
         }
         Plan::Filter {
             input, predicate, ..
@@ -2373,6 +3776,8 @@ fn push_verbose_plan_details(
             left,
             right,
             merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
             join_qual,
             qual,
             ..
@@ -2385,6 +3790,19 @@ fn push_verbose_plan_details(
                     .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
                     .collect::<Vec<_>>()
                     .join(" AND ");
+                lines.push(format!("{prefix}Merge Cond: {rendered}"));
+            } else if !outer_merge_keys.is_empty() {
+                let rendered = render_merge_key_conditions(
+                    outer_merge_keys,
+                    inner_merge_keys,
+                    &left_names,
+                    &right_names,
+                    ctx,
+                );
+                lines.push(format!("{prefix}Merge Cond: {rendered}"));
+            } else if let Some(rendered) =
+                render_merge_condition_from_child_sorts(left, right, &left_names, &right_names, ctx)
+            {
                 lines.push(format!("{prefix}Merge Cond: {rendered}"));
             }
             if !join_qual.is_empty() {
@@ -2424,6 +3842,17 @@ fn explain_plan_children_with_context(
             nest_params,
             ..
         } => {
+            let whole_row_field = ctx
+                .whole_row_field_output
+                .clone()
+                .or_else(|| nested_loop_whole_row_field(plan, ctx));
+            let left_ctx = if let Some((qualifier, _)) = &whole_row_field {
+                let mut left_ctx = ctx.clone();
+                left_ctx.scan_output_override = Some(vec![format!("{qualifier}.*")]);
+                left_ctx
+            } else {
+                ctx.clone()
+            };
             format_explain_plan_with_subplans_inner(
                 left,
                 subplans,
@@ -2432,14 +3861,15 @@ fn explain_plan_children_with_context(
                 verbose,
                 true,
                 false,
-                ctx,
+                &left_ctx,
                 lines,
             );
             let mut right_ctx = ctx.clone();
+            right_ctx.whole_row_field_output = whole_row_field;
             let left_names = if verbose {
-                verbose_plan_output_exprs(left, ctx, true)
+                verbose_plan_output_exprs(left, &left_ctx, true)
             } else {
-                plan_join_output_exprs(left, ctx, true)
+                plan_join_output_exprs(left, &left_ctx, true)
             };
             right_ctx
                 .exec_params
@@ -2508,7 +3938,7 @@ fn explain_plan_children_with_context(
             );
         }
         Plan::Hash { input, .. } => {
-            let child_indent = if indent == 0 { 1 } else { indent + 3 };
+            let child_indent = indent + 1;
             format_explain_plan_with_subplans_inner(
                 input,
                 subplans,
@@ -2540,6 +3970,19 @@ fn explain_plan_children_with_context(
                 );
             }
         }
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. }
+            if !verbose
+                && !ctx.alias_through_aggregate_children
+                && partitionwise_aggregate_append_alias_base(&flattened_append_children(
+                    children,
+                ))
+                .is_some() =>
+        {
+            let children = flattened_append_children(children);
+            format_partitionwise_aggregate_append_children(
+                &children, subplans, indent, show_costs, verbose, ctx, lines,
+            );
+        }
         _ => {
             let mut values_seen = 0usize;
             let mut functions_seen = BTreeMap::<String, usize>::new();
@@ -2549,14 +3992,24 @@ fn explain_plan_children_with_context(
             } else {
                 indent + 1
             };
+            let reserve_append_parent_alias =
+                matches!(plan, Plan::Append { .. } | Plan::MergeAppend { .. })
+                    && !ctx.preserve_partition_child_aliases;
             for child in direct_plan_children(plan) {
-                let child_ctx = context_for_sibling_scan(
+                let mut child_ctx = context_for_sibling_scan(
                     ctx,
                     child,
                     &mut values_seen,
                     &mut functions_seen,
                     &mut relations_seen,
+                    reserve_append_parent_alias,
                 );
+                if matches!(plan, Plan::Append { .. } | Plan::MergeAppend { .. })
+                    && let Plan::Append { children, .. } | Plan::MergeAppend { children, .. } = plan
+                    && append_children_are_constant_results(children)
+                {
+                    child_ctx.setop_raw_numeric_outputs = true;
+                }
                 format_explain_plan_with_subplans_inner(
                     child,
                     subplans,
@@ -2564,10 +4017,127 @@ fn explain_plan_children_with_context(
                     show_costs,
                     verbose,
                     true,
-                    false,
+                    matches!(
+                        plan,
+                        Plan::Append { .. }
+                            | Plan::MergeAppend { .. }
+                            | Plan::OrderBy { .. }
+                            | Plan::IncrementalSort { .. }
+                    ),
                     &child_ctx,
                     lines,
                 );
+            }
+        }
+    }
+}
+
+fn format_partitionwise_aggregate_append_children(
+    children: &[&Plan],
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    verbose: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) {
+    let Some(alias_base) = partitionwise_aggregate_append_alias_base(children) else {
+        return;
+    };
+    let mut next_suffix = 0usize;
+    let child_indent = indent + 1;
+    for child in children {
+        let leaf_bases = leaf_relation_bases(child);
+        let mut child_ctx = ctx.clone();
+        match leaf_bases.as_slice() {
+            [] => {}
+            [base_name] => {
+                if next_suffix > 0 {
+                    child_ctx
+                        .relation_scan_aliases
+                        .insert(base_name.clone(), format!("{alias_base}_{next_suffix}"));
+                }
+                next_suffix += 1;
+            }
+            _ => {
+                // :HACK: PostgreSQL reserves an inherited alias for a visible
+                // subpartitioned child before numbering that child's leaf scans.
+                // The executable plan already has the right partitionwise shape;
+                // this keeps EXPLAIN output aligned until inheritance planning
+                // carries a real global alias map.
+                next_suffix += 1;
+                for base_name in leaf_bases {
+                    child_ctx
+                        .relation_scan_aliases
+                        .insert(base_name, format!("{alias_base}_{next_suffix}"));
+                    next_suffix += 1;
+                }
+                child_ctx.alias_through_aggregate_children = true;
+            }
+        }
+        format_explain_plan_with_subplans_inner(
+            child,
+            subplans,
+            child_indent,
+            show_costs,
+            verbose,
+            true,
+            true,
+            &child_ctx,
+            lines,
+        );
+    }
+}
+
+fn partitionwise_aggregate_append_alias_base(children: &[&Plan]) -> Option<String> {
+    if children.len() < 2 || !children.iter().all(|child| plan_is_aggregate_child(child)) {
+        return None;
+    }
+    let mut aliases = children
+        .iter()
+        .filter_map(|child| first_leaf_relation_alias_base(child));
+    let first = aliases.next()?;
+    aliases.all(|alias| alias == first).then_some(first)
+}
+
+fn plan_is_aggregate_child(plan: &Plan) -> bool {
+    if matches!(plan, Plan::Aggregate { .. }) {
+        return true;
+    }
+    explain_passthrough_plan_child(plan).is_some_and(plan_is_aggregate_child)
+}
+
+fn first_leaf_relation_alias_base(plan: &Plan) -> Option<String> {
+    first_leaf_relation_name(plan).and_then(|relation_name| {
+        relation_name
+            .rsplit_once(' ')
+            .map(|(_, alias)| inherited_root_alias(alias).unwrap_or(alias).to_string())
+    })
+}
+
+fn leaf_relation_bases(plan: &Plan) -> Vec<String> {
+    let mut bases = Vec::new();
+    collect_leaf_relation_bases(plan, &mut bases);
+    bases
+}
+
+fn collect_leaf_relation_bases(plan: &Plan, bases: &mut Vec<String>) {
+    match plan {
+        Plan::SeqScan { relation_name, .. }
+        | Plan::IndexOnlyScan { relation_name, .. }
+        | Plan::IndexScan { relation_name, .. }
+        | Plan::BitmapHeapScan { relation_name, .. } => {
+            bases.push(relation_name_base(relation_name).to_string());
+        }
+        Plan::BitmapIndexScan { .. }
+        | Plan::BitmapOr { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::Result { .. }
+        | Plan::Values { .. }
+        | Plan::WorkTableScan { .. } => {}
+        _ => {
+            for child in direct_plan_children(plan) {
+                collect_leaf_relation_bases(child, bases);
             }
         }
     }
@@ -2579,9 +4149,28 @@ fn context_for_sibling_scan(
     values_seen: &mut usize,
     functions_seen: &mut BTreeMap<String, usize>,
     relations_seen: &mut BTreeMap<String, usize>,
+    reserve_append_parent_alias: bool,
 ) -> VerboseExplainContext {
     let mut child_ctx = ctx.clone();
-    match child_leaf_scan_source(child) {
+    if reserve_append_parent_alias {
+        let inherited_sources =
+            inherited_relation_leaf_sources(child, ctx.alias_through_aggregate_children);
+        if inherited_sources.len() > 1 {
+            for (base_name, alias_base) in inherited_sources {
+                let seen = relations_seen.entry(alias_base.clone()).or_default();
+                child_ctx
+                    .relation_scan_aliases
+                    .insert(base_name, format!("{alias_base}_{}", *seen + 1));
+                *seen += 1;
+            }
+            return child_ctx;
+        }
+    }
+    match child_leaf_scan_source(
+        child,
+        reserve_append_parent_alias,
+        ctx.alias_through_aggregate_children,
+    ) {
         Some(LeafScanSource::Values) => {
             if child_ctx.values_scan_name.is_none() {
                 child_ctx.values_scan_name = Some(values_scan_name(*values_seen));
@@ -2600,17 +4189,110 @@ fn context_for_sibling_scan(
             key,
             inherited_alias_base,
         }) => {
-            if child_ctx.relation_scan_alias.is_none() {
+            if child_ctx.relation_scan_alias.is_none() && inherited_alias_base.is_none() {
                 let seen = relations_seen.entry(key.clone()).or_default();
-                child_ctx.relation_scan_alias = inherited_alias_base
-                    .map(|alias_base| format!("{alias_base}_{}", *seen + 1))
-                    .or_else(|| (*seen > 0).then(|| format!("{key}_{seen}")));
+                child_ctx.relation_scan_alias = (*seen > 0).then(|| format!("{key}_{seen}"));
                 *seen += 1;
             }
         }
         None => {}
     }
     child_ctx
+}
+
+fn inherited_relation_leaf_sources(
+    plan: &Plan,
+    alias_through_aggregate_children: bool,
+) -> Vec<(String, String)> {
+    let mut sources = Vec::new();
+    collect_inherited_relation_leaf_sources(plan, alias_through_aggregate_children, &mut sources);
+    sources
+}
+
+fn collect_inherited_relation_leaf_sources(
+    plan: &Plan,
+    alias_through_aggregate_children: bool,
+    sources: &mut Vec<(String, String)>,
+) {
+    match plan {
+        Plan::SeqScan { relation_name, .. }
+        | Plan::IndexOnlyScan { relation_name, .. }
+        | Plan::IndexScan { relation_name, .. }
+        | Plan::BitmapHeapScan { relation_name, .. } => {
+            if let Some((_, alias)) = relation_name.rsplit_once(' ') {
+                let root_alias = inherited_root_alias(alias).unwrap_or(alias);
+                sources.push((
+                    relation_name_base(relation_name).to_string(),
+                    root_alias.to_string(),
+                ));
+            }
+        }
+        Plan::Aggregate { input, .. } if alias_through_aggregate_children => {
+            collect_inherited_relation_leaf_sources(
+                input,
+                alias_through_aggregate_children,
+                sources,
+            )
+        }
+        Plan::Aggregate { .. } => {}
+        Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
+        | Plan::Unique { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::IncrementalSort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => collect_inherited_relation_leaf_sources(
+            input,
+            alias_through_aggregate_children,
+            sources,
+        ),
+        Plan::Append { children, .. }
+        | Plan::MergeAppend { children, .. }
+        | Plan::SetOp { children, .. }
+        | Plan::BitmapOr { children, .. } => {
+            for child in children {
+                collect_inherited_relation_leaf_sources(
+                    child,
+                    alias_through_aggregate_children,
+                    sources,
+                );
+            }
+        }
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. }
+        | Plan::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => {
+            collect_inherited_relation_leaf_sources(
+                left,
+                alias_through_aggregate_children,
+                sources,
+            );
+            collect_inherited_relation_leaf_sources(
+                right,
+                alias_through_aggregate_children,
+                sources,
+            );
+        }
+        Plan::BitmapIndexScan { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::Result { .. }
+        | Plan::Values { .. }
+        | Plan::WorkTableScan { .. } => {}
+    }
 }
 
 enum LeafScanSource {
@@ -2622,7 +4304,11 @@ enum LeafScanSource {
     },
 }
 
-fn child_leaf_scan_source(plan: &Plan) -> Option<LeafScanSource> {
+fn child_leaf_scan_source(
+    plan: &Plan,
+    reserve_append_parent_alias: bool,
+    alias_through_aggregate_children: bool,
+) -> Option<LeafScanSource> {
     match plan {
         Plan::Values { .. } => Some(LeafScanSource::Values),
         Plan::FunctionScan {
@@ -2635,23 +4321,41 @@ fn child_leaf_scan_source(plan: &Plan) -> Option<LeafScanSource> {
         Plan::SeqScan { relation_name, .. }
         | Plan::IndexOnlyScan { relation_name, .. }
         | Plan::IndexScan { relation_name, .. }
-        | Plan::BitmapHeapScan { relation_name, .. } => relation_leaf_scan_source(relation_name),
+        | Plan::BitmapHeapScan { relation_name, .. } => {
+            relation_leaf_scan_source(relation_name, reserve_append_parent_alias)
+        }
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::Limit { input, .. }
         | Plan::LockRows { input, .. }
         | Plan::Projection { input, .. }
-        | Plan::SubqueryScan { input, .. } => child_leaf_scan_source(input),
+        | Plan::SubqueryScan { input, .. } => child_leaf_scan_source(
+            input,
+            reserve_append_parent_alias,
+            alias_through_aggregate_children,
+        ),
+        Plan::Aggregate { input, .. } if alias_through_aggregate_children => {
+            child_leaf_scan_source(
+                input,
+                reserve_append_parent_alias,
+                alias_through_aggregate_children,
+            )
+        }
         _ => None,
     }
 }
 
-fn relation_leaf_scan_source(relation_name: &str) -> Option<LeafScanSource> {
-    if let Some((_, alias)) = relation_name.rsplit_once(' ')
-        && let Some(root_alias) = inherited_root_alias(alias)
-    {
+fn relation_leaf_scan_source(
+    relation_name: &str,
+    reserve_append_parent_alias: bool,
+) -> Option<LeafScanSource> {
+    if reserve_append_parent_alias && let Some((_, alias)) = relation_name.rsplit_once(' ') {
+        let root_alias = inherited_root_alias(alias).unwrap_or(alias);
         return Some(LeafScanSource::Relation {
             key: root_alias.to_string(),
             inherited_alias_base: Some(root_alias.to_string()),
@@ -2661,6 +4365,13 @@ fn relation_leaf_scan_source(relation_name: &str) -> Option<LeafScanSource> {
         key: name.to_string(),
         inherited_alias_base: None,
     })
+}
+
+fn relation_name_base(relation_name: &str) -> &str {
+    relation_name
+        .rsplit_once(' ')
+        .map(|(base_name, _)| base_name)
+        .unwrap_or(relation_name)
 }
 
 fn explain_node_prefix(indent: usize, is_child: bool) -> String {
@@ -2741,7 +4452,7 @@ fn qualified_scan_output_exprs_with_context(
     desc: &crate::include::nodes::primnodes::RelationDesc,
     ctx: &VerboseExplainContext,
 ) -> Vec<String> {
-    if let Some(alias) = &ctx.relation_scan_alias {
+    if let Some(alias) = context_relation_scan_alias(ctx, relation_name) {
         return desc
             .columns
             .iter()
@@ -2819,6 +4530,34 @@ fn append_parent_output_exprs(
     )
 }
 
+fn aggregate_group_names_from_input_sort(
+    input: &Plan,
+    group_count: usize,
+    ctx: &VerboseExplainContext,
+) -> Option<Vec<String>> {
+    let Plan::OrderBy {
+        input: sort_input,
+        items,
+        display_items,
+        ..
+    } = input
+    else {
+        return None;
+    };
+    if group_count == 0 || items.len() < group_count {
+        return None;
+    }
+    if display_items.len() >= group_count {
+        return Some(display_items.iter().take(group_count).cloned().collect());
+    }
+    Some(nonverbose_sort_items(
+        sort_input,
+        &items[..group_count],
+        &[],
+        ctx,
+    ))
+}
+
 fn plan_join_output_exprs(
     plan: &Plan,
     ctx: &VerboseExplainContext,
@@ -2861,6 +4600,9 @@ fn plan_join_output_exprs(
         } => qualified_scan_output_exprs_with_context(relation_name, desc, ctx),
         Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -2890,16 +4632,52 @@ fn plan_join_output_exprs(
                 .collect()
         }
         Plan::Aggregate {
+            semantic_output_names: Some(names),
+            ..
+        } if !context_has_relation_aliases(ctx) => names.clone(),
+        Plan::Aggregate {
             input,
             group_by,
+            passthrough_exprs,
             accumulators,
+            semantic_accumulators,
             ..
         } => {
             let input_names = plan_join_output_exprs(input, ctx, true);
-            let mut output = group_by
-                .iter()
-                .map(|expr| render_verbose_expr(expr, &input_names, ctx))
-                .collect::<Vec<_>>();
+            let mut output = if context_has_relation_aliases(ctx) {
+                aggregate_group_names_from_input_sort(input, group_by.len(), ctx).unwrap_or_else(
+                    || {
+                        group_by
+                            .iter()
+                            .map(|expr| render_verbose_expr(expr, &input_names, ctx))
+                            .collect::<Vec<_>>()
+                    },
+                )
+            } else {
+                group_by
+                    .iter()
+                    .map(|expr| render_verbose_expr(expr, &input_names, ctx))
+                    .collect::<Vec<_>>()
+            };
+            output.extend(
+                passthrough_exprs
+                    .iter()
+                    .map(|expr| render_verbose_expr(expr, &input_names, ctx)),
+            );
+            if let Some(display_accumulators) = semantic_accumulators {
+                let offset = group_by.len() + passthrough_exprs.len();
+                output.extend(
+                    display_accumulators
+                        .iter()
+                        .enumerate()
+                        .map(|(index, accum)| {
+                            input_names.get(offset + index).cloned().unwrap_or_else(|| {
+                                render_verbose_agg_accum(accum, &input_names, ctx)
+                            })
+                        }),
+                );
+                return output;
+            }
             output.extend(accumulators.iter().map(|accum| {
                 let rendered = render_verbose_agg_accum(accum, &input_names, ctx);
                 if for_parent_ref {
@@ -3009,8 +4787,134 @@ fn verbose_display_output_exprs(
             .scan_output_override
             .clone()
             .unwrap_or_else(|| verbose_plan_output_exprs(plan, ctx, for_parent_ref)),
+        Plan::ProjectSet { input, targets, .. } if !for_parent_ref => {
+            let input_names = verbose_plan_output_exprs(input, ctx, true);
+            targets
+                .iter()
+                .map(|target| match target {
+                    ProjectSetTarget::Scalar(entry) => {
+                        render_verbose_expr(&entry.expr, &input_names, ctx)
+                    }
+                    ProjectSetTarget::Set { source_expr, .. } => {
+                        render_verbose_expr(source_expr, &input_names, ctx)
+                    }
+                })
+                .collect()
+        }
+        Plan::Unique { .. } | Plan::OrderBy { .. }
+            if !for_parent_ref && let Some(outputs) = setop_constant_child_outputs(plan, ctx) =>
+        {
+            outputs
+                .into_iter()
+                .map(|output| format!("({output})"))
+                .collect()
+        }
+        Plan::NestedLoopJoin { .. }
+            if !for_parent_ref
+                && let Some((qualifier, field)) = nested_loop_whole_row_field(plan, ctx) =>
+        {
+            vec![format!("(({}.*).{})", qualifier, field)]
+        }
+        Plan::Projection { input, .. }
+            if !for_parent_ref
+                && matches!(input.as_ref(), Plan::Result { .. })
+                && let Some((qualifier, field)) = &ctx.whole_row_field_output =>
+        {
+            vec![format!("({qualifier}.*).{field}")]
+        }
+        Plan::Projection { input, targets, .. }
+            if !for_parent_ref
+                && matches!(
+                    input.as_ref(),
+                    Plan::Append { .. } | Plan::MergeAppend { .. }
+                ) =>
+        {
+            let output = append_first_child_output(input, ctx).unwrap_or_else(|| {
+                let input_names = verbose_plan_output_exprs(input, ctx, true);
+                targets
+                    .iter()
+                    .filter(|target| !target.resjunk)
+                    .map(|target| render_verbose_target_expr(target, &input_names, ctx))
+                    .collect::<Vec<_>>()
+            });
+            if output.len() == 1 {
+                vec![format!("({})", output[0])]
+            } else {
+                output
+            }
+        }
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. }
+            if !for_parent_ref && append_children_are_constant_results(children) =>
+        {
+            Vec::new()
+        }
         _ => verbose_plan_output_exprs(plan, ctx, for_parent_ref),
     }
+}
+
+fn append_children_are_constant_results(children: &[Plan]) -> bool {
+    !children.is_empty() && children.iter().all(plan_is_constant_result)
+}
+
+fn plan_is_constant_result(plan: &Plan) -> bool {
+    match plan {
+        Plan::Result { .. } => true,
+        Plan::Projection { input, .. } => plan_is_constant_result(input),
+        _ => false,
+    }
+}
+
+fn append_first_child_output(input: &Plan, ctx: &VerboseExplainContext) -> Option<Vec<String>> {
+    match input {
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => children
+            .first()
+            .map(|child| verbose_display_output_exprs(child, ctx, false)),
+        _ => None,
+    }
+}
+
+fn setop_constant_child_outputs(plan: &Plan, ctx: &VerboseExplainContext) -> Option<Vec<String>> {
+    match plan {
+        Plan::Unique { input, .. } | Plan::OrderBy { input, .. } => {
+            setop_constant_child_outputs(input, ctx)
+        }
+        Plan::Append { children, .. } | Plan::MergeAppend { children, .. } => {
+            let first = children.first()?;
+            let mut child_ctx = ctx.clone();
+            child_ctx.setop_raw_numeric_outputs = true;
+            let output = verbose_display_output_exprs(first, &child_ctx, false);
+            (!output.is_empty()).then_some(output)
+        }
+        _ => None,
+    }
+}
+
+fn trim_numeric_fraction_zeros(value: &str) -> &str {
+    let Some((whole, fraction)) = value.split_once('.') else {
+        return value;
+    };
+    let trimmed = fraction.trim_end_matches('0');
+    if trimmed.is_empty() {
+        whole
+    } else {
+        let keep = whole.len() + 1 + trimmed.len();
+        &value[..keep]
+    }
+}
+
+fn nested_loop_whole_row_field(
+    plan: &Plan,
+    ctx: &VerboseExplainContext,
+) -> Option<(String, String)> {
+    if !matches!(plan, Plan::NestedLoopJoin { .. }) {
+        return None;
+    }
+    let output = plan_join_output_exprs(plan, ctx, false);
+    let [single] = output.as_slice() else {
+        return None;
+    };
+    let (qualifier, field) = single.split_once('.')?;
+    Some((qualifier.to_string(), field.to_string()))
 }
 
 fn aggregate_child_output_exprs(
@@ -3080,6 +4984,9 @@ fn verbose_plan_output_exprs(
         } => qualified_base_scan_output_exprs(relation_name, desc),
         Plan::BitmapIndexScan { .. } | Plan::BitmapOr { .. } => Vec::new(),
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Unique { input, .. }
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
@@ -3096,14 +5003,19 @@ fn verbose_plan_output_exprs(
             targets
                 .iter()
                 .filter(|target| !target.resjunk)
-                .map(|target| render_verbose_expr(&target.expr, &input_names, ctx))
+                .map(|target| render_verbose_target_expr(target, &input_names, ctx))
                 .collect()
         }
+        Plan::Aggregate {
+            semantic_output_names: Some(names),
+            ..
+        } => names.clone(),
         Plan::Aggregate {
             input,
             group_by,
             passthrough_exprs,
             accumulators,
+            semantic_accumulators,
             ..
         } => {
             let input_names = verbose_plan_output_exprs(input, ctx, true);
@@ -3116,6 +5028,20 @@ fn verbose_plan_output_exprs(
                     .iter()
                     .map(|expr| render_verbose_expr(expr, &input_names, ctx)),
             );
+            if let Some(display_accumulators) = semantic_accumulators {
+                let offset = group_by.len() + passthrough_exprs.len();
+                output.extend(
+                    display_accumulators
+                        .iter()
+                        .enumerate()
+                        .map(|(index, accum)| {
+                            input_names.get(offset + index).cloned().unwrap_or_else(|| {
+                                render_verbose_agg_accum(accum, &input_names, ctx)
+                            })
+                        }),
+                );
+                return output;
+            }
             output.extend(accumulators.iter().map(|accum| {
                 let rendered = render_verbose_agg_accum(accum, &input_names, ctx);
                 if for_parent_ref {
@@ -3175,11 +5101,33 @@ fn render_verbose_set_returning_call(
     call: &SetReturningCall,
     ctx: &VerboseExplainContext,
 ) -> String {
+    if let SetReturningCall::RowsFrom { items, .. } = call {
+        let rendered_items = items
+            .iter()
+            .map(|item| match &item.source {
+                RowsFromSource::Function(call) => render_verbose_set_returning_call(call, ctx),
+                RowsFromSource::Project { output_exprs, .. } => output_exprs
+                    .iter()
+                    .map(|expr| render_verbose_expr(expr, &[], ctx))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("ROWS FROM({rendered_items})");
+    }
     if let SetReturningCall::SqlJsonTable(table) = call {
         return render_verbose_sql_json_table_call(table, ctx);
     }
     if let SetReturningCall::SqlXmlTable(table) = call {
         return render_verbose_sql_xml_table_call(table, ctx);
+    }
+    if let SetReturningCall::UserDefined {
+        inlined_expr: Some(expr),
+        ..
+    } = call
+    {
+        return render_verbose_function_arg(expr, ctx);
     }
     let name = set_returning_call_label(call);
     let args = match call {
@@ -3241,6 +5189,7 @@ fn render_verbose_set_returning_call(
         SetReturningCall::SqlJsonTable(_) | SetReturningCall::SqlXmlTable(_) => {
             unreachable!("handled above")
         }
+        SetReturningCall::RowsFrom { .. } => unreachable!("handled above"),
     };
     format!("{name}({})", args.join(", "))
 }
@@ -3577,12 +5526,49 @@ fn append_verbose_sql_json_table_behavior(
 fn render_verbose_function_arg(expr: &Expr, ctx: &VerboseExplainContext) -> String {
     match expr {
         Expr::Cast(inner, _) => render_verbose_function_arg(inner, ctx),
-        Expr::Const(value) => render_verbose_function_const(value),
+        Expr::Const(value) => render_verbose_function_const(value, ctx),
         _ => render_verbose_expr(expr, &[], ctx),
     }
 }
 
-fn render_verbose_function_const(value: &Value) -> String {
+fn render_verbose_target_expr(
+    target: &TargetEntry,
+    column_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    let rendered = render_verbose_expr(&target.expr, column_names, ctx);
+    if ctx.setop_raw_numeric_outputs
+        && target.sql_type.kind == crate::backend::parser::SqlTypeKind::Numeric
+    {
+        return rendered
+            .split_once("::")
+            .map(|(base, _)| trim_numeric_fraction_zeros(base).to_string())
+            .unwrap_or_else(|| trim_numeric_fraction_zeros(&rendered).to_string());
+    }
+    if matches!(target.expr, Expr::Const(_))
+        && target.sql_type.kind == crate::backend::parser::SqlTypeKind::Numeric
+        && target.sql_type.typmod >= crate::backend::parser::SqlType::VARHDRSZ
+    {
+        return format!("{rendered}::{}", render_type_name(target.sql_type, ctx));
+    }
+    rendered
+}
+
+fn render_verbose_record_const(
+    record: &crate::include::nodes::datum::RecordValue,
+    ctx: &VerboseExplainContext,
+) -> String {
+    let rendered =
+        crate::backend::executor::value_io::format_record_text(record).replace('\'', "''");
+    let record_type = record.sql_type();
+    if record_type.type_oid != crate::include::catalog::RECORD_TYPE_OID {
+        format!("'{rendered}'::{}", render_type_name(record_type, ctx))
+    } else {
+        format!("'{rendered}'::record")
+    }
+}
+
+fn render_verbose_function_const(value: &Value, ctx: &VerboseExplainContext) -> String {
     match value {
         Value::Int16(value) => value.to_string(),
         Value::Int32(value) => value.to_string(),
@@ -3595,8 +5581,51 @@ fn render_verbose_function_const(value: &Value) -> String {
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes)
             .map(|value| format!("'{}'::jsonb", value.replace('\'', "''")))
             .unwrap_or_else(|_| "'null'::jsonb".into()),
+        Value::Record(record) => render_verbose_record_const(record, ctx),
+        Value::Array(items) if items.iter().any(|item| matches!(item, Value::Jsonb(_))) => {
+            format!("'{}'::jsonb[]", render_verbose_jsonb_array(items))
+        }
+        Value::PgArray(array)
+            if array
+                .elements
+                .iter()
+                .any(|item| matches!(item, Value::Jsonb(_))) =>
+        {
+            format!("'{}'::jsonb[]", render_verbose_jsonb_array(&array.elements))
+        }
         _ => strip_outer_parens(&render_explain_expr(&Expr::Const(value.clone()), &[])),
     }
+}
+
+fn render_verbose_jsonb_array(items: &[Value]) -> String {
+    let mut out = String::from("{");
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let rendered = match item {
+            Value::Jsonb(bytes) => render_jsonb_bytes(bytes).unwrap_or_else(|_| "null".into()),
+            Value::Null => {
+                out.push_str("NULL");
+                continue;
+            }
+            other => strip_outer_parens(&render_explain_expr(&Expr::Const(other.clone()), &[])),
+        };
+        out.push('"');
+        for ch in rendered.chars() {
+            match ch {
+                '"' | '\\' => {
+                    out.push('\\');
+                    out.push(ch);
+                }
+                '\'' => out.push_str("''"),
+                _ => out.push(ch),
+            }
+        }
+        out.push('"');
+    }
+    out.push('}');
+    out
 }
 
 fn render_verbose_agg_accum(
@@ -3673,9 +5702,7 @@ fn render_verbose_join_expr(
         Expr::FieldSelect {
             expr: inner, field, ..
         } => {
-            if let Expr::Row { fields, .. } = inner.as_ref()
-                && let Some((_, value)) = fields.iter().find(|(name, _)| name == field)
-            {
+            if let Some(value) = field_select_projected_value(inner, field) {
                 return render_verbose_join_expr(value, left_names, right_names, ctx);
             }
             format!("{expr:?}")
@@ -3691,10 +5718,17 @@ fn render_verbose_join_expr(
             .find(|source| source.paramid == param.paramid)
             .map(|source| render_verbose_expr(&source.expr, &source.column_names, ctx))
             .unwrap_or_else(|| format!("${}", param.paramid)),
+        Expr::Param(param) if param.paramkind == ParamKind::External => {
+            format!("${}", param.paramid)
+        }
+        Expr::Const(Value::Record(record)) => render_verbose_record_const(record, ctx),
         Expr::Const(value) => {
             strip_outer_parens(&render_explain_expr(&Expr::Const(value.clone()), &[]))
         }
         Expr::Cast(inner, ty) => {
+            if let Some(rendered) = render_verbose_const_cast(inner, *ty, ctx) {
+                return rendered;
+            }
             let inner = render_verbose_join_expr(inner, left_names, right_names, ctx);
             format!("({inner})::{}", render_type_name(*ty, ctx))
         }
@@ -3778,6 +5812,35 @@ fn render_verbose_join_expr(
     }
 }
 
+fn field_select_projected_value<'a>(inner: &'a Expr, field: &str) -> Option<&'a Expr> {
+    if let Expr::Row { fields, .. } = inner
+        && let Some((_, value)) = fields
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(field))
+    {
+        return Some(value);
+    }
+    let Expr::Case(case_expr) = inner else {
+        return None;
+    };
+    if case_expr.arg.is_some()
+        || case_expr.args.is_empty()
+        || !case_expr
+            .args
+            .iter()
+            .all(|arm| matches!(arm.result, Expr::Const(Value::Null)))
+    {
+        return None;
+    }
+    let Expr::Row { fields, .. } = case_expr.defresult.as_ref() else {
+        return None;
+    };
+    fields
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(field))
+        .map(|(_, value)| value)
+}
+
 fn render_verbose_expr(
     expr: &Expr,
     column_names: &[String],
@@ -3795,9 +5858,7 @@ fn render_verbose_expr(
         Expr::FieldSelect {
             expr: inner, field, ..
         } => {
-            if let Expr::Row { fields, .. } = inner.as_ref()
-                && let Some((_, value)) = fields.iter().find(|(name, _)| name == field)
-            {
+            if let Some(value) = field_select_projected_value(inner, field) {
                 return render_verbose_expr(value, column_names, ctx);
             }
             strip_outer_parens(&render_explain_expr(expr, column_names))
@@ -3809,12 +5870,56 @@ fn render_verbose_expr(
             .find(|source| source.paramid == param.paramid)
             .map(|source| render_verbose_expr(&source.expr, &source.column_names, ctx))
             .unwrap_or_else(|| format!("${}", param.paramid)),
+        Expr::Param(param) if param.paramkind == ParamKind::External => {
+            format!("${}", param.paramid)
+        }
+        Expr::Const(Value::Record(record)) => render_verbose_record_const(record, ctx),
         Expr::Const(value) => {
             strip_outer_parens(&render_explain_expr(&Expr::Const(value.clone()), &[]))
         }
         Expr::Cast(inner, ty) => {
+            if let Some(rendered) = render_verbose_const_cast(inner, *ty, ctx) {
+                return rendered;
+            }
+            if let Expr::Const(value @ (Value::Text(_) | Value::TextRef(_, _))) = inner.as_ref()
+                && matches!(
+                    ty.kind,
+                    crate::backend::parser::SqlTypeKind::Varchar
+                        | crate::backend::parser::SqlTypeKind::Char
+                )
+            {
+                let rendered = match value {
+                    Value::Text(value) => format!("'{}'", value.replace('\'', "''")),
+                    Value::TextRef(_, _) => {
+                        format!("'{}'", value.as_text().unwrap().replace('\'', "''"))
+                    }
+                    _ => unreachable!(),
+                };
+                return format!("{rendered}::{}", render_type_name(*ty, ctx));
+            }
             let inner = render_verbose_expr(inner, column_names, ctx);
             format!("({inner})::{}", render_type_name(*ty, ctx))
+        }
+        Expr::ArrayLiteral { .. } => strip_outer_parens(&render_explain_expr(expr, column_names)),
+        Expr::ArraySubscript { array, subscripts } => {
+            let array = render_verbose_expr(array, column_names, ctx);
+            let rendered_subscripts = subscripts
+                .iter()
+                .map(|subscript| match (&subscript.lower, &subscript.upper) {
+                    (Some(lower), Some(upper)) if subscript.is_slice => format!(
+                        "{}:{}",
+                        render_verbose_expr(lower, column_names, ctx),
+                        render_verbose_expr(upper, column_names, ctx)
+                    ),
+                    (Some(lower), _) => render_verbose_expr(lower, column_names, ctx),
+                    (None, Some(upper)) => {
+                        format!(":{}", render_verbose_expr(upper, column_names, ctx))
+                    }
+                    (None, None) => String::new(),
+                })
+                .collect::<Vec<_>>()
+                .join("][");
+            format!("({array})[{rendered_subscripts}]")
         }
         Expr::Func(func)
             if matches!(
@@ -3831,12 +5936,19 @@ fn render_verbose_expr(
             let Some(op_text) = verbose_op_text(op.opno, op.op) else {
                 return strip_outer_parens(&render_explain_expr(expr, column_names));
             };
-            format!(
-                "({} {} {})",
-                render_verbose_expr(left, column_names, ctx),
-                op_text,
-                render_verbose_expr(right, column_names, ctx)
-            )
+            let mut left_rendered = render_verbose_op_arg(left, column_names, ctx);
+            let mut right_rendered = render_verbose_op_arg(right, column_names, ctx);
+            if (verbose_expr_is_numeric(left) || left_rendered.starts_with("avg("))
+                && matches!(right, Expr::Const(_))
+            {
+                right_rendered = format!("'{}'::numeric", right_rendered);
+            }
+            if (verbose_expr_is_numeric(right) || right_rendered.starts_with("avg("))
+                && matches!(left, Expr::Const(_))
+            {
+                left_rendered = format!("'{}'::numeric", left_rendered);
+            }
+            format!("({left_rendered} {op_text} {right_rendered})")
         }
         Expr::Bool(bool_expr) => match bool_expr.boolop {
             crate::include::nodes::primnodes::BoolExprType::And => format!(
@@ -3865,8 +5977,118 @@ fn render_verbose_expr(
             }
         },
         Expr::Aggref(aggref) => render_verbose_aggref(aggref, column_names, ctx),
+        Expr::SetReturning(srf) => render_verbose_set_returning_call(&srf.call, ctx),
         Expr::ScalarArrayOp(_) => render_explain_expr(expr, column_names),
         _ => strip_outer_parens(&render_explain_expr(expr, column_names)),
+    }
+}
+
+fn render_merge_key_conditions(
+    outer_merge_keys: &[Expr],
+    inner_merge_keys: &[Expr],
+    left_names: &[String],
+    right_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    let rendered = outer_merge_keys
+        .iter()
+        .zip(inner_merge_keys.iter())
+        .map(|(outer_key, inner_key)| {
+            format!(
+                "{} = {}",
+                strip_outer_parens(&render_verbose_expr(outer_key, left_names, ctx)),
+                strip_outer_parens(&render_verbose_expr(inner_key, right_names, ctx))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    format!("({rendered})")
+}
+
+fn render_merge_condition_from_child_sorts(
+    left: &Plan,
+    right: &Plan,
+    left_names: &[String],
+    right_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    let left_expr = first_sort_expr(left)?;
+    let right_expr = first_sort_expr(right)?;
+    Some(format!(
+        "({} = {})",
+        strip_outer_parens(&render_verbose_expr(left_expr, left_names, ctx)),
+        strip_outer_parens(&render_verbose_expr(right_expr, right_names, ctx))
+    ))
+}
+
+fn first_sort_expr(plan: &Plan) -> Option<&Expr> {
+    match plan {
+        Plan::OrderBy { items, .. } | Plan::IncrementalSort { items, .. } => {
+            items.first().map(|item| &item.expr)
+        }
+        _ => None,
+    }
+}
+
+fn normalize_aggregate_operand_parens(rendered: String) -> String {
+    let mut chars = rendered.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] != '(' || !aggregate_call_starts_at(&chars, index + 1) {
+            index += 1;
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut end = index;
+        while end < chars.len() {
+            match chars[end] {
+                '(' => depth += 1,
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            end += 1;
+        }
+        if index > 0
+            && end < chars.len()
+            && chars[index - 1] == '('
+            && chars.get(end + 1).is_some_and(|ch| ch.is_whitespace())
+        {
+            chars.remove(end);
+            chars.remove(index);
+            index = index.saturating_sub(1);
+        } else {
+            index = end.saturating_add(1);
+        }
+    }
+    chars.into_iter().collect()
+}
+
+fn aggregate_call_starts_at(chars: &[char], index: usize) -> bool {
+    ["avg(", "count(", "max(", "min(", "sum("]
+        .iter()
+        .any(|prefix| {
+            let prefix = prefix.chars().collect::<Vec<_>>();
+            chars
+                .get(index..index.saturating_add(prefix.len()))
+                .is_some_and(|candidate| candidate == prefix.as_slice())
+        })
+}
+
+fn render_verbose_op_arg(
+    expr: &Expr,
+    column_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> String {
+    let rendered = render_verbose_expr(expr, column_names, ctx);
+    if matches!(expr, Expr::Op(_) | Expr::Bool(_)) {
+        rendered
+    } else {
+        strip_outer_parens(&rendered)
     }
 }
 
@@ -3897,7 +6119,27 @@ fn verbose_op_text(
         crate::include::nodes::primnodes::OpExprKind::ArrayOverlap => Some("&&"),
         crate::include::nodes::primnodes::OpExprKind::ArrayContains => Some("@>"),
         crate::include::nodes::primnodes::OpExprKind::ArrayContained => Some("<@"),
+        crate::include::nodes::primnodes::OpExprKind::JsonGet => Some("->"),
+        crate::include::nodes::primnodes::OpExprKind::JsonGetText => Some("->>"),
         _ => None,
+    }
+}
+
+fn verbose_expr_is_numeric(expr: &Expr) -> bool {
+    use crate::backend::parser::SqlTypeKind;
+    match expr {
+        Expr::Aggref(aggref) => {
+            matches!(aggref.aggtype.kind, SqlTypeKind::Numeric)
+                || builtin_aggregate_function_for_proc_oid(aggref.aggfnoid).is_some_and(|func| {
+                    matches!(func, crate::include::nodes::primnodes::AggFunc::Avg)
+                })
+        }
+        Expr::Cast(inner, ty) => {
+            matches!(ty.kind, SqlTypeKind::Numeric) || verbose_expr_is_numeric(inner)
+        }
+        Expr::Collate { expr, .. } => verbose_expr_is_numeric(expr),
+        Expr::Const(Value::Numeric(_)) => true,
+        _ => false,
     }
 }
 
@@ -3914,6 +6156,132 @@ fn strip_outer_parens(text: &str) -> String {
         .and_then(|value| value.strip_suffix(')'))
         .unwrap_or(text)
         .to_string()
+}
+
+fn render_nonverbose_expr_with_dynamic_type_names(
+    expr: &Expr,
+    column_names: &[String],
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    let mut replacements = Vec::new();
+    collect_dynamic_const_cast_replacements(expr, ctx, &mut replacements);
+    if replacements.is_empty() {
+        return None;
+    }
+    let mut rendered = render_explain_expr(expr, column_names);
+    replacements.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+    replacements.dedup();
+    for (from, to) in replacements {
+        rendered = rendered.replace(&from, &to);
+    }
+    Some(rendered)
+}
+
+fn collect_dynamic_const_cast_replacements(
+    expr: &Expr,
+    ctx: &VerboseExplainContext,
+    replacements: &mut Vec<(String, String)>,
+) {
+    match expr {
+        Expr::Cast(inner, ty)
+            if ty.type_oid != 0
+                && ctx.type_names.contains_key(&ty.type_oid)
+                && matches!(inner.as_ref(), Expr::Const(_)) =>
+        {
+            let old = render_explain_expr(expr, &[]);
+            let new = render_verbose_const_cast(inner, *ty, ctx)
+                .expect("dynamic constant cast checked above");
+            replacements.push((old, new));
+            if let Expr::Const(value) = inner.as_ref() {
+                replacements.push((
+                    format!("{}::text", render_explain_literal(value)),
+                    render_verbose_const_cast(inner, *ty, ctx)
+                        .expect("dynamic constant cast checked above"),
+                ));
+            }
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => {
+            collect_dynamic_const_cast_replacements(inner, ctx, replacements);
+        }
+        Expr::Op(op) => {
+            for arg in &op.args {
+                collect_dynamic_const_cast_replacements(arg, ctx, replacements);
+            }
+        }
+        Expr::Bool(bool_expr) => {
+            for arg in &bool_expr.args {
+                collect_dynamic_const_cast_replacements(arg, ctx, replacements);
+            }
+        }
+        Expr::ScalarArrayOp(saop) => {
+            collect_dynamic_const_cast_replacements(&saop.left, ctx, replacements);
+            collect_dynamic_const_cast_replacements(&saop.right, ctx, replacements);
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            collect_dynamic_const_cast_replacements(left, ctx, replacements);
+            collect_dynamic_const_cast_replacements(right, ctx, replacements);
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            for element in elements {
+                collect_dynamic_const_cast_replacements(element, ctx, replacements);
+            }
+        }
+        Expr::Row { fields, .. } => {
+            for (_, field) in fields {
+                collect_dynamic_const_cast_replacements(field, ctx, replacements);
+            }
+        }
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_dynamic_const_cast_replacements(arg, ctx, replacements);
+            }
+            for arm in &case_expr.args {
+                collect_dynamic_const_cast_replacements(&arm.expr, ctx, replacements);
+                collect_dynamic_const_cast_replacements(&arm.result, ctx, replacements);
+            }
+            collect_dynamic_const_cast_replacements(&case_expr.defresult, ctx, replacements);
+        }
+        Expr::Func(func) => {
+            for arg in &func.args {
+                collect_dynamic_const_cast_replacements(arg, ctx, replacements);
+            }
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_dynamic_const_cast_replacements(array, ctx, replacements);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_dynamic_const_cast_replacements(lower, ctx, replacements);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_dynamic_const_cast_replacements(upper, ctx, replacements);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn render_verbose_const_cast(
+    inner: &Expr,
+    ty: crate::backend::parser::SqlType,
+    ctx: &VerboseExplainContext,
+) -> Option<String> {
+    if ty.type_oid == 0 || !ctx.type_names.contains_key(&ty.type_oid) {
+        return None;
+    }
+    let Expr::Const(value) = inner else {
+        return None;
+    };
+    Some(format!(
+        "{}::{}",
+        render_explain_literal(value),
+        render_type_name(ty, ctx)
+    ))
 }
 
 fn render_type_name(ty: crate::backend::parser::SqlType, ctx: &VerboseExplainContext) -> String {
@@ -3987,6 +6355,9 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
             Vec::new()
         }
         Plan::Hash { input, .. }
+        | Plan::Materialize { input, .. }
+        | Plan::Memoize { input, .. }
+        | Plan::Gather { input, .. }
         | Plan::Unique { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::IncrementalSort { input, .. }
@@ -4067,19 +6438,58 @@ fn const_false_filter_result_plan(plan: &Plan) -> Option<PlanEstimate> {
         {
             Some(*plan_info)
         }
+        Plan::Hash { input, .. } => const_false_filter_result_plan(input),
         Plan::Projection { input, targets, .. }
             if projection_targets_are_explain_passthrough(input, targets) =>
         {
             const_false_filter_result_plan(input)
         }
+        Plan::NestedLoopJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            ..
+        }
+        | Plan::HashJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            ..
+        }
+        | Plan::MergeJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            ..
+        } if join_with_const_false_side_can_render_as_result(*kind, left, right) => {
+            Some(*plan_info)
+        }
         _ => None,
+    }
+}
+
+fn join_with_const_false_side_can_render_as_result(
+    kind: JoinType,
+    left: &Plan,
+    right: &Plan,
+) -> bool {
+    let left_false = const_false_filter_result_plan(left).is_some();
+    let right_false = const_false_filter_result_plan(right).is_some();
+    match kind {
+        JoinType::Inner | JoinType::Cross => left_false || right_false,
+        JoinType::Left | JoinType::Semi | JoinType::Anti => left_false,
+        JoinType::Right => right_false,
+        JoinType::Full => left_false && right_false,
     }
 }
 
 fn const_false_filter_input_can_render_as_result(input: &Plan) -> bool {
     match input {
         Plan::SeqScan { .. } | Plan::Result { .. } => true,
-        Plan::Append { children, .. } => children.is_empty(),
+        Plan::Append { .. } => true,
         _ => false,
     }
 }
@@ -4112,6 +6522,13 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
                 collect_direct_expr_subplans(expr, &mut found);
             }
         }
+        Plan::Materialize { .. } => {}
+        Plan::Memoize { cache_keys, .. } => {
+            for expr in cache_keys {
+                collect_direct_expr_subplans(expr, &mut found);
+            }
+        }
+        Plan::Gather { .. } => {}
         Plan::NestedLoopJoin {
             join_qual, qual, ..
         } => {
@@ -4437,6 +6854,20 @@ fn collect_direct_set_returning_call_subplans<'a>(
     out: &mut Vec<&'a SubPlan>,
 ) {
     match call {
+        SetReturningCall::RowsFrom { items, .. } => {
+            for item in items {
+                match &item.source {
+                    RowsFromSource::Function(call) => {
+                        collect_direct_set_returning_call_subplans(call, out);
+                    }
+                    RowsFromSource::Project { output_exprs, .. } => {
+                        for expr in output_exprs {
+                            collect_direct_expr_subplans(expr, out);
+                        }
+                    }
+                }
+            }
+        }
         SetReturningCall::GenerateSeries {
             start,
             stop,

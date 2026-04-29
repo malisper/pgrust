@@ -34,6 +34,11 @@ path = "src/bin/bench_insert.rs"
 required-features = ["tools"]
 
 [[bin]]
+name = "btree_pk_build_profile"
+path = "src/bin/btree_pk_build_profile.rs"
+required-features = ["tools"]
+
+[[bin]]
 name = "bufmgr_e2e"
 path = "src/bin/bufmgr_e2e.rs"
 required-features = ["tools"]

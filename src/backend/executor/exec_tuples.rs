@@ -14,6 +14,7 @@ use crate::include::access::htup::HEAP_NATTS_MASK;
 use crate::include::access::htup::{AttributeDesc, HEAP_HASNULL, SIZEOF_HEAP_TUPLE_HEADER};
 use crate::include::nodes::datum::{GeoBox, GeoCircle, GeoLine, GeoLseg, GeoPoint};
 use crate::include::nodes::execnodes::{RelationDesc, ScalarType, Value};
+use crate::pgrust::compact_string::CompactString;
 
 /// A precomputed decode step for one column, eliminating per-tuple type
 /// dispatch and alignment computation.
@@ -247,12 +248,26 @@ impl CompiledTupleDecoder {
                             data[off + 3],
                         ]);
                         let total_len = (raw >> 2) as usize;
-                        let start = off + 4;
                         let end = off + total_len;
-                        values.push(Value::TextRef(
-                            data[start..end].as_ptr(),
-                            (end - start) as u32,
-                        ));
+                        if crate::include::varatt::is_compressed_inline_datum(&data[off..end]) {
+                            let decompressed =
+                                crate::backend::access::common::toast_compression::decompress_inline_datum(
+                                    &data[off..end],
+                                )?;
+                            let text = std::str::from_utf8(&decompressed).map_err(|_| {
+                                ExecError::InvalidStorageValue {
+                                    column: "<text>".into(),
+                                    details: "compressed text is not valid UTF-8".into(),
+                                }
+                            })?;
+                            values.push(Value::Text(CompactString::new(text)));
+                        } else {
+                            let start = off + 4;
+                            values.push(Value::TextRef(
+                                data[start..end].as_ptr(),
+                                (end - start) as u32,
+                            ));
+                        }
                         off = end;
                     }
                 }

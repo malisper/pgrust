@@ -8,26 +8,37 @@ use super::expr_json::{
 use super::expr_txid::eval_txid_snapshot_xip_values;
 use super::expr_xml::eval_sql_xml_table;
 use super::pg_regex::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows};
-use super::sqlfunc::execute_user_defined_sql_set_returning_function;
+use super::sqlfunc::{
+    execute_user_defined_sql_scalar_function, execute_user_defined_sql_set_returning_function,
+};
 use super::{ExecError, ExecutorContext, Expr, SetReturningCall, TupleSlot, Value, eval_expr};
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
 use crate::backend::access::index::buildkeys::materialize_heap_row_values;
 use crate::backend::commands::partition::{partition_ancestor_oids, partition_tree_entries};
 use crate::backend::parser::{CatalogLookup, SqlTypeKind};
-use crate::backend::utils::cache::system_views::build_pg_get_publication_tables_rows;
+use crate::backend::statistics::types::decode_pg_mcv_list_payload;
+use crate::backend::utils::cache::system_views::{
+    build_pg_get_publication_tables_rows, build_pg_stat_io_rows,
+};
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::utils::time::datetime::{
     current_timezone_name, days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
 };
 use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
-use crate::include::catalog::builtin_scalar_function_for_proc_oid;
+use crate::include::catalog::{BOOL_TYPE_OID, TEXT_TYPE_OID, builtin_scalar_function_for_proc_oid};
 use crate::include::nodes::datetime::{
     TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
 };
-use crate::include::nodes::datum::{IntervalValue, NumericValue, RecordValue};
-use crate::include::nodes::primnodes::{TextSearchTableFunction, expr_sql_type_hint};
+use crate::include::nodes::datum::{ArrayValue, IntervalValue, NumericValue, RecordValue};
+use crate::include::nodes::primnodes::{
+    QueryColumn, RowsFromItem, RowsFromSource, TextSearchTableFunction, expr_sql_type_hint,
+    set_returning_call_exprs,
+};
 use crate::include::nodes::tsearch::TsWeight;
-use crate::pl::plpgsql::execute_user_defined_set_returning_function;
+use crate::pl::plpgsql::{
+    current_event_trigger_ddl_commands, current_event_trigger_dropped_objects,
+    execute_user_defined_set_returning_function,
+};
 
 const MAX_UNBOUNDED_TIMESTAMP_SERIES_ROWS: usize = 10_000;
 
@@ -37,6 +48,7 @@ pub(crate) fn eval_set_returning_call(
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
     let mut rows = match call {
+        SetReturningCall::RowsFrom { items, .. } => eval_rows_from(items, slot, ctx),
         SetReturningCall::GenerateSeries {
             start,
             stop,
@@ -59,7 +71,17 @@ pub(crate) fn eval_set_returning_call(
             reverse,
             ..
         } => eval_generate_subscripts(array, dimension, reverse.as_ref(), slot, ctx),
-        SetReturningCall::Unnest { args, .. } => eval_unnest(args, slot, ctx),
+        SetReturningCall::Unnest {
+            args,
+            output_columns,
+            with_ordinality,
+            ..
+        } => eval_unnest(
+            args,
+            function_output_columns(output_columns, *with_ordinality),
+            slot,
+            ctx,
+        ),
         SetReturningCall::JsonTableFunction { kind, args, .. } => {
             eval_json_table_function(*kind, args, slot, ctx)
         }
@@ -70,11 +92,12 @@ pub(crate) fn eval_set_returning_call(
             args,
             output_columns,
             record_type,
+            with_ordinality,
             ..
         } => eval_json_record_set_returning_function(
             *kind,
             args,
-            output_columns,
+            function_output_columns(output_columns, *with_ordinality),
             *record_type,
             slot,
             ctx,
@@ -97,15 +120,24 @@ pub(crate) fn eval_set_returning_call(
         SetReturningCall::UserDefined {
             proc_oid,
             args,
+            inlined_expr,
             output_columns,
+            with_ordinality,
             ..
-        } => execute_user_defined_set_returning_function_by_language(
-            *proc_oid,
-            args,
-            output_columns,
-            slot,
-            ctx,
-        ),
+        } => {
+            let output_columns = function_output_columns(output_columns, *with_ordinality);
+            if let Some(inlined_expr) = inlined_expr {
+                eval_inlined_user_defined_function_scan(inlined_expr, output_columns, slot, ctx)
+            } else {
+                execute_user_defined_set_returning_function_by_language(
+                    *proc_oid,
+                    args,
+                    output_columns,
+                    slot,
+                    ctx,
+                )
+            }
+        }
     }?;
     if call.with_ordinality() {
         for (index, row) in rows.iter_mut().enumerate() {
@@ -114,6 +146,238 @@ pub(crate) fn eval_set_returning_call(
         }
     }
     Ok(rows)
+}
+
+fn eval_inlined_user_defined_function_scan(
+    expr: &Expr,
+    output_columns: &[QueryColumn],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let value = crate::backend::executor::eval_expr(expr, slot, ctx)?;
+    single_row_function_scan_slots(value, output_columns)
+}
+
+fn single_row_function_scan_slots(
+    value: Value,
+    output_columns: &[QueryColumn],
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let values = match value {
+        Value::Record(record) if output_columns.len() == record.fields.len() => record.fields,
+        Value::Null if output_columns.len() != 1 => {
+            std::iter::repeat_n(Value::Null, output_columns.len()).collect()
+        }
+        other if output_columns.len() == 1 => vec![other],
+        other => vec![other],
+    };
+    Ok(vec![TupleSlot::virtual_row(values)])
+}
+
+fn function_output_columns(
+    output_columns: &[QueryColumn],
+    with_ordinality: bool,
+) -> &[QueryColumn] {
+    if with_ordinality {
+        output_columns
+            .split_last()
+            .map(|(_, base)| base)
+            .unwrap_or(output_columns)
+    } else {
+        output_columns
+    }
+}
+
+fn eval_rows_from(
+    items: &[RowsFromItem],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let mut function_rows = Vec::with_capacity(items.len());
+    let mut max_rows = 0;
+    for (item_index, item) in items.iter().enumerate() {
+        let rows = eval_rows_from_item_cached(item_index, item, slot, ctx)?;
+        max_rows = max_rows.max(rows.len());
+        function_rows.push(rows);
+    }
+
+    let mut output = Vec::with_capacity(max_rows);
+    for row_index in 0..max_rows {
+        let mut values = Vec::new();
+        for (item, rows) in items.iter().zip(function_rows.iter_mut()) {
+            let width = item.output_columns().len();
+            if let Some(row) = rows.get_mut(row_index) {
+                values.extend(row.values()?.iter().cloned());
+            } else {
+                values.extend(std::iter::repeat_n(Value::Null, width));
+            }
+        }
+        output.push(TupleSlot::virtual_row(values));
+    }
+    Ok(output)
+}
+
+fn eval_rows_from_item_cached(
+    item_index: usize,
+    item: &RowsFromItem,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    if rows_from_item_uses_outer_columns(item) {
+        return eval_rows_from_item(item, slot, ctx);
+    }
+
+    // :HACK: Executor SRF expressions do not currently carry a stable plan-node
+    // id, and lateral rescans rebuild the inner plan state. Use the item index
+    // plus the planned source shape so uncorrelated ROWS FROM items can keep
+    // PostgreSQL's tuplestore-like rescan behavior across those rebuilds.
+    let cache_key = format!("rows_from_item:{item_index}:{:?}", item.source);
+    if let Some(rows) = ctx.srf_rows_cache.get(&cache_key) {
+        return Ok(rows.clone());
+    }
+
+    let mut rows = eval_rows_from_item(item, slot, ctx)?;
+    for row in &mut rows {
+        row.values()?;
+        Value::materialize_all(&mut row.tts_values);
+    }
+    ctx.srf_rows_cache.insert(cache_key, rows.clone());
+    Ok(rows)
+}
+
+fn eval_rows_from_item(
+    item: &RowsFromItem,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    match &item.source {
+        RowsFromSource::Function(call) => eval_set_returning_call(call, slot, ctx),
+        RowsFromSource::Project { output_exprs, .. } => Ok(vec![TupleSlot::virtual_row(
+            output_exprs
+                .iter()
+                .map(|expr| eval_expr(expr, slot, ctx))
+                .collect::<Result<Vec<_>, _>>()?,
+        )]),
+    }
+}
+
+fn rows_from_item_uses_outer_columns(item: &RowsFromItem) -> bool {
+    match &item.source {
+        RowsFromSource::Function(call) => set_returning_call_exprs(call)
+            .into_iter()
+            .any(expr_uses_outer_columns),
+        RowsFromSource::Project { output_exprs, .. } => {
+            output_exprs.iter().any(expr_uses_outer_columns)
+        }
+    }
+}
+
+fn expr_uses_outer_columns(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup > 0,
+        Expr::Param(_) => true,
+        Expr::Aggref(aggref) => {
+            aggref.args.iter().any(expr_uses_outer_columns)
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_uses_outer_columns)
+        }
+        Expr::WindowFunc(window_func) => {
+            window_func.args.iter().any(expr_uses_outer_columns)
+                || match &window_func.kind {
+                    crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => aggref
+                        .aggfilter
+                        .as_ref()
+                        .is_some_and(expr_uses_outer_columns),
+                    crate::include::nodes::primnodes::WindowFuncKind::Builtin(_) => false,
+                }
+        }
+        Expr::Op(op) => op.args.iter().any(expr_uses_outer_columns),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_uses_outer_columns),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_uses_outer_columns)
+                || case_expr.args.iter().any(|arm| {
+                    expr_uses_outer_columns(&arm.expr) || expr_uses_outer_columns(&arm.result)
+                })
+                || expr_uses_outer_columns(&case_expr.defresult)
+        }
+        Expr::CaseTest(_) => false,
+        Expr::Func(func) => func.args.iter().any(expr_uses_outer_columns),
+        Expr::SqlJsonQueryFunction(func) => {
+            func.child_exprs().into_iter().any(expr_uses_outer_columns)
+        }
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_uses_outer_columns),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_uses_outer_columns),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_uses_outer_columns),
+        Expr::ScalarArrayOp(saop) => {
+            expr_uses_outer_columns(&saop.left) || expr_uses_outer_columns(&saop.right)
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => expr_uses_outer_columns(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_uses_outer_columns(expr)
+                || expr_uses_outer_columns(pattern)
+                || escape.as_deref().is_some_and(expr_uses_outer_columns)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_uses_outer_columns(left) || expr_uses_outer_columns(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_uses_outer_columns),
+        Expr::Row { fields, .. } => fields.iter().any(|(_, expr)| expr_uses_outer_columns(expr)),
+        Expr::FieldSelect { expr, .. } => expr_uses_outer_columns(expr),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_uses_outer_columns(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_uses_outer_columns)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_uses_outer_columns)
+                })
+        }
+        Expr::Xml(xml) => xml.child_exprs().any(expr_uses_outer_columns),
+        Expr::Const(_)
+        | Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
 }
 
 pub(crate) fn eval_set_returning_call_simple_values(
@@ -191,6 +455,10 @@ fn execute_user_defined_set_returning_function_by_language(
     if row.proname.eq_ignore_ascii_case("pg_show_all_settings") {
         return Ok(eval_pg_show_all_settings(output_columns));
     }
+    if !row.proretset && row.prolang == crate::include::catalog::PG_LANGUAGE_SQL_OID {
+        let value = execute_user_defined_sql_scalar_function(&row, args, slot, ctx)?;
+        return single_row_function_scan_slots(value, output_columns);
+    }
     if row.prolang == crate::include::catalog::PG_LANGUAGE_SQL_OID {
         execute_user_defined_sql_set_returning_function(&row, args, output_columns, slot, ctx)
     } else if let Some(kind) = text_search_table_function_for_proc_src(&row.prosrc) {
@@ -246,8 +514,18 @@ fn execute_native_set_returning_function(
             Value::Interval(IntervalValue::zero()),
             Value::Bool(false),
         ])]),
+        "pg_stat_get_backend_idset" => Some(vec![TupleSlot::virtual_row(vec![Value::Int32(
+            ctx.database
+                .as_ref()
+                .map(|db| db.temp_backend_id(ctx.client_id) as i32)
+                .unwrap_or(ctx.client_id as i32),
+        )])]),
+        "pg_stat_get_backend_io" => Some(eval_pg_stat_get_backend_io(&values, ctx)),
         "pg_tablespace_databases" => Some(eval_pg_tablespace_databases(&values)),
         "pg_get_publication_tables" => Some(eval_pg_get_publication_tables(&values, ctx)?),
+        "pg_event_trigger_ddl_commands" => Some(eval_pg_event_trigger_ddl_commands()),
+        "pg_event_trigger_dropped_objects" => Some(eval_pg_event_trigger_dropped_objects()),
+        "pg_stats_ext_mcvlist_items" => Some(eval_pg_mcv_list_items(&values)?),
         _ => {
             if let Some(func) = builtin_scalar_function_for_proc_oid(row.oid) {
                 let value = eval_native_builtin_scalar_value_call(func, &values, false, ctx)?;
@@ -261,6 +539,128 @@ fn execute_native_set_returning_function(
         }
     };
     Ok(rows)
+}
+
+fn eval_pg_stat_get_backend_io(values: &[Value], ctx: &ExecutorContext) -> Vec<TupleSlot> {
+    let pid = values.first().and_then(|value| match value {
+        Value::Int32(value) => Some(*value),
+        Value::Int64(value) => i32::try_from(*value).ok(),
+        _ => None,
+    });
+    if pid != Some(ctx.client_id as i32) {
+        return Vec::new();
+    }
+    let io = ctx
+        .session_stats
+        .read()
+        .backend_io_entries(crate::backend::utils::activity::default_pg_stat_io_keys());
+    let stats = crate::pgrust::database::DatabaseStatsStore {
+        io,
+        ..crate::pgrust::database::DatabaseStatsStore::default()
+    };
+    build_pg_stat_io_rows(&stats)
+        .into_iter()
+        .map(TupleSlot::virtual_row)
+        .collect()
+}
+
+fn eval_pg_event_trigger_dropped_objects() -> Vec<TupleSlot> {
+    current_event_trigger_dropped_objects()
+        .into_iter()
+        .map(|row| {
+            TupleSlot::virtual_row(vec![
+                Value::Int64(i64::from(row.classid)),
+                Value::Int64(i64::from(row.objid)),
+                Value::Int32(row.objsubid),
+                Value::Bool(row.original),
+                Value::Bool(row.normal),
+                Value::Bool(row.is_temporary),
+                Value::Text(row.object_type.into()),
+                row.schema_name
+                    .map(|schema| Value::Text(schema.into()))
+                    .unwrap_or(Value::Null),
+                row.object_name
+                    .map(|name| Value::Text(name.into()))
+                    .unwrap_or(Value::Null),
+                Value::Text(row.object_identity.into()),
+                Value::Array(
+                    row.address_names
+                        .into_iter()
+                        .map(|name| Value::Text(name.into()))
+                        .collect(),
+                ),
+                Value::Array(
+                    row.address_args
+                        .into_iter()
+                        .map(|arg| Value::Text(arg.into()))
+                        .collect(),
+                ),
+            ])
+        })
+        .collect()
+}
+
+fn eval_pg_event_trigger_ddl_commands() -> Vec<TupleSlot> {
+    current_event_trigger_ddl_commands()
+        .into_iter()
+        .map(|row| {
+            TupleSlot::virtual_row(vec![
+                Value::Int64(0),
+                Value::Int64(0),
+                Value::Int32(0),
+                Value::Text(row.command_tag.into()),
+                Value::Text(row.object_type.into()),
+                row.schema_name
+                    .map(|schema| Value::Text(schema.into()))
+                    .unwrap_or(Value::Null),
+                Value::Text(row.object_identity.into()),
+                Value::Bool(false),
+                Value::Null,
+            ])
+        })
+        .collect()
+}
+
+fn eval_pg_mcv_list_items(values: &[Value]) -> Result<Vec<TupleSlot>, ExecError> {
+    let [Value::Bytea(bytes)] = values else {
+        return Ok(Vec::new());
+    };
+    let payload =
+        decode_pg_mcv_list_payload(bytes).map_err(|message| ExecError::DetailedError {
+            message: "could not decode pg_mcv_list".into(),
+            detail: Some(message),
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    Ok(payload
+        .items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let values = item
+                .values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_ref()
+                        .map(|value| Value::Text(value.clone().into()))
+                        .unwrap_or(Value::Null)
+                })
+                .collect::<Vec<_>>();
+            let nulls = item
+                .values
+                .iter()
+                .map(|value| Value::Bool(value.is_none()))
+                .collect::<Vec<_>>();
+            TupleSlot::virtual_row(vec![
+                Value::Int32(index as i32),
+                Value::PgArray(ArrayValue::from_1d(values).with_element_type_oid(TEXT_TYPE_OID)),
+                Value::PgArray(ArrayValue::from_1d(nulls).with_element_type_oid(BOOL_TYPE_OID)),
+                Value::Float64(item.frequency),
+                Value::Float64(item.base_frequency),
+            ])
+        })
+        .collect())
 }
 
 fn eval_pg_get_publication_tables(
@@ -609,6 +1009,7 @@ pub(crate) fn eval_project_set_returning_call(
 
 pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &str {
     match call {
+        SetReturningCall::RowsFrom { .. } => "rows from",
         SetReturningCall::GenerateSeries { .. } => "generate_series",
         SetReturningCall::GenerateSubscripts { .. } => "generate_subscripts",
         SetReturningCall::Unnest { .. } => "unnest",
@@ -1676,6 +2077,7 @@ fn eval_timestamp_generate_series(
 
 fn eval_unnest(
     args: &[Expr],
+    output_columns: &[QueryColumn],
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
@@ -1738,21 +2140,31 @@ fn eval_unnest(
         }
     }
 
+    let expand_single_composite = unnest_expands_single_composite_arg(args, output_columns);
     let mut rows = Vec::with_capacity(max_len);
     for idx in 0..max_len {
         ctx.check_for_interrupts()?;
-        if args.len() == 1 {
+        if expand_single_composite {
             let value = arrays
                 .first()
                 .and_then(|array| array.as_ref())
                 .and_then(|values| values.get(idx))
                 .cloned()
                 .unwrap_or(Value::Null);
-            if let Value::Record(record) = value {
-                rows.push(TupleSlot::virtual_row(record.fields));
-            } else {
-                rows.push(TupleSlot::virtual_row(vec![value]));
-            }
+            let mut fields = match value {
+                Value::Record(record) => record.fields,
+                Value::Null => vec![Value::Null; output_columns.len()],
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "unnest",
+                        left: other,
+                        right: Value::Null,
+                    });
+                }
+            };
+            fields.resize(output_columns.len(), Value::Null);
+            fields.truncate(output_columns.len());
+            rows.push(TupleSlot::virtual_row(fields));
             continue;
         }
         let mut row = Vec::with_capacity(arrays.len());
@@ -1765,6 +2177,30 @@ fn eval_unnest(
         rows.push(TupleSlot::virtual_row(row));
     }
     Ok(rows)
+}
+
+fn unnest_expands_single_composite_arg(args: &[Expr], output_columns: &[QueryColumn]) -> bool {
+    if args.len() != 1 {
+        return false;
+    }
+    if let Some(arg_type) = expr_sql_type_hint(&args[0]) {
+        let element_type = if arg_type.is_array {
+            arg_type.element_type()
+        } else {
+            arg_type
+        };
+        return matches!(
+            element_type.kind,
+            SqlTypeKind::Composite | SqlTypeKind::Record
+        ) && (output_columns.len() != 1
+            || output_columns
+                .first()
+                .is_some_and(|column| !column.name.eq_ignore_ascii_case("unnest")));
+    }
+    output_columns.len() > 1
+        && output_columns
+            .first()
+            .is_some_and(|column| !column.name.eq_ignore_ascii_case("unnest"))
 }
 
 fn eval_pg_options_to_table(

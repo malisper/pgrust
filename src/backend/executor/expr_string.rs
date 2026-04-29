@@ -14,7 +14,7 @@ use super::expr_range::render_range_text_with_config;
 use super::node_types::Value;
 use super::render_macaddr_text;
 use super::render_macaddr8_text;
-use super::value_io::format_array_text;
+use super::value_io::{format_array_text, render_tid_text};
 use crate::backend::executor::jsonb::render_jsonb_bytes;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind};
@@ -995,6 +995,7 @@ fn value_output_text_with_config(
         Value::Numeric(v) => v.render(),
         Value::Interval(v) => render_interval_text_with_config(*v, datetime_config),
         Value::Uuid(v) => crate::backend::executor::value_io::render_uuid_text(v),
+        Value::Tid(v) => render_tid_text(v),
         Value::Bool(v) => {
             if *v {
                 "t".into()
@@ -1506,6 +1507,24 @@ pub(super) fn eval_length_function(values: &[Value]) -> Result<Value, ExecError>
         right: Value::Null,
     })?;
     Ok(Value::Int32(text.chars().count() as i32))
+}
+
+pub(super) fn eval_bit_length_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    if let Value::Bytea(bytes) = value {
+        return Ok(Value::Int32(bytes.len().saturating_mul(8) as i32));
+    }
+    let text = value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "bit_length",
+        left: value.clone(),
+        right: Value::Null,
+    })?;
+    Ok(Value::Int32(text.as_bytes().len().saturating_mul(8) as i32))
 }
 
 pub(super) fn eval_repeat_function(values: &[Value]) -> Result<Value, ExecError> {

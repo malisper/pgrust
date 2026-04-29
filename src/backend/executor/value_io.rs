@@ -32,6 +32,7 @@ use crate::backend::utils::record::register_anonymous_record_descriptor;
 use crate::include::access::htup::{HeapTuple, TupleValue};
 use crate::include::catalog::range_type_ref_for_sql_type;
 use crate::include::nodes::execnodes::ToastFetchContext;
+use crate::include::nodes::primnodes::ColumnDesc;
 use crate::pgrust::compact_string::CompactString;
 
 mod array;
@@ -95,6 +96,10 @@ pub fn render_uuid_text(value: &[u8; 16]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
+}
+
+pub fn render_tid_text(value: &crate::include::access::itemptr::ItemPointerData) -> String {
+    format!("({},{})", value.block_number, value.offset_number)
 }
 
 pub(crate) fn format_record_text(record: &crate::include::nodes::datum::RecordValue) -> String {
@@ -181,6 +186,7 @@ pub(crate) fn format_record_text_with_options(
                             Value::Xml(v) => {
                                 crate::backend::executor::render_xml_output_text(v).to_string()
                             }
+                            Value::Tid(v) => render_tid_text(v),
                             Value::Null => String::new(),
                             _ => format!("{other:?}"),
                         })
@@ -215,6 +221,21 @@ pub(crate) fn format_failing_row_detail(
     let body = values
         .iter()
         .map(|value| format_failing_row_value(value, datetime_config))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Failing row contains ({body}).")
+}
+
+pub(crate) fn format_failing_row_detail_for_columns(
+    values: &[Value],
+    columns: &[ColumnDesc],
+    datetime_config: &DateTimeConfig,
+) -> String {
+    let body = columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| (!column.dropped).then(|| values.get(index)))
+        .map(|value| format_failing_row_value(value.unwrap_or(&Value::Null), datetime_config))
         .collect::<Vec<_>>()
         .join(", ");
     format!("Failing row contains ({body}).")
@@ -368,6 +389,7 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
         Value::TsVector(vector) => crate::backend::executor::render_tsvector_text(vector),
         Value::TsQuery(query) => crate::backend::executor::render_tsquery_text(query),
         Value::PgLsn(value) => render_pg_lsn_text(*value),
+        Value::Tid(value) => render_tid_text(value),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)
@@ -426,6 +448,7 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::Shell => 78,
         SqlTypeKind::Cstring => 79,
         SqlTypeKind::Trigger => 54,
+        SqlTypeKind::EventTrigger => 80,
         SqlTypeKind::Void => 51,
         SqlTypeKind::FdwHandler => 69,
         SqlTypeKind::Int2 => 3,
@@ -545,6 +568,7 @@ fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
         78 => SqlTypeKind::Shell,
         79 => SqlTypeKind::Cstring,
         54 => SqlTypeKind::Trigger,
+        80 => SqlTypeKind::EventTrigger,
         51 => SqlTypeKind::Void,
         69 => SqlTypeKind::FdwHandler,
         3 => SqlTypeKind::Int2,
@@ -1057,6 +1081,10 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
         Value::PgLsn(v) => {
             out.push(INTERNAL_VALUE_TAG_PG_LSN);
             out.extend_from_slice(&v.to_le_bytes());
+        }
+        Value::Tid(v) => {
+            out.push(INTERNAL_VALUE_TAG_TEXT);
+            encode_internal_text(render_tid_text(&v).as_bytes(), &mut out);
         }
         Value::Text(v) => {
             out.push(INTERNAL_VALUE_TAG_TEXT);
@@ -1887,6 +1915,9 @@ pub(crate) fn coerce_assignment_value_with_config(
         }
         Value::PgLsn(v) => {
             cast_text_value_with_config(&render_pg_lsn_text(*v), target, false, datetime_config)
+        }
+        Value::Tid(v) => {
+            cast_text_value_with_config(&render_tid_text(v), target, false, datetime_config)
         }
         Value::Money(v) => cast_text_value_with_config(
             &crate::backend::executor::money_format_text(*v),

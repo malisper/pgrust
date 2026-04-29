@@ -223,6 +223,8 @@ impl Portal {
             columns,
             column_names,
             rows,
+            // PostgreSQL cursor positions are 0 before the first row,
+            // 1..=N on a row, and N+1 after the last row.
             pos: 0,
         };
         self.status = PortalStatus::Ready;
@@ -332,14 +334,31 @@ impl Portal {
                 sqlstate: "XX000",
             });
         };
-        let count = match limit {
-            PortalFetchLimit::All => *pos,
-            PortalFetchLimit::Count(count) => count.min(*pos),
+        let len = rows.len();
+        let start_row = if *pos > len {
+            len
+        } else {
+            pos.saturating_sub(1)
         };
-        let end = *pos;
-        let start = end.saturating_sub(count);
-        let out = rows[start..end].iter().rev().cloned().collect::<Vec<_>>();
-        *pos = start;
+        let count = match limit {
+            PortalFetchLimit::All => start_row,
+            PortalFetchLimit::Count(count) => count.min(start_row),
+        };
+        let first_returned = start_row.saturating_sub(count).saturating_add(1);
+        let start_idx = first_returned.saturating_sub(1);
+        let end_idx = start_row;
+        let out = rows[start_idx..end_idx]
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        *pos = if count == 0 {
+            *pos
+        } else if count == start_row {
+            0
+        } else {
+            first_returned
+        };
         Ok(PortalRunResult {
             columns: columns.clone(),
             column_names: column_names.clone(),
@@ -352,21 +371,21 @@ impl Portal {
 
     fn fetch_materialized_absolute(&mut self, offset: i64) -> Result<PortalRunResult, ExecError> {
         let len = self.materialized_len()?;
-        let target = if offset < 0 {
-            len.saturating_sub(offset.unsigned_abs() as usize)
-                .saturating_add(1)
+        let target = if offset == 0 {
+            0
+        } else if offset < 0 {
+            len.saturating_add(1)
+                .saturating_sub(offset.unsigned_abs() as usize)
         } else {
             offset as usize
         };
-        self.set_materialized_pos(target.saturating_sub(1))?;
-        self.fetch_forward(PortalFetchLimit::Count(1))
+        self.fetch_materialized_row_at(target)
     }
 
     fn fetch_materialized_relative(&mut self, offset: i64) -> Result<PortalRunResult, ExecError> {
         let current = self.materialized_pos()? as i64;
         let target = (current + offset).max(0) as usize;
-        self.set_materialized_pos(target.saturating_sub(1))?;
-        self.fetch_forward(PortalFetchLimit::Count(1))
+        self.fetch_materialized_row_at(target)
     }
 
     fn materialized_len(&self) -> Result<usize, ExecError> {
@@ -396,7 +415,7 @@ impl Portal {
     fn set_materialized_pos(&mut self, new_pos: usize) -> Result<(), ExecError> {
         match &mut self.execution {
             PortalExecution::Materialized { rows, pos, .. } => {
-                *pos = new_pos.min(rows.len());
+                *pos = new_pos.min(rows.len().saturating_add(1));
                 Ok(())
             }
             _ => Err(ExecError::DetailedError {
@@ -406,6 +425,44 @@ impl Portal {
                 sqlstate: "XX000",
             }),
         }
+    }
+
+    fn fetch_materialized_row_at(&mut self, target: usize) -> Result<PortalRunResult, ExecError> {
+        let len = self.materialized_len()?;
+        if target == 0 {
+            self.set_materialized_pos(0)?;
+            return self.empty_materialized_result();
+        }
+        if target > len {
+            self.set_materialized_pos(len.saturating_add(1))?;
+            return self.empty_materialized_result();
+        }
+        self.set_materialized_pos(target.saturating_sub(1))?;
+        self.fetch_forward(PortalFetchLimit::Count(1))
+    }
+
+    fn empty_materialized_result(&self) -> Result<PortalRunResult, ExecError> {
+        let PortalExecution::Materialized {
+            columns,
+            column_names,
+            ..
+        } = &self.execution
+        else {
+            return Err(ExecError::DetailedError {
+                message: "portal is not materialized".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            });
+        };
+        Ok(PortalRunResult {
+            columns: columns.clone(),
+            column_names: column_names.clone(),
+            rows: Vec::new(),
+            processed: 0,
+            completed: true,
+            command_tag: None,
+        })
     }
 
     pub fn cursor_view_row(&self) -> Option<CursorViewRow> {
@@ -462,15 +519,22 @@ fn fetch_materialized_forward(
     pos: &mut usize,
     limit: PortalFetchLimit,
 ) -> PortalRunResult {
-    let remaining = rows.len().saturating_sub(*pos);
+    let start = (*pos).min(rows.len());
+    let remaining = rows.len().saturating_sub(start);
     let count = match limit {
         PortalFetchLimit::All => remaining,
         PortalFetchLimit::Count(count) => count.min(remaining),
     };
-    let start = *pos;
     let end = start + count;
     let out = rows[start..end].to_vec();
-    *pos = end;
+    *pos = match limit {
+        PortalFetchLimit::All => rows.len().saturating_add(1),
+        PortalFetchLimit::Count(requested) if requested > remaining => rows.len().saturating_add(1),
+        PortalFetchLimit::Count(_) if count == 0 && *pos == rows.len() => {
+            rows.len().saturating_add(1)
+        }
+        PortalFetchLimit::Count(_) => end,
+    };
     PortalRunResult {
         columns: columns.to_vec(),
         column_names: column_names.to_vec(),
@@ -668,5 +732,46 @@ mod tests {
             vec![vec![Value::Int32(2)], vec![Value::Int32(3)]]
         );
         assert_eq!(portal.status, PortalStatus::Done);
+    }
+
+    #[test]
+    fn materialized_scroll_distinguishes_last_row_from_after_end() {
+        let mut portal = materialized_portal("c", true);
+
+        let last = portal
+            .fetch_direction(PortalFetchDirection::Last, false)
+            .unwrap();
+        assert_eq!(last.rows, vec![vec![Value::Int32(3)]]);
+
+        let prev = portal
+            .fetch_direction(
+                PortalFetchDirection::Backward(PortalFetchLimit::Count(1)),
+                false,
+            )
+            .unwrap();
+        assert_eq!(prev.rows, vec![vec![Value::Int32(2)]]);
+
+        let next = portal
+            .fetch_direction(PortalFetchDirection::Next, false)
+            .unwrap();
+        assert_eq!(next.rows, vec![vec![Value::Int32(3)]]);
+
+        let past_end = portal
+            .fetch_direction(PortalFetchDirection::Next, false)
+            .unwrap();
+        assert!(past_end.rows.is_empty());
+
+        let from_after_end = portal
+            .fetch_direction(
+                PortalFetchDirection::Backward(PortalFetchLimit::Count(1)),
+                false,
+            )
+            .unwrap();
+        assert_eq!(from_after_end.rows, vec![vec![Value::Int32(3)]]);
+
+        let next_after_refetching_last = portal
+            .fetch_direction(PortalFetchDirection::Next, false)
+            .unwrap();
+        assert!(next_after_refetching_last.rows.is_empty());
     }
 }

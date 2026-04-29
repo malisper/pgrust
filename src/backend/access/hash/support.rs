@@ -225,16 +225,10 @@ fn hash_inet_value(value: &InetValue, seed: u64) -> u64 {
 }
 
 fn hash_array_value(value: &ArrayValue, seed: u64) -> Result<u64, String> {
-    let mut hash = hash_uint32_extended(value.ndim() as u32, seed);
-    for dimension in &value.dimensions {
-        hash = hash_combine64(hash, hash_uint32_extended(dimension.length as u32, seed));
-        hash = hash_combine64(
-            hash,
-            hash_uint32_extended(dimension.lower_bound as u32, seed),
-        );
-    }
+    let mut hash = 1_u64;
     for element in &value.elements {
-        hash = hash_combine64(hash, hash_element_value(element, seed)?);
+        let element_hash = hash_value_extended(element, None, seed)?.unwrap_or(0);
+        hash = (hash << 5).wrapping_sub(hash).wrapping_add(element_hash);
     }
     Ok(hash)
 }
@@ -248,10 +242,6 @@ fn hash_record_value(value: &RecordValue, seed: u64) -> Result<u64, String> {
         hash = hash_combine64(hash, field_hash);
     }
     Ok(hash)
-}
-
-fn hash_element_value(value: &Value, seed: u64) -> Result<u64, String> {
-    Ok(hash_value_extended(value, None, seed)?.unwrap_or_else(|| hash_null_sentinel(seed)))
 }
 
 fn hash_null_sentinel(seed: u64) -> u64 {

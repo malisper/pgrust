@@ -8,8 +8,9 @@ use crate::include::nodes::pathnodes::{
     AggregateLayout, PathTarget, PlannerConfig, PlannerInfo, RelOptInfo,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, AggFunc, Aggref, Expr, SetReturningCall, SortGroupClause, SubLink, SubLinkType,
-    TargetEntry, Var, expr_contains_set_returning, is_system_attr, set_returning_call_exprs,
+    AggAccum, AggFunc, Aggref, Expr, RowsFromItem, RowsFromSource, SetReturningCall,
+    SortGroupClause, SubLink, SubLinkType, TargetEntry, Var, expr_contains_set_returning,
+    is_system_attr, set_returning_call_exprs,
 };
 
 use super::path::flatten_and_conjuncts;
@@ -34,6 +35,11 @@ fn prepare_query_for_locking_with_inherited(
     mut query: Query,
     inherited_lock: Option<SelectLockingClause>,
 ) -> Result<Query, ParseError> {
+    let local_locking_targets = if query.locking_clause.is_some() {
+        query.locking_targets.clone()
+    } else {
+        Vec::new()
+    };
     let effective_lock = match (query.locking_clause, inherited_lock) {
         (Some(local), Some(inherited)) => Some(local.strongest(inherited)),
         (Some(local), None) => Some(local),
@@ -92,7 +98,14 @@ fn prepare_query_for_locking_with_inherited(
     query.row_marks.clear();
     if let Some(strength) = effective_lock {
         let mut row_marks = Vec::new();
-        if let Some(jointree) = &query.jointree {
+        if !local_locking_targets.is_empty() {
+            collect_query_row_marks_for_targets(
+                &query.rtable,
+                &local_locking_targets,
+                strength,
+                &mut row_marks,
+            )?;
+        } else if let Some(jointree) = &query.jointree {
             collect_query_row_marks(&query.rtable, jointree, strength, &mut row_marks);
         }
         row_marks.sort_by_key(|mark| mark.rtindex);
@@ -107,6 +120,7 @@ fn prepare_query_for_locking_with_inherited(
         query.row_marks = row_marks;
     }
     query.locking_clause = None;
+    query.locking_targets.clear();
     Ok(query)
 }
 
@@ -249,6 +263,86 @@ fn collect_query_row_marks(
             collect_query_row_marks(rtable, right, strength, row_marks);
         }
     }
+}
+
+fn collect_query_row_marks_for_targets(
+    rtable: &[RangeTblEntry],
+    targets: &[String],
+    strength: SelectLockingClause,
+    row_marks: &mut Vec<QueryRowMark>,
+) -> Result<(), ParseError> {
+    for target in targets {
+        let mut matches = rtable
+            .iter()
+            .enumerate()
+            .filter(|(_, rte)| {
+                rte.alias
+                    .as_deref()
+                    .is_some_and(|alias| alias.eq_ignore_ascii_case(target))
+            })
+            .collect::<Vec<_>>();
+        let Some((index, rte)) = matches.pop() else {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "relation \"{target}\" in FOR UPDATE clause not found in FROM clause"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P01",
+            });
+        };
+        if !matches.is_empty() {
+            return Err(ParseError::DetailedError {
+                message: format!("table reference \"{target}\" is ambiguous"),
+                detail: None,
+                hint: None,
+                sqlstate: "42702",
+            });
+        }
+        match &rte.kind {
+            RangeTblEntryKind::Relation { .. } => {
+                let rtindex = index + 1;
+                if let Some(existing) = row_marks
+                    .iter_mut()
+                    .find(|row_mark| row_mark.rtindex == rtindex)
+                {
+                    existing.strength = existing.strength.strongest(strength);
+                } else {
+                    row_marks.push(QueryRowMark { rtindex, strength });
+                }
+            }
+            RangeTblEntryKind::Join { .. } => {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "FOR UPDATE cannot be applied to a join".into(),
+                ));
+            }
+            RangeTblEntryKind::Values { .. } => {
+                return Err(ParseError::FeatureNotSupportedMessage(format!(
+                    "{} cannot be applied to VALUES",
+                    strength.sql()
+                )));
+            }
+            RangeTblEntryKind::Subquery { .. } => {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "FOR UPDATE cannot be applied to a subquery".into(),
+                ));
+            }
+            RangeTblEntryKind::Function { .. }
+            | RangeTblEntryKind::WorkTable { .. }
+            | RangeTblEntryKind::Cte { .. }
+            | RangeTblEntryKind::Result => {
+                return Err(ParseError::DetailedError {
+                    message: format!(
+                        "relation \"{target}\" in FOR UPDATE clause not found in FROM clause"
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P01",
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn prepare_rte_for_locking(
@@ -428,6 +522,37 @@ fn prepare_set_returning_call_for_locking(
     call: SetReturningCall,
 ) -> Result<SetReturningCall, ParseError> {
     Ok(match call {
+        SetReturningCall::RowsFrom {
+            items,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::RowsFrom {
+            items: items
+                .into_iter()
+                .map(|item| {
+                    Ok(RowsFromItem {
+                        source: match item.source {
+                            RowsFromSource::Function(call) => RowsFromSource::Function(
+                                prepare_set_returning_call_for_locking(call)?,
+                            ),
+                            RowsFromSource::Project {
+                                output_exprs,
+                                output_columns,
+                            } => RowsFromSource::Project {
+                                output_exprs: output_exprs
+                                    .into_iter()
+                                    .map(prepare_expr_for_locking)
+                                    .collect::<Result<Vec<_>, ParseError>>()?,
+                                output_columns,
+                            },
+                        },
+                        column_definitions: item.column_definitions,
+                    })
+                })
+                .collect::<Result<Vec<_>, ParseError>>()?,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
@@ -623,6 +748,7 @@ fn prepare_set_returning_call_for_locking(
             function_name,
             func_variadic,
             args,
+            inlined_expr,
             output_columns,
             with_ordinality,
         } => SetReturningCall::UserDefined {
@@ -633,6 +759,9 @@ fn prepare_set_returning_call_for_locking(
                 .into_iter()
                 .map(prepare_expr_for_locking)
                 .collect::<Result<Vec<_>, _>>()?,
+            inlined_expr: inlined_expr
+                .map(|expr| prepare_expr_for_locking(*expr).map(Box::new))
+                .transpose()?,
             output_columns,
             with_ordinality,
         },
@@ -954,6 +1083,7 @@ impl PlannerInfo {
 
 fn rewrite_minmax_aggregate_query(query: Query) -> Query {
     if !query.group_by.is_empty()
+        || !query.grouping_sets.is_empty()
         || query.having_qual.is_some()
         || !query.window_clauses.is_empty()
         || query.has_target_srfs
@@ -1000,6 +1130,7 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         distinct_on: query.distinct_on,
         where_qual: None,
         group_by: Vec::new(),
+        grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
         having_qual: None,
@@ -1010,6 +1141,7 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         limit_count: query.limit_count,
         limit_offset: query.limit_offset,
         locking_clause: query.locking_clause,
+        locking_targets: query.locking_targets,
         row_marks: query.row_marks,
         has_target_srfs: false,
         recursive_union: None,
@@ -1049,7 +1181,7 @@ fn rewrite_target_outer_aggregate_sublink_expr(
         || aggregate_query.having_qual.is_some()
         || !aggregate_query.sort_clause.is_empty()
         || aggregate_query.limit_count.is_some()
-        || aggregate_query.limit_offset != 0
+        || aggregate_query.limit_offset.is_some()
         || aggregate_query.locking_clause.is_some()
         || !aggregate_query.row_marks.is_empty()
         || aggregate_query.has_target_srfs
@@ -1097,7 +1229,7 @@ fn scalar_sublink_has_unique_lookup(
         || subquery.having_qual.is_some()
         || !subquery.sort_clause.is_empty()
         || subquery.limit_count.is_some()
-        || subquery.limit_offset != 0
+        || subquery.limit_offset.is_some()
         || subquery.locking_clause.is_some()
         || !subquery.row_marks.is_empty()
         || subquery.has_target_srfs
@@ -1368,14 +1500,16 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
         distinct_on: Vec::new(),
         where_qual,
         group_by: Vec::new(),
+        grouping_sets: Vec::new(),
         accumulators: Vec::new(),
         window_clauses: Vec::new(),
         having_qual: None,
         sort_clause,
         constraint_deps: query.constraint_deps.clone(),
         limit_count: Some(1),
-        limit_offset: 0,
+        limit_offset: None,
         locking_clause: None,
+        locking_targets: Vec::new(),
         row_marks: Vec::new(),
         has_target_srfs: false,
         recursive_union: None,
@@ -2696,6 +2830,20 @@ fn collect_set_returning_call_outer_refs(
     exprs: &mut Vec<Expr>,
 ) {
     match call {
+        SetReturningCall::RowsFrom { items, .. } => {
+            for item in items {
+                match &item.source {
+                    RowsFromSource::Function(call) => {
+                        collect_set_returning_call_outer_refs(call, levelsup, exprs);
+                    }
+                    RowsFromSource::Project { output_exprs, .. } => {
+                        for expr in output_exprs {
+                            collect_query_outer_refs_expr(expr, levelsup, exprs);
+                        }
+                    }
+                }
+            }
+        }
         SetReturningCall::GenerateSeries {
             start,
             stop,

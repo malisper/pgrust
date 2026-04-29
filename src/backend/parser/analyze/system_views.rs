@@ -245,6 +245,7 @@ pub(super) fn bind_builtin_system_view(
                 ]
             })
             .collect(),
+        SyntheticSystemViewKind::PgTables => catalog.pg_tables_rows(),
         SyntheticSystemViewKind::PgViews => catalog.pg_views_rows(),
         SyntheticSystemViewKind::PgMatviews => catalog.pg_matviews_rows(),
         SyntheticSystemViewKind::PgIndexes => catalog.pg_indexes_rows(),
@@ -277,6 +278,15 @@ pub(super) fn bind_builtin_system_view(
             })
             .collect(),
         SyntheticSystemViewKind::PgStatActivity => catalog.pg_stat_activity_rows(),
+        SyntheticSystemViewKind::PgStatDatabase => catalog.pg_stat_database_rows(),
+        SyntheticSystemViewKind::PgStatCheckpointer => catalog.pg_stat_checkpointer_rows(),
+        SyntheticSystemViewKind::PgStatWal => catalog.pg_stat_wal_rows(),
+        SyntheticSystemViewKind::PgStatSlru => catalog.pg_stat_slru_rows(),
+        SyntheticSystemViewKind::PgStatArchiver => catalog.pg_stat_archiver_rows(),
+        SyntheticSystemViewKind::PgStatBgwriter => catalog.pg_stat_bgwriter_rows(),
+        SyntheticSystemViewKind::PgStatRecoveryPrefetch => {
+            catalog.pg_stat_recovery_prefetch_rows()
+        }
         SyntheticSystemViewKind::PgStatAllTables => catalog.pg_stat_all_tables_rows(),
         SyntheticSystemViewKind::PgStatUserTables => catalog.pg_stat_user_tables_rows(),
         SyntheticSystemViewKind::PgStatioUserTables => catalog.pg_statio_user_tables_rows(),
@@ -1038,7 +1048,7 @@ fn describe_auto_updatable_view_shape(
         || query.recursive_union.is_some()
         || !raw_select.with.is_empty()
         || query.limit_count.is_some()
-        || query.limit_offset != 0
+        || query.limit_offset.is_some()
         || !query.accumulators.is_empty()
         || !query.window_clauses.is_empty()
         || query.has_target_srfs

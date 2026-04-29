@@ -22,6 +22,10 @@ pub enum ParseError {
         source: Box<ParseError>,
         position: usize,
     },
+    WithContext {
+        source: Box<ParseError>,
+        context: String,
+    },
     UnexpectedEof,
     UnexpectedToken {
         expected: &'static str,
@@ -113,16 +117,26 @@ impl ParseError {
         }
     }
 
+    pub fn with_context(self, context: impl Into<String>) -> Self {
+        ParseError::WithContext {
+            source: Box::new(self),
+            context: context.into(),
+        }
+    }
+
     pub fn position(&self) -> Option<usize> {
         match self {
             ParseError::Positioned { position, .. } => Some(*position),
+            ParseError::WithContext { source, .. } => source.position(),
             _ => None,
         }
     }
 
     pub fn unpositioned(&self) -> &ParseError {
         match self {
-            ParseError::Positioned { source, .. } => source.unpositioned(),
+            ParseError::Positioned { source, .. } | ParseError::WithContext { source, .. } => {
+                source.unpositioned()
+            }
             other => other,
         }
     }
@@ -137,7 +151,9 @@ impl fmt::Display for ParseError {
             ParseError::InvalidNumeric(value) => write!(f, "invalid numeric: {value}"),
             ParseError::UnknownTable(name) => write!(f, "relation \"{name}\" does not exist"),
             ParseError::UnknownColumn(name) => {
-                if name.contains('.') {
+                if name.starts_with("........pg.dropped.") {
+                    write!(f, "column \"{name}\" does not exist")
+                } else if name.contains('.') {
                     write!(f, "column {name} does not exist")
                 } else {
                     write!(f, "column \"{name}\" does not exist")
@@ -279,6 +295,9 @@ impl fmt::Display for ParseError {
             ParseError::Positioned { .. } => {
                 unreachable!("positioned parse errors unwrap before display")
             }
+            ParseError::WithContext { .. } => {
+                unreachable!("context parse errors unwrap before display")
+            }
         }
     }
 }
@@ -312,6 +331,7 @@ mod tests {
 pub enum Statement {
     Do(DoStatement),
     Explain(ExplainStatement),
+    Cluster(ClusterStatement),
     Show(ShowStatement),
     Select(SelectStatement),
     Values(ValuesStatement),
@@ -329,6 +349,7 @@ pub enum Statement {
     CreateAggregate(CreateAggregateStatement),
     CreateCast(CreateCastStatement),
     CreateTrigger(CreateTriggerStatement),
+    CreateEventTrigger(CreateEventTriggerStatement),
     CreateType(CreateTypeStatement),
     AlterType(AlterTypeStatement),
     AlterTypeOwner(AlterTypeOwnerStatement),
@@ -366,6 +387,7 @@ pub enum Statement {
     AlterOperatorFamily(AlterOperatorFamilyStatement),
     AlterOperatorClass(AlterOperatorClassStatement),
     DropOperatorFamily(DropOperatorFamilyStatement),
+    DropOperatorClass(DropOperatorClassStatement),
     CreateTextSearch(CreateTextSearchStatement),
     AlterTextSearch(AlterTextSearchStatement),
     AlterSequence(AlterSequenceStatement),
@@ -399,8 +421,10 @@ pub enum Statement {
     AlterTableRenameColumn(AlterTableRenameColumnStatement),
     AlterTableRename(AlterTableRenameStatement),
     AlterTableSetSchema(AlterRelationSetSchemaStatement),
+    AlterTableSetTablespace(AlterTableSetTablespaceStatement),
     AlterViewSetSchema(AlterRelationSetSchemaStatement),
     AlterMaterializedViewSetSchema(AlterRelationSetSchemaStatement),
+    AlterMaterializedViewSetAccessMethod(AlterMaterializedViewSetAccessMethodStatement),
     AlterViewOwner(AlterRelationOwnerStatement),
     AlterSchemaOwner(AlterSchemaOwnerStatement),
     AlterSchemaRename(AlterSchemaRenameStatement),
@@ -420,6 +444,8 @@ pub enum Statement {
     AlterTableAttachPartition(AlterTableAttachPartitionStatement),
     AlterTableDetachPartition(AlterTableDetachPartitionStatement),
     AlterTableTriggerState(AlterTableTriggerStateStatement),
+    AlterEventTrigger(AlterEventTriggerStatement),
+    AlterEventTriggerOwner(AlterEventTriggerOwnerStatement),
     AlterForeignTableOptions(AlterForeignTableOptionsStatement),
     AlterPublication(AlterPublicationStatement),
     AlterOperator(AlterOperatorStatement),
@@ -429,6 +455,7 @@ pub enum Statement {
     AlterLanguage(AlterLanguageStatement),
     DropLanguage(DropLanguageStatement),
     AlterTriggerRename(AlterTriggerRenameStatement),
+    AlterEventTriggerRename(AlterEventTriggerRenameStatement),
     CommentOnTable(CommentOnTableStatement),
     CommentOnColumn(CommentOnColumnStatement),
     CommentOnView(CommentOnViewStatement),
@@ -437,6 +464,7 @@ pub enum Statement {
     CommentOnConstraint(CommentOnConstraintStatement),
     CommentOnRule(CommentOnRuleStatement),
     CommentOnTrigger(CommentOnTriggerStatement),
+    CommentOnEventTrigger(CommentOnEventTriggerStatement),
     CommentOnDomain(CommentOnDomainStatement),
     CommentOnConversion(CommentOnConversionStatement),
     CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
@@ -450,6 +478,7 @@ pub enum Statement {
     CreateConversion(CreateConversionStatement),
     CreateCollation(CreateCollationStatement),
     CreatePublication(CreatePublicationStatement),
+    CommentOnDatabase(CommentOnDatabaseStatement),
     CommentOnRole(CommentOnRoleStatement),
     GrantObject(GrantObjectStatement),
     RevokeObject(RevokeObjectStatement),
@@ -470,6 +499,7 @@ pub enum Statement {
     DropAggregate(DropAggregateStatement),
     DropTable(DropTableStatement),
     DropTrigger(DropTriggerStatement),
+    DropEventTrigger(DropEventTriggerStatement),
     DropIndex(DropIndexStatement),
     ReindexIndex(ReindexIndexStatement),
     DropDomain(DropDomainStatement),
@@ -530,6 +560,12 @@ pub struct LoadStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterStatement {
+    pub table_name: String,
+    pub index_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscardStatement {
     pub target: DiscardTarget,
 }
@@ -557,14 +593,16 @@ pub struct Query {
     pub distinct_on: Vec<SortGroupClause>,
     pub where_qual: Option<Expr>,
     pub group_by: Vec<Expr>,
+    pub grouping_sets: Vec<Vec<Expr>>,
     pub accumulators: Vec<AggAccum>,
     pub window_clauses: Vec<WindowClause>,
     pub having_qual: Option<Expr>,
     pub sort_clause: Vec<SortGroupClause>,
     pub constraint_deps: Vec<u32>,
     pub limit_count: Option<usize>,
-    pub limit_offset: usize,
+    pub limit_offset: Option<usize>,
     pub locking_clause: Option<SelectLockingClause>,
+    pub locking_targets: Vec<String>,
     pub row_marks: Vec<QueryRowMark>,
     pub has_target_srfs: bool,
     pub recursive_union: Option<Box<RecursiveUnionQuery>>,
@@ -616,6 +654,13 @@ pub struct RangeTblEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableSampleClause {
+    pub method: String,
+    pub args: Vec<Expr>,
+    pub repeatable: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RangeTblEntryKind {
     Result,
     Relation {
@@ -624,6 +669,7 @@ pub enum RangeTblEntryKind {
         relkind: char,
         relispopulated: bool,
         toast: Option<ToastRelationRef>,
+        tablesample: Option<TableSampleClause>,
     },
     Join {
         jointype: JoinType,
@@ -1044,6 +1090,21 @@ pub struct CreateTriggerStatement {
     pub function_schema_name: Option<String>,
     pub function_name: String,
     pub func_args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventTriggerWhenClause {
+    pub variable: String,
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateEventTriggerStatement {
+    pub trigger_name: String,
+    pub event_name: String,
+    pub when_clauses: Vec<EventTriggerWhenClause>,
+    pub function_schema_name: Option<String>,
+    pub function_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1534,6 +1595,7 @@ pub struct SelectStatement {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub locking_clause: Option<SelectLockingClause>,
+    pub locking_targets: Vec<String>,
     pub set_operation: Option<Box<SetOperationStatement>>,
 }
 
@@ -1646,8 +1708,16 @@ pub enum FromItem {
         func_variadic: bool,
         with_ordinality: bool,
     },
+    RowsFrom {
+        functions: Vec<RowsFromFunction>,
+        with_ordinality: bool,
+    },
     JsonTable(JsonTableExpr),
     XmlTable(XmlTableExpr),
+    TableSample {
+        source: Box<FromItem>,
+        sample: RawTableSampleClause,
+    },
     Lateral(Box<FromItem>),
     DerivedTable(Box<SelectStatement>),
     Join {
@@ -1662,6 +1732,13 @@ pub enum FromItem {
         column_aliases: AliasColumnSpec,
         preserve_source_names: bool,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawTableSampleClause {
+    pub method: String,
+    pub args: Vec<SqlExpr>,
+    pub repeatable: Option<SqlExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1685,6 +1762,14 @@ impl AliasColumnSpec {
 pub struct AliasColumnDef {
     pub name: String,
     pub ty: RawTypeName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowsFromFunction {
+    pub name: String,
+    pub args: Vec<SqlFunctionArg>,
+    pub func_variadic: bool,
+    pub column_definitions: Vec<AliasColumnDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2241,7 +2326,7 @@ pub struct CreateTableAsStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateTableAsQuery {
     Select(SelectStatement),
-    Execute(String),
+    Execute(ExecuteStatement),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2254,14 +2339,27 @@ pub enum TableAsObjectType {
 pub struct PrepareStatement {
     pub name: String,
     pub parameter_types: Vec<RawTypeName>,
-    pub query: SelectStatement,
+    pub query: PreparedStatementQuery,
     pub query_sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreparedStatementQuery {
+    Select(SelectStatement),
+    Update(UpdateStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecuteStatement {
     pub name: String,
-    pub args: Vec<SqlExpr>,
+    pub args_sql: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedExternalParam {
+    pub paramid: usize,
+    pub arg: SqlExpr,
+    pub type_name: Option<RawTypeName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2303,6 +2401,12 @@ pub struct RefreshMaterializedViewStatement {
     pub relation_name: String,
     pub concurrently: bool,
     pub skip_data: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterMaterializedViewSetAccessMethodStatement {
+    pub relation_name: String,
+    pub access_method: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2489,6 +2593,14 @@ pub struct DropOperatorFamilyStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropOperatorClassStatement {
+    pub if_exists: bool,
+    pub schema_name: Option<String>,
+    pub opclass_name: String,
+    pub access_method: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateOperatorClassItem {
     Operator {
         strategy_number: i16,
@@ -2544,6 +2656,14 @@ pub struct AlterTableSetStatement {
     pub only: bool,
     pub table_name: String,
     pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableSetTablespaceStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub tablespace_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2680,6 +2800,7 @@ pub struct AlterTableAlterColumnTypeStatement {
     pub table_name: String,
     pub column_name: String,
     pub ty: RawTypeName,
+    pub collation: Option<String>,
     pub using_expr: Option<SqlExpr>,
 }
 
@@ -2898,6 +3019,7 @@ pub struct AlterTableNoInheritStatement {
     pub only: bool,
     pub table_name: String,
     pub parent_name: String,
+    pub additional_parent_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2906,6 +3028,7 @@ pub struct AlterTableInheritStatement {
     pub only: bool,
     pub table_name: String,
     pub parent_name: String,
+    pub additional_parent_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2973,10 +3096,28 @@ pub struct AlterTableTriggerStateStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterEventTriggerStatement {
+    pub trigger_name: String,
+    pub mode: AlterTableTriggerMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterEventTriggerOwnerStatement {
+    pub trigger_name: String,
+    pub new_owner: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTriggerRenameStatement {
     pub trigger_name: String,
     pub schema_name: Option<String>,
     pub table_name: String,
+    pub new_trigger_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterEventTriggerRenameStatement {
+    pub trigger_name: String,
     pub new_trigger_name: String,
 }
 
@@ -3029,6 +3170,12 @@ pub struct CommentOnRuleStatement {
 pub struct CommentOnTriggerStatement {
     pub trigger_name: String,
     pub table_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnEventTriggerStatement {
+    pub trigger_name: String,
     pub comment: Option<String>,
 }
 
@@ -3466,6 +3613,12 @@ pub struct CommentOnRoleStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnDatabaseStatement {
+    pub database_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnAggregateStatement {
     pub schema_name: Option<String>,
     pub aggregate_name: String,
@@ -3511,6 +3664,7 @@ pub enum GrantObjectPrivilege {
     TablePrivileges(String),
     TableColumnPrivileges(Vec<GrantTableColumnPrivilege>),
     AllPrivilegesOnSchema,
+    CreateOnSchema,
     UsageOnSchema,
     UsageOnType,
     UsageOnLanguage,
@@ -3648,10 +3802,18 @@ pub struct DropTriggerStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropEventTriggerStatement {
+    pub if_exists: bool,
+    pub trigger_name: String,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropIndexStatement {
     pub concurrently: bool,
     pub if_exists: bool,
     pub index_names: Vec<String>,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4190,6 +4352,7 @@ pub enum TableConstraint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExclusionElement {
     pub column: String,
+    pub expr_sql: Option<String>,
     pub operator: String,
 }
 
@@ -4225,6 +4388,7 @@ pub enum SqlTypeKind {
     Shell,
     Void,
     Trigger,
+    EventTrigger,
     FdwHandler,
     Int2,
     Int2Vector,
@@ -4711,6 +4875,7 @@ pub struct DeleteStatement {
     pub with: Vec<CommonTableExpr>,
     pub table_name: String,
     pub only: bool,
+    pub using: Option<FromItem>,
     pub where_clause: Option<SqlExpr>,
     pub returning: Vec<SelectItem>,
 }
@@ -4751,6 +4916,8 @@ pub enum SubqueryComparisonOp {
     Gt,
     GtEq,
     Match,
+    RegexMatch,
+    NotRegexMatch,
     Like,
     NotLike,
     ILike,
@@ -4763,6 +4930,7 @@ pub enum SubqueryComparisonOp {
 pub enum SqlExpr {
     Column(String),
     Parameter(usize),
+    ParamRef(usize),
     Default,
     Const(Value),
     IntegerLiteral(String),

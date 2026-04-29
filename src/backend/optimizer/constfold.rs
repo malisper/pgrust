@@ -5,9 +5,8 @@ use crate::backend::executor::expr_ops::{
     concat_values, div_values, mod_values, mul_values, negate_value, not_equal_values,
     order_values, shift_left_values, shift_right_values, sub_values, values_are_distinct,
 };
-use crate::backend::executor::{ExecError, Value, cast_value, eval_to_char_function};
+use crate::backend::executor::{ExecError, Value, cast_value};
 use crate::backend::parser::ParseError;
-use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::catalog::builtin_range_spec_by_oid;
 use crate::include::catalog::pg_proc::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::parsenodes::{
@@ -16,10 +15,10 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, Aggref, BoolExpr, BoolExprType, BuiltinScalarFunction, CaseExpr, CaseWhen,
-    Expr, ExprArraySubscript, FuncExpr, OpExpr, OpExprKind, OrderByEntry, ScalarFunctionImpl,
-    SetReturningCall, SortGroupClause, SqlJsonQueryFunction, SqlJsonTableBehavior,
-    SqlJsonTablePassingArg, TargetEntry, WindowClause, WindowFrame, WindowFrameBound,
-    WindowFuncExpr, WindowFuncKind, XmlExpr,
+    Expr, ExprArraySubscript, FuncExpr, OpExpr, OpExprKind, OrderByEntry, RowsFromSource,
+    ScalarFunctionImpl, SetReturningCall, SortGroupClause, SqlJsonQueryFunction,
+    SqlJsonTableBehavior, SqlJsonTablePassingArg, SubLinkType, TargetEntry, WindowClause,
+    WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind, XmlExpr,
 };
 
 pub(crate) fn fold_query_constants(query: Query) -> Result<Query, ParseError> {
@@ -65,6 +64,15 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
             .into_iter()
             .map(|expr| simplify_expr(expr, None))
             .collect::<Result<Vec<_>, _>>()?,
+        grouping_sets: query
+            .grouping_sets
+            .into_iter()
+            .map(|set| {
+                set.into_iter()
+                    .map(|expr| simplify_expr(expr, None))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         accumulators: query
             .accumulators
             .into_iter()
@@ -88,6 +96,7 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
         limit_count: query.limit_count,
         limit_offset: query.limit_offset,
         locking_clause: query.locking_clause,
+        locking_targets: query.locking_targets,
         row_marks: query.row_marks,
         has_target_srfs: query.has_target_srfs,
         recursive_union: query
@@ -99,6 +108,17 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
             .map(|query| simplify_set_operation(*query).map(Box::new))
             .transpose()?,
     })
+}
+
+fn simple_query_where_qual_is_empty(query: &Query) -> bool {
+    matches!(
+        query.where_qual.as_ref(),
+        Some(Expr::Const(Value::Bool(false)) | Expr::Const(Value::Null))
+    ) && query.accumulators.is_empty()
+        && query.group_by.is_empty()
+        && query.having_qual.is_none()
+        && query.set_operation.is_none()
+        && query.recursive_union.is_none()
 }
 
 fn simplify_rte(rte: RangeTblEntry) -> Result<RangeTblEntry, ParseError> {
@@ -220,6 +240,37 @@ fn simplify_order_by_entry(item: OrderByEntry) -> Result<OrderByEntry, ParseErro
 
 fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCall, ParseError> {
     Ok(match call {
+        SetReturningCall::RowsFrom {
+            items,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::RowsFrom {
+            items: items
+                .into_iter()
+                .map(|item| {
+                    Ok(crate::include::nodes::primnodes::RowsFromItem {
+                        source: match item.source {
+                            RowsFromSource::Function(call) => {
+                                RowsFromSource::Function(simplify_set_returning_call(call)?)
+                            }
+                            RowsFromSource::Project {
+                                output_exprs,
+                                output_columns,
+                            } => RowsFromSource::Project {
+                                output_exprs: output_exprs
+                                    .into_iter()
+                                    .map(|expr| simplify_expr(expr, None))
+                                    .collect::<Result<Vec<_>, ParseError>>()?,
+                                output_columns,
+                            },
+                        },
+                        column_definitions: item.column_definitions,
+                    })
+                })
+                .collect::<Result<Vec<_>, ParseError>>()?,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
@@ -401,6 +452,7 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             function_name,
             func_variadic,
             args,
+            inlined_expr,
             output_columns,
             with_ordinality,
         } => SetReturningCall::UserDefined {
@@ -408,6 +460,9 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             function_name,
             func_variadic,
             args: simplify_exprs(args)?,
+            inlined_expr: inlined_expr
+                .map(|expr| simplify_expr(*expr, None).map(Box::new))
+                .transpose()?,
             output_columns,
             with_ordinality,
         },
@@ -639,16 +694,25 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
                 ..*srf
             },
         ))),
-        Expr::SubLink(sublink) => Ok(Expr::SubLink(Box::new(
-            crate::include::nodes::primnodes::SubLink {
-                testexpr: sublink
-                    .testexpr
-                    .map(|expr| simplify_expr(*expr, case_test_value).map(Box::new))
-                    .transpose()?,
-                subselect: Box::new(simplify_query(*sublink.subselect)?),
-                ..*sublink
-            },
-        ))),
+        Expr::SubLink(sublink) => {
+            let testexpr = sublink
+                .testexpr
+                .map(|expr| simplify_expr(*expr, case_test_value).map(Box::new))
+                .transpose()?;
+            let subselect = simplify_query(*sublink.subselect)?;
+            if matches!(sublink.sublink_type, SubLinkType::ExistsSubLink)
+                && simple_query_where_qual_is_empty(&subselect)
+            {
+                return Ok(Expr::Const(Value::Bool(false)));
+            }
+            Ok(Expr::SubLink(Box::new(
+                crate::include::nodes::primnodes::SubLink {
+                    testexpr,
+                    subselect: Box::new(subselect),
+                    ..*sublink
+                },
+            )))
+        }
         Expr::SubPlan(subplan) => Ok(Expr::SubPlan(Box::new(
             crate::include::nodes::primnodes::SubPlan {
                 testexpr: subplan
@@ -778,21 +842,57 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
             array_type,
         }),
         Expr::Row { descriptor, fields } => Ok(Expr::Row {
-            descriptor,
+            descriptor: descriptor.clone(),
             fields: fields
                 .into_iter()
                 .map(|(name, expr)| Ok((name, simplify_expr(expr, case_test_value)?)))
                 .collect::<Result<Vec<_>, ParseError>>()?,
+        })
+        .and_then(|expr| {
+            if let Expr::Row { descriptor, fields } = expr {
+                if let Some(values) = fields
+                    .iter()
+                    .map(|(_, expr)| const_expr_value(expr).cloned())
+                    .collect::<Option<Vec<_>>>()
+                {
+                    return Ok(Expr::Const(Value::Record(
+                        crate::include::nodes::datum::RecordValue::from_descriptor(
+                            descriptor, values,
+                        ),
+                    )));
+                }
+                Ok(Expr::Row { descriptor, fields })
+            } else {
+                Ok(expr)
+            }
         }),
         Expr::FieldSelect {
             expr,
             field,
             field_type,
-        } => Ok(Expr::FieldSelect {
-            expr: Box::new(simplify_expr(*expr, case_test_value)?),
-            field,
-            field_type,
-        }),
+        } => {
+            let expr = simplify_expr(*expr, case_test_value)?;
+            if let Expr::Row { fields, .. } = &expr
+                && let Some((_, selected)) = fields
+                    .iter()
+                    .find(|(candidate, _)| candidate.eq_ignore_ascii_case(&field))
+            {
+                return Ok(selected.clone());
+            }
+            if let Expr::Cast(inner, _) = &expr
+                && let Expr::Row { fields, .. } = inner.as_ref()
+                && let Some((_, selected)) = fields
+                    .iter()
+                    .find(|(candidate, _)| candidate.eq_ignore_ascii_case(&field))
+            {
+                return Ok(selected.clone());
+            }
+            Ok(Expr::FieldSelect {
+                expr: Box::new(expr),
+                field,
+                field_type,
+            })
+        }
         Expr::Coalesce(left, right) => simplify_coalesce_expr(*left, *right, case_test_value),
         Expr::ArraySubscript { array, subscripts } => Ok(Expr::ArraySubscript {
             array: Box::new(simplify_expr(*array, case_test_value)?),
@@ -829,9 +929,6 @@ fn evaluate_const_func(
     match implementation {
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Power) => {
             eval_power_function(args).map(Some)
-        }
-        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::ToChar) => {
-            eval_to_char_function(args, &DateTimeConfig::default()).map(Some)
         }
         _ => Ok(None),
     }
@@ -1034,6 +1131,9 @@ fn simplify_bool_expr(
             if args.len() == 1 && !saw_null {
                 return Ok(args.pop().expect("one bool arg"));
             }
+            if and_args_have_contradictory_equalities(&args) {
+                return Ok(Expr::Const(Value::Bool(false)));
+            }
             if saw_null {
                 args.push(Expr::Const(Value::Null));
             }
@@ -1072,6 +1172,39 @@ fn simplify_bool_expr(
                 args,
             })))
         }
+    }
+}
+
+fn and_args_have_contradictory_equalities(args: &[Expr]) -> bool {
+    let mut equalities: Vec<(&Expr, &Value)> = Vec::new();
+    for arg in args {
+        let Some((expr, value)) = equality_to_const(arg) else {
+            continue;
+        };
+        if matches!(value, Value::Null) {
+            continue;
+        }
+        if equalities.iter().any(|(existing_expr, existing_value)| {
+            *existing_expr == expr && *existing_value != value
+        }) {
+            return true;
+        }
+        equalities.push((expr, value));
+    }
+    false
+}
+
+fn equality_to_const(expr: &Expr) -> Option<(&Expr, &Value)> {
+    let Expr::Op(op) = expr else {
+        return None;
+    };
+    if op.op != OpExprKind::Eq || op.args.len() != 2 {
+        return None;
+    }
+    match (&op.args[0], &op.args[1]) {
+        (left, Expr::Const(value)) => Some((left, value)),
+        (Expr::Const(value), right) => Some((right, value)),
+        _ => None,
     }
 }
 

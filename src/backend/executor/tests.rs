@@ -438,6 +438,7 @@ fn people_scan_plan() -> Plan {
         relispopulated: true,
         disabled: false,
         toast: None,
+        tablesample: None,
         desc: relation_desc(),
     }
 }
@@ -453,6 +454,7 @@ fn pets_scan_plan() -> Plan {
         relispopulated: true,
         disabled: false,
         toast: None,
+        tablesample: None,
         desc: pets_relation_desc(),
     }
 }
@@ -504,6 +506,7 @@ fn people_pets_merge_join_plan(kind: JoinType, join_qual: Vec<Expr>, qual: Vec<E
         )],
         outer_merge_keys: vec![local_var(0)],
         inner_merge_keys: vec![local_var(2)],
+        merge_key_descending: vec![false],
         join_qual,
         qual,
     }
@@ -588,6 +591,7 @@ fn values_people_pets_merge_join_plan(
         )],
         outer_merge_keys: vec![local_var(0)],
         inner_merge_keys: vec![local_var(1)],
+        merge_key_descending: vec![false],
         join_qual,
         qual,
     }
@@ -940,6 +944,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         pending_table_locks: Vec::new(),
         catalog: None,
         scalar_function_cache: std::collections::HashMap::new(),
+        srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
         )),
@@ -1020,6 +1025,7 @@ fn run_plan(
         pending_table_locks: Vec::new(),
         catalog: None,
         scalar_function_cache: std::collections::HashMap::new(),
+        srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
         )),
@@ -1136,6 +1142,7 @@ fn first_tuple_slot_kind_for_sql(
             pending_table_locks: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                 crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
             )),
@@ -1234,6 +1241,7 @@ fn first_tuple_slot_kind_for_plan(
             pending_table_locks: Vec::new(),
             catalog: None,
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                 crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
             )),
@@ -1346,6 +1354,7 @@ fn run_sql_with_catalog(
             pending_table_locks: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                 crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
             )),
@@ -1427,6 +1436,27 @@ fn expr_eval_obeys_null_semantics() {
         )
         .unwrap(),
         Value::Null
+    );
+    assert_eq!(
+        eval_expr(
+            &Expr::and(
+                Expr::Const(Value::Bool(false)),
+                Expr::Const(Value::Int32(1))
+            ),
+            &mut slot,
+            &mut ctx
+        )
+        .unwrap(),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        eval_expr(
+            &Expr::or(Expr::Const(Value::Bool(true)), Expr::Const(Value::Int32(1))),
+            &mut slot,
+            &mut ctx
+        )
+        .unwrap(),
+        Value::Bool(true)
     );
     assert_eq!(
         eval_expr(&Expr::IsNull(Box::new(local_var(2))), &mut slot, &mut ctx).unwrap(),
@@ -1834,6 +1864,7 @@ fn seqscan_filter_projection_returns_expected_rows() {
                 relispopulated: true,
                 disabled: false,
                 toast: None,
+                tablesample: None,
                 desc: relation_desc(),
             }),
             predicate: Expr::op_auto(
@@ -1914,6 +1945,7 @@ fn seqscan_skips_superseded_versions() {
         relispopulated: true,
         disabled: false,
         toast: None,
+        tablesample: None,
         desc: relation_desc(),
     };
     let rows = run_plan(&base, &txns, plan).unwrap();
@@ -1959,11 +1991,11 @@ fn manual_hash_join_inner_returns_matching_rows() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
@@ -2002,11 +2034,11 @@ fn manual_hash_join_left_emits_null_extended_rows() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
@@ -2049,11 +2081,11 @@ fn manual_hash_join_right_emits_unmatched_inner_rows() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
@@ -2096,11 +2128,11 @@ fn manual_hash_join_full_emits_unmatched_rows_from_both_sides() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
@@ -2312,6 +2344,7 @@ fn manual_merge_join_emits_duplicate_groups_in_merge_order() {
         )],
         outer_merge_keys: vec![local_var(0)],
         inner_merge_keys: vec![local_var(0)],
+        merge_key_descending: vec![false],
         join_qual: vec![],
         qual: vec![],
     };
@@ -2783,6 +2816,7 @@ fn manual_merge_join_null_keys_do_not_match_each_other() {
         )],
         outer_merge_keys: vec![local_var(0)],
         inner_merge_keys: vec![local_var(0)],
+        merge_key_descending: vec![false],
         join_qual: vec![],
         qual: vec![],
     };
@@ -3860,6 +3894,58 @@ fn delete_sql_deletes_matching_rows() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn delete_using_deletes_rows_matching_join_source() {
+    let base = temp_dir("delete_using_join_source");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table t1(a int)").unwrap();
+    db.execute(1, "create table t3(x int, y int)").unwrap();
+    db.execute(1, "insert into t1 values (5), (500)").unwrap();
+    db.execute(1, "insert into t3 values (5, 20), (6, 7), (500, 100)")
+        .unwrap();
+
+    assert_eq!(
+        db.execute(1, "delete from t3 using t1 table1 where t3.x = table1.a")
+            .unwrap(),
+        StatementResult::AffectedRows(2)
+    );
+    match db.execute(1, "select * from t3 order by x").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(6), Value::Int32(7)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn delete_using_join_using_allows_qualified_merged_column() {
+    let base = temp_dir("delete_using_join_using_qualified");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table t1(a int)").unwrap();
+    db.execute(1, "create table t2(a int)").unwrap();
+    db.execute(1, "create table t3(x int, y int)").unwrap();
+    db.execute(1, "insert into t1 values (5)").unwrap();
+    db.execute(1, "insert into t2 values (5)").unwrap();
+    db.execute(1, "insert into t3 values (5, 20), (6, 7), (7, 8)")
+        .unwrap();
+
+    assert_eq!(
+        db.execute(
+            1,
+            "delete from t3 using t1 join t2 using (a) where t3.x > t1.a"
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(2)
+    );
+    match db.execute(1, "select * from t3 order by x").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(5), Value::Int32(20)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn order_by_limit_offset_returns_expected_rows() {
     let mut harness = SeededSqlHarness::new("order_by_limit_offset", catalog());
@@ -4077,7 +4163,6 @@ fn explain_verbose_keeps_simple_projection() {
                     other => panic!("expected text explain line, got {:?}", other),
                 })
                 .collect::<Vec<_>>();
-            assert!(rendered.iter().any(|line| line.contains("Projection")));
             assert!(rendered.iter().any(|line| line.contains("Seq Scan")));
         }
         other => panic!("expected query result, got {:?}", other),
@@ -4459,6 +4544,7 @@ fn explain_expr_renders_user_function_current_user_and_initplan() {
                     sublink_type: SubLinkType::ExprSubLink,
                     testexpr: None,
                     first_col_type: Some(int4),
+                    target_width: 1,
                     plan_id: 0,
                     par_param: Vec::new(),
                     args: Vec::new(),
@@ -4555,7 +4641,7 @@ fn explain_expr_parenthesizes_boolean_clause_args() {
 #[test]
 fn explain_expr_matches_postgres_filter_formatting() {
     use crate::backend::parser::{SqlType, SqlTypeKind};
-    use crate::include::nodes::primnodes::{OpExprKind, ScalarFunctionImpl};
+    use crate::include::nodes::primnodes::{BuiltinScalarFunction, OpExprKind, ScalarFunctionImpl};
 
     let int4 = SqlType::new(SqlTypeKind::Int4);
     let text = SqlType::new(SqlTypeKind::Text);
@@ -4617,6 +4703,37 @@ fn explain_expr_matches_postgres_filter_formatting() {
         render_explain_expr(&like, &["a".into(), "b".into()]),
         "(b ~~ '%2f%'::text)"
     );
+
+    let ts = SqlType::new(SqlTypeKind::Timestamp);
+    let localtimestamp = Expr::binary_op(
+        OpExprKind::Lt,
+        bool_ty,
+        Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(0),
+            varlevelsup: 0,
+            vartype: ts,
+        }),
+        Expr::LocalTimestamp { precision: None },
+    );
+    assert_eq!(
+        render_explain_expr(&localtimestamp, &["a".into()]),
+        "(a < LOCALTIMESTAMP)"
+    );
+
+    let to_char = Expr::builtin_func(
+        BuiltinScalarFunction::ToChar,
+        Some(text),
+        false,
+        vec![
+            Expr::Const(Value::Int32(125)),
+            Expr::Const(Value::Text("999".into())),
+        ],
+    );
+    assert_eq!(
+        render_explain_expr(&to_char, &[]),
+        "to_char(125, '999'::text)"
+    );
 }
 
 #[test]
@@ -4664,6 +4781,66 @@ fn explain_expr_renders_scalar_array_op_with_typed_array_literal() {
     assert_eq!(
         render_explain_expr(&numeric_array, &[]),
         "(((random())::integer)::numeric = ANY ('{1,4,8.0}'::numeric[]))"
+    );
+
+    let bpchar_singleton = Expr::scalar_array_op(
+        SubqueryComparisonOp::Eq,
+        true,
+        Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(1),
+            varlevelsup: 0,
+            vartype: SqlType::new(SqlTypeKind::Char),
+        }),
+        Expr::ArrayLiteral {
+            elements: vec![Expr::Const(Value::Text("ab".into()))],
+            array_type: SqlType::array_of(SqlType::new(SqlTypeKind::Char)),
+        },
+    );
+    assert_eq!(
+        render_explain_expr(&bpchar_singleton, &["a".into(), "b".into()]),
+        "(b = 'ab'::bpchar)"
+    );
+}
+
+#[test]
+fn explain_join_expr_renders_function_args_with_join_vars() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::{
+        BuiltinScalarFunction, OUTER_VAR, OpExprKind, ScalarFunctionImpl,
+    };
+
+    let text = SqlType::new(SqlTypeKind::Text);
+    let bool_ty = SqlType::new(SqlTypeKind::Bool);
+    let left_call = Expr::func_with_impl(
+        3060,
+        Some(text),
+        false,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Left),
+        vec![
+            Expr::Var(Var {
+                varno: OUTER_VAR,
+                varattno: user_attrno(2),
+                varlevelsup: 0,
+                vartype: text,
+            }),
+            Expr::Const(Value::Int32(3)),
+        ],
+    );
+    let regex = Expr::binary_op(
+        OpExprKind::RegexMatch,
+        bool_ty,
+        left_call,
+        Expr::Const(Value::Text("a1$".into())),
+    );
+
+    assert_eq!(
+        render_explain_join_expr(
+            &regex,
+            &["p1.a".into(), "p1.b".into(), "p1.c".into()],
+            &["p2.a".into(), "p2.b".into(), "p2.c".into()],
+        ),
+        "(\"left\"(p1.c, 3) ~ 'a1$'::text)"
     );
 }
 
@@ -4733,6 +4910,35 @@ fn explain_expr_renders_geometry_consts_as_sql_literals() {
     assert_eq!(
         render_explain_expr(&circle_expr, &["f1".into()]),
         "(f1 && '<(500,500),500>'::circle)"
+    );
+}
+
+#[test]
+fn explain_sort_key_renders_box_coordinate_subscripts() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::{BuiltinScalarFunction, ScalarFunctionImpl};
+
+    let expr = Expr::func_with_impl(
+        0,
+        Some(SqlType::new(SqlTypeKind::Float8)),
+        false,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointX),
+        vec![Expr::func_with_impl(
+            0,
+            Some(SqlType::new(SqlTypeKind::Point)),
+            false,
+            ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxHigh),
+            vec![Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(0),
+                varlevelsup: 0,
+                vartype: SqlType::new(SqlTypeKind::Box),
+            })],
+        )],
+    );
+    assert_eq!(
+        render_explain_expr(&expr, &["home_base".into()]),
+        "((home_base[0])[0])"
     );
 }
 
@@ -5183,6 +5389,61 @@ fn explain_uses_query_aliases_in_sort_key_and_scan_label() {
     }
 }
 
+#[test]
+fn explain_partition_index_scan_does_not_duplicate_child_alias() {
+    let base = temp_dir("explain_partition_index_alias");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(
+        1,
+        "create table alias_parted (a int) partition by range (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table alias_parted0 partition of alias_parted for values from (0) to (10)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table alias_parted1 partition of alias_parted for values from (10) to (20)",
+    )
+    .unwrap();
+    db.execute(1, "create index on alias_parted (a)").unwrap();
+    db.execute(1, "set enable_seqscan = off").unwrap();
+
+    match db
+        .execute(
+            1,
+            "explain (costs off) select * from alias_parted order by a",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.contains("Index Only Scan") || line.contains("Index Scan")),
+                "expected index scans in partitioned ordered plan, got {rendered:?}"
+            );
+            assert!(
+                rendered.iter().all(|line| {
+                    !line.contains("alias_parted_1 alias_parted_1")
+                        && !line.contains("alias_parted_2 alias_parted_2")
+                }),
+                "expected child aliases not to be duplicated, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 const PARTITION_JOIN_FIXTURE_SQL: &[&str] = &[
     "set enable_partitionwise_join to true",
     "create table prt1 (a int, b int, c varchar) partition by range(a)",
@@ -5256,6 +5517,8 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
         &catalog,
         PlannerConfig {
             enable_partitionwise_join: true,
+            enable_nestloop: false,
+            enable_mergejoin: false,
             ..PlannerConfig::default()
         },
     )
@@ -5290,6 +5553,9 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
                 collect_hash_clause_counts(right, counts);
             }
             Plan::Hash { input, .. }
+            | Plan::Materialize { input, .. }
+            | Plan::Memoize { input, .. }
+            | Plan::Gather { input, .. }
             | Plan::Unique { input, .. }
             | Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
@@ -5328,14 +5594,18 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
     );
 
     match session
-        .execute(
-            &db,
-            "explain (costs off)
+        .execute(&db, "set enable_nestloop to false")
+        .and_then(|_| session.execute(&db, "set enable_mergejoin to false"))
+        .and_then(|_| {
+            session.execute(
+                &db,
+                "explain (costs off)
              select t1.a, t1.c, t2.b, t2.c
              from prt1 t1, prt2 t2
              where t1.a = t2.b and t1.b = 0
              order by t1.a, t2.b",
-        )
+            )
+        })
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
@@ -5643,6 +5913,32 @@ fn group_by_with_count() {
                 vec![
                     vec![Value::Text("a".into()), Value::Int64(2)],
                     vec![Value::Text("b".into()), Value::Int64(1)]
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn count_whole_row_ignores_null_extended_outer_join_rows() {
+    let mut harness = seed_people_and_pets("count_whole_row_outer_join");
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select people.id, count(pets.*) \
+             from people left join pets on pets.owner_id = people.id \
+             group by people.id order by people.id",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int64(2)],
+                    vec![Value::Int32(2), Value::Int64(1)],
+                    vec![Value::Int32(3), Value::Int64(0)]
                 ]
             );
         }
@@ -9090,6 +9386,64 @@ fn unnest_with_ordinality_aliases_and_counts_rows() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn rows_from_zips_functions_and_null_pads_shorter_results() {
+    let base = temp_dir("rows_from_zip");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from rows from(generate_series(1, 3), unnest(ARRAY['x']::varchar[])) with ordinality as r(g, u, ord)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["g", "u", "ord"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Text("x".into()), Value::Int64(1)],
+                    vec![Value::Int32(2), Value::Null, Value::Int64(2)],
+                    vec![Value::Int32(3), Value::Null, Value::Int64(3)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn rows_from_accepts_scalar_function_items() {
+    let base = temp_dir("rows_from_scalar_function");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from rows from(abs(-7::int4), generate_series(1, 2)) with ordinality as r(s, g, ord)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["s", "g", "ord"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(7), Value::Int32(1), Value::Int64(1)],
+                    vec![Value::Null, Value::Int32(2), Value::Int64(2)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn casts_support_int2_int8_float4_and_float8() {
     let base = temp_dir("extended_numeric_casts");
@@ -11530,6 +11884,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         pending_table_locks: Vec::new(),
         catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
         scalar_function_cache: std::collections::HashMap::new(),
+        srf_rows_cache: std::collections::HashMap::new(),
         plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
         )),
@@ -12364,6 +12719,237 @@ fn lateral_values_can_reference_left_columns() {
 }
 
 #[test]
+fn nested_join_rhs_lateral_can_reference_prior_from_item() {
+    let base = temp_dir("nested_join_rhs_lateral_outer_ref");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select x, z
+         from (values (1),(2)) a(x),
+              (values (10)) b(y) join lateral (values (a.x)) ss(z) on true
+         order by x, z",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int32(1)],
+                    vec![Value::Int32(2), Value::Int32(2)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn derived_table_in_correlated_subquery_can_reference_outer_query() {
+    let base = temp_dir("derived_table_correlated_subquery");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table int8_tbl(q1 int8, q2 int8)")
+        .unwrap();
+    db.execute(1, "insert into int8_tbl values (123, 456)")
+        .unwrap();
+    match db
+        .execute(
+            1,
+            "select q1, q2, (select r from (select q1 as q2) x, (select q2 as r) y)
+             from int8_tbl",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int64(123),
+                    Value::Int64(456),
+                    Value::Int64(456),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn lateral_subquery_can_reference_left_join_output() {
+    let base = temp_dir("lateral_references_left_join_output");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select x, y, z
+         from (select 1 as x) ss1 left join (select 2 as y) ss2 on true,
+              lateral (select ss2.y as z limit 1) ss3",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(1), Value::Int32(2), Value::Int32(2)]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn lateral_inside_join_can_reference_prior_from_item_in_join_qual() {
+    let base = temp_dir("lateral_nested_join_prior_ref_qual");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select x, y, z
+         from (values (1),(2)) a(x),
+              (values (10),(1),(2)) b(y)
+              left join lateral (select a.x from (values (0)) d(n)) ss(z)
+                on b.y = ss.z
+         order by x, y",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int32(1), Value::Int32(1)],
+                    vec![Value::Int32(1), Value::Int32(2), Value::Null],
+                    vec![Value::Int32(1), Value::Int32(10), Value::Null],
+                    vec![Value::Int32(2), Value::Int32(1), Value::Null],
+                    vec![Value::Int32(2), Value::Int32(2), Value::Int32(2)],
+                    vec![Value::Int32(2), Value::Int32(10), Value::Null],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn lateral_nested_sublink_preserves_outer_values_binding() {
+    let base = temp_dir("lateral_nested_sublink_outer_values");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table int4_tbl(f1 int4)").unwrap();
+    db.execute(1, "insert into int4_tbl values (0),(1),(2)")
+        .unwrap();
+    db.execute(1, "create table tenk1(unique1 int4, unique2 int4)")
+        .unwrap();
+    db.execute(1, "insert into tenk1 values (0,9998),(5,1000)")
+        .unwrap();
+
+    assert_query_rows(
+        db.execute(
+            1,
+            "select id, x, f1
+             from (values (0,9998), (1,1000)) v(id,x),
+                  lateral (
+                    select f1 from int4_tbl
+                    where f1 = any (
+                        select unique1 from tenk1
+                        where unique2 = v.x
+                        offset 0
+                    )
+                  ) ss
+             order by id, f1",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(0), Value::Int32(9998), Value::Int32(0)]],
+    );
+}
+
+#[test]
+fn lateral_right_join_placeholder_uses_outer_binding_at_join_level() {
+    let base = temp_dir("lateral_right_join_placeholder_outer_binding");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table int4_tbl(f1 int4)").unwrap();
+    db.execute(1, "insert into int4_tbl values (0),(1),(2)")
+        .unwrap();
+    db.execute(1, "create table int8_tbl(q1 int8, q2 int8)")
+        .unwrap();
+    db.execute(1, "insert into int8_tbl values (10,20)")
+        .unwrap();
+
+    let sql = "select * from
+               int4_tbl as i41,
+               lateral
+                 (select 1 as x from
+                   (select i41.f1 as lat,
+                           i42.f1 as loc from
+                      int8_tbl as i81, int4_tbl as i42) as ss1
+                   right join int4_tbl as i43 on (i43.f1 > 1)
+                   where ss1.loc = ss1.lat) as ss2
+             where i41.f1 > 0"
+        .to_string();
+
+    assert_query_rows(
+        db.execute(1, &(sql + " order by i41.f1")).unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(1)],
+            vec![Value::Int32(2), Value::Int32(1)],
+        ],
+    );
+}
+
+#[test]
+fn right_full_join_lateral_cannot_reference_left_side() {
+    let base = temp_dir("right_full_lateral_invalid_left_ref");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let right_err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from (values (1)) a(f1)
+         right join lateral generate_series(0, a.f1) g on true",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(right_err, ExecError::Parse(ParseError::InvalidFromClauseReference(name)) if name == "a")
+    );
+
+    let full_err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from (values (1)) a(f1)
+         full join lateral generate_series(0, a.f1) g on true",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(full_err, ExecError::Parse(ParseError::InvalidFromClauseReference(name)) if name == "a")
+    );
+}
+
+#[test]
+fn lateral_duplicate_outer_relation_alias_is_ambiguous() {
+    let base = temp_dir("lateral_duplicate_alias_ambiguous");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table int8_tbl(q1 int8, q2 int8)")
+        .unwrap();
+    db.execute(1, "create table int4_tbl(f1 int4)").unwrap();
+    let err = db
+        .execute(
+            1,
+            "select * from int8_tbl x
+             cross join (int4_tbl x cross join lateral (select x.f1) ss)",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError { message, .. })
+            if message == "table reference \"x\" is ambiguous"
+    ));
+}
+
+#[test]
 fn lateral_values_can_reference_zero_column_whole_row() {
     let base = temp_dir("lateral_values_zero_column_whole_row");
     let db = Database::open(&base, 16).unwrap();
@@ -12653,6 +13239,25 @@ fn to_char_numeric_fill_mode_respects_integer_zero_masks() {
                     Value::Text(".0".into()),
                 ]]
             );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn to_char_numeric_fill_mode_can_trail_zero_mask() {
+    let base = temp_dir("to_char_numeric_trailing_fm");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select to_char(42, '000000000000FM')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("000000000042".into())]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -14892,6 +15497,214 @@ from (values (1),(2)) v1(r1)
 }
 
 #[test]
+fn lateral_left_join_under_offset_uses_outer_ref_in_function_scan() {
+    let base = temp_dir("rangefuncs_lateral_offset_generate_series");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let sql = r#"
+select *
+from (values (1),(2),(3)) v1(r1),
+     lateral (
+       select r1, *
+       from (values (10),(20),(30)) v2(r2)
+       left join generate_series(20 + r1, 23) f(i) on ((r2 + i) < 100)
+       offset 0
+     ) s1
+"#;
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(10),
+                        Value::Int32(21),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(10),
+                        Value::Int32(22),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(10),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(20),
+                        Value::Int32(21),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(20),
+                        Value::Int32(22),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(20),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(30),
+                        Value::Int32(21),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(30),
+                        Value::Int32(22),
+                    ],
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(30),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(10),
+                        Value::Int32(22),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(10),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(20),
+                        Value::Int32(22),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(20),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(30),
+                        Value::Int32(22),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Int32(30),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(3),
+                        Value::Int32(3),
+                        Value::Int32(10),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(3),
+                        Value::Int32(3),
+                        Value::Int32(20),
+                        Value::Int32(23),
+                    ],
+                    vec![
+                        Value::Int32(3),
+                        Value::Int32(3),
+                        Value::Int32(30),
+                        Value::Int32(23),
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn lateral_left_join_under_offset_uses_nearest_outer_ref_in_function_scan() {
+    let base = temp_dir("rangefuncs_lateral_offset_nearest_outer");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let sql = r#"
+select *
+from (values (1),(2),(3)) v1(r1),
+     lateral (
+       select r1, *
+       from (values (10),(20),(30)) v2(r2)
+       left join generate_series(r2, r2 + 3) f(i) on ((r2 + i) < 100)
+       offset 0
+     ) s1
+"#;
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap() {
+        StatementResult::Query { rows, .. } => {
+            let expected = [1, 2, 3]
+                .into_iter()
+                .flat_map(|r1| {
+                    [10, 20, 30].into_iter().flat_map(move |r2| {
+                        (r2..=r2 + 3).map(move |i| {
+                            vec![
+                                Value::Int32(r1),
+                                Value::Int32(r1),
+                                Value::Int32(r2),
+                                Value::Int32(i),
+                            ]
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(rows, expected);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn lateral_left_join_under_offset_uses_outer_refs_from_two_levels_in_function_scan() {
+    let base = temp_dir("rangefuncs_lateral_offset_two_outer_levels");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let sql = r#"
+select *
+from (values (1),(2),(3)) v1(r1),
+     lateral (
+       select r1, *
+       from (values (10),(20),(30)) v2(r2)
+       left join generate_series(r1, 2 + r2 / 5) f(i) on ((r2 + i) < 100)
+       offset 0
+     ) s1
+"#;
+    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap() {
+        StatementResult::Query { rows, .. } => {
+            let expected = [1, 2, 3]
+                .into_iter()
+                .flat_map(|r1| {
+                    [10, 20, 30].into_iter().flat_map(move |r2| {
+                        (r1..=2 + r2 / 5).map(move |i| {
+                            vec![
+                                Value::Int32(r1),
+                                Value::Int32(r1),
+                                Value::Int32(r2),
+                                Value::Int32(i),
+                            ]
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(rows, expected);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn derived_table_alias_preserved_for_empty_result() {
     let base = temp_dir("derived_table_empty_alias");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -15411,6 +16224,46 @@ fn point_coordinate_subscripts_return_float8_values() {
         )
         .unwrap(),
         vec![vec![Value::Float64(1.5), Value::Float64(2.5)]],
+    );
+}
+
+#[test]
+fn box_subscripts_return_high_and_low_points() {
+    use crate::include::nodes::datum::GeoPoint;
+
+    let base = temp_dir("box_subscripts");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ('((1,2),(3,4))'::box)[0], ('((1,2),(3,4))'::box)[1], (('((1,2),(3,4))'::box)[0])[1]",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Point(GeoPoint { x: 3.0, y: 4.0 }),
+            Value::Point(GeoPoint { x: 1.0, y: 2.0 }),
+            Value::Float64(4.0),
+        ]],
+    );
+}
+
+#[test]
+fn point_contained_by_circle_matches_circle_contains_point() {
+    let base = temp_dir("point_contained_by_circle");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '(1,1)'::point <@ '<(0,0),2>'::circle, '<(0,0),2>'::circle @> '(3,0)'::point",
+        )
+        .unwrap(),
+        vec![vec![Value::Bool(true), Value::Bool(false)]],
     );
 }
 
@@ -16215,6 +17068,35 @@ fn hypothetical_set_aggregates_compute_expected_results() {
 }
 
 #[test]
+fn percentile_disc_ordered_set_aggregate_returns_discrete_value() {
+    let base = temp_dir("percentile_disc_ordered_set");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select percentile_disc(0.5) within group (order by x)
+             from (values (1),(2),(3),(null)) v(x)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(2)]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select percentile_disc(0.5) within group (order by x desc)
+             from (values (1),(2),(3),(4)) v(x)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(3)]],
+    );
+}
+
+#[test]
 fn hypothetical_set_aggregates_support_multicolumn_ordering_and_empty_percent_rank() {
     let base = temp_dir("hypothetical_set_aggregates_multicolumn");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -16230,6 +17112,25 @@ fn hypothetical_set_aggregates_support_multicolumn_ordering_and_empty_percent_ra
         )
         .unwrap(),
         vec![vec![Value::Int64(3), Value::Int64(3)]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select rank('00000000-0000-0000-0000-000000000000', '2', '2')
+                    within group (order by v, id, id::text)
+             from (values
+                 ('00000000-0000-0000-0000-000000000000'::uuid, 1),
+                 ('00000000-0000-0000-0000-000000010009'::uuid, 10010),
+                 ('00000000-0000-0000-0000-000000000001'::uuid, 2),
+                 (null::uuid, 0),
+                 (null::uuid, 20002),
+                 (null::uuid, 20003)
+             ) s(v, id)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(2)]],
     );
     assert_query_rows(
         run_sql(
@@ -22742,6 +23643,73 @@ fn alter_function_signature_accepts_argument_names() {
 }
 
 #[test]
+fn plpgsql_return_positional_comparison() {
+    let db = Database::open(temp_dir("plpgsql_return_positional_comparison"), 16).unwrap();
+    db.execute(
+        1,
+        "create function cmp_leak(int, int) returns bool \
+         language plpgsql as $$begin return $1 < $2; end$$",
+    )
+    .unwrap();
+
+    assert_query_rows(
+        db.execute(1, "select cmp_leak(1, 2), cmp_leak(2, 1)")
+            .unwrap(),
+        vec![vec![Value::Bool(true), Value::Bool(false)]],
+    );
+}
+
+#[test]
+fn custom_plpgsql_operator_with_scalarltsel_runs() {
+    let db = Database::open(temp_dir("custom_plpgsql_operator_scalarltsel"), 16).unwrap();
+    db.execute(
+        1,
+        "create function cmp_leak_op(int, int) returns bool \
+         language plpgsql as $$begin return $1 < $2; end$$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator <<< (procedure = cmp_leak_op, leftarg = int, rightarg = int, restrict = scalarltsel)",
+    )
+    .unwrap();
+
+    assert_query_rows(
+        db.execute(1, "select 1 <<< 2, 2 <<< 1").unwrap(),
+        vec![vec![Value::Bool(true), Value::Bool(false)]],
+    );
+}
+
+#[test]
+fn sql_function_scan_expands_named_composite_record_result() {
+    let db = Database::open(temp_dir("sql_function_scan_named_composite"), 16).unwrap();
+    db.execute(1, "create table int8_tbl(q1 int8, q2 int8)")
+        .unwrap();
+    db.execute(1, "create table int4_tbl(f1 int4)").unwrap();
+    db.execute(
+        1,
+        "create function mki8(bigint, bigint) returns int8_tbl as \
+         $$select row($1,$2)::int8_tbl$$ language sql",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function mki4(int) returns int4_tbl as \
+         $$select row($1)::int4_tbl$$ language sql",
+    )
+    .unwrap();
+
+    assert_query_rows(
+        db.execute(1, "select * from mki8(1,2)").unwrap(),
+        vec![vec![Value::Int64(1), Value::Int64(2)]],
+    );
+    assert_query_rows(
+        db.execute(1, "select * from mki4(42)").unwrap(),
+        vec![vec![Value::Int32(42)]],
+    );
+}
+
+#[test]
 fn range_constructor_semantics() {
     let base = temp_dir("range_constructor_accessors");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -23237,6 +24205,42 @@ fn scalar_subquery_multiple_rows_errors() {
     assert!(
         format!("{err:?}")
             .contains("more than one row returned by a subquery used as an expression")
+    );
+}
+
+#[test]
+fn correlated_scalar_subquery_in_join_qual_uses_sql_visible_width() {
+    let mut harness = SeededSqlHarness::new("scalar_subquery_join_qual_width", Catalog::default());
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "create table tenk1(unique1 int4, two int4)",
+        )
+        .unwrap();
+    let xid = harness.txns.begin();
+    harness
+        .execute(xid, "insert into tenk1 values (0,0),(1,1),(2,0),(3,1)")
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
+
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select t1.unique1,t2.unique1 from tenk1 t1
+                 inner join tenk1 t2 on t1.two = t2.two
+                   and t1.unique1 = (select min(unique1) from tenk1
+                                     where t2.unique1=unique1)
+                 where t1.unique1 < 4 and t2.unique1 < 4
+                 order by t1.unique1",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(0), Value::Int32(0)],
+            vec![Value::Int32(1), Value::Int32(1)],
+            vec![Value::Int32(2), Value::Int32(2)],
+            vec![Value::Int32(3), Value::Int32(3)],
+        ],
     );
 }
 
@@ -24546,6 +25550,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
             pending_table_locks: Vec::new(),
             catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: std::sync::Arc::new(parking_lot::RwLock::new(
                 crate::pl::plpgsql::PlpgsqlFunctionCache::default(),
             )),

@@ -114,11 +114,12 @@ pub const fn relam_for_relkind(relkind: char) -> u32 {
     }
 }
 
-pub fn bootstrap_pg_class_rows() -> [PgClassRow; 37] {
+pub fn bootstrap_pg_class_rows() -> [PgClassRow; 44] {
     [
         bootstrap_pg_class_row(BootstrapCatalogKind::PgNamespace),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgType),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgProc),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgDefaultAcl),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgLanguage),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgOperator),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgAttribute),
@@ -128,10 +129,14 @@ pub fn bootstrap_pg_class_rows() -> [PgClassRow; 37] {
         bootstrap_pg_class_row(BootstrapCatalogKind::PgCollation),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgLargeobject),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgDatabase),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgExtension),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgEventTrigger),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgTablespace),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgShdepend),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgShdescription),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgReplicationOrigin),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgAm),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgTransform),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgAttrdef),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgCast),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgConstraint),
@@ -153,6 +158,8 @@ pub fn bootstrap_pg_class_rows() -> [PgClassRow; 37] {
         bootstrap_pg_class_row(BootstrapCatalogKind::PgPublication),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgPublicationRel),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgPublicationNamespace),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgSubscription),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgParameterAcl),
     ]
 }
 

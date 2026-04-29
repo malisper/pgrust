@@ -4,8 +4,11 @@ use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::catalog::PgInheritsRow;
 use crate::include::nodes::parsenodes::SetOperator;
+use crate::include::nodes::parsenodes::TableSampleClause;
 use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind};
-use crate::include::nodes::plannodes::{AggregateStrategy, IndexScanKey, PlanEstimate};
+use crate::include::nodes::plannodes::{
+    AggregatePhase, AggregateStrategy, IndexScanKey, PartitionPrunePlan, PlanEstimate,
+};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
     SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var, WindowClause,
@@ -33,26 +36,42 @@ pub struct AppendRelInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlannerConfig {
     pub enable_partitionwise_join: bool,
+    pub enable_partitionwise_aggregate: bool,
     pub enable_seqscan: bool,
     pub enable_indexscan: bool,
     pub enable_indexonlyscan: bool,
     pub enable_bitmapscan: bool,
+    pub enable_nestloop: bool,
+    pub enable_hashjoin: bool,
+    pub enable_mergejoin: bool,
+    pub enable_memoize: bool,
+    pub enable_material: bool,
     pub retain_partial_index_filters: bool,
     pub enable_hashagg: bool,
     pub enable_sort: bool,
+    pub force_parallel_gather: bool,
+    pub max_parallel_workers_per_gather: usize,
 }
 
 impl Default for PlannerConfig {
     fn default() -> Self {
         Self {
             enable_partitionwise_join: false,
+            enable_partitionwise_aggregate: false,
             enable_seqscan: true,
             enable_indexscan: true,
             enable_indexonlyscan: true,
             enable_bitmapscan: true,
+            enable_nestloop: true,
+            enable_hashjoin: true,
+            enable_mergejoin: true,
+            enable_memoize: true,
+            enable_material: true,
             retain_partial_index_filters: false,
             enable_hashagg: true,
             enable_sort: true,
+            force_parallel_gather: false,
+            max_parallel_workers_per_gather: 2,
         }
     }
 }
@@ -424,10 +443,12 @@ pub enum Path {
     Append {
         plan_info: PlanEstimate,
         pathtarget: PathTarget,
+        pathkeys: Vec<PathKey>,
         relids: Vec<usize>,
         source_id: usize,
         desc: RelationDesc,
         child_roots: Vec<Option<PlannerSubroot>>,
+        partition_prune: Option<PartitionPrunePlan>,
         children: Vec<Path>,
     },
     MergeAppend {
@@ -436,6 +457,7 @@ pub enum Path {
         source_id: usize,
         desc: RelationDesc,
         items: Vec<OrderByEntry>,
+        partition_prune: Option<PartitionPrunePlan>,
         children: Vec<Path>,
     },
     Unique {
@@ -454,6 +476,7 @@ pub enum Path {
         relkind: char,
         relispopulated: bool,
         toast: Option<ToastRelationRef>,
+        tablesample: Option<TableSampleClause>,
         desc: RelationDesc,
         disabled: bool,
     },
@@ -566,6 +589,7 @@ pub enum Path {
         merge_clauses: Vec<RestrictInfo>,
         outer_merge_keys: Vec<Expr>,
         inner_merge_keys: Vec<Expr>,
+        merge_key_descending: Vec<bool>,
         restrict_clauses: Vec<RestrictInfo>,
     },
     Projection {
@@ -609,6 +633,8 @@ pub enum Path {
         pathtarget: PathTarget,
         slot_id: usize,
         strategy: AggregateStrategy,
+        phase: AggregatePhase,
+        semantic_accumulators: Option<Vec<AggAccum>>,
         disabled: bool,
         pathkeys: Vec<PathKey>,
         input: Box<Path>,

@@ -5,7 +5,7 @@ use crate::backend::executor::{Expr, Plan};
 use crate::backend::parser::{CatalogLookup, FromItem, JoinConstraint, SqlExpr};
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::plannodes::PlannedStmt;
-use crate::include::nodes::primnodes::set_returning_call_exprs;
+use crate::include::nodes::primnodes::{RowsFromSource, set_returning_call_exprs};
 
 pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLocator>) {
     match expr {
@@ -233,6 +233,20 @@ fn collect_rels_from_set_returning_call(
     rels: &mut BTreeSet<RelFileLocator>,
 ) {
     match call {
+        crate::include::nodes::primnodes::SetReturningCall::RowsFrom { items, .. } => {
+            for item in items {
+                match &item.source {
+                    RowsFromSource::Function(call) => {
+                        collect_rels_from_set_returning_call(call, rels)
+                    }
+                    RowsFromSource::Project { output_exprs, .. } => {
+                        for expr in output_exprs {
+                            collect_rels_from_expr(expr, rels);
+                        }
+                    }
+                }
+            }
+        }
         crate::include::nodes::primnodes::SetReturningCall::GenerateSeries {
             start,
             stop,
@@ -326,6 +340,16 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_expr(expr, rels);
             }
         }
+        Plan::Materialize { input, .. } => collect_rels_from_plan(input, rels),
+        Plan::Memoize {
+            input, cache_keys, ..
+        } => {
+            collect_rels_from_plan(input, rels);
+            for expr in cache_keys {
+                collect_rels_from_expr(expr, rels);
+            }
+        }
+        Plan::Gather { input, .. } => collect_rels_from_plan(input, rels),
         Plan::NestedLoopJoin {
             left,
             right,
@@ -691,13 +715,25 @@ fn collect_direct_relation_oids_from_from_item(
                 collect_direct_relation_oids_from_sql_expr(&arg.value, catalog, visible_ctes, rels);
             }
         }
+        FromItem::RowsFrom { functions, .. } => {
+            for function in functions {
+                for arg in &function.args {
+                    collect_direct_relation_oids_from_sql_expr(
+                        &arg.value,
+                        catalog,
+                        visible_ctes,
+                        rels,
+                    );
+                }
+            }
+        }
         FromItem::JsonTable(table) => {
             collect_direct_relation_oids_from_json_table(table, catalog, visible_ctes, rels);
         }
         FromItem::XmlTable(table) => {
             collect_direct_relation_oids_from_xml_table(table, catalog, visible_ctes, rels);
         }
-        FromItem::Lateral(source) => {
+        FromItem::Lateral(source) | FromItem::TableSample { source, .. } => {
             collect_direct_relation_oids_from_from_item(source, catalog, visible_ctes, rels);
         }
         FromItem::DerivedTable(select) => {
@@ -841,6 +877,7 @@ fn collect_direct_relation_oids_from_sql_expr(
     match expr {
         SqlExpr::Column(_)
         | SqlExpr::Parameter(_)
+        | SqlExpr::ParamRef(_)
         | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)

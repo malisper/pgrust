@@ -154,6 +154,7 @@ fn encode_array_element_payload(
         }
         Value::Bytea(v) => Ok(v),
         Value::Uuid(v) => Ok(v.to_vec()),
+        Value::Tid(v) => Ok(render_tid_text(&v).into_bytes()),
         Value::Inet(v) => Ok(crate::backend::executor::encode_network_bytes(&v, false)),
         Value::Cidr(v) => Ok(crate::backend::executor::encode_network_bytes(&v, true)),
         Value::MacAddr(v) => Ok(v.to_vec()),
@@ -547,7 +548,7 @@ fn array_element_layout(
             });
         }
         SqlTypeKind::Cstring => (-2, AttributeAlign::Char),
-        SqlTypeKind::Trigger => {
+        SqlTypeKind::Trigger | SqlTypeKind::EventTrigger => {
             return Err(ExecError::InvalidStorageValue {
                 column: column.into(),
                 details: "trigger arrays are unsupported".into(),
@@ -840,6 +841,7 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         Value::TsVector(_) => Some(SqlType::new(SqlTypeKind::TsVector)),
         Value::TsQuery(_) => Some(SqlType::new(SqlTypeKind::TsQuery)),
         Value::PgLsn(_) => Some(SqlType::new(SqlTypeKind::PgLsn)),
+        Value::Tid(_) => Some(SqlType::new(SqlTypeKind::Tid)),
         Value::InternalChar(_) => Some(SqlType::new(SqlTypeKind::InternalChar)),
         Value::Json(_) => Some(SqlType::new(SqlTypeKind::Json)),
         Value::Jsonb(_) => Some(SqlType::new(SqlTypeKind::Jsonb)),
@@ -913,7 +915,7 @@ fn decode_array_element_value(
             column: column.into(),
             details: "shell type arrays are unsupported".into(),
         }),
-        SqlTypeKind::Trigger => Err(ExecError::InvalidStorageValue {
+        SqlTypeKind::Trigger | SqlTypeKind::EventTrigger => Err(ExecError::InvalidStorageValue {
             column: column.into(),
             details: "trigger arrays are unsupported".into(),
         }),
@@ -1391,6 +1393,7 @@ fn format_array_values_nested(
                 out.push('"');
             }
             Value::Uuid(v) => push_array_text_element(&mut out, &render_uuid_text(v)),
+            Value::Tid(v) => push_array_text_element(&mut out, &render_tid_text(v)),
             Value::Inet(v) => push_array_text_element(&mut out, &v.render_inet()),
             Value::Cidr(v) => push_array_text_element(&mut out, &v.render_cidr()),
             Value::MacAddr(v) => {
@@ -1450,7 +1453,7 @@ fn format_array_values_nested(
                 let rendered = render_jsonb_bytes(v).unwrap_or_else(|_| "null".into());
                 push_array_text_element(&mut out, &rendered);
             }
-            Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
+            Value::Bool(v) => out.push_str(if *v { "t" } else { "f" }),
             Value::Point(_)
             | Value::Lseg(_)
             | Value::Path(_)

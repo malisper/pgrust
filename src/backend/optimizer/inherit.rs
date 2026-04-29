@@ -27,8 +27,9 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
         let RangeTblEntryKind::Relation {
             relation_oid,
             relkind,
+            tablesample,
             ..
-        } = parent_rte.kind
+        } = parent_rte.kind.clone()
         else {
             parent_rtindex += 1;
             continue;
@@ -87,7 +88,11 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
             let child_rtindex = root.parse.rtable.len() + 1;
             let translated_vars =
                 translate_parent_vars_to_child(&parent_rte.desc, child_rtindex, &child.desc);
-            let child_alias = format!("{parent_alias}_{child_alias_index}");
+            let child_alias = if child_alias_index == 1 {
+                parent_alias.clone()
+            } else {
+                format!("{parent_alias}_{}", child_alias_index - 1)
+            };
             let child_rte = RangeTblEntry {
                 alias: Some(child_alias.clone()),
                 alias_preserves_source_names: false,
@@ -110,6 +115,7 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
                     relkind: child.relkind,
                     relispopulated: child.relispopulated,
                     toast: child.toast,
+                    tablesample: tablesample.clone(),
                 },
             };
             let mut child_rte = child_rte;
@@ -343,19 +349,29 @@ fn partition_info_for_parent(
     members: Vec<PartitionMember>,
 ) -> Option<PartitionInfo> {
     let spec = partition_cache::partition_spec(root, catalog, relation_oid)?;
+    let parent_translation = AppendRelInfo {
+        parent_relid: 1,
+        child_relid: parent_rtindex,
+        translated_vars: parent_rte
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                Expr::Var(Var {
+                    varno: parent_rtindex,
+                    varattno: user_attrno(index),
+                    varlevelsup: 0,
+                    vartype: column.sql_type,
+                })
+            })
+            .collect(),
+    };
     let key_exprs = spec
-        .partattrs
+        .key_exprs
         .iter()
-        .filter_map(|attno| {
-            let index = usize::try_from(*attno).ok()?.checked_sub(1)?;
-            let column = parent_rte.desc.columns.get(index)?;
-            Some(Expr::Var(Var {
-                varno: parent_rtindex,
-                varattno: i32::from(*attno),
-                varlevelsup: 0,
-                vartype: column.sql_type,
-            }))
-        })
+        .cloned()
+        .map(|expr| translate_append_rel_expr(expr, &parent_translation))
         .collect::<Vec<_>>();
     if key_exprs.len() != spec.partattrs.len() || members.is_empty() {
         return None;

@@ -1,31 +1,35 @@
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::analyze::bound_index_relation_from_relcache_entry_with_heap_and_cache;
 use crate::backend::parser::{BoundRelation, CatalogLookup, DomainLookup};
+use crate::backend::rewrite::format_view_definition;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
-    build_pg_rules_rows, build_pg_stat_all_tables_rows, build_pg_stat_io_rows,
-    build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
-    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_user_mappings_rows,
-    build_pg_views_rows,
+    build_pg_rules_rows, build_pg_stat_activity_rows, build_pg_stat_all_tables_rows,
+    build_pg_stat_archiver_rows, build_pg_stat_bgwriter_rows, build_pg_stat_checkpointer_rows,
+    build_pg_stat_database_rows, build_pg_stat_io_rows, build_pg_stat_recovery_prefetch_rows,
+    build_pg_stat_slru_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
+    build_pg_stat_wal_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
+    build_pg_tables_rows, build_pg_user_mappings_rows,
+    build_pg_views_rows_with_definition_formatter,
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PgAggregateRow, PgAmprocRow, PgAuthIdRow,
     PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgConversionRow,
-    PgDatabaseRow, PgDependRow, PgEnumRow, PgForeignDataWrapperRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow,
-    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRangeRow,
-    PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTriggerRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    bootstrap_pg_aggregate_rows, bootstrap_pg_amproc_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_conversion_rows, bootstrap_pg_database_rows,
-    bootstrap_pg_enum_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
-    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
-    bootstrap_pg_proc_row_by_oid, bootstrap_pg_proc_rows, bootstrap_pg_proc_rows_by_name,
-    bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
-    bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows, builtin_range_rows,
-    builtin_type_rows, synthetic_range_proc_rows_by_name,
+    PgDatabaseRow, PgDependRow, PgEnumRow, PgEventTriggerRow, PgForeignDataWrapperRow,
+    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRangeRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgStatisticRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow, bootstrap_pg_aggregate_rows, bootstrap_pg_amproc_rows,
+    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_conversion_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_opfamily_rows, bootstrap_pg_proc_row_by_oid, bootstrap_pg_proc_rows,
+    bootstrap_pg_proc_rows_by_name, bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows,
+    bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows,
+    builtin_range_rows, builtin_type_rows, synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::pathnodes::PlannerIndexExprCacheEntry;
 use crate::pgrust::database::DatabaseStatsStore;
@@ -756,6 +760,13 @@ impl CatalogLookup for VisibleCatalog {
             .unwrap_or_default()
     }
 
+    fn event_trigger_rows(&self) -> Vec<PgEventTriggerRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.event_trigger_rows())
+            .unwrap_or_default()
+    }
+
     fn policy_rows_for_relation(&self, relation_oid: u32) -> Vec<PgPolicyRow> {
         VisibleCatalog::policy_rows_for_relation(self, relation_oid)
     }
@@ -895,15 +906,33 @@ impl CatalogLookup for VisibleCatalog {
         VisibleCatalog::statistic_ext_data_rows(self)
     }
 
+    fn pg_tables_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        let Some(catcache) = &self.catcache else {
+            return Vec::new();
+        };
+        build_pg_tables_rows(
+            catcache.namespace_rows(),
+            catcache.authid_rows(),
+            catcache.class_rows(),
+        )
+    }
+
     fn pg_views_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
         let Some(catcache) = &self.catcache else {
             return Vec::new();
         };
-        build_pg_views_rows(
+        build_pg_views_rows_with_definition_formatter(
             catcache.namespace_rows(),
             catcache.authid_rows(),
             catcache.class_rows(),
             catcache.rewrite_rows(),
+            |class, definition| {
+                self.relation_by_oid(class.oid)
+                    .and_then(|relation| {
+                        format_view_definition(class.oid, &relation.desc, self).ok()
+                    })
+                    .unwrap_or_else(|| definition.to_string())
+            },
         )
     }
 
@@ -981,7 +1010,40 @@ impl CatalogLookup for VisibleCatalog {
     }
 
     fn pg_stat_activity_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
-        Vec::new()
+        build_pg_stat_activity_rows(0, "regression")
+    }
+
+    fn pg_stat_database_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        let stats = DatabaseStatsStore::with_default_io_rows();
+        build_pg_stat_database_rows(self.database_rows(), &stats)
+    }
+
+    fn pg_stat_checkpointer_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        let stats = DatabaseStatsStore::with_default_io_rows();
+        build_pg_stat_checkpointer_rows(
+            &crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+            &stats,
+        )
+    }
+
+    fn pg_stat_wal_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        build_pg_stat_wal_rows(&DatabaseStatsStore::with_default_io_rows())
+    }
+
+    fn pg_stat_slru_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        build_pg_stat_slru_rows(&DatabaseStatsStore::with_default_io_rows())
+    }
+
+    fn pg_stat_archiver_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        build_pg_stat_archiver_rows(&DatabaseStatsStore::with_default_io_rows())
+    }
+
+    fn pg_stat_bgwriter_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        build_pg_stat_bgwriter_rows(&DatabaseStatsStore::with_default_io_rows())
+    }
+
+    fn pg_stat_recovery_prefetch_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        build_pg_stat_recovery_prefetch_rows(&DatabaseStatsStore::with_default_io_rows())
     }
 
     fn pg_stat_all_tables_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
@@ -1128,6 +1190,7 @@ mod tests {
             base.rewrite_rows(),
             base.sequence_rows(),
             base.trigger_rows(),
+            base.event_trigger_rows(),
             base.policy_rows(),
             base.publication_rows(),
             base.publication_rel_rows(),

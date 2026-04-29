@@ -7,8 +7,7 @@ use crate::backend::executor::expr_reg::{format_regprocedure_oid_optional, forma
 use crate::backend::parser::{parse_type_name, resolve_raw_type_name};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::syscache::{
-    SysCacheId, SysCacheTuple, search_sys_cache_list1_db, search_sys_cache_list2_db,
-    search_sys_cache1_db,
+    SearchSysCache1, SearchSysCacheList1, SearchSysCacheList2, SysCacheId, SysCacheTuple,
 };
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
 use crate::include::catalog::{
@@ -111,6 +110,29 @@ fn drop_quote_identifier_if_needed(identifier: &str) -> String {
     } else {
         format!("\"{}\"", identifier.replace('"', "\"\""))
     }
+}
+
+fn push_missing_relation_notice(
+    catalog: &dyn CatalogLookup,
+    relation_name: &str,
+    object_kind: &str,
+) {
+    if let Some((schema_name, _)) = relation_name.split_once('.') {
+        let schema_name = schema_name.trim_matches('"').replace("\"\"", "\"");
+        if !catalog
+            .namespace_rows()
+            .into_iter()
+            .any(|row| row.nspname.eq_ignore_ascii_case(&schema_name))
+        {
+            push_notice(format!("schema \"{schema_name}\" does not exist, skipping"));
+            return;
+        }
+    }
+    let display_name = relation_name.rsplit('.').next().unwrap_or(relation_name);
+    let display_name = display_name.trim_matches('"').replace("\"\"", "\"");
+    push_notice(format!(
+        "{object_kind} \"{display_name}\" does not exist, skipping"
+    ));
 }
 
 fn cast_drop_notice(
@@ -358,7 +380,7 @@ fn drop_table_relation_kind_name(relkind: char) -> &'static str {
 
 fn drop_schema_relation_drop_priority(relkind: char) -> u8 {
     match relkind {
-        'r' | 'p' | 'm' | 'S' => 0,
+        'f' | 'r' | 'p' | 'm' | 'S' => 0,
         'v' => 1,
         'c' => 2,
         'i' | 'I' | 't' => 3,
@@ -427,11 +449,11 @@ fn drop_dependents_for_reference(
     txn_ctx: CatalogTxnContext,
     referenced: ObjectAddress,
 ) -> Vec<crate::include::catalog::PgDependRow> {
-    search_sys_cache_list2_db(
+    SearchSysCacheList2(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::DependReference,
+        SysCacheId::DEPENDREFERENCE,
         drop_oid_key(referenced.classid),
         drop_oid_key(referenced.objid),
     )
@@ -453,11 +475,11 @@ fn drop_inheritance_children(
     txn_ctx: CatalogTxnContext,
     parent_oid: u32,
 ) -> Vec<crate::include::catalog::PgInheritsRow> {
-    search_sys_cache_list1_db(
+    SearchSysCacheList1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::InheritsParent,
+        SysCacheId::INHPARENT,
         drop_oid_key(parent_oid),
     )
     .map(|tuples| {
@@ -478,11 +500,11 @@ fn drop_constraint_row_by_oid(
     txn_ctx: CatalogTxnContext,
     oid: u32,
 ) -> Option<PgConstraintRow> {
-    search_sys_cache1_db(
+    SearchSysCache1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::ConstraintOid,
+        SysCacheId::CONSTROID,
         drop_oid_key(oid),
     )
     .ok()?
@@ -499,11 +521,11 @@ fn drop_rewrite_row_by_oid(
     txn_ctx: CatalogTxnContext,
     oid: u32,
 ) -> Option<PgRewriteRow> {
-    search_sys_cache1_db(
+    SearchSysCache1(
         db,
         client_id,
         txn_ctx,
-        SysCacheId::RewriteOid,
+        SysCacheId::REWRITEOID,
         drop_oid_key(oid),
     )
     .ok()?
@@ -620,6 +642,40 @@ fn drop_schema_display_object_name(
     drop_format_name(catcache, namespace_oid, object_name)
 }
 
+fn drop_schema_display_relation_name(
+    catcache: &CatCache,
+    visible_namespaces: &BTreeSet<u32>,
+    namespace_oid: u32,
+    relation_name: &str,
+) -> String {
+    if visible_namespaces.contains(&namespace_oid) {
+        return drop_quote_identifier_if_needed(relation_name);
+    }
+    drop_format_name(catcache, namespace_oid, relation_name)
+}
+
+fn drop_schema_display_signature_name(
+    catcache: &CatCache,
+    visible_namespaces: &BTreeSet<u32>,
+    namespace_oid: u32,
+    signature: &str,
+) -> String {
+    if visible_namespaces.contains(&namespace_oid) {
+        return signature.to_string();
+    }
+    let schema_name = catcache
+        .namespace_by_oid(namespace_oid)
+        .map(|row| row.nspname.clone())
+        .unwrap_or_else(|| "public".to_string());
+    match schema_name.as_str() {
+        "public" | "pg_catalog" => signature.to_string(),
+        _ => format!(
+            "{}.{signature}",
+            drop_quote_identifier_if_needed(&schema_name)
+        ),
+    }
+}
+
 fn drop_schema_display_operator_name(
     catalog: &dyn CatalogLookup,
     catcache: &CatCache,
@@ -632,7 +688,7 @@ fn drop_schema_display_operator_name(
         .collect::<Vec<_>>()
         .join(",");
     let name = format!("{}({args})", row.oprname);
-    drop_schema_display_object_name(catcache, visible_namespaces, row.oprnamespace, &name)
+    drop_schema_display_signature_name(catcache, visible_namespaces, row.oprnamespace, &name)
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
@@ -676,20 +732,11 @@ fn drop_function_arg_type_oid(
     catalog: &dyn crate::backend::parser::CatalogLookup,
 ) -> Result<Option<u32>, ParseError> {
     let mut text = arg.trim();
-    let lower = text.to_ascii_lowercase();
-    for (mode, callable) in [
-        ("inout", true),
-        ("variadic", true),
-        ("in", true),
-        ("out", false),
-    ] {
-        if lower == mode || lower.starts_with(&format!("{mode} ")) {
-            if !callable {
-                return Ok(None);
-            }
-            text = text[mode.len()..].trim_start();
-            break;
+    if let Some((rest, callable)) = strip_drop_function_arg_mode(text) {
+        if !callable {
+            return Ok(None);
         }
+        text = rest;
     }
 
     let raw_type = match parse_type_name(text).and_then(|raw_type| {
@@ -700,6 +747,9 @@ fn drop_function_arg_type_oid(
             let Some(rest) = strip_leading_sql_word(text) else {
                 return Err(first_err);
             };
+            let rest = strip_drop_function_arg_mode(rest)
+                .map(|(rest, _)| rest)
+                .unwrap_or(rest);
             parse_type_name(rest)?
         }
     };
@@ -712,6 +762,22 @@ fn drop_function_arg_type_oid(
         })
         .map(Some)
         .ok_or_else(|| ParseError::UnsupportedType(arg.to_string()))
+}
+
+fn strip_drop_function_arg_mode(text: &str) -> Option<(&str, bool)> {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    for (mode, callable) in [
+        ("inout", true),
+        ("variadic", true),
+        ("in", true),
+        ("out", false),
+    ] {
+        if lower == mode || lower.starts_with(&format!("{mode} ")) {
+            return Some((trimmed[mode.len()..].trim_start(), callable));
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -738,19 +804,10 @@ fn drop_routine_arg_spec(
     catalog: &dyn crate::backend::parser::CatalogLookup,
 ) -> Result<DropRoutineArgSpec, ParseError> {
     let mut text = arg.trim();
-    let lower = text.to_ascii_lowercase();
     let mut parsed_mode = None;
-    for (mode, code) in [
-        ("inout", b'b'),
-        ("variadic", b'v'),
-        ("in", b'i'),
-        ("out", b'o'),
-    ] {
-        if lower == mode || lower.starts_with(&format!("{mode} ")) {
-            parsed_mode = Some(code);
-            text = text[mode.len()..].trim_start();
-            break;
-        }
+    if let Some((rest, mode)) = strip_drop_routine_arg_mode(text) {
+        parsed_mode = Some(mode);
+        text = rest;
     }
 
     let raw_type = match parse_type_name(text).and_then(|raw_type| {
@@ -760,6 +817,12 @@ fn drop_routine_arg_spec(
         Err(first_err) => {
             let Some(rest) = strip_leading_sql_word(text) else {
                 return Err(first_err);
+            };
+            let rest = if let Some((rest, mode)) = strip_drop_routine_arg_mode(rest) {
+                parsed_mode = Some(mode);
+                rest
+            } else {
+                rest
             };
             parse_type_name(rest)?
         }
@@ -776,6 +839,22 @@ fn drop_routine_arg_spec(
         mode: parsed_mode,
         type_oid,
     })
+}
+
+fn strip_drop_routine_arg_mode(text: &str) -> Option<(&str, u8)> {
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    for (mode, code) in [
+        ("inout", b'b'),
+        ("variadic", b'v'),
+        ("in", b'i'),
+        ("out", b'o'),
+    ] {
+        if lower == mode || lower.starts_with(&format!("{mode} ")) {
+            return Some((trimmed[mode.len()..].trim_start(), code));
+        }
+    }
+    None
 }
 
 fn drop_table_direct_dependencies(
@@ -917,6 +996,30 @@ fn record_drop_table_blocker(
     }
 }
 
+fn relation_in_explicit_drop_subtree(
+    ctx: &DropTableDependencyContext<'_>,
+    relation_oid: u32,
+    explicit_relation_oids: &BTreeSet<u32>,
+) -> bool {
+    if explicit_relation_oids.contains(&relation_oid) {
+        return true;
+    }
+    let mut stack = explicit_relation_oids.iter().copied().collect::<Vec<_>>();
+    let mut visited = BTreeSet::new();
+    while let Some(parent_oid) = stack.pop() {
+        if !visited.insert(parent_oid) {
+            continue;
+        }
+        for inherit in ctx.graph.inheritance_children(parent_oid) {
+            if inherit.inhrelid == relation_oid {
+                return true;
+            }
+            stack.push(inherit.inhrelid);
+        }
+    }
+    false
+}
+
 fn collect_drop_table_restrict_blockers(
     ctx: &DropTableDependencyContext<'_>,
     relation_oid: u32,
@@ -974,7 +1077,11 @@ fn collect_drop_table_restrict_blockers(
                 relation_oid: dependent_relation_oid,
                 ..
             } => {
-                if explicit_relation_oids.contains(&dependent_relation_oid) {
+                if relation_in_explicit_drop_subtree(
+                    ctx,
+                    dependent_relation_oid,
+                    explicit_relation_oids,
+                ) {
                     continue;
                 }
                 record_drop_table_blocker(
@@ -1058,8 +1165,11 @@ fn plan_drop_table_relation(
                 ref constraint,
                 ..
             } => {
-                if explicit_relation_oids.contains(&dependent_relation_oid)
-                    || plan.relation_drop_oids.contains(&dependent_relation_oid)
+                if relation_in_explicit_drop_subtree(
+                    ctx,
+                    dependent_relation_oid,
+                    explicit_relation_oids,
+                ) || plan.relation_drop_oids.contains(&dependent_relation_oid)
                     || !plan.constraint_drop_oids.insert(constraint.oid)
                 {
                     continue;
@@ -1081,8 +1191,11 @@ fn plan_drop_table_relation(
                 ref rule,
                 ..
             } => {
-                if explicit_relation_oids.contains(&dependent_relation_oid)
-                    || plan.relation_drop_oids.contains(&dependent_relation_oid)
+                if relation_in_explicit_drop_subtree(
+                    ctx,
+                    dependent_relation_oid,
+                    explicit_relation_oids,
+                ) || plan.relation_drop_oids.contains(&dependent_relation_oid)
                     || !plan.rule_drop_oids.insert(rule.rewrite_oid)
                 {
                     continue;
@@ -1625,6 +1738,9 @@ impl Database {
                 .map(|(_, effect)| effect)
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
+            self.session_stats_state(client_id)
+                .write()
+                .note_function_drop(dependent_aggregate_oid, &self.stats);
             next_cid = next_cid.saturating_add(1);
         }
         let target_ctx = CatalogWriteContext {
@@ -1638,6 +1754,9 @@ impl Database {
             .map(|(_, effect)| effect)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
+        self.session_stats_state(client_id)
+            .write()
+            .note_function_drop(proc_row.oid, &self.stats);
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -1730,7 +1849,7 @@ impl Database {
             .class_rows()
             .into_iter()
             .filter(|row| row.relnamespace == schema_oid)
-            .filter(|row| matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'S' | 'v'))
+            .filter(|row| matches!(row.relkind, 'c' | 'f' | 'r' | 'p' | 'm' | 'S' | 'v'))
             .filter(|row| {
                 row.relkind != 'S'
                     || !sequence_is_owned_by_relation_in_schema(&catcache, row.oid, schema_oid)
@@ -1849,8 +1968,11 @@ impl Database {
         let range_types_guard = self.range_types.read();
         let mut drops = Vec::new();
         for domain_name in &domain_names {
-            let (normalized, _, _) =
-                self.normalize_domain_name_for_create(domain_name, configured_search_path)?;
+            let (normalized, _, _) = self.normalize_domain_name_for_create(
+                client_id,
+                domain_name,
+                configured_search_path,
+            )?;
             let Some(domain) = domains_guard.get(&normalized).cloned() else {
                 if drop_stmt.if_exists {
                     continue;
@@ -1950,7 +2072,15 @@ impl Database {
                         },
                     }));
                 }
-                None if drop_stmt.if_exists => continue,
+                None if drop_stmt.if_exists => {
+                    let object_kind = if drop_stmt.foreign_table {
+                        "foreign table"
+                    } else {
+                        "table"
+                    };
+                    push_missing_relation_notice(&catalog, relation_name, object_kind);
+                    continue;
+                }
                 None => {
                     return Err(ExecError::Parse(ParseError::TableDoesNotExist(
                         relation_name.clone(),
@@ -2485,25 +2615,6 @@ impl Database {
                     &auth_catalog,
                 );
 
-                let mut proc_rows = catcache
-                    .proc_rows()
-                    .into_iter()
-                    .filter(|row| row.pronamespace == schema.oid)
-                    .collect::<Vec<_>>();
-                proc_rows.sort_by_key(|row| row.oid);
-                for proc_row in proc_rows {
-                    let signature = drop_proc_signature_text(&proc_row, &catalog);
-                    notices.push(format!(
-                        "drop cascades to function {}",
-                        drop_schema_display_object_name(
-                            &catcache,
-                            &visible_namespaces,
-                            proc_row.pronamespace,
-                            &signature
-                        )
-                    ));
-                }
-
                 let mut conversion_rows = catcache
                     .conversion_rows()
                     .into_iter()
@@ -2572,7 +2683,7 @@ impl Database {
                     .filter(|row| {
                         (!row.relispartition
                             || !partition_has_parent_in_schema(&catcache, row.oid, schema.oid))
-                            && matches!(row.relkind, 'c' | 'r' | 'p' | 'm' | 'S' | 'v')
+                            && matches!(row.relkind, 'c' | 'f' | 'r' | 'p' | 'm' | 'S' | 'v')
                             && (row.relkind != 'S'
                                 || !sequence_is_owned_by_relation_in_schema(
                                     &catcache, row.oid, schema.oid,
@@ -2580,7 +2691,21 @@ impl Database {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                relation_notice_rows.sort_by_key(|row| row.oid);
+                let relation_notice_oids = relation_notice_rows
+                    .iter()
+                    .map(|row| row.oid)
+                    .collect::<BTreeSet<_>>();
+                let inheritance_parent_oids = catcache
+                    .inherit_rows()
+                    .into_iter()
+                    .filter(|row| {
+                        relation_notice_oids.contains(&row.inhparent)
+                            && relation_notice_oids.contains(&row.inhrelid)
+                    })
+                    .map(|row| row.inhparent)
+                    .collect::<BTreeSet<_>>();
+                relation_notice_rows
+                    .sort_by_key(|row| (!inheritance_parent_oids.contains(&row.oid), row.oid));
                 for relation in relation_notice_rows {
                     notices.push(format!(
                         "drop cascades to {} {}",
@@ -2665,6 +2790,39 @@ impl Database {
                         )
                     ));
                 }
+
+                let mut tail_notices = Vec::new();
+                for row in catcache.type_rows().into_iter().filter(|row| {
+                    row.typnamespace == schema.oid && matches!(row.typtype, 'd' | 'e')
+                }) {
+                    tail_notices.push((
+                        row.oid,
+                        format!(
+                            "drop cascades to type {}",
+                            drop_schema_display_object_name(
+                                &catcache,
+                                &visible_namespaces,
+                                row.typnamespace,
+                                &row.typname
+                            )
+                        ),
+                    ));
+                }
+                for proc_row in catcache
+                    .proc_rows()
+                    .into_iter()
+                    .filter(|row| row.pronamespace == schema.oid)
+                {
+                    tail_notices.push((
+                        proc_row.oid,
+                        format!(
+                            "drop cascades to function {}",
+                            drop_proc_signature_text(&proc_row, &catalog)
+                        ),
+                    ));
+                }
+                tail_notices.sort_by_key(|(oid, _)| *oid);
+                notices.extend(tail_notices.into_iter().map(|(_, notice)| notice));
 
                 match notices.as_slice() {
                     [] => {}
@@ -2958,15 +3116,7 @@ impl Database {
                     }));
                 }
                 None if if_exists => {
-                    push_notice(format!(
-                        "{} \"{}\" does not exist, skipping",
-                        expected_name,
-                        relation_name
-                            .rsplit('.')
-                            .next()
-                            .unwrap_or(relation_name)
-                            .trim_matches('"')
-                    ));
+                    push_missing_relation_notice(&catalog, relation_name, expected_name);
                     continue;
                 }
                 None => {
@@ -3655,6 +3805,39 @@ mod tests {
         let catcache = db.backend_catcache(1, None).unwrap();
         assert!(catcache.class_by_name("parents").is_none());
         assert!(catcache.class_by_name("children").is_none());
+    }
+
+    #[test]
+    fn drop_table_allows_explicit_partitioned_fk_table_with_referenced_parent() {
+        let base = temp_dir("table_fk_explicit_partitioned_multi_drop");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table parents (id int4 primary key)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create table children (id int4 references parents) partition by range (id)",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create table children_1 partition of children for values from (0) to (10)",
+            )
+            .unwrap();
+
+        clear_backend_notices();
+        session
+            .execute(&db, "drop table parents, children")
+            .unwrap();
+
+        assert!(take_backend_notice_messages().is_empty());
+        let catcache = db.backend_catcache(1, None).unwrap();
+        assert!(catcache.class_by_name("parents").is_none());
+        assert!(catcache.class_by_name("children").is_none());
+        assert!(catcache.class_by_name("children_1").is_none());
     }
 
     #[test]

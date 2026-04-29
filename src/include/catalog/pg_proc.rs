@@ -4,12 +4,16 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::*;
 use crate::include::nodes::primnodes::{
     AggFunc, BuiltinScalarFunction, BuiltinWindowFunction, HashFunctionKind, HypotheticalAggFunc,
+    OrderedSetAggFunc,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{OnceLock, RwLock};
 
 const VOID_TYPE_OID: u32 = 2278;
 const INTERNAL_TYPE_OID: u32 = 2281;
+pub const ORDERED_SET_TRANSITION_PROC_OID: u32 = 3970;
+pub const PERCENTILE_DISC_AGG_PROC_OID: u32 = 3972;
+pub const PERCENTILE_DISC_FINAL_PROC_OID: u32 = 3973;
 
 pub const CAST_PROC_INT4_INT2_OID: u32 = 313;
 pub const CAST_PROC_INT8_INT2_OID: u32 = 754;
@@ -342,6 +346,7 @@ pub const INT4_UMINUS_PROC_OID: u32 = 212;
 pub const INFORMATION_SCHEMA_EXPANDARRAY_PROC_OID: u32 = 78220;
 pub const INFORMATION_SCHEMA_INDEX_POSITION_PROC_OID: u32 = 78221;
 pub const EQSEL_PROC_OID: u32 = 101;
+pub const SCALARLTSEL_PROC_OID: u32 = 102;
 pub const EQJOINSEL_PROC_OID: u32 = 105;
 pub const AGG_TRANSITION_PROC_OID_BASE: u32 = 880_000;
 
@@ -556,6 +561,30 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             'v',
         ),
+        proc_row(
+            2626,
+            "pg_sleep",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID]),
+            "pg_sleep",
+            1,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            3935,
+            "pg_sleep_for",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERVAL_TYPE_OID]),
+            "pg_sleep_for",
+            1,
+            false,
+            false,
+            'f',
+            'v',
+        ),
         xml_mapping_proc_row(
             2923,
             "table_to_xml",
@@ -689,6 +718,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "",
             "current_database",
             0,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            1403,
+            "current_schemas",
+            NAME_ARRAY_TYPE_OID,
+            &oid_argtypes(&[BOOL_TYPE_OID]),
+            "current_schemas",
+            1,
             false,
             false,
             'f',
@@ -1745,6 +1786,112 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
                 's',
             )
         },
+        PgProcRow {
+            prorows: 100.0,
+            proallargtypes: Some(vec![
+                OID_TYPE_OID,
+                OID_TYPE_OID,
+                INT4_TYPE_OID,
+                TEXT_TYPE_OID,
+                TEXT_TYPE_OID,
+                TEXT_TYPE_OID,
+                TEXT_TYPE_OID,
+                BOOL_TYPE_OID,
+                TEXT_TYPE_OID,
+            ]),
+            proargmodes: Some(vec![b'o'; 9]),
+            proargnames: Some(vec![
+                "classid".into(),
+                "objid".into(),
+                "objsubid".into(),
+                "command_tag".into(),
+                "object_type".into(),
+                "schema_name".into(),
+                "object_identity".into(),
+                "in_extension".into(),
+                "command".into(),
+            ]),
+            ..proc_row(
+                4568,
+                "pg_event_trigger_ddl_commands",
+                RECORD_TYPE_OID,
+                "",
+                "pg_event_trigger_ddl_commands",
+                0,
+                true,
+                false,
+                'f',
+                's',
+            )
+        },
+        PgProcRow {
+            prorows: 100.0,
+            proallargtypes: Some(vec![
+                OID_TYPE_OID,
+                OID_TYPE_OID,
+                INT4_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+                BOOL_TYPE_OID,
+                TEXT_TYPE_OID,
+                TEXT_TYPE_OID,
+                TEXT_TYPE_OID,
+                TEXT_TYPE_OID,
+                TEXT_ARRAY_TYPE_OID,
+                TEXT_ARRAY_TYPE_OID,
+            ]),
+            proargmodes: Some(vec![b'o'; 12]),
+            proargnames: Some(vec![
+                "classid".into(),
+                "objid".into(),
+                "objsubid".into(),
+                "original".into(),
+                "normal".into(),
+                "is_temporary".into(),
+                "object_type".into(),
+                "schema_name".into(),
+                "object_name".into(),
+                "object_identity".into(),
+                "address_names".into(),
+                "address_args".into(),
+            ]),
+            ..proc_row(
+                3566,
+                "pg_event_trigger_dropped_objects",
+                RECORD_TYPE_OID,
+                "",
+                "pg_event_trigger_dropped_objects",
+                0,
+                true,
+                false,
+                'f',
+                's',
+            )
+        },
+        proc_row(
+            4566,
+            "pg_event_trigger_table_rewrite_oid",
+            OID_TYPE_OID,
+            "",
+            "pg_event_trigger_table_rewrite_oid",
+            0,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            4567,
+            "pg_event_trigger_table_rewrite_reason",
+            INT4_TYPE_OID,
+            "",
+            "pg_event_trigger_table_rewrite_reason",
+            0,
+            false,
+            false,
+            'f',
+            's',
+        ),
         proc_row(
             6400,
             "pg_rust_internal_binary_coercible",
@@ -2287,6 +2434,20 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             's',
         ),
+        record_out_proc_row(
+            1686,
+            "pg_get_keywords",
+            "",
+            "pg_get_keywords",
+            0,
+            &[
+                ("word", TEXT_TYPE_OID),
+                ("catcode", INTERNAL_CHAR_TYPE_OID),
+                ("barelabel", BOOL_TYPE_OID),
+                ("catdesc", TEXT_TYPE_OID),
+                ("baredesc", TEXT_TYPE_OID),
+            ],
+        ),
         proc_row(
             76720,
             "pg_get_function_arguments",
@@ -2383,6 +2544,99 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             's',
         ),
+        {
+            let mut row = proc_row(
+                3537,
+                "pg_describe_object",
+                TEXT_TYPE_OID,
+                &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
+                "pg_describe_object",
+                3,
+                false,
+                false,
+                'f',
+                's',
+            );
+            row.proargnames = Some(vec!["classid".into(), "objid".into(), "objsubid".into()]);
+            row
+        },
+        {
+            let mut row = scalar_record_out_proc_row(
+                3839,
+                "pg_identify_object",
+                &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
+                "pg_identify_object",
+                3,
+                &[
+                    ("type", TEXT_TYPE_OID),
+                    ("schema", TEXT_TYPE_OID),
+                    ("name", TEXT_TYPE_OID),
+                    ("identity", TEXT_TYPE_OID),
+                ],
+            );
+            row.proisstrict = false;
+            row.provolatile = 's';
+            row.proargnames = Some(vec![
+                "classid".into(),
+                "objid".into(),
+                "objsubid".into(),
+                "type".into(),
+                "schema".into(),
+                "name".into(),
+                "identity".into(),
+            ]);
+            row
+        },
+        {
+            let mut row = scalar_record_out_proc_row(
+                3382,
+                "pg_identify_object_as_address",
+                &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
+                "pg_identify_object_as_address",
+                3,
+                &[
+                    ("type", TEXT_TYPE_OID),
+                    ("object_names", TEXT_ARRAY_TYPE_OID),
+                    ("object_args", TEXT_ARRAY_TYPE_OID),
+                ],
+            );
+            row.proisstrict = false;
+            row.provolatile = 's';
+            row.proargnames = Some(vec![
+                "classid".into(),
+                "objid".into(),
+                "objsubid".into(),
+                "type".into(),
+                "object_names".into(),
+                "object_args".into(),
+            ]);
+            row
+        },
+        {
+            let mut row = scalar_record_out_proc_row(
+                3954,
+                "pg_get_object_address",
+                &oid_argtypes(&[TEXT_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_ARRAY_TYPE_OID]),
+                "pg_get_object_address",
+                3,
+                &[
+                    ("classid", OID_TYPE_OID),
+                    ("objid", OID_TYPE_OID),
+                    ("objsubid", INT4_TYPE_OID),
+                ],
+            );
+            row.proisstrict = false;
+            row.provolatile = 's';
+            row.proargnames = Some(vec![
+                "type".into(),
+                "object_names".into(),
+                "object_args".into(),
+                "classid".into(),
+                "objid".into(),
+                "objsubid".into(),
+            ]);
+            row
+        },
         proc_row(
             1215,
             "obj_description",
@@ -2684,6 +2938,38 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             's',
         ),
+        PgProcRow {
+            prorows: 1000.0,
+            proallargtypes: Some(vec![
+                PG_MCV_LIST_TYPE_OID,
+                INT4_TYPE_OID,
+                TEXT_ARRAY_TYPE_OID,
+                BOOL_ARRAY_TYPE_OID,
+                FLOAT8_TYPE_OID,
+                FLOAT8_TYPE_OID,
+            ]),
+            proargmodes: Some(vec![b'i', b'o', b'o', b'o', b'o', b'o']),
+            proargnames: Some(vec![
+                "mcv_list".into(),
+                "index".into(),
+                "values".into(),
+                "nulls".into(),
+                "frequency".into(),
+                "base_frequency".into(),
+            ]),
+            ..proc_row(
+                3427,
+                "pg_mcv_list_items",
+                RECORD_TYPE_OID,
+                &oid_argtypes(&[PG_MCV_LIST_TYPE_OID]),
+                "pg_stats_ext_mcvlist_items",
+                1,
+                true,
+                true,
+                'f',
+                's',
+            )
+        },
         proc_row(
             2092,
             "array_upper",
@@ -3291,7 +3577,7 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
         proc_row(
             6601,
             "pg_typeof",
-            TEXT_TYPE_OID,
+            REGTYPE_TYPE_OID,
             &oid_argtypes(&[ANYOID]),
             "pg_typeof",
             1,
@@ -4505,6 +4791,232 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             'v',
         ),
+        proc_row(
+            80100,
+            "pg_stat_get_backend_idset",
+            INT4_TYPE_OID,
+            "",
+            "pg_stat_get_backend_idset",
+            0,
+            true,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            80101,
+            "pg_stat_get_backend_pid",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID]),
+            "pg_stat_get_backend_pid",
+            1,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        record_out_proc_row(
+            80102,
+            "pg_stat_get_backend_io",
+            &oid_argtypes(&[INT4_TYPE_OID]),
+            "pg_stat_get_backend_io",
+            1,
+            &[
+                ("backend_type", TEXT_TYPE_OID),
+                ("object", TEXT_TYPE_OID),
+                ("context", TEXT_TYPE_OID),
+                ("reads", INT8_TYPE_OID),
+                ("read_bytes", INT8_TYPE_OID),
+                ("read_time", FLOAT8_TYPE_OID),
+                ("writes", INT8_TYPE_OID),
+                ("write_bytes", INT8_TYPE_OID),
+                ("write_time", FLOAT8_TYPE_OID),
+                ("writebacks", INT8_TYPE_OID),
+                ("writeback_time", FLOAT8_TYPE_OID),
+                ("extends", INT8_TYPE_OID),
+                ("extend_bytes", INT8_TYPE_OID),
+                ("extend_time", FLOAT8_TYPE_OID),
+                ("hits", INT8_TYPE_OID),
+                ("evictions", INT8_TYPE_OID),
+                ("reuses", INT8_TYPE_OID),
+                ("fsyncs", INT8_TYPE_OID),
+                ("fsync_time", FLOAT8_TYPE_OID),
+                ("stats_reset", TIMESTAMPTZ_TYPE_OID),
+            ],
+        ),
+        scalar_record_out_proc_row(
+            80103,
+            "pg_stat_get_backend_wal",
+            &oid_argtypes(&[INT4_TYPE_OID]),
+            "pg_stat_get_backend_wal",
+            1,
+            &[
+                ("wal_records", INT8_TYPE_OID),
+                ("wal_fpi", INT8_TYPE_OID),
+                ("wal_bytes", INT8_TYPE_OID),
+                ("wal_buffers_full", INT8_TYPE_OID),
+                ("stats_reset", TIMESTAMPTZ_TYPE_OID),
+            ],
+        ),
+        proc_row(
+            80104,
+            "pg_stat_reset",
+            VOID_TYPE_OID,
+            "",
+            "pg_stat_reset",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            80105,
+            "pg_stat_reset_shared",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "pg_stat_reset_shared",
+            1,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            80106,
+            "pg_stat_reset_single_table_counters",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_stat_reset_single_table_counters",
+            1,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            80107,
+            "pg_stat_reset_single_function_counters",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_stat_reset_single_function_counters",
+            1,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            80108,
+            "pg_stat_reset_backend_stats",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID]),
+            "pg_stat_reset_backend_stats",
+            1,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        proc_row(
+            80109,
+            "pg_stat_reset_slru",
+            VOID_TYPE_OID,
+            "",
+            "pg_stat_reset_slru",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            80110,
+            "pg_stat_reset_slru",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "pg_stat_reset_slru",
+            1,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            80111,
+            "pg_stat_reset_replication_slot",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "pg_stat_reset_replication_slot",
+            1,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        proc_row(
+            80112,
+            "pg_stat_reset_subscription_stats",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_stat_reset_subscription_stats",
+            1,
+            false,
+            false,
+            'f',
+            'v',
+        ),
+        scalar_record_out_proc_row(
+            80113,
+            "pg_stat_get_replication_slot",
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "pg_stat_get_replication_slot",
+            1,
+            &[
+                ("slot_name", TEXT_TYPE_OID),
+                ("spill_txns", INT8_TYPE_OID),
+                ("spill_count", INT8_TYPE_OID),
+                ("spill_bytes", INT8_TYPE_OID),
+                ("stream_txns", INT8_TYPE_OID),
+                ("stream_count", INT8_TYPE_OID),
+                ("stream_bytes", INT8_TYPE_OID),
+                ("total_txns", INT8_TYPE_OID),
+                ("total_bytes", INT8_TYPE_OID),
+                ("stats_reset", TIMESTAMPTZ_TYPE_OID),
+            ],
+        ),
+        scalar_record_out_proc_row(
+            80114,
+            "pg_stat_get_subscription_stats",
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_stat_get_subscription_stats",
+            1,
+            &[
+                ("subid", OID_TYPE_OID),
+                ("apply_error_count", INT8_TYPE_OID),
+                ("sync_error_count", INT8_TYPE_OID),
+                ("confl_insert_exists", INT8_TYPE_OID),
+                ("confl_update_origin_differs", INT8_TYPE_OID),
+                ("confl_update_exists", INT8_TYPE_OID),
+                ("confl_update_missing", INT8_TYPE_OID),
+                ("confl_delete_origin_differs", INT8_TYPE_OID),
+                ("confl_delete_missing", INT8_TYPE_OID),
+                ("confl_multiple_unique_conflicts", INT8_TYPE_OID),
+                ("stats_reset", TIMESTAMPTZ_TYPE_OID),
+            ],
+        ),
+        proc_row(
+            80115,
+            "shobj_description",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID, NAME_TYPE_OID]),
+            "shobj_description",
+            2,
+            false,
+            true,
+            'f',
+            's',
+        ),
         stats_import_variadic_proc_row(6362, "pg_restore_relation_stats"),
         stats_import_clear_proc_row(
             6397,
@@ -4599,6 +5111,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             INT8_TYPE_OID,
             &oid_argtypes(&[OID_TYPE_OID]),
             "pg_stat_get_tuples_updated",
+            1,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            80116,
+            "pg_stat_get_tuples_hot_updated",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID]),
+            "pg_stat_get_tuples_hot_updated",
             1,
             false,
             true,
@@ -4858,6 +5382,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            3060,
+            "left",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, INT4_TYPE_OID]),
+            "text_left",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
             6202,
             "lower",
             TEXT_TYPE_OID,
@@ -4935,6 +5471,42 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             INT4_TYPE_OID,
             &oid_argtypes(&[BPCHAR_TYPE_OID]),
             "length",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1810,
+            "bit_length",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[BYTEA_TYPE_OID]),
+            "bit_length",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1811,
+            "bit_length",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            "bit_length",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1812,
+            "bit_length",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[BIT_TYPE_OID]),
+            "bit_length",
             1,
             false,
             true,
@@ -5212,6 +5784,18 @@ fn build_bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             &oid_argtypes(&[]),
             "dpi",
             0,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            1604,
+            "sin",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID]),
+            "dsin",
+            1,
             false,
             true,
             'f',
@@ -7844,6 +8428,12 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
         ),
         (751, "array_out", CSTRING_TYPE_OID, vec![ANYARRAYOID]),
         (
+            515,
+            "array_larger",
+            ANYARRAYOID,
+            vec![ANYARRAYOID, ANYARRAYOID],
+        ),
+        (
             2400,
             "array_recv",
             ANYARRAYOID,
@@ -7902,7 +8492,12 @@ fn type_io_proc_rows() -> Vec<PgProcRow> {
             CSTRING_TYPE_OID,
             vec![ANYMULTIRANGEOID],
         ),
-        (3832, "anyrange_in", ANYRANGEOID, vec![CSTRING_TYPE_OID]),
+        (
+            3832,
+            "anyrange_in",
+            ANYRANGEOID,
+            vec![CSTRING_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID],
+        ),
         (3833, "anyrange_out", CSTRING_TYPE_OID, vec![ANYRANGEOID]),
         (1242, "boolin", BOOL_TYPE_OID, vec![CSTRING_TYPE_OID]),
         (1243, "boolout", CSTRING_TYPE_OID, vec![BOOL_TYPE_OID]),
@@ -8945,7 +9540,7 @@ fn aggregate_support_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
-            3970,
+            ORDERED_SET_TRANSITION_PROC_OID,
             "ordered_set_transition",
             INTERNAL_TYPE_OID,
             &oid_argtypes(&[INTERNAL_TYPE_OID, ANYOID]),
@@ -8957,7 +9552,19 @@ fn aggregate_support_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
-            3973,
+            PERCENTILE_DISC_AGG_PROC_OID,
+            "percentile_disc",
+            ANYELEMENTOID,
+            &oid_argtypes(&[FLOAT8_TYPE_OID, ANYELEMENTOID]),
+            "aggregate_dummy",
+            2,
+            false,
+            false,
+            'a',
+            'i',
+        ),
+        proc_row(
+            PERCENTILE_DISC_FINAL_PROC_OID,
             "percentile_disc_final",
             ANYELEMENTOID,
             &oid_argtypes(&[INTERNAL_TYPE_OID, FLOAT8_TYPE_OID, ANYELEMENTOID]),
@@ -10408,6 +11015,23 @@ fn selectivity_estimator_proc_rows() -> Vec<PgProcRow> {
             's',
         ),
         proc_row(
+            SCALARLTSEL_PROC_OID,
+            "scalarltsel",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                OID_TYPE_OID,
+                INTERNAL_TYPE_OID,
+                INT4_TYPE_OID,
+            ]),
+            "scalarltsel",
+            4,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
             EQJOINSEL_PROC_OID,
             "eqjoinsel",
             FLOAT8_TYPE_OID,
@@ -10593,6 +11217,16 @@ pub fn proc_oid_for_builtin_hypothetical_aggregate_function(
         .find_map(|(candidate, oid)| (*candidate == func).then_some(*oid))
 }
 
+pub fn builtin_ordered_set_aggregate_function_for_proc_oid(oid: u32) -> Option<OrderedSetAggFunc> {
+    (oid == PERCENTILE_DISC_AGG_PROC_OID).then_some(OrderedSetAggFunc::PercentileDisc)
+}
+
+pub fn proc_oid_for_builtin_ordered_set_aggregate_function(func: OrderedSetAggFunc) -> Option<u32> {
+    match func {
+        OrderedSetAggFunc::PercentileDisc => Some(PERCENTILE_DISC_AGG_PROC_OID),
+    }
+}
+
 pub fn proc_oid_for_builtin_window_function(func: BuiltinWindowFunction) -> Option<u32> {
     bootstrap_window_proc_oids()
         .iter()
@@ -10605,13 +11239,44 @@ pub fn proc_oid_for_builtin_window_function(func: BuiltinWindowFunction) -> Opti
 }
 
 pub fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
+    let builtin_by_src = builtin_scalar_function_for_proc_src(&row.prosrc);
+    if row.pronamespace != PG_CATALOG_NAMESPACE_OID {
+        return builtin_by_src.filter(|func| is_dynamic_range_scalar_function(*func));
+    }
     if row.proname.eq_ignore_ascii_case("timestamptz")
         && matches!(row.proargtypes.trim(), "1082 1083" | "1082 1266")
     {
         return Some(BuiltinScalarFunction::TimestampTzConstructor);
     }
-    builtin_scalar_function_for_proc_src(&row.prosrc)
-        .or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
+    builtin_by_src.or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
+}
+
+fn is_dynamic_range_scalar_function(func: BuiltinScalarFunction) -> bool {
+    matches!(
+        func,
+        BuiltinScalarFunction::RangeConstructor
+            | BuiltinScalarFunction::RangeIsEmpty
+            | BuiltinScalarFunction::RangeLower
+            | BuiltinScalarFunction::RangeUpper
+            | BuiltinScalarFunction::RangeLowerInc
+            | BuiltinScalarFunction::RangeUpperInc
+            | BuiltinScalarFunction::RangeLowerInf
+            | BuiltinScalarFunction::RangeUpperInf
+            | BuiltinScalarFunction::RangeContains
+            | BuiltinScalarFunction::RangeContainedBy
+            | BuiltinScalarFunction::RangeOverlap
+            | BuiltinScalarFunction::RangeStrictLeft
+            | BuiltinScalarFunction::RangeStrictRight
+            | BuiltinScalarFunction::RangeOverLeft
+            | BuiltinScalarFunction::RangeOverRight
+            | BuiltinScalarFunction::RangeAdjacent
+            | BuiltinScalarFunction::RangeUnion
+            | BuiltinScalarFunction::RangeIntersect
+            | BuiltinScalarFunction::RangeDifference
+            | BuiltinScalarFunction::RangeMerge
+            | BuiltinScalarFunction::PgRustInternalBinaryCoercible
+            | BuiltinScalarFunction::PgRustIsCatalogTextUniqueIndexOid
+    )
 }
 
 fn builtin_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarFunction> {
@@ -10901,6 +11566,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("drandom_normal_noargs", BuiltinScalarFunction::RandomNormal),
         ("setseed", BuiltinScalarFunction::SetSeed),
         ("current_database", BuiltinScalarFunction::CurrentDatabase),
+        ("current_schemas", BuiltinScalarFunction::CurrentSchemas),
         ("pg_backend_pid", BuiltinScalarFunction::PgBackendPid),
         (
             "pg_settings_get_flags",
@@ -11029,6 +11695,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("clock_timestamp", BuiltinScalarFunction::ClockTimestamp),
         ("timeofday", BuiltinScalarFunction::TimeOfDay),
         ("pg_sleep", BuiltinScalarFunction::PgSleep),
+        ("pg_sleep_for", BuiltinScalarFunction::PgSleep),
         ("timezone", BuiltinScalarFunction::Timezone),
         ("date_part", BuiltinScalarFunction::DatePart),
         ("extract", BuiltinScalarFunction::Extract),
@@ -11638,6 +12305,49 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_stat_clear_snapshot",
             BuiltinScalarFunction::PgStatClearSnapshot,
         ),
+        (
+            "pg_stat_get_backend_pid",
+            BuiltinScalarFunction::PgStatGetBackendPid,
+        ),
+        (
+            "pg_stat_get_backend_wal",
+            BuiltinScalarFunction::PgStatGetBackendWal,
+        ),
+        ("pg_stat_reset", BuiltinScalarFunction::PgStatReset),
+        (
+            "pg_stat_reset_shared",
+            BuiltinScalarFunction::PgStatResetShared,
+        ),
+        (
+            "pg_stat_reset_single_table_counters",
+            BuiltinScalarFunction::PgStatResetSingleTableCounters,
+        ),
+        (
+            "pg_stat_reset_single_function_counters",
+            BuiltinScalarFunction::PgStatResetSingleFunctionCounters,
+        ),
+        (
+            "pg_stat_reset_backend_stats",
+            BuiltinScalarFunction::PgStatResetBackendStats,
+        ),
+        ("pg_stat_reset_slru", BuiltinScalarFunction::PgStatResetSlru),
+        (
+            "pg_stat_reset_replication_slot",
+            BuiltinScalarFunction::PgStatResetReplicationSlot,
+        ),
+        (
+            "pg_stat_reset_subscription_stats",
+            BuiltinScalarFunction::PgStatResetSubscriptionStats,
+        ),
+        (
+            "pg_stat_get_replication_slot",
+            BuiltinScalarFunction::PgStatGetReplicationSlot,
+        ),
+        (
+            "pg_stat_get_subscription_stats",
+            BuiltinScalarFunction::PgStatGetSubscriptionStats,
+        ),
+        ("shobj_description", BuiltinScalarFunction::ShobjDescription),
         ("pg_stat_have_stats", BuiltinScalarFunction::PgStatHaveStats),
         (
             "pg_stat_get_numscans",
@@ -11662,6 +12372,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_stat_get_tuples_updated",
             BuiltinScalarFunction::PgStatGetTuplesUpdated,
+        ),
+        (
+            "pg_stat_get_tuples_hot_updated",
+            BuiltinScalarFunction::PgStatGetTuplesHotUpdated,
         ),
         (
             "pg_stat_get_tuples_deleted",
@@ -11941,11 +12655,15 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("rpad", BuiltinScalarFunction::RPad),
         ("repeat", BuiltinScalarFunction::Repeat),
         ("length", BuiltinScalarFunction::Length),
+        ("bit_length", BuiltinScalarFunction::BitLength),
         ("array_ndims", BuiltinScalarFunction::ArrayNdims),
         ("array_dims", BuiltinScalarFunction::ArrayDims),
         ("array_lower", BuiltinScalarFunction::ArrayLower),
         ("array_upper", BuiltinScalarFunction::ArrayUpper),
         ("array_fill", BuiltinScalarFunction::ArrayFill),
+        ("array_in", BuiltinScalarFunction::ArrayIn),
+        ("anyrange_in", BuiltinScalarFunction::AnyRangeIn),
+        ("array_larger", BuiltinScalarFunction::ArrayLarger),
         ("string_to_array", BuiltinScalarFunction::StringToArray),
         ("array_to_string", BuiltinScalarFunction::ArrayToString),
         ("array_length", BuiltinScalarFunction::ArrayLength),
@@ -12152,6 +12870,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("numeric_sqrt", BuiltinScalarFunction::Sqrt),
         ("pi", BuiltinScalarFunction::Pi),
         ("dpi", BuiltinScalarFunction::Pi),
+        ("sin", BuiltinScalarFunction::Sin),
+        ("dsin", BuiltinScalarFunction::Sin),
         ("cbrt", BuiltinScalarFunction::Cbrt),
         ("dcbrt", BuiltinScalarFunction::Cbrt),
         ("power", BuiltinScalarFunction::Power),
@@ -12364,6 +13084,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("range_intersect", BuiltinScalarFunction::RangeIntersect),
         ("range_difference", BuiltinScalarFunction::RangeDifference),
         ("range_merge", BuiltinScalarFunction::RangeMerge),
+        ("box_high", BuiltinScalarFunction::GeoBoxHigh),
+        ("box_low", BuiltinScalarFunction::GeoBoxLow),
         ("pointx", BuiltinScalarFunction::GeoPointX),
         ("pointy", BuiltinScalarFunction::GeoPointY),
         (
@@ -12397,6 +13119,26 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_describe_object",
             BuiltinScalarFunction::PgDescribeObject,
+        ),
+        (
+            "pg_identify_object",
+            BuiltinScalarFunction::PgIdentifyObject,
+        ),
+        (
+            "pg_identify_object_as_address",
+            BuiltinScalarFunction::PgIdentifyObjectAsAddress,
+        ),
+        (
+            "pg_get_object_address",
+            BuiltinScalarFunction::PgGetObjectAddress,
+        ),
+        (
+            "pg_event_trigger_table_rewrite_oid",
+            BuiltinScalarFunction::PgEventTriggerTableRewriteOid,
+        ),
+        (
+            "pg_event_trigger_table_rewrite_reason",
+            BuiltinScalarFunction::PgEventTriggerTableRewriteReason,
         ),
         (
             "pg_get_function_arguments",
@@ -18197,6 +18939,24 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_left_proc_row_matches_postgres_volatility() {
+        let row = bootstrap_pg_proc_rows()
+            .into_iter()
+            .find(|row| row.oid == 3060)
+            .expect("left(text, int4) row");
+        assert_eq!(row.proname, "left");
+        assert_eq!(
+            row.proargtypes,
+            oid_argtypes(&[TEXT_TYPE_OID, INT4_TYPE_OID])
+        );
+        assert_eq!(row.provolatile, 'i');
+        assert_eq!(
+            builtin_scalar_function_for_proc_oid(row.oid),
+            Some(BuiltinScalarFunction::Left)
+        );
+    }
+
+    #[test]
     fn bootstrap_rows_include_macaddr_builtin_procs() {
         let rows = bootstrap_pg_proc_rows();
         let macaddr_cmp = rows
@@ -18313,6 +19073,9 @@ mod tests {
             BuiltinScalarFunction::RegRoleToText,
             BuiltinScalarFunction::PgGetUserById,
             BuiltinScalarFunction::PgDescribeObject,
+            BuiltinScalarFunction::PgIdentifyObject,
+            BuiltinScalarFunction::PgIdentifyObjectAsAddress,
+            BuiltinScalarFunction::PgGetObjectAddress,
             BuiltinScalarFunction::PgGetRuleDef,
             BuiltinScalarFunction::PgGetViewDef,
             BuiltinScalarFunction::PgGetPartKeyDef,

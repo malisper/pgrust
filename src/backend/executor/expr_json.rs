@@ -25,6 +25,7 @@ use crate::backend::executor::render_interval_text_with_config;
 use crate::backend::executor::render_macaddr_text;
 use crate::backend::executor::render_macaddr8_text;
 use crate::backend::executor::render_range_text;
+use crate::backend::executor::value_io::render_tid_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
@@ -2558,6 +2559,7 @@ fn json_object_text_value(value: &Value, op: &'static str) -> Result<Option<Stri
         Value::Uuid(v) => Ok(Some(crate::backend::executor::value_io::render_uuid_text(
             v,
         ))),
+        Value::Tid(v) => Ok(Some(render_tid_text(v))),
         Value::Bool(v) => Ok(Some(if *v { "true".into() } else { "false".into() })),
         Value::JsonPath(v) => Ok(Some(v.to_string())),
         Value::Xml(v) => Ok(Some(v.to_string())),
@@ -3035,7 +3037,10 @@ fn eval_sql_json_value_expr(
 
 fn is_missing_jsonpath_variable_error(err: &ExecError) -> bool {
     match err {
-        ExecError::WithContext { source, .. } => is_missing_jsonpath_variable_error(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => {
+            is_missing_jsonpath_variable_error(source)
+        }
         ExecError::DetailedError { message, .. } => {
             message.starts_with("could not find jsonpath variable ")
         }
@@ -4401,6 +4406,7 @@ fn value_to_json_serde_with_config(
         Value::Uuid(v) => {
             SerdeJsonValue::String(crate::backend::executor::value_io::render_uuid_text(v))
         }
+        Value::Tid(v) => SerdeJsonValue::String(render_tid_text(v)),
         Value::Bool(v) => SerdeJsonValue::Bool(*v),
         Value::Bit(v) => SerdeJsonValue::String(render_bit_text(v)),
         Value::JsonPath(text) => SerdeJsonValue::String(text.to_string()),
@@ -4534,6 +4540,7 @@ fn render_json_value_text_with_config(
         Value::Uuid(v) => {
             serde_json::to_string(&crate::backend::executor::value_io::render_uuid_text(v)).unwrap()
         }
+        Value::Tid(v) => serde_json::to_string(&render_tid_text(v)).unwrap(),
         Value::Bool(v) => {
             if *v {
                 "true".into()
@@ -5350,7 +5357,10 @@ fn cast_sql_json_default_value(
 
 fn sql_json_default_error_is_direct(err: &ExecError) -> bool {
     match err {
-        ExecError::WithContext { source, .. } => sql_json_default_error_is_direct(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => {
+            sql_json_default_error_is_direct(source)
+        }
         ExecError::BitStringLengthMismatch { .. }
         | ExecError::BitStringTooLong { .. }
         | ExecError::StringDataRightTruncation { .. } => true,
@@ -5405,7 +5415,8 @@ fn sql_json_behavior_coercion_error(
 
 fn sql_json_error_message(err: &ExecError) -> String {
     match err {
-        ExecError::WithContext { source, .. } => sql_json_error_message(source),
+        ExecError::WithContext { source, .. }
+        | ExecError::WithInternalQueryContext { source, .. } => sql_json_error_message(source),
         ExecError::Parse(parse) => parse.to_string(),
         ExecError::DetailedError { message, .. } => message.clone(),
         ExecError::JsonInput { message, .. } => message.clone(),

@@ -1,3 +1,4 @@
+use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::RangeCanonicalization;
 use crate::include::nodes::datetime::{
     DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY,
@@ -803,6 +804,7 @@ pub enum Value {
     TsVector(TsVector),
     TsQuery(TsQuery),
     PgLsn(u64),
+    Tid(ItemPointerData),
     Text(CompactString),
     EnumOid(u32),
     /// Raw pointer to on-page text bytes. Valid while the buffer page is pinned.
@@ -1179,6 +1181,7 @@ impl Value {
             Value::TsVector(v) => Value::TsVector(v.clone()),
             Value::TsQuery(q) => Value::TsQuery(q.clone()),
             Value::PgLsn(v) => Value::PgLsn(*v),
+            Value::Tid(v) => Value::Tid(*v),
             Value::TextRef(ptr, len) => {
                 let s = unsafe {
                     std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
@@ -1285,6 +1288,7 @@ impl Value {
             Value::TsVector(_) => Some(SqlType::new(SqlTypeKind::TsVector)),
             Value::TsQuery(_) => Some(SqlType::new(SqlTypeKind::TsQuery)),
             Value::PgLsn(_) => Some(SqlType::new(SqlTypeKind::PgLsn)),
+            Value::Tid(_) => Some(SqlType::new(SqlTypeKind::Tid)),
             Value::Text(_) | Value::TextRef(_, _) => Some(SqlType::new(SqlTypeKind::Text)),
             Value::EnumOid(_) => Some(SqlType::new(SqlTypeKind::Enum)),
             Value::InternalChar(_) => Some(SqlType::new(SqlTypeKind::InternalChar)),
@@ -1397,6 +1401,7 @@ impl PartialEq for Value {
             (Value::TsVector(a), Value::TsVector(b)) => a == b,
             (Value::TsQuery(a), Value::TsQuery(b)) => a == b,
             (Value::PgLsn(a), Value::PgLsn(b)) => a == b,
+            (Value::Tid(a), Value::Tid(b)) => a == b,
             (Value::EnumOid(a), Value::EnumOid(b)) => a == b,
             (Value::InternalChar(a), Value::InternalChar(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
@@ -1584,6 +1589,10 @@ impl std::hash::Hash for Value {
             }
             Value::PgLsn(v) => {
                 29u8.hash(state);
+                v.hash(state);
+            }
+            Value::Tid(v) => {
+                39u8.hash(state);
                 v.hash(state);
             }
             Value::Text(s) => {

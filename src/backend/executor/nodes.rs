@@ -7,6 +7,7 @@ use crate::backend::access::heap::heapam::{
     heap_scan_page_next_tuple, heap_scan_prepare_next_page,
 };
 use crate::backend::access::index::indexam;
+use crate::backend::access::nbtree::nbtcompare::compare_bt_values;
 use crate::backend::access::nbtree::nbtree::decode_key_payload;
 use crate::backend::commands::explain::format_explain_lines_with_costs;
 use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
@@ -22,6 +23,7 @@ use crate::backend::executor::value_io::{decode_value_with_toast, missing_column
 use crate::backend::executor::window::execute_window_clause;
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::libpq::pqformat::format_float8_text;
+use crate::backend::optimizer::partition_prune::partition_may_satisfy_filter_with_runtime_values;
 use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::backend::storage::lmgr::RowLockMode;
 use crate::backend::storage::page::bufpage::{
@@ -44,20 +46,23 @@ use crate::include::catalog::{
     TIMESTAMPTZ_TYPE_OID,
 };
 use crate::include::nodes::datetime::{DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimestampTzADT};
-use crate::include::nodes::datum::Value;
+use crate::include::nodes::datum::{ArrayValue, Value};
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, BitmapOrState,
-    BitmapQualState, CteScanState, FilterState, FunctionScanRows, FunctionScanState,
+    BitmapQualState, CteScanState, FilterState, FunctionScanRows, FunctionScanState, GatherState,
     IncrementalSortState, IndexOnlyScanState, IndexScanState, LimitState, LockRowsState,
-    MaterializedRow, MergeAppendState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode,
-    PlanState, ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState,
-    SetOpState, SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot,
-    UniqueState, ValuesState, WindowAggState, WorkTableScanState,
+    MaterializeState, MaterializedRow, MemoizeCacheKey, MemoizeState, MergeAppendState,
+    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState, ProjectSetState,
+    ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState, SlotKind,
+    SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, UniqueState, ValuesState,
+    WindowAggState, WorkTableScanState,
 };
-use crate::include::nodes::plannodes::{AggregateStrategy, IndexScanKey, IndexScanKeyArgument};
+use crate::include::nodes::plannodes::{
+    AggregatePhase, AggregateStrategy, IndexScanKey, IndexScanKeyArgument, PartitionPrunePlan, Plan,
+};
 use crate::include::nodes::primnodes::{
-    BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, OrderByEntry,
-    ParamKind, RelationDesc, ScalarFunctionImpl, SetReturningCall, Var, attrno_index,
+    AggAccum, BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR,
+    OrderByEntry, ParamKind, RelationDesc, ScalarFunctionImpl, SetReturningCall, Var, attrno_index,
     is_special_varno,
 };
 use std::cell::RefCell;
@@ -66,7 +71,10 @@ use std::rc::Rc;
 
 const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
 
-fn pg_sql_sort_by<T>(values: &mut [T], mut compare: impl FnMut(&T, &T) -> std::cmp::Ordering) {
+pub(crate) fn pg_sql_sort_by<T>(
+    values: &mut [T],
+    mut compare: impl FnMut(&T, &T) -> std::cmp::Ordering,
+) {
     fn med3<T>(
         values: &[T],
         a: usize,
@@ -475,6 +483,19 @@ fn note_filtered_row(stats: &mut NodeExecStats) {
     stats.rows_removed_by_filter += 1;
 }
 
+fn relation_io_object(ctx: &ExecutorContext, relation_oid: u32) -> &'static str {
+    if ctx
+        .catalog
+        .as_deref()
+        .and_then(|catalog| catalog.relation_by_oid(relation_oid))
+        .is_some_and(|relation| relation.relpersistence == 't')
+    {
+        "temp relation"
+    } else {
+        "relation"
+    }
+}
+
 fn render_order_by_key(item: &OrderByEntry, column_names: &[String]) -> String {
     let mut rendered = render_explain_expr_inner(&item.expr, column_names);
     if item.descending {
@@ -846,6 +867,150 @@ fn eval_index_scan_keys(
     Ok(Some(scan_keys))
 }
 
+fn expand_array_equality_scan_keys(
+    keys: Vec<ScanKeyData>,
+    allow_array_expansion: bool,
+) -> Vec<Vec<ScanKeyData>> {
+    if !allow_array_expansion {
+        return vec![keys];
+    }
+    let Some((array_key_index, array)) = keys.iter().enumerate().find_map(|(index, key)| {
+        (key.strategy == 3)
+            .then(|| key.argument.as_array_value().map(|array| (index, array)))
+            .flatten()
+    }) else {
+        return vec![keys];
+    };
+
+    let mut values = Vec::new();
+    for value in array.elements {
+        if matches!(value, Value::Null) || values.iter().any(|existing| existing == &value) {
+            continue;
+        }
+        values.push(value);
+    }
+    values.sort_by(compare_bt_values);
+
+    values
+        .into_iter()
+        .map(|value| {
+            let mut scan_keys = keys.clone();
+            scan_keys[array_key_index].argument = value;
+            scan_keys
+        })
+        .collect()
+}
+
+fn begin_index_only_scan(
+    state: &mut IndexOnlyScanState,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    if !state.array_scan_keys_initialized {
+        let Some(key_data) = eval_index_scan_keys(&state.keys, ctx, true)? else {
+            return Ok(false);
+        };
+        let mut scans = expand_array_equality_scan_keys(
+            key_data,
+            state.order_by_keys.is_empty()
+                && matches!(
+                    state.direction,
+                    crate::include::access::relscan::ScanDirection::Forward
+                ),
+        );
+        scans.reverse();
+        state.pending_array_scan_keys = scans;
+        state.array_scan_seen_tids.clear();
+        state.array_scan_keys_initialized = true;
+    }
+
+    let Some(key_data) = state.pending_array_scan_keys.pop() else {
+        return Ok(false);
+    };
+    state.stats.index_searches = state.stats.index_searches.saturating_add(1);
+    let order_by_data = eval_index_scan_keys(&state.order_by_keys, ctx, false)?.unwrap_or_default();
+    let begin = crate::include::access::amapi::IndexBeginScanContext {
+        pool: ctx.pool.clone(),
+        client_id: ctx.client_id,
+        snapshot: ctx.snapshot.clone(),
+        heap_relation: state.rel,
+        index_relation: state.index_rel,
+        index_desc: (*state.index_desc).clone(),
+        index_meta: state.index_meta.clone(),
+        key_data,
+        order_by_data,
+        direction: state.direction,
+        want_itup: true,
+    };
+    state.scan = Some(
+        indexam::index_beginscan(&begin, state.am_oid).map_err(|err| {
+            ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                expected: "index access method begin scan",
+                actual: format!("{err:?}"),
+            })
+        })?,
+    );
+    let mut session_stats = ctx.session_stats.write();
+    session_stats.note_relation_scan(state.index_meta.indexrelid);
+    session_stats.note_io_read("client backend", "relation", "normal", 8192);
+    session_stats.note_io_hit("client backend", "relation", "normal");
+    Ok(true)
+}
+
+fn begin_index_scan(
+    state: &mut IndexScanState,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    if !state.array_scan_keys_initialized {
+        let Some(key_data) = eval_index_scan_keys(&state.keys, ctx, true)? else {
+            return Ok(false);
+        };
+        let mut scans = expand_array_equality_scan_keys(
+            key_data,
+            state.order_by_keys.is_empty()
+                && matches!(
+                    state.direction,
+                    crate::include::access::relscan::ScanDirection::Forward
+                ),
+        );
+        scans.reverse();
+        state.pending_array_scan_keys = scans;
+        state.array_scan_seen_tids.clear();
+        state.array_scan_keys_initialized = true;
+    }
+
+    let Some(key_data) = state.pending_array_scan_keys.pop() else {
+        return Ok(false);
+    };
+    state.stats.index_searches = state.stats.index_searches.saturating_add(1);
+    let order_by_data = eval_index_scan_keys(&state.order_by_keys, ctx, false)?.unwrap_or_default();
+    let begin = crate::include::access::amapi::IndexBeginScanContext {
+        pool: ctx.pool.clone(),
+        client_id: ctx.client_id,
+        snapshot: ctx.snapshot.clone(),
+        heap_relation: state.rel,
+        index_relation: state.index_rel,
+        index_desc: (*state.index_desc).clone(),
+        index_meta: state.index_meta.clone(),
+        key_data,
+        order_by_data,
+        direction: state.direction,
+        want_itup: state.index_only,
+    };
+    state.scan = Some(
+        indexam::index_beginscan(&begin, state.am_oid).map_err(|err| {
+            ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                expected: "index access method begin scan",
+                actual: format!("{err:?}"),
+            })
+        })?,
+    );
+    let mut session_stats = ctx.session_stats.write();
+    session_stats.note_relation_scan(state.index_meta.indexrelid);
+    session_stats.note_io_read("client backend", "relation", "normal", 8192);
+    session_stats.note_io_hit("client backend", "relation", "normal");
+    Ok(true)
+}
+
 fn collect_visible_page_offsets(
     page: &crate::backend::storage::buffer::Page,
     snapshot: &crate::backend::utils::time::snapmgr::Snapshot,
@@ -970,7 +1135,6 @@ impl PlanNode for ResultState {
             None
         };
         begin_node(&mut self.stats, ctx)?;
-        begin_node(&mut self.stats, ctx)?;
         if self.emitted {
             finish_eof(&mut self.stats, start, ctx);
             Ok(None)
@@ -1019,14 +1183,99 @@ impl PlanNode for AppendState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        ensure_append_runtime_pruned(
+            &mut self.active_children,
+            &mut self.visible_children,
+            &mut self.subplans_removed,
+            self.partition_prune.as_ref(),
+            ctx,
+        )?;
+        self.exec_proc_node_after_pruning(ctx)
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+    fn node_label(&self) -> String {
+        "Append".into()
+    }
+    fn explain_one_time_false_input(&self) -> bool {
+        self.children.is_empty()
+    }
+    fn explain_details(
+        &self,
+        indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        if self.subplans_removed > 0 {
+            lines.push(format!(
+                "{}Subplans Removed: {}",
+                explain_detail_prefix(indent),
+                self.subplans_removed
+            ));
+        }
+    }
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        timing: bool,
+        lines: &mut Vec<String>,
+    ) {
+        let explain_children = if analyze {
+            &self.visible_children
+        } else {
+            &self.active_children
+        };
+        for child_index in append_explain_child_indexes(self.children.len(), explain_children) {
+            if let Some(child) = self.children.get(child_index) {
+                format_explain_lines_with_costs(
+                    child.as_ref(),
+                    indent + 1,
+                    analyze,
+                    show_costs,
+                    timing,
+                    lines,
+                );
+            }
+        }
+    }
+}
+
+impl AppendState {
+    fn exec_proc_node_after_pruning<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         let start = if ctx.timed {
             Some(Instant::now())
         } else {
             None
         };
         begin_node(&mut self.stats, ctx)?;
-        while self.current_child < self.children.len() {
-            if let Some(slot) = self.children[self.current_child].exec_proc_node(ctx)? {
+        while let Some(child_index) = append_child_index(
+            self.children.len(),
+            self.active_children.as_deref(),
+            self.current_child,
+        ) {
+            if let Some(slot) = self.children[child_index].exec_proc_node(ctx)? {
                 let child_bindings = ctx.system_bindings.clone();
                 let mut values = slot.values()?.to_vec();
                 Value::materialize_all(&mut values);
@@ -1054,45 +1303,192 @@ impl PlanNode for AppendState {
         finish_eof(&mut self.stats, start, ctx);
         Ok(None)
     }
-    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
-        Some(&mut self.slot)
+}
+
+fn append_child_index(
+    child_count: usize,
+    active_children: Option<&[usize]>,
+    current_child: usize,
+) -> Option<usize> {
+    match active_children {
+        Some(active_children) => active_children.get(current_child).copied(),
+        None if current_child < child_count => Some(current_child),
+        None => None,
     }
-    fn current_system_bindings(&self) -> &[SystemVarBinding] {
-        &self.current_bindings
+}
+
+fn append_explain_child_indexes(
+    child_count: usize,
+    active_children: &Option<Vec<usize>>,
+) -> Vec<usize> {
+    active_children
+        .clone()
+        .unwrap_or_else(|| (0..child_count).collect())
+}
+
+fn ensure_append_runtime_pruned(
+    active_children: &mut Option<Vec<usize>>,
+    visible_children: &mut Option<Vec<usize>>,
+    subplans_removed: &mut usize,
+    partition_prune: Option<&PartitionPrunePlan>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if active_children.is_some() {
+        return Ok(());
     }
-    fn column_names(&self) -> &[String] {
-        &self.column_names
-    }
-    fn node_stats(&self) -> &NodeExecStats {
-        &self.stats
-    }
-    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
-        &mut self.stats
-    }
-    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
-        self.plan_info
-    }
-    fn node_label(&self) -> String {
-        "Append".into()
-    }
-    fn explain_children(
-        &self,
-        indent: usize,
-        analyze: bool,
-        show_costs: bool,
-        timing: bool,
-        lines: &mut Vec<String>,
-    ) {
-        for child in &self.children {
-            format_explain_lines_with_costs(
-                child.as_ref(),
-                indent + 1,
-                analyze,
-                show_costs,
-                timing,
-                lines,
-            );
+    let Some(partition_prune) = partition_prune else {
+        return Ok(());
+    };
+    let (startup_visible, startup_removed) =
+        runtime_pruned_startup_child_indexes(partition_prune, ctx);
+    let child_count = partition_prune
+        .child_domains
+        .len()
+        .max(partition_prune.child_bounds.len());
+    let mut active = Vec::new();
+    for index in 0..child_count {
+        if partition_prune_child_may_satisfy(
+            partition_prune,
+            index,
+            RuntimePruneMode::Execution,
+            ctx,
+        ) {
+            active.push(index);
         }
+    }
+    *subplans_removed += startup_removed;
+    *visible_children = Some(startup_visible);
+    *active_children = Some(active);
+    Ok(())
+}
+
+pub(crate) fn runtime_pruned_startup_child_indexes(
+    partition_prune: &PartitionPrunePlan,
+    ctx: &mut ExecutorContext,
+) -> (Vec<usize>, usize) {
+    let child_count = partition_prune
+        .child_domains
+        .len()
+        .max(partition_prune.child_bounds.len());
+    let startup_visible = (0..child_count)
+        .filter(|index| {
+            partition_prune_child_may_satisfy(
+                partition_prune,
+                *index,
+                RuntimePruneMode::Startup,
+                ctx,
+            )
+        })
+        .collect::<Vec<_>>();
+    let removed = child_count.saturating_sub(startup_visible.len());
+    (startup_visible, removed)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimePruneMode {
+    Startup,
+    Execution,
+}
+
+fn partition_prune_child_may_satisfy(
+    partition_prune: &PartitionPrunePlan,
+    child_index: usize,
+    mode: RuntimePruneMode,
+    ctx: &mut ExecutorContext,
+) -> bool {
+    let fallback_domain;
+    let domains = partition_prune
+        .child_domains
+        .get(child_index)
+        .filter(|domains| !domains.is_empty());
+    let domains = match domains {
+        Some(domains) => domains.as_slice(),
+        None => {
+            fallback_domain = [
+                crate::include::nodes::plannodes::PartitionPruneChildDomain {
+                    spec: partition_prune.spec.clone(),
+                    sibling_bounds: partition_prune.sibling_bounds.clone(),
+                    bound: partition_prune
+                        .child_bounds
+                        .get(child_index)
+                        .cloned()
+                        .flatten(),
+                },
+            ];
+            &fallback_domain
+        }
+    };
+    domains.iter().all(|domain| {
+        let mut eval_slot = TupleSlot::empty(0);
+        let catalog = ctx.catalog.clone();
+        partition_may_satisfy_filter_with_runtime_values(
+            &domain.spec,
+            domain.bound.as_ref(),
+            &domain.sibling_bounds,
+            &partition_prune.filter,
+            catalog.as_deref(),
+            |expr| {
+                if mode == RuntimePruneMode::Startup && !startup_prune_expr_is_evaluable(expr) {
+                    return None;
+                }
+                eval_expr(expr, &mut eval_slot, ctx).ok()
+            },
+        )
+    })
+}
+
+fn startup_prune_expr_is_evaluable(expr: &Expr) -> bool {
+    match expr {
+        Expr::Const(_) | Expr::Var(_) => true,
+        Expr::Param(param) => param.paramkind == ParamKind::External,
+        Expr::SubPlan(_) | Expr::SubLink(_) => false,
+        Expr::Op(op) => op.args.iter().all(startup_prune_expr_is_evaluable),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().all(startup_prune_expr_is_evaluable),
+        Expr::Func(func) => func.args.iter().all(startup_prune_expr_is_evaluable),
+        Expr::Cast(expr, _) => startup_prune_expr_is_evaluable(expr),
+        Expr::Collate { expr, .. } => startup_prune_expr_is_evaluable(expr),
+        Expr::IsNull(expr) | Expr::IsNotNull(expr) => startup_prune_expr_is_evaluable(expr),
+        Expr::ScalarArrayOp(scalar) => {
+            startup_prune_expr_is_evaluable(&scalar.left)
+                && startup_prune_expr_is_evaluable(&scalar.right)
+        }
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            startup_prune_expr_is_evaluable(left) && startup_prune_expr_is_evaluable(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().all(startup_prune_expr_is_evaluable),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .all(|(_, expr)| startup_prune_expr_is_evaluable(expr)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_none_or(|expr| startup_prune_expr_is_evaluable(expr))
+                && case_expr.args.iter().all(|when| {
+                    startup_prune_expr_is_evaluable(&when.expr)
+                        && startup_prune_expr_is_evaluable(&when.result)
+                })
+                && startup_prune_expr_is_evaluable(&case_expr.defresult)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            startup_prune_expr_is_evaluable(expr)
+                && startup_prune_expr_is_evaluable(pattern)
+                && escape
+                    .as_ref()
+                    .is_none_or(|expr| startup_prune_expr_is_evaluable(expr))
+        }
+        _ => false,
     }
 }
 
@@ -1101,6 +1497,13 @@ impl PlanNode for MergeAppendState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        ensure_append_runtime_pruned(
+            &mut self.active_children,
+            &mut self.visible_children,
+            &mut self.subplans_removed,
+            self.partition_prune.as_ref(),
+            ctx,
+        )?;
         let start = if ctx.timed {
             Some(Instant::now())
         } else {
@@ -1109,10 +1512,14 @@ impl PlanNode for MergeAppendState {
         begin_node(&mut self.stats, ctx)?;
         if self.rows.is_none() {
             let mut rows = Vec::new();
-            for child in &mut self.children {
-                while child.exec_proc_node(ctx)?.is_some() {
-                    ctx.check_for_interrupts()?;
-                    rows.push(child.materialize_current_row()?);
+            for child_index in
+                append_explain_child_indexes(self.children.len(), &self.active_children)
+            {
+                if let Some(child) = self.children.get_mut(child_index) {
+                    while child.exec_proc_node(ctx)?.is_some() {
+                        ctx.check_for_interrupts()?;
+                        rows.push(child.materialize_current_row()?);
+                    }
                 }
             }
 
@@ -1215,6 +1622,12 @@ impl PlanNode for MergeAppendState {
         lines: &mut Vec<String>,
     ) {
         let prefix = explain_detail_prefix(indent);
+        if self.subplans_removed > 0 {
+            lines.push(format!(
+                "{prefix}Subplans Removed: {}",
+                self.subplans_removed
+            ));
+        }
         let sort_keys = self
             .items
             .iter()
@@ -1232,15 +1645,22 @@ impl PlanNode for MergeAppendState {
         timing: bool,
         lines: &mut Vec<String>,
     ) {
-        for child in &self.children {
-            format_explain_lines_with_costs(
-                child.as_ref(),
-                indent + 1,
-                analyze,
-                show_costs,
-                timing,
-                lines,
-            );
+        let explain_children = if analyze {
+            &self.visible_children
+        } else {
+            &self.active_children
+        };
+        for child_index in append_explain_child_indexes(self.children.len(), explain_children) {
+            if let Some(child) = self.children.get(child_index) {
+                format_explain_lines_with_costs(
+                    child.as_ref(),
+                    indent + 1,
+                    analyze,
+                    show_costs,
+                    timing,
+                    lines,
+                );
+            }
         }
     }
 }
@@ -1590,7 +2010,9 @@ impl PlanNode for SeqScanState {
             } else {
                 let mut session_stats = ctx.session_stats.write();
                 session_stats.note_relation_block_fetched(self.relation_oid);
-                session_stats.note_io_read("client backend", "relation", "bulkread", 8192);
+                let object = relation_io_object(ctx, self.relation_oid);
+                session_stats.note_io_read("client backend", object, "normal", 8192);
+                session_stats.note_io_hit("client backend", object, "normal");
             }
         }
     }
@@ -1707,38 +2129,11 @@ impl PlanNode for IndexOnlyScanState {
             return Ok(None);
         }
         if self.scan.is_none() {
-            let Some(key_data) = eval_index_scan_keys(&self.keys, ctx, true)? else {
+            if !begin_index_only_scan(self, ctx)? {
                 self.scan_exhausted = true;
                 finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
-            };
-            self.stats.index_searches = self.stats.index_searches.saturating_add(1);
-            let order_by_data =
-                eval_index_scan_keys(&self.order_by_keys, ctx, false)?.unwrap_or_default();
-            let begin = crate::include::access::amapi::IndexBeginScanContext {
-                pool: ctx.pool.clone(),
-                client_id: ctx.client_id,
-                snapshot: ctx.snapshot.clone(),
-                heap_relation: self.rel,
-                index_relation: self.index_rel,
-                index_desc: (*self.index_desc).clone(),
-                index_meta: self.index_meta.clone(),
-                key_data,
-                order_by_data,
-                direction: self.direction,
-                want_itup: true,
-            };
-            self.scan = Some(
-                indexam::index_beginscan(&begin, self.am_oid).map_err(|err| {
-                    ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
-                        expected: "index access method begin scan",
-                        actual: format!("{err:?}"),
-                    })
-                })?,
-            );
-            let mut session_stats = ctx.session_stats.write();
-            session_stats.note_relation_scan(self.index_meta.indexrelid);
-            session_stats.note_io_read("client backend", "relation", "normal", 8192);
+            }
         }
 
         loop {
@@ -1761,6 +2156,9 @@ impl PlanNode for IndexOnlyScanState {
                         })
                     })?;
                 }
+                if begin_index_only_scan(self, ctx)? {
+                    continue;
+                }
                 self.scan_exhausted = true;
                 finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
@@ -1777,6 +2175,9 @@ impl PlanNode for IndexOnlyScanState {
                     scan.xs_itup.clone(),
                 )
             };
+            if !self.array_scan_seen_tids.insert(tid) {
+                continue;
+            }
             {
                 let mut session_stats = ctx.session_stats.write();
                 session_stats.note_relation_tuple_returned(self.index_meta.indexrelid);
@@ -1828,6 +2229,7 @@ impl PlanNode for IndexOnlyScanState {
                 return Ok(Some(&mut self.slot));
             }
 
+            self.stats.heap_fetches = self.stats.heap_fetches.saturating_add(1);
             let visible = heap_fetch_visible_with_txns(
                 &ctx.pool,
                 ctx.client_id,
@@ -1844,6 +2246,7 @@ impl PlanNode for IndexOnlyScanState {
                 session_stats.note_relation_tuple_fetched(self.relation_oid);
                 session_stats.note_relation_block_fetched(self.relation_oid);
                 session_stats.note_io_read("client backend", "relation", "normal", 8192);
+                session_stats.note_io_hit("client backend", "relation", "normal");
             }
             self.slot.kind = SlotKind::HeapTuple {
                 desc: self.desc.clone(),
@@ -1947,6 +2350,9 @@ impl PlanNode for IndexOnlyScanState {
                 self.stats.rows_removed_by_filter
             ));
         }
+        if analyze {
+            lines.push(format!("{prefix}Heap Fetches: {}", self.stats.heap_fetches));
+        }
         if analyze && self.stats.index_searches > 0 {
             lines.push(format!(
                 "{prefix}Index Searches: {}",
@@ -1982,38 +2388,11 @@ impl PlanNode for IndexScanState {
             return Ok(None);
         }
         if self.scan.is_none() {
-            let Some(key_data) = eval_index_scan_keys(&self.keys, ctx, true)? else {
+            if !begin_index_scan(self, ctx)? {
                 self.scan_exhausted = true;
                 finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
-            };
-            self.stats.index_searches = self.stats.index_searches.saturating_add(1);
-            let order_by_data =
-                eval_index_scan_keys(&self.order_by_keys, ctx, false)?.unwrap_or_default();
-            let begin = crate::include::access::amapi::IndexBeginScanContext {
-                pool: ctx.pool.clone(),
-                client_id: ctx.client_id,
-                snapshot: ctx.snapshot.clone(),
-                heap_relation: self.rel,
-                index_relation: self.index_rel,
-                index_desc: (*self.index_desc).clone(),
-                index_meta: self.index_meta.clone(),
-                key_data,
-                order_by_data,
-                direction: self.direction,
-                want_itup: self.index_only,
-            };
-            self.scan = Some(
-                indexam::index_beginscan(&begin, self.am_oid).map_err(|err| {
-                    ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
-                        expected: "index access method begin scan",
-                        actual: format!("{err:?}"),
-                    })
-                })?,
-            );
-            let mut session_stats = ctx.session_stats.write();
-            session_stats.note_relation_scan(self.index_meta.indexrelid);
-            session_stats.note_io_read("client backend", "relation", "normal", 8192);
+            }
         }
 
         loop {
@@ -2036,6 +2415,9 @@ impl PlanNode for IndexScanState {
                         })
                     })?;
                 }
+                if begin_index_scan(self, ctx)? {
+                    continue;
+                }
                 self.scan_exhausted = true;
                 finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
@@ -2046,6 +2428,9 @@ impl PlanNode for IndexScanState {
                 .as_ref()
                 .and_then(|scan| scan.xs_heaptid)
                 .expect("index scan tuple must set heap tid");
+            if !self.array_scan_seen_tids.insert(tid) {
+                continue;
+            }
             {
                 let mut session_stats = ctx.session_stats.write();
                 session_stats.note_relation_tuple_returned(self.index_meta.indexrelid);
@@ -2127,6 +2512,9 @@ impl PlanNode for IndexScanState {
                     return Ok(Some(&mut self.slot));
                 }
             }
+            if self.index_only {
+                self.stats.heap_fetches = self.stats.heap_fetches.saturating_add(1);
+            }
             let visible = heap_fetch_visible_with_txns(
                 &ctx.pool,
                 ctx.client_id,
@@ -2143,6 +2531,7 @@ impl PlanNode for IndexScanState {
                 session_stats.note_relation_tuple_fetched(self.relation_oid);
                 session_stats.note_relation_block_fetched(self.relation_oid);
                 session_stats.note_io_read("client backend", "relation", "normal", 8192);
+                session_stats.note_io_hit("client backend", "relation", "normal");
             }
             self.slot.kind = SlotKind::HeapTuple {
                 desc: self.desc.clone(),
@@ -2244,6 +2633,9 @@ impl PlanNode for IndexScanState {
                 "{prefix}Rows Removed by Filter: {}",
                 self.stats.rows_removed_by_filter
             ));
+        }
+        if analyze && self.index_only {
+            lines.push(format!("{prefix}Heap Fetches: {}", self.stats.heap_fetches));
         }
         if analyze && self.stats.index_searches > 0 {
             lines.push(format!(
@@ -2354,8 +2746,10 @@ fn render_index_scan_key(
             ),
             None => render_explain_literal(value),
         },
-        IndexScanKeyArgument::Runtime(expr) => runtime_renderer
-            .map(|render| render(expr))
+        IndexScanKeyArgument::Runtime(expr) => key
+            .runtime_label
+            .clone()
+            .or_else(|| runtime_renderer.map(|render| render(expr)))
             .unwrap_or_else(|| render_explain_expr(expr, &[])),
     };
     if key.strategy == 3
@@ -2641,6 +3035,7 @@ impl BitmapIndexScanState {
             let mut session_stats = ctx.session_stats.write();
             session_stats.note_relation_scan(self.index_meta.indexrelid);
             session_stats.note_io_read("client backend", "relation", "normal", 8192);
+            session_stats.note_io_hit("client backend", "relation", "normal");
         }
         let tuples = indexam::index_getbitmap(&mut scan, self.am_oid, &mut self.bitmap)
             .map_err(|err| bitmap_am_error("index access method bitmap scan", err))?;
@@ -2906,6 +3301,7 @@ impl BitmapHeapScanState {
                 let mut session_stats = ctx.session_stats.write();
                 session_stats.note_relation_block_fetched(self.relation_oid);
                 session_stats.note_io_read("client backend", "relation", "normal", 8192);
+                session_stats.note_io_hit("client backend", "relation", "normal");
             }
 
             self.current_page_pin = Some(pin_rc);
@@ -3178,7 +3574,81 @@ pub(crate) fn render_explain_join_expr(
 }
 
 fn render_explain_var_name(var: &Var, column_names: &[String]) -> Option<String> {
-    attrno_index(var.varattno).and_then(|index| column_names.get(index).cloned())
+    attrno_index(var.varattno)
+        .and_then(|index| column_names.get(index).cloned())
+        .map(normalize_explain_var_name)
+}
+
+fn normalize_explain_var_name(name: String) -> String {
+    let mut inner = name.as_str();
+    let mut stripped = false;
+    while let Some(next) = inner
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        inner = next;
+        stripped = true;
+    }
+    if !stripped {
+        return name;
+    }
+    if matches!(
+        inner.split_once('(').map(|(func, _)| func),
+        Some("avg" | "count" | "max" | "min" | "sum")
+    ) {
+        inner.to_string()
+    } else {
+        name
+    }
+}
+
+fn normalize_aggregate_operand_parens(rendered: String) -> String {
+    let mut chars = rendered.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] != '(' || !aggregate_call_starts_at(&chars, index + 1) {
+            index += 1;
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut end = index;
+        while end < chars.len() {
+            match chars[end] {
+                '(' => depth += 1,
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            end += 1;
+        }
+        if index > 0
+            && end < chars.len()
+            && chars[index - 1] == '('
+            && chars.get(end + 1).is_some_and(|ch| ch.is_whitespace())
+        {
+            chars.remove(end);
+            chars.remove(index);
+            index = index.saturating_sub(1);
+        } else {
+            index = end.saturating_add(1);
+        }
+    }
+    chars.into_iter().collect()
+}
+
+fn aggregate_call_starts_at(chars: &[char], index: usize) -> bool {
+    ["avg(", "count(", "max(", "min(", "sum("]
+        .iter()
+        .any(|prefix| {
+            let prefix = prefix.chars().collect::<Vec<_>>();
+            chars
+                .get(index..index.saturating_add(prefix.len()))
+                .is_some_and(|candidate| candidate == prefix.as_slice())
+        })
 }
 
 fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
@@ -3198,6 +3668,9 @@ fn render_explain_expr_inner_with_qualifier(
             })
             .unwrap_or_else(|| format!("{expr:?}")),
         Expr::Param(param) if param.paramkind == ParamKind::Exec => {
+            format!("${}", param.paramid)
+        }
+        Expr::Param(param) if param.paramkind == ParamKind::External => {
             format!("${}", param.paramid)
         }
         Expr::Const(value) => render_explain_const(value),
@@ -3234,7 +3707,9 @@ fn render_explain_expr_inner_with_qualifier(
             | crate::include::nodes::primnodes::OpExprKind::BitXor
             | crate::include::nodes::primnodes::OpExprKind::Shl
             | crate::include::nodes::primnodes::OpExprKind::Shr
-            | crate::include::nodes::primnodes::OpExprKind::Concat => {
+            | crate::include::nodes::primnodes::OpExprKind::Concat
+            | crate::include::nodes::primnodes::OpExprKind::JsonGet
+            | crate::include::nodes::primnodes::OpExprKind::JsonGetText => {
                 let [left, right] = op.args.as_slice() else {
                     return format!("{expr:?}");
                 };
@@ -3250,6 +3725,8 @@ fn render_explain_expr_inner_with_qualifier(
                     crate::include::nodes::primnodes::OpExprKind::Shl => "<<",
                     crate::include::nodes::primnodes::OpExprKind::Shr => ">>",
                     crate::include::nodes::primnodes::OpExprKind::Concat => "||",
+                    crate::include::nodes::primnodes::OpExprKind::JsonGet => "->",
+                    crate::include::nodes::primnodes::OpExprKind::JsonGetText => "->>",
                     _ => unreachable!(),
                 };
                 format!(
@@ -3408,6 +3885,18 @@ fn render_explain_expr_inner_with_qualifier(
         Expr::CurrentCatalog => "CURRENT_CATALOG".into(),
         Expr::CurrentSchema => "CURRENT_SCHEMA".into(),
         Expr::CurrentDate => "CURRENT_DATE".into(),
+        Expr::CurrentTime { precision } => {
+            render_explain_sql_datetime_keyword("CURRENT_TIME", *precision)
+        }
+        Expr::CurrentTimestamp { precision } => {
+            render_explain_sql_datetime_keyword("CURRENT_TIMESTAMP", *precision)
+        }
+        Expr::LocalTime { precision } => {
+            render_explain_sql_datetime_keyword("LOCALTIME", *precision)
+        }
+        Expr::LocalTimestamp { precision } => {
+            render_explain_sql_datetime_keyword("LOCALTIMESTAMP", *precision)
+        }
         Expr::CurrentUser => "CURRENT_USER".into(),
         Expr::CurrentRole => "CURRENT_ROLE".into(),
         Expr::SessionUser => "SESSION_USER".into(),
@@ -3437,6 +3926,13 @@ fn render_explain_expr_inner_with_qualifier(
             render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
         }),
         other => format!("{other:?}"),
+    }
+}
+
+fn render_explain_sql_datetime_keyword(keyword: &str, precision: Option<i32>) -> String {
+    match precision {
+        Some(precision) => format!("{keyword}({precision})"),
+        None => keyword.into(),
     }
 }
 
@@ -3623,11 +4119,20 @@ fn render_explain_func_expr(
             );
         }
     }
+    if let Some(rendered) = render_explain_geometry_subscript_func(func, qualifier, column_names) {
+        return rendered;
+    }
     if matches!(
         func.implementation,
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Timezone)
     ) {
         return render_explain_timezone_function(func, qualifier, column_names);
+    }
+    if matches!(
+        func.implementation,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::JsonbPathQueryArray)
+    ) {
+        return render_explain_jsonb_path_query_array_function(func, qualifier, column_names);
     }
     let name = match func.implementation {
         ScalarFunctionImpl::Builtin(builtin) => builtin_scalar_function_name(builtin),
@@ -3645,6 +4150,84 @@ fn render_explain_func_expr(
     format!("{name}({args})")
 }
 
+fn render_explain_geometry_subscript_func(
+    func: &FuncExpr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> Option<String> {
+    let index = match func.implementation {
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxHigh)
+        | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointX) => 0,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxLow)
+        | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoPointY) => 1,
+        _ => return None,
+    };
+    let arg = func.args.first()?;
+    let rendered_arg = render_explain_expr_inner_with_qualifier(arg, qualifier, column_names);
+    Some(match func.implementation {
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxHigh)
+        | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxLow) => {
+            format!("{rendered_arg}[{index}]")
+        }
+        _ if matches!(
+            arg,
+            Expr::Func(inner)
+                if matches!(
+                    inner.implementation,
+                    ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxHigh)
+                        | ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBoxLow)
+                )
+        ) =>
+        {
+            format!("(({rendered_arg})[{index}])")
+        }
+        _ => format!("{rendered_arg}[{index}]"),
+    })
+}
+
+fn render_explain_jsonb_path_query_array_function(
+    func: &FuncExpr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    let mut args = func
+        .args
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            if index == 1 {
+                render_explain_jsonpath_arg(arg)
+            } else {
+                let rendered =
+                    render_explain_expr_inner_with_qualifier(arg, qualifier, column_names);
+                if index == 0 && matches!(arg, Expr::Op(_)) {
+                    format!("({rendered})")
+                } else {
+                    rendered
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    if args.len() == 2 {
+        args.push("'{}'::jsonb".into());
+        args.push("false".into());
+    }
+    format!("jsonb_path_query_array({})", args.join(", "))
+}
+
+fn render_explain_jsonpath_arg(expr: &Expr) -> String {
+    match expr {
+        Expr::Const(value) if value.as_text().is_some() => {
+            let path = value.as_text().unwrap_or_default();
+            format!("'{}'::jsonpath", path.replace('\'', "''"))
+        }
+        Expr::Const(Value::JsonPath(path)) => {
+            format!("'{}'::jsonpath", path.to_string().replace('\'', "''"))
+        }
+        other => render_explain_expr_inner(other, &[]),
+    }
+}
+
 fn render_explain_scalar_array_op(
     saop: &crate::include::nodes::primnodes::ScalarArrayOpExpr,
     qualifier: Option<&str>,
@@ -3657,6 +4240,8 @@ fn render_explain_scalar_array_op(
         SubqueryComparisonOp::LtEq => "<=",
         SubqueryComparisonOp::Gt => ">",
         SubqueryComparisonOp::GtEq => ">=",
+        SubqueryComparisonOp::RegexMatch => "~",
+        SubqueryComparisonOp::NotRegexMatch => "!~",
         _ => return format!("{saop:?}"),
     };
     let quantifier = if saop.use_or { "ANY" } else { "ALL" };
@@ -3669,6 +4254,28 @@ fn render_explain_scalar_array_op(
     } else {
         None
     };
+    if saop.use_or
+        && matches!(saop.op, SubqueryComparisonOp::Eq)
+        && let Some(element) = scalar_array_singleton_element(&saop.right)
+    {
+        return format!(
+            "{} {op} {}",
+            render_explain_infix_operand_with_display_type(
+                &saop.left,
+                display_type.map(|ty| ty.element_type()),
+                None,
+                qualifier,
+                column_names
+            ),
+            render_explain_infix_operand_with_display_type(
+                element,
+                display_type.map(|ty| ty.element_type()),
+                saop.collation_oid,
+                qualifier,
+                column_names
+            )
+        );
+    }
     format!(
         "{} {op} {quantifier} ({})",
         render_explain_infix_operand_with_display_type(
@@ -3686,6 +4293,14 @@ fn render_explain_scalar_array_op(
             column_names
         )
     )
+}
+
+fn scalar_array_singleton_element(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::ArrayLiteral { elements, .. } if elements.len() == 1 => elements.first(),
+        Expr::Cast(inner, _) => scalar_array_singleton_element(inner),
+        _ => None,
+    }
 }
 
 pub(crate) fn render_verbose_range_support_expr(
@@ -4219,6 +4834,7 @@ fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
         BuiltinScalarFunction::JsonBuildObject => "json_build_object".into(),
         BuiltinScalarFunction::JsonbBuildArray => "jsonb_build_array".into(),
         BuiltinScalarFunction::JsonbBuildObject => "jsonb_build_object".into(),
+        BuiltinScalarFunction::JsonbPathQueryArray => "jsonb_path_query_array".into(),
         BuiltinScalarFunction::RowToJson => "row_to_json".into(),
         BuiltinScalarFunction::ArrayToJson => "array_to_json".into(),
         BuiltinScalarFunction::ToJson => "to_json".into(),
@@ -4234,6 +4850,9 @@ fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
         BuiltinScalarFunction::TextStartsWith => "starts_with".into(),
         BuiltinScalarFunction::Abs => "abs".into(),
         BuiltinScalarFunction::Substring => "substr".into(),
+        BuiltinScalarFunction::ToChar => "to_char".into(),
+        BuiltinScalarFunction::Left => "\"left\"".into(),
+        BuiltinScalarFunction::Right => "\"right\"".into(),
         other => format!("{other:?}"),
     }
 }
@@ -4301,6 +4920,8 @@ fn infix_operator_text(
         crate::include::nodes::primnodes::OpExprKind::ArrayOverlap => Some("&&"),
         crate::include::nodes::primnodes::OpExprKind::ArrayContains => Some("@>"),
         crate::include::nodes::primnodes::OpExprKind::ArrayContained => Some("<@"),
+        crate::include::nodes::primnodes::OpExprKind::JsonGet => Some("->"),
+        crate::include::nodes::primnodes::OpExprKind::JsonGetText => Some("->>"),
         _ => None,
     }
 }
@@ -4736,7 +5357,60 @@ pub(crate) fn render_explain_join_expr_inner(
         } => render_similar_explain_expr(expr, pattern, escape.as_deref(), *negated, |expr| {
             render_explain_join_expr_inner(expr, outer_names, inner_names)
         }),
+        Expr::Func(func) => render_explain_join_func_expr(func, outer_names, inner_names),
         other => format!("{other:?}"),
+    }
+}
+
+fn render_explain_join_func_expr(
+    func: &FuncExpr,
+    outer_names: &[String],
+    inner_names: &[String],
+) -> String {
+    if matches!(
+        func.implementation,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::BpcharToText)
+    ) && func.args.len() == 1
+    {
+        return render_explain_join_expr_inner(&func.args[0], outer_names, inner_names);
+    }
+    if render_explain_func_expr_is_infix(func)
+        && let Some(operator) = builtin_scalar_function_infix_operator(func.implementation)
+        && let [left, right] = func.args.as_slice()
+    {
+        return format!(
+            "{} {} {}",
+            render_explain_join_infix_operand(left, outer_names, inner_names),
+            operator,
+            render_explain_join_infix_operand(right, outer_names, inner_names)
+        );
+    }
+    let name = match func.implementation {
+        ScalarFunctionImpl::Builtin(builtin) => builtin_scalar_function_name(builtin),
+        ScalarFunctionImpl::UserDefined { proc_oid } => func
+            .funcname
+            .clone()
+            .unwrap_or_else(|| format!("proc_{proc_oid}")),
+    };
+    let args = func
+        .args
+        .iter()
+        .map(|arg| render_explain_join_expr_inner(arg, outer_names, inner_names))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({args})")
+}
+
+fn render_explain_join_infix_operand(
+    expr: &Expr,
+    outer_names: &[String],
+    inner_names: &[String],
+) -> String {
+    let rendered = render_explain_join_expr_inner(expr, outer_names, inner_names);
+    if explain_expr_needs_infix_operand_parens(expr) {
+        format!("({rendered})")
+    } else {
+        rendered
     }
 }
 
@@ -4858,17 +5532,65 @@ fn render_explain_const(value: &Value) -> String {
             ),
             None => render_explain_literal(value),
         },
-        Value::PgArray(array) => match value.sql_type_hint() {
-            Some(sql_type) => format!(
-                "'{}'::{}",
-                crate::backend::executor::format_array_value_text(array),
-                render_explain_sql_type_name(sql_type)
-            ),
-            None => format!(
-                "'{}'",
+        Value::PgArray(array) => {
+            let rendered = if array
+                .elements
+                .iter()
+                .any(|item| matches!(item, Value::Jsonb(_)))
+            {
+                render_explain_array_items(&array.elements)
+            } else {
                 crate::backend::executor::format_array_value_text(array)
-            ),
-        },
+            };
+            match value.sql_type_hint() {
+                Some(sql_type) => {
+                    format!("'{rendered}'::{}", render_explain_sql_type_name(sql_type))
+                }
+                None => format!("'{rendered}'"),
+            }
+        }
+        Value::Array(items) => {
+            let rendered = if items.iter().any(|item| matches!(item, Value::Jsonb(_))) {
+                render_explain_array_items(items)
+            } else {
+                let array = ArrayValue::from_1d(items.clone());
+                crate::backend::executor::format_array_value_text(&array)
+            };
+            let escaped = rendered.replace('\'', "''");
+            let array_type = items
+                .iter()
+                .find_map(Value::sql_type_hint)
+                .map(SqlType::array_of);
+            match array_type {
+                Some(sql_type) => {
+                    format!("'{escaped}'::{}", render_explain_sql_type_name(sql_type))
+                }
+                None => format!("'{escaped}'"),
+            }
+        }
+        Value::Jsonb(bytes) => {
+            let rendered = crate::backend::executor::jsonb::render_jsonb_bytes(bytes)
+                .unwrap_or_else(|_| "null".into())
+                .replace('\'', "''");
+            format!("'{rendered}'::jsonb")
+        }
+        Value::JsonPath(path) => {
+            let rendered = path.to_string().replace('\'', "''");
+            format!("'{rendered}'::jsonpath")
+        }
+        Value::Record(record) => {
+            let rendered =
+                crate::backend::executor::value_io::format_record_text(record).replace('\'', "''");
+            let record_type = record.sql_type();
+            if record_type.type_oid != crate::include::catalog::RECORD_TYPE_OID {
+                format!(
+                    "'{rendered}'::{}",
+                    render_explain_sql_type_name(record_type)
+                )
+            } else {
+                format!("'{rendered}'::record")
+            }
+        }
         Value::TsQuery(_) | Value::TsVector(_) => match value.sql_type_hint() {
             Some(sql_type) => format!(
                 "{}::{}",
@@ -4892,6 +5614,40 @@ fn render_explain_const(value: &Value) -> String {
         Value::Null => "NULL".to_string(),
         other => format!("{other:?}"),
     }
+}
+
+fn render_explain_array_items(items: &[Value]) -> String {
+    let mut out = String::from("{");
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        match item {
+            Value::Null => out.push_str("NULL"),
+            Value::Jsonb(bytes) => {
+                let rendered = crate::backend::executor::jsonb::render_jsonb_bytes(bytes)
+                    .unwrap_or_else(|_| "null".into());
+                push_explain_array_quoted_element(&mut out, &rendered);
+            }
+            other => out.push_str(&render_explain_const(other)),
+        }
+    }
+    out.push('}');
+    out
+}
+
+fn push_explain_array_quoted_element(out: &mut String, text: &str) {
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
 }
 
 fn render_explain_projection_const(value: &Value) -> String {
@@ -4977,7 +5733,7 @@ fn render_explain_join_cast(
     format!("({inner})::{}", render_explain_sql_type_name(ty))
 }
 
-fn render_explain_literal(value: &Value) -> String {
+pub(crate) fn render_explain_literal(value: &Value) -> String {
     match value {
         Value::Text(_) | Value::TextRef(_, _) => {
             format!("'{}'", value.as_text().unwrap().replace('\'', "''"))
@@ -5019,6 +5775,10 @@ fn render_explain_literal(value: &Value) -> String {
         }
         Value::PgArray(array) => {
             let rendered = crate::backend::executor::value_io::format_array_value_text(array);
+            format!("'{}'", rendered.replace('\'', "''"))
+        }
+        Value::Record(record) => {
+            let rendered = crate::backend::executor::value_io::format_record_text(record);
             format!("'{}'", rendered.replace('\'', "''"))
         }
         Value::Date(date) => {
@@ -5107,6 +5867,14 @@ fn render_explain_array_literal_value(value: &Value, element_type: SqlType) -> S
         }
         Value::Float64(v) => format_float8_text(*v, FloatFormatOptions::default()),
         Value::Numeric(v) => v.render(),
+        Value::Jsonb(bytes) => {
+            let rendered = crate::backend::executor::jsonb::render_jsonb_bytes(bytes)
+                .unwrap_or_else(|_| "null".into())
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\'', "''");
+            format!("\"{rendered}\"")
+        }
         Value::Null => "NULL".into(),
         _ => render_explain_literal(&value),
     }
@@ -5232,7 +6000,11 @@ impl PlanNode for FilterState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        "Filter".into()
+        if filter_state_is_one_time_false_result(self) {
+            "Result".into()
+        } else {
+            "Filter".into()
+        }
     }
     fn explain_details(
         &self,
@@ -5242,10 +6014,14 @@ impl PlanNode for FilterState {
         lines: &mut Vec<String>,
     ) {
         let prefix = explain_detail_prefix(indent);
-        lines.push(format!(
-            "{prefix}Filter: {}",
-            render_explain_expr(&self.predicate, self.column_names())
-        ));
+        if filter_state_is_one_time_false_result(self) {
+            lines.push(format!("{prefix}One-Time Filter: false"));
+        } else {
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_expr(&self.predicate, self.column_names())
+            ));
+        }
         if analyze && self.stats.rows_removed_by_filter > 0 {
             lines.push(format!(
                 "{prefix}Rows Removed by Filter: {}",
@@ -5253,6 +6029,481 @@ impl PlanNode for FilterState {
             ));
         }
     }
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        timing: bool,
+        lines: &mut Vec<String>,
+    ) {
+        if filter_state_is_one_time_false_result(self) {
+            return;
+        }
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
+    }
+}
+
+fn filter_state_is_one_time_false_result(state: &FilterState) -> bool {
+    matches!(state.predicate, Expr::Const(Value::Bool(false)))
+        && state.input.explain_one_time_false_input()
+}
+
+impl PlanNode for MaterializeState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx)?;
+        if self.input.exec_proc_node(ctx)?.is_some() {
+            finish_row(&mut self.stats, start);
+            Ok(self.input.current_slot())
+        } else {
+            finish_eof(&mut self.stats, start, ctx);
+            Ok(None)
+        }
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        self.input.current_slot()
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        self.input.current_system_bindings()
+    }
+
+    fn column_names(&self) -> &[String] {
+        self.input.column_names()
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        "Materialize".into()
+    }
+
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        timing: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
+    }
+}
+
+fn memoize_param_value(
+    ctx: &ExecutorContext,
+    paramid: usize,
+    binary_mode: bool,
+) -> Result<Value, ExecError> {
+    let value = ctx
+        .expr_bindings
+        .exec_params
+        .get(&paramid)
+        .cloned()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "executor param reached memoize without a binding".into(),
+            detail: Some(format!("paramid={paramid}")),
+            hint: None,
+            sqlstate: "XX000",
+        })?;
+    let mut values = vec![value];
+    Value::materialize_all(&mut values);
+    let value = values.pop().unwrap_or(Value::Null);
+    if !binary_mode
+        && let Value::Float64(float) = value
+        && float == 0.0
+    {
+        return Ok(Value::Float64(0.0));
+    }
+    Ok(value)
+}
+
+fn memoize_key(state: &MemoizeState, ctx: &ExecutorContext) -> Result<MemoizeCacheKey, ExecError> {
+    state
+        .key_paramids
+        .iter()
+        .copied()
+        .map(|paramid| memoize_param_value(ctx, paramid, state.binary_mode))
+        .collect::<Result<Vec<_>, _>>()
+        .map(MemoizeCacheKey)
+}
+
+fn memoize_nonkey_dependents(
+    state: &MemoizeState,
+    ctx: &ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    state
+        .dependent_paramids
+        .iter()
+        .copied()
+        .filter(|paramid| !state.key_paramids.contains(paramid))
+        .map(|paramid| memoize_param_value(ctx, paramid, true))
+        .collect()
+}
+
+fn memoize_value_memory(value: &Value) -> usize {
+    match value {
+        Value::Text(text) | Value::Json(text) | Value::JsonPath(text) | Value::Xml(text) => {
+            24 + text.len()
+        }
+        Value::TextRef(_, len) => 24 + *len as usize,
+        Value::Bytea(bytes) | Value::Jsonb(bytes) => 24 + bytes.len(),
+        Value::Array(values) => 24 + values.iter().map(memoize_value_memory).sum::<usize>(),
+        Value::PgArray(array) => {
+            24 + array
+                .to_nested_values()
+                .iter()
+                .map(memoize_value_memory)
+                .sum::<usize>()
+        }
+        Value::Record(record) => {
+            24 + record
+                .fields
+                .iter()
+                .map(memoize_value_memory)
+                .sum::<usize>()
+        }
+        _ => 32,
+    }
+}
+
+fn memoize_rows_memory(rows: &[MaterializedRow]) -> usize {
+    rows.iter()
+        .map(|row| {
+            64 + row
+                .slot
+                .tts_values
+                .iter()
+                .map(memoize_value_memory)
+                .sum::<usize>()
+        })
+        .sum()
+}
+
+fn memoize_key_memory(key: &MemoizeCacheKey) -> usize {
+    48 + key.0.iter().map(memoize_value_memory).sum::<usize>()
+}
+
+fn memoize_entry_memory(key: &MemoizeCacheKey, rows: &[MaterializedRow]) -> usize {
+    // Account for the hash table entry, tuple array, and per-entry memory
+    // context overhead that PostgreSQL charges outside the raw key/row bytes.
+    8192 + memoize_key_memory(key) + memoize_rows_memory(rows)
+}
+
+fn parse_memory_kb(raw: &str) -> Option<usize> {
+    let trimmed = raw.trim().trim_matches('\'').trim();
+    let mut parts = trimmed.split_whitespace();
+    let number = parts.next()?;
+    let unit = parts.next().unwrap_or("kB");
+    let value = number.parse::<f64>().ok()?;
+    let multiplier = match unit.to_ascii_lowercase().as_str() {
+        "b" | "byte" | "bytes" => 1.0 / 1024.0,
+        "kb" | "kib" => 1.0,
+        "mb" | "mib" => 1024.0,
+        "gb" | "gib" => 1024.0 * 1024.0,
+        _ => 1.0,
+    };
+    value
+        .is_finite()
+        .then(|| (value * multiplier).ceil() as usize)
+}
+
+fn memoize_memory_limit_bytes(ctx: &ExecutorContext) -> usize {
+    let work_mem_kb = ctx
+        .gucs
+        .get("work_mem")
+        .and_then(|value| parse_memory_kb(value))
+        .unwrap_or(4096);
+    let hash_multiplier = ctx
+        .gucs
+        .get("hash_mem_multiplier")
+        .and_then(|value| value.trim().trim_matches('\'').parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(2.0);
+    ((work_mem_kb as f64) * 1024.0 * hash_multiplier) as usize
+}
+
+fn memoize_evict_if_needed(state: &mut MemoizeState, ctx: &ExecutorContext) {
+    let limit = memoize_memory_limit_bytes(ctx);
+    while (state.memoize_stats.memory_usage_bytes > limit
+        || (state.est_entries > 0 && state.cache.len() > state.est_entries))
+        && !state.lru.is_empty()
+    {
+        let Some(key) = state.lru.pop_front() else {
+            break;
+        };
+        if let Some(rows) = state.cache.remove(&key) {
+            state.memoize_stats.memory_usage_bytes = state
+                .memoize_stats
+                .memory_usage_bytes
+                .saturating_sub(memoize_entry_memory(&key, &rows));
+            state.memoize_stats.evictions += 1;
+        }
+    }
+}
+
+fn memoize_prepare_scan(
+    state: &mut MemoizeState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let nonkey_dependents = memoize_nonkey_dependents(state, ctx)?;
+    if state
+        .last_nonkey_dependents
+        .as_ref()
+        .is_some_and(|last| *last != nonkey_dependents)
+    {
+        state.cache.clear();
+        state.lru.clear();
+        state.memoize_stats.memory_usage_bytes = 0;
+    }
+    state.last_nonkey_dependents = Some(nonkey_dependents);
+
+    let key = memoize_key(state, ctx)?;
+    if let Some(rows) = state.cache.get(&key) {
+        state.memoize_stats.hits += 1;
+        state.active_rows = rows.clone();
+        state.active_index = 0;
+        state.scan_prepared = true;
+        return Ok(());
+    }
+
+    state.memoize_stats.misses += 1;
+    state.input = executor_start(state.input_plan.clone());
+    let mut rows = Vec::new();
+    while state.input.exec_proc_node(ctx)?.is_some() {
+        ctx.check_for_interrupts()?;
+        rows.push(state.input.materialize_current_row()?);
+        if state.single_row {
+            break;
+        }
+    }
+    let entry_memory = memoize_entry_memory(&key, &rows);
+    if entry_memory > memoize_memory_limit_bytes(ctx) {
+        state.memoize_stats.overflows += 1;
+    }
+    state.memoize_stats.memory_usage_bytes = state
+        .memoize_stats
+        .memory_usage_bytes
+        .saturating_add(entry_memory);
+    state.cache.insert(key.clone(), rows.clone());
+    state.lru.push_back(key);
+    memoize_evict_if_needed(state, ctx);
+    state.active_rows = rows;
+    state.active_index = 0;
+    state.scan_prepared = true;
+    Ok(())
+}
+
+impl PlanNode for MemoizeState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx)?;
+        if !self.scan_prepared {
+            memoize_prepare_scan(self, ctx)?;
+        }
+        if self.active_index >= self.active_rows.len() {
+            finish_eof(&mut self.stats, start, ctx);
+            return Ok(None);
+        }
+        let row = &self.active_rows[self.active_index];
+        self.active_index += 1;
+        self.slot = row.slot.clone();
+        self.current_bindings = row.system_bindings.clone();
+        set_active_system_bindings(ctx, &self.current_bindings);
+        finish_row(&mut self.stats, start);
+        Ok(Some(&mut self.slot))
+    }
+
+    fn rescan(&mut self, _ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        self.active_rows.clear();
+        self.active_index = 0;
+        self.scan_prepared = false;
+        self.current_bindings.clear();
+        self.slot = TupleSlot::empty(self.column_names.len());
+        Ok(())
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+    fn node_label(&self) -> String {
+        "Memoize".into()
+    }
+    fn explain_details(
+        &self,
+        indent: usize,
+        analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        let prefix = explain_detail_prefix(indent);
+        if !self.cache_keys.is_empty() || !self.cache_key_labels.is_empty() {
+            let keys = if !self.cache_key_labels.is_empty() {
+                self.cache_key_labels.join(", ")
+            } else {
+                self.cache_keys
+                    .iter()
+                    .map(|expr| render_explain_expr(expr, &self.column_names))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            lines.push(format!("{prefix}Cache Key: {keys}"));
+        }
+        lines.push(format!(
+            "{prefix}Cache Mode: {}",
+            if self.binary_mode {
+                "binary"
+            } else {
+                "logical"
+            }
+        ));
+        if analyze {
+            let memory_kb = self.memoize_stats.memory_usage_bytes.div_ceil(1024).max(1);
+            lines.push(format!(
+                "{prefix}Hits: {}  Misses: {}  Evictions: {}  Overflows: {}  Memory Usage: {memory_kb}kB",
+                self.memoize_stats.hits,
+                self.memoize_stats.misses,
+                self.memoize_stats.evictions,
+                self.memoize_stats.overflows
+            ));
+        }
+    }
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        timing: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(
+            &*self.input,
+            indent + 1,
+            analyze,
+            show_costs,
+            timing,
+            lines,
+        );
+    }
+}
+
+impl PlanNode for GatherState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx)?;
+        if self.input.exec_proc_node(ctx)?.is_some() {
+            finish_row(&mut self.stats, start);
+            Ok(self.input.current_slot())
+        } else {
+            finish_eof(&mut self.stats, start, ctx);
+            Ok(None)
+        }
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        self.input.current_slot()
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        self.input.current_system_bindings()
+    }
+
+    fn column_names(&self) -> &[String] {
+        self.input.column_names()
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        "Gather".into()
+    }
+
+    fn explain_details(
+        &self,
+        indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        let prefix = explain_detail_prefix(indent);
+        lines.push(format!("{prefix}Workers Planned: {}", self.workers_planned));
+        if self.single_copy {
+            lines.push(format!("{prefix}Single Copy: true"));
+        }
+    }
+
     fn explain_children(
         &self,
         indent: usize,
@@ -5286,6 +6537,36 @@ impl PlanNode for NestedLoopJoinState {
             return exec_lateral_join(self, ctx, start);
         }
 
+        if self.join_qual_never_matches && matches!(self.kind, JoinType::Left | JoinType::Anti) {
+            match self.left.exec_proc_node(ctx)?.is_some() {
+                true => {
+                    let left = self.left.materialize_current_row()?;
+                    if matches!(self.kind, JoinType::Anti) {
+                        self.slot.tts_values = left.slot.tts_values;
+                        self.slot.tts_nvalid = self.left_width;
+                    } else {
+                        let mut combined_values = left.slot.tts_values;
+                        combined_values.extend(std::iter::repeat_n(Value::Null, self.right_width));
+                        self.slot.tts_values = combined_values;
+                        self.slot.tts_nvalid = self.left_width + self.right_width;
+                    }
+                    self.slot.kind = SlotKind::Virtual;
+                    self.slot.virtual_tid = None;
+                    self.slot.decode_offset = 0;
+                    self.current_bindings = left.system_bindings;
+                    set_active_system_bindings(ctx, &self.current_bindings);
+                    clear_outer_expr_bindings(ctx);
+                    clear_inner_expr_bindings(ctx);
+                    finish_row(&mut self.stats, start);
+                    return Ok(Some(&mut self.slot));
+                }
+                false => {
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                }
+            }
+        }
+
         if self.right_rows.is_none() {
             let mut rows = Vec::new();
             while self.right.exec_proc_node(ctx)?.is_some() {
@@ -5294,6 +6575,50 @@ impl PlanNode for NestedLoopJoinState {
             }
             self.right_matched = Some(vec![false; rows.len()]);
             self.right_rows = Some(rows);
+        }
+
+        if self.join_qual_never_matches && matches!(self.kind, JoinType::Full) {
+            let right_rows = self.right_rows.as_ref().unwrap();
+            while self.unmatched_right_index < right_rows.len() {
+                let ri = self.unmatched_right_index;
+                self.unmatched_right_index += 1;
+                let mut combined_values = vec![Value::Null; self.left_width];
+                combined_values.extend(right_rows[ri].slot.tts_values.iter().cloned());
+                self.slot.tts_values = combined_values;
+                self.slot.tts_nvalid = self.left_width + self.right_width;
+                self.slot.kind = SlotKind::Virtual;
+                self.slot.virtual_tid = None;
+                self.slot.decode_offset = 0;
+                self.current_bindings = right_rows[ri].system_bindings.clone();
+                set_active_system_bindings(ctx, &self.current_bindings);
+                clear_outer_expr_bindings(ctx);
+                clear_inner_expr_bindings(ctx);
+                finish_row(&mut self.stats, start);
+                return Ok(Some(&mut self.slot));
+            }
+
+            match self.left.exec_proc_node(ctx)?.is_some() {
+                true => {
+                    let left = self.left.materialize_current_row()?;
+                    let mut combined_values = left.slot.tts_values;
+                    combined_values.extend(std::iter::repeat_n(Value::Null, self.right_width));
+                    self.slot.tts_values = combined_values;
+                    self.slot.tts_nvalid = self.left_width + self.right_width;
+                    self.slot.kind = SlotKind::Virtual;
+                    self.slot.virtual_tid = None;
+                    self.slot.decode_offset = 0;
+                    self.current_bindings = left.system_bindings;
+                    set_active_system_bindings(ctx, &self.current_bindings);
+                    clear_outer_expr_bindings(ctx);
+                    clear_inner_expr_bindings(ctx);
+                    finish_row(&mut self.stats, start);
+                    return Ok(Some(&mut self.slot));
+                }
+                false => {
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                }
+            }
         }
 
         loop {
@@ -5518,18 +6843,26 @@ fn exec_lateral_join<'a>(
                         values,
                         &state.current_left.as_ref().unwrap().system_bindings,
                     );
+                    set_active_system_bindings(
+                        ctx,
+                        &state.current_left.as_ref().unwrap().system_bindings,
+                    );
                     let saved_params = bind_exec_params(
                         &state.nest_params,
                         &mut state.current_left.as_mut().unwrap().slot,
                         ctx,
                     )?;
-                    state.right = super::executor_start(
-                        state
-                            .right_plan
-                            .as_ref()
-                            .expect("lateral right plan")
-                            .clone(),
-                    );
+                    if matches!(state.right_plan.as_ref(), Some(Plan::Memoize { .. })) {
+                        state.right.rescan(ctx)?;
+                    } else {
+                        state.right = super::executor_start(
+                            state
+                                .right_plan
+                                .as_ref()
+                                .expect("lateral right plan")
+                                .clone(),
+                        );
+                    }
                     let mut rows = Vec::new();
                     while state.right.exec_proc_node(ctx)?.is_some() {
                         ctx.check_for_interrupts()?;
@@ -6349,6 +7682,7 @@ fn projection_is_explain_passthrough(state: &ProjectionState) -> bool {
 
 fn aggregate_uses_plain_fast_path(state: &AggregateState) -> bool {
     state.strategy == AggregateStrategy::Plain
+        && state.phase == AggregatePhase::Complete
         && !state.disabled
         && state.group_by.is_empty()
         && state.passthrough_exprs.is_empty()
@@ -6521,6 +7855,132 @@ fn execute_plain_aggregate_fast_path(
     )]))
 }
 
+fn new_aggregate_group(
+    key_values: Vec<Value>,
+    passthrough_values: Vec<Value>,
+    runtimes: &[AggregateRuntime],
+    accumulators: &[AggAccum],
+) -> AggGroup {
+    let accum_states = runtimes
+        .iter()
+        .zip(accumulators.iter())
+        .map(|(runtime, accum)| runtime.initialize_state(accum))
+        .collect();
+    AggGroup {
+        key_values,
+        passthrough_values,
+        accum_states,
+        distinct_inputs: accumulators
+            .iter()
+            .map(|accum| accum.distinct.then(HashSet::new))
+            .collect(),
+        direct_arg_values: vec![None; accumulators.len()],
+        ordered_inputs: vec![Vec::new(); accumulators.len()],
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_aggregate_group(
+    group: &mut AggGroup,
+    accumulators: &[AggAccum],
+    runtimes: &[AggregateRuntime],
+    phase: AggregatePhase,
+    group_by_len: usize,
+    passthrough_len: usize,
+    outer_values: &[Value],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for (i, accum) in accumulators.iter().enumerate() {
+        if phase == AggregatePhase::Finalize {
+            let partial_index = group_by_len + passthrough_len + i;
+            let partial = outer_values
+                .get(partial_index)
+                .cloned()
+                .unwrap_or(Value::Null);
+            runtimes[i].combine_partial(accum, &mut group.accum_states[i], &partial, ctx)?;
+            continue;
+        }
+        if group.direct_arg_values[i].is_none() && !accum.direct_args.is_empty() {
+            group.direct_arg_values[i] = Some(
+                accum
+                    .direct_args
+                    .iter()
+                    .map(|arg| eval_expr(arg, slot, ctx))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+        }
+        if let Some(filter) = accum.filter.as_ref() {
+            match eval_expr(filter, slot, ctx)? {
+                Value::Bool(true) => {}
+                Value::Bool(false) | Value::Null => continue,
+                other => return Err(ExecError::NonBoolQual(other)),
+            }
+        }
+        let values = accum
+            .args
+            .iter()
+            .map(|arg| eval_expr(arg, slot, ctx))
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(seen_inputs) = group.distinct_inputs[i].as_mut()
+            && !seen_inputs.insert(values.clone())
+        {
+            continue;
+        }
+        if accum.order_by.is_empty() {
+            runtimes[i].transition(&mut group.accum_states[i], &values, ctx)?;
+        } else {
+            let sort_keys = accum
+                .order_by
+                .iter()
+                .map(|item| eval_expr(&item.expr, slot, ctx))
+                .collect::<Result<Vec<_>, _>>()?;
+            group.ordered_inputs[i].push(OrderedAggInput {
+                sort_keys,
+                arg_values: values,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn finish_ordered_aggregate_inputs(
+    group: &mut AggGroup,
+    accumulators: &[AggAccum],
+    runtimes: &[AggregateRuntime],
+    phase: AggregatePhase,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if phase == AggregatePhase::Finalize {
+        return Ok(());
+    }
+    for (i, accum) in accumulators.iter().enumerate() {
+        if accum.order_by.is_empty() {
+            continue;
+        }
+        let inputs = &mut group.ordered_inputs[i];
+        let mut sort_error = None;
+        pg_sql_sort_by(inputs, |left, right| {
+            match compare_order_by_keys(&accum.order_by, &left.sort_keys, &right.sort_keys) {
+                Ok(ordering) => ordering,
+                Err(err) => {
+                    if sort_error.is_none() {
+                        sort_error = Some(err);
+                    }
+                    std::cmp::Ordering::Equal
+                }
+            }
+        });
+        if let Some(err) = sort_error {
+            return Err(err);
+        }
+        for input in inputs.iter() {
+            runtimes[i].transition(&mut group.accum_states[i], &input.arg_values, ctx)?;
+        }
+    }
+    Ok(())
+}
+
 impl PlanNode for AggregateState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -6562,12 +8022,20 @@ impl PlanNode for AggregateState {
                 return Ok(Some(&mut rows[idx].slot));
             }
             let mut groups: Vec<AggGroup> = Vec::new();
+            let mut mixed_group = (self.strategy == AggregateStrategy::Mixed).then(|| {
+                new_aggregate_group(
+                    vec![Value::Null; self.group_by.len()],
+                    Vec::new(),
+                    &runtimes,
+                    &self.accumulators,
+                )
+            });
 
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
                 ctx.check_for_interrupts()?;
                 let outer_values = materialize_slot_values(slot)?;
                 let current_bindings = ctx.system_bindings.clone();
-                set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                set_outer_expr_bindings(ctx, outer_values.clone(), &current_bindings);
                 clear_inner_expr_bindings(ctx);
                 self.key_buffer.clear();
                 for expr in &self.group_by {
@@ -6584,127 +8052,72 @@ impl PlanNode for AggregateState {
                         .iter()
                         .map(|expr| eval_expr(expr, slot, ctx))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let accum_states = runtimes
-                        .iter()
-                        .zip(self.accumulators.iter())
-                        .map(|(runtime, accum)| runtime.initialize_state(accum))
-                        .collect();
-                    groups.push(AggGroup {
-                        key_values: self.key_buffer.clone(),
+                    groups.push(new_aggregate_group(
+                        self.key_buffer.clone(),
                         passthrough_values,
-                        accum_states,
-                        distinct_inputs: self
-                            .accumulators
-                            .iter()
-                            .map(|accum| accum.distinct.then(HashSet::new))
-                            .collect(),
-                        direct_arg_values: vec![None; self.accumulators.len()],
-                        ordered_inputs: vec![Vec::new(); self.accumulators.len()],
-                    });
+                        &runtimes,
+                        &self.accumulators,
+                    ));
                     groups.len() - 1
                 };
 
                 let group = &mut groups[group_idx];
-                for (i, accum) in self.accumulators.iter().enumerate() {
-                    if group.direct_arg_values[i].is_none() && !accum.direct_args.is_empty() {
-                        group.direct_arg_values[i] = Some(
-                            accum
-                                .direct_args
-                                .iter()
-                                .map(|arg| eval_expr(arg, slot, ctx))
-                                .collect::<Result<Vec<_>, _>>()?,
-                        );
-                    }
-                    if let Some(filter) = accum.filter.as_ref() {
-                        match eval_expr(filter, slot, ctx)? {
-                            Value::Bool(true) => {}
-                            Value::Bool(false) | Value::Null => continue,
-                            other => return Err(ExecError::NonBoolQual(other)),
-                        }
-                    }
-                    let values = accum
-                        .args
-                        .iter()
-                        .map(|arg| eval_expr(arg, slot, ctx))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    if let Some(seen_inputs) = group.distinct_inputs[i].as_mut() {
-                        if !seen_inputs.insert(values.clone()) {
-                            continue;
-                        }
-                    }
-                    if accum.order_by.is_empty() {
-                        runtimes[i].transition(&mut group.accum_states[i], &values, ctx)?;
-                    } else {
-                        let sort_keys = accum
-                            .order_by
-                            .iter()
-                            .map(|item| eval_expr(&item.expr, slot, ctx))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        group.ordered_inputs[i].push(OrderedAggInput {
-                            sort_keys,
-                            arg_values: values,
-                        });
-                    }
+                advance_aggregate_group(
+                    group,
+                    &self.accumulators,
+                    &runtimes,
+                    self.phase,
+                    self.group_by.len(),
+                    self.passthrough_exprs.len(),
+                    &outer_values,
+                    slot,
+                    ctx,
+                )?;
+                if let Some(group) = mixed_group.as_mut() {
+                    advance_aggregate_group(
+                        group,
+                        &self.accumulators,
+                        &runtimes,
+                        self.phase,
+                        self.group_by.len(),
+                        self.passthrough_exprs.len(),
+                        &outer_values,
+                        slot,
+                        ctx,
+                    )?;
                 }
             }
 
             if groups.is_empty() && self.group_by.is_empty() {
-                let accum_states = runtimes
-                    .iter()
-                    .zip(self.accumulators.iter())
-                    .map(|(runtime, accum)| runtime.initialize_state(accum))
-                    .collect();
-                groups.push(AggGroup {
-                    key_values: Vec::new(),
-                    passthrough_values: Vec::new(),
-                    accum_states,
-                    distinct_inputs: self
-                        .accumulators
-                        .iter()
-                        .map(|accum| accum.distinct.then(HashSet::new))
-                        .collect(),
-                    direct_arg_values: vec![None; self.accumulators.len()],
-                    ordered_inputs: vec![Vec::new(); self.accumulators.len()],
-                });
+                groups.push(new_aggregate_group(
+                    Vec::new(),
+                    Vec::new(),
+                    &runtimes,
+                    &self.accumulators,
+                ));
             }
 
             for group in &mut groups {
-                for (i, accum) in self.accumulators.iter().enumerate() {
-                    if accum.order_by.is_empty() {
-                        continue;
-                    }
-                    let inputs = &mut group.ordered_inputs[i];
-                    let mut sort_error = None;
-                    pg_sql_sort_by(inputs, |left, right| {
-                        match compare_order_by_keys(
-                            &accum.order_by,
-                            &left.sort_keys,
-                            &right.sort_keys,
-                        ) {
-                            Ok(ordering) => ordering,
-                            Err(err) => {
-                                if sort_error.is_none() {
-                                    sort_error = Some(err);
-                                }
-                                std::cmp::Ordering::Equal
-                            }
-                        }
-                    });
-                    if let Some(err) = sort_error {
-                        return Err(err);
-                    }
-                    for input in inputs.iter() {
-                        runtimes[i].transition(
-                            &mut group.accum_states[i],
-                            &input.arg_values,
-                            ctx,
-                        )?;
-                    }
-                }
+                finish_ordered_aggregate_inputs(
+                    group,
+                    &self.accumulators,
+                    &runtimes,
+                    self.phase,
+                    ctx,
+                )?;
+            }
+            if let Some(group) = mixed_group.as_mut() {
+                finish_ordered_aggregate_inputs(
+                    group,
+                    &self.accumulators,
+                    &runtimes,
+                    self.phase,
+                    ctx,
+                )?;
             }
 
             let mut result_rows = Vec::new();
-            for group in &groups {
+            for group in groups.iter().chain(mixed_group.iter()) {
                 ctx.check_for_interrupts()?;
                 let mut row_values = group.key_values.clone();
                 row_values.extend(group.passthrough_values.iter().cloned());
@@ -6714,6 +8127,10 @@ impl PlanNode for AggregateState {
                     .zip(self.accumulators.iter())
                     .enumerate()
                 {
+                    if self.phase == AggregatePhase::Partial {
+                        row_values.push(runtime.partial_value(accum, accum_state)?);
+                        continue;
+                    }
                     let direct_arg_values =
                         if let Some(values) = group.direct_arg_values[i].as_ref() {
                             values.clone()
@@ -6790,10 +8207,19 @@ impl PlanNode for AggregateState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        match self.strategy {
-            crate::include::nodes::plannodes::AggregateStrategy::Plain => "Aggregate".into(),
-            crate::include::nodes::plannodes::AggregateStrategy::Sorted => "GroupAggregate".into(),
-            crate::include::nodes::plannodes::AggregateStrategy::Hashed => "HashAggregate".into(),
+        if self.accumulators.is_empty() && self.strategy == AggregateStrategy::Sorted {
+            return "Group".into();
+        }
+        let base = match self.strategy {
+            crate::include::nodes::plannodes::AggregateStrategy::Plain => "Aggregate",
+            crate::include::nodes::plannodes::AggregateStrategy::Sorted => "GroupAggregate",
+            crate::include::nodes::plannodes::AggregateStrategy::Hashed => "HashAggregate",
+            crate::include::nodes::plannodes::AggregateStrategy::Mixed => "MixedAggregate",
+        };
+        match self.phase {
+            AggregatePhase::Complete => base.to_string(),
+            AggregatePhase::Partial => format!("Partial {base}"),
+            AggregatePhase::Finalize => format!("Finalize {base}"),
         }
     }
     fn explain_details(
@@ -6817,13 +8243,19 @@ impl PlanNode for AggregateState {
                 }
             }
             let group_key = group_items.join(", ");
-            lines.push(format!("{prefix}Group Key: {group_key}"));
+            if self.strategy == AggregateStrategy::Mixed {
+                lines.push(format!("{prefix}Hash Key: {group_key}"));
+                lines.push(format!("{prefix}Group Key: ()"));
+            } else {
+                lines.push(format!("{prefix}Group Key: {group_key}"));
+            }
         }
         if let Some(having) = &self.having {
-            lines.push(format!(
-                "{prefix}Filter: {}",
-                render_explain_expr(having, self.column_names())
+            let rendered = normalize_aggregate_operand_parens(render_explain_expr(
+                having,
+                self.column_names(),
             ));
+            lines.push(format!("{prefix}Filter: {}", rendered));
         }
     }
     fn explain_children(

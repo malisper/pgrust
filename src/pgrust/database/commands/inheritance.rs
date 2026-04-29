@@ -9,6 +9,7 @@ use crate::include::catalog::{CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, PgConstraint
 use crate::include::nodes::parsenodes::{AlterTableInheritStatement, AlterTableNoInheritStatement};
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, lookup_heap_relation_for_alter_table, lookup_heap_relation_for_ddl,
+    lookup_table_or_partitioned_table_for_alter_table,
 };
 
 fn add_lock_request(
@@ -20,6 +21,43 @@ fn add_lock_request(
         .entry(rel)
         .and_modify(|existing| *existing = existing.strongest(mode))
         .or_insert(mode);
+}
+
+fn reject_regular_inheritance_with_partitioned_relations(
+    relation: &BoundRelation,
+    parent: &BoundRelation,
+    parent_name: &str,
+) -> Result<(), ExecError> {
+    if relation.relkind == 'p' || relation.relispartition {
+        return Err(ExecError::DetailedError {
+            message: if relation.relispartition {
+                "cannot change inheritance of a partition".into()
+            } else {
+                "cannot change inheritance of partitioned table".into()
+            },
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+    if parent.relkind == 'p' {
+        let parent_name = parent_name.rsplit('.').next().unwrap_or(parent_name);
+        return Err(ExecError::DetailedError {
+            message: format!("cannot inherit from partitioned table \"{parent_name}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+    if parent.relispartition {
+        return Err(ExecError::DetailedError {
+            message: "cannot inherit from a partition".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+    Ok(())
 }
 
 fn relation_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
@@ -218,13 +256,13 @@ fn validate_inherit_constraints(
 ) -> Result<(), ExecError> {
     let child_constraints = inherited_check_constraints(catalog, relation.relation_oid);
     for parent_constraint in inherited_check_constraints(catalog, parent.relation_oid) {
-        let matched = child_constraints.iter().any(|child_constraint| {
+        let matched = child_constraints.iter().find(|child_constraint| {
             child_constraint
                 .conname
                 .eq_ignore_ascii_case(&parent_constraint.conname)
                 && child_constraint.conbin == parent_constraint.conbin
         });
-        if !matched {
+        let Some(child_constraint) = matched else {
             return Err(ExecError::DetailedError {
                 message: format!(
                     "child table is missing constraint \"{}\"",
@@ -233,6 +271,30 @@ fn validate_inherit_constraints(
                 detail: None,
                 hint: None,
                 sqlstate: "42704",
+            });
+        };
+        if parent_constraint.conenforced && !child_constraint.conenforced {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "constraint \"{}\" conflicts with NOT ENFORCED constraint on child table \"{}\"",
+                    child_constraint.conname,
+                    relation_name_for_oid(catalog, relation.relation_oid),
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P17",
+            });
+        }
+        if parent_constraint.convalidated && !child_constraint.convalidated {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "constraint \"{}\" conflicts with NOT VALID constraint on child table \"{}\"",
+                    child_constraint.conname,
+                    relation_name_for_oid(catalog, relation.relation_oid),
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P17",
             });
         }
     }
@@ -327,7 +389,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -335,11 +397,41 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        let parent = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.parent_name)?;
+        let parent_names = std::iter::once(&alter_stmt.parent_name)
+            .chain(alter_stmt.additional_parent_names.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let parents = parent_names
+            .iter()
+            .map(|parent_name| {
+                let parent = lookup_table_or_partitioned_table_for_alter_table(
+                    &catalog,
+                    parent_name,
+                    false,
+                )?
+                .expect("if_exists false returns relation or error");
+                reject_regular_inheritance_with_partitioned_relations(
+                    &relation,
+                    &parent,
+                    parent_name,
+                )?;
+                Ok::<_, ExecError>(parent)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut requests = BTreeMap::new();
-        add_lock_request(&mut requests, relation.rel, TableLockMode::AccessExclusive);
-        add_lock_request(&mut requests, parent.rel, TableLockMode::AccessShare);
+        add_lock_request(
+            &mut requests,
+            crate::pgrust::database::relation_lock_tag(&relation),
+            TableLockMode::AccessExclusive,
+        );
+        for parent in &parents {
+            add_lock_request(
+                &mut requests,
+                crate::pgrust::database::relation_lock_tag(parent),
+                TableLockMode::AccessShare,
+            );
+        }
         let requests = requests.into_iter().collect::<Vec<_>>();
         lock_table_requests_interruptible(
             &self.table_locks,
@@ -351,13 +443,25 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
-        let result = self.execute_alter_table_inherit_stmt_in_transaction_with_search_path(
-            client_id,
-            alter_stmt,
-            xid,
-            0,
-            configured_search_path,
-            &mut catalog_effects,
+        let result = parent_names.into_iter().try_fold(
+            StatementResult::AffectedRows(0),
+            |_, parent_name| {
+                let single_stmt = AlterTableInheritStatement {
+                    if_exists: alter_stmt.if_exists,
+                    only: alter_stmt.only,
+                    table_name: alter_stmt.table_name.clone(),
+                    parent_name,
+                    additional_parent_names: Vec::new(),
+                };
+                self.execute_alter_table_inherit_stmt_in_transaction_with_search_path(
+                    client_id,
+                    &single_stmt,
+                    xid,
+                    catalog_effects.len() as u32,
+                    configured_search_path,
+                    &mut catalog_effects,
+                )
+            },
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
@@ -378,7 +482,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -386,7 +490,17 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        let parent = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.parent_name)?;
+        let parent = lookup_table_or_partitioned_table_for_alter_table(
+            &catalog,
+            &alter_stmt.parent_name,
+            false,
+        )?
+        .expect("if_exists false returns relation or error");
+        reject_regular_inheritance_with_partitioned_relations(
+            &relation,
+            &parent,
+            &alter_stmt.parent_name,
+        )?;
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.table_name)?;
         ensure_relation_owner(self, client_id, &parent, &alter_stmt.parent_name)?;
         reject_typed_table_ddl(&relation, "change inheritance of")?;
@@ -416,8 +530,18 @@ impl Database {
             .write()
             .create_relation_inheritance_mvcc(relation.relation_oid, &parent_oids, &ctx)
             .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
-        for child_constraint in catalog
+        let update_catalog = self.lazy_catalog_lookup(
+            client_id,
+            Some((
+                xid,
+                cid.saturating_add(1)
+                    .saturating_add(catalog_effects.len() as u32),
+            )),
+            configured_search_path,
+        );
+        for child_constraint in update_catalog
             .constraint_rows_for_relation(relation.relation_oid)
             .into_iter()
             .filter(|row| row.contype == CONSTRAINT_NOTNULL)
@@ -434,7 +558,7 @@ impl Database {
                 continue;
             };
             let inherited_count =
-                inherited_not_null_match_count(&catalog, &parent_oids, column_name)?;
+                inherited_not_null_match_count(&update_catalog, &parent_oids, column_name)?;
             if inherited_count == 0 {
                 continue;
             }
@@ -452,8 +576,10 @@ impl Database {
             let effect = self
                 .catalog
                 .write()
-                .alter_not_null_constraint_state_mvcc(
+                .alter_not_null_constraint_state_by_attnum_mvcc(
                     relation.relation_oid,
+                    attnum,
+                    child_constraint.oid,
                     &child_constraint.conname,
                     None,
                     Some(false),
@@ -483,11 +609,20 @@ impl Database {
         else {
             return Ok(StatementResult::AffectedRows(0));
         };
-        let parent = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.parent_name)?;
+        let parent_names = std::iter::once(&alter_stmt.parent_name)
+            .chain(alter_stmt.additional_parent_names.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let parents = parent_names
+            .iter()
+            .map(|parent_name| lookup_heap_relation_for_ddl(&catalog, parent_name))
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut requests = BTreeMap::new();
         add_lock_request(&mut requests, relation.rel, TableLockMode::AccessExclusive);
-        add_lock_request(&mut requests, parent.rel, TableLockMode::AccessShare);
+        for parent in &parents {
+            add_lock_request(&mut requests, parent.rel, TableLockMode::AccessShare);
+        }
         let requests = requests.into_iter().collect::<Vec<_>>();
         lock_table_requests_interruptible(
             &self.table_locks,
@@ -499,13 +634,25 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
-        let result = self.execute_alter_table_no_inherit_stmt_in_transaction_with_search_path(
-            client_id,
-            alter_stmt,
-            xid,
-            0,
-            configured_search_path,
-            &mut catalog_effects,
+        let result = parent_names.into_iter().try_fold(
+            StatementResult::AffectedRows(0),
+            |_, parent_name| {
+                let single_stmt = AlterTableNoInheritStatement {
+                    if_exists: alter_stmt.if_exists,
+                    only: alter_stmt.only,
+                    table_name: alter_stmt.table_name.clone(),
+                    parent_name,
+                    additional_parent_names: Vec::new(),
+                };
+                self.execute_alter_table_no_inherit_stmt_in_transaction_with_search_path(
+                    client_id,
+                    &single_stmt,
+                    xid,
+                    catalog_effects.len() as u32,
+                    configured_search_path,
+                    &mut catalog_effects,
+                )
+            },
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
         guard.disarm();
@@ -570,6 +717,7 @@ impl Database {
             .write()
             .drop_relation_inheritance_parent_mvcc(relation.relation_oid, parent.relation_oid, &ctx)
             .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
         if relation.relpersistence == 't' {
             self.replace_temp_entry_desc(client_id, relation.relation_oid, new_child_entry.desc)?;
         }

@@ -255,6 +255,8 @@ fn run_conflict_update(
         &stmt.relation_name,
         stmt.rel,
         stmt.relation_oid,
+        None,
+        false,
         stmt.toast,
         stmt.toast_index.as_ref(),
         &stmt.desc,

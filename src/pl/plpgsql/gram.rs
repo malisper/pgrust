@@ -298,8 +298,10 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         Rule::if_stmt => build_if_stmt(inner),
         Rule::while_stmt => build_while_stmt(inner),
         Rule::for_stmt => build_for_stmt(inner),
+        Rule::exit_stmt => build_exit_stmt(inner),
         Rule::raise_stmt => build_raise_stmt(inner),
         Rule::assert_stmt => build_assert_stmt(inner),
+        Rule::continue_stmt => Ok(Stmt::Continue),
         Rule::return_stmt => build_return_stmt(inner),
         Rule::return_next_stmt => build_return_next_stmt(inner),
         Rule::return_query_stmt => build_return_query_stmt(inner),
@@ -501,7 +503,18 @@ fn build_while_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     })
 }
 
+fn build_exit_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let mut condition = None;
+    for part in pair.into_inner() {
+        if part.as_rule() == Rule::expr_until_semi {
+            condition = Some(part.as_str().trim().to_string());
+        }
+    }
+    Ok(Stmt::ExitWhen { condition })
+}
+
 fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let line = pair.as_span().start_pos().line_col().0;
     let raw = pair.as_str().to_string();
     let mut level = RaiseLevel::Exception;
     let mut message = None;
@@ -513,6 +526,8 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
                 let token = part.as_str();
                 level = if token.eq_ignore_ascii_case("info") {
                     RaiseLevel::Info
+                } else if token.eq_ignore_ascii_case("log") {
+                    RaiseLevel::Log
                 } else if token.eq_ignore_ascii_case("notice") {
                     RaiseLevel::Notice
                 } else if token.eq_ignore_ascii_case("warning") {
@@ -591,6 +606,7 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         sqlstate,
         message: message.ok_or(ParseError::UnexpectedEof)?,
         params,
+        line,
     })
 }
 
@@ -727,6 +743,7 @@ fn build_perform_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
 }
 
 fn build_dynamic_execute_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let line = pair.as_span().start_pos().line_col().0;
     let raw = pair
         .into_inner()
         .find(|part| part.as_rule() == Rule::exec_sql_text)
@@ -738,6 +755,7 @@ fn build_dynamic_execute_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> 
         sql_expr,
         into_targets,
         using_exprs,
+        line,
     })
 }
 
@@ -1563,6 +1581,7 @@ mod tests {
             sql_expr,
             into_targets,
             using_exprs,
+            ..
         } = &block.statements[1]
         else {
             panic!("expected dynamic EXECUTE statement");
@@ -1657,6 +1676,41 @@ mod tests {
                 "values\n                    ('table'), ('index'), ('sequence'), ('view')".into()
             )
         );
+        assert_eq!(body.len(), 1);
+    }
+
+    #[test]
+    fn parse_static_query_for_loop_with_many_parenthesized_values() {
+        let block = parse_block(
+            "
+            begin
+                for objtype in values
+                    ('table'), ('index'), ('sequence'), ('view'),
+                    ('materialized view'), ('foreign table'),
+                    ('table column'), ('foreign table column'),
+                    ('aggregate'), ('function'), ('procedure'), ('type'), ('cast'),
+                    ('table constraint'), ('domain constraint'), ('conversion'), ('default value'),
+                    ('operator'), ('operator class'), ('operator family'), ('rule'), ('trigger'),
+                    ('text search parser'), ('text search dictionary'),
+                    ('text search template'), ('text search configuration'),
+                    ('policy'), ('user mapping'), ('default acl'), ('transform'),
+                    ('operator of access method'), ('function of access method'),
+                    ('publication namespace'), ('publication relation')
+                loop
+                    null;
+                end loop;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::ForQuery { source, body, .. } = &block.statements[0] else {
+            panic!("expected query FOR loop");
+        };
+        let ForQuerySource::Static(source) = source else {
+            panic!("expected static query FOR loop");
+        };
+        assert!(source.contains("('publication relation')"));
         assert_eq!(body.len(), 1);
     }
 

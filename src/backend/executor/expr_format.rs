@@ -22,6 +22,11 @@ enum Token {
 }
 
 pub(crate) fn to_char_int(value: i128, format: &str) -> Result<String, ExecError> {
+    if let Some(width) = zero_mask_fill_mode_width(format)
+        && value >= 0
+    {
+        return Ok(format!("{value:0width$}"));
+    }
     let mut parser = FormatParser::new(format);
     let spec = parser.parse()?;
     if spec.roman {
@@ -31,6 +36,29 @@ pub(crate) fn to_char_int(value: i128, format: &str) -> Result<String, ExecError
         return Ok(format_scientific(value, &spec));
     }
     Ok(format_standard(value, &spec))
+}
+
+fn zero_mask_fill_mode_width(format: &str) -> Option<usize> {
+    let chars = format.chars().collect::<Vec<_>>();
+    let mut idx = 0;
+    let mut saw_fill_mode = false;
+    let mut width = 0usize;
+    while idx < chars.len() {
+        if idx + 1 < chars.len()
+            && chars[idx].eq_ignore_ascii_case(&'F')
+            && chars[idx + 1].eq_ignore_ascii_case(&'M')
+        {
+            saw_fill_mode = true;
+            idx += 2;
+            continue;
+        }
+        if chars[idx] != '0' {
+            return None;
+        }
+        width += 1;
+        idx += 1;
+    }
+    (saw_fill_mode && width > 0).then_some(width)
 }
 
 pub(crate) fn to_char_numeric(value: &NumericValue, format: &str) -> Result<String, ExecError> {
@@ -297,13 +325,14 @@ impl<'a> FormatParser<'a> {
 
     fn parse(&mut self) -> Result<FormatSpec, ExecError> {
         let mut fill_mode = false;
-        if self.peek_ci("FM") {
-            self.idx += 2;
-            fill_mode = true;
-        }
 
         let mut tokens = Vec::new();
         while self.idx < self.chars.len() {
+            if self.peek_ci("FM") {
+                self.idx += 2;
+                fill_mode = true;
+                continue;
+            }
             if self.peek_ci("PR") || self.peek_ci("TH") || self.peek_ci("EEEE") {
                 break;
             }

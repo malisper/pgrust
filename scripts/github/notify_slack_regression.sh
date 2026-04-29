@@ -11,6 +11,8 @@
 #   RUN_SHA              commit under test
 #   RUN_URL              workflow run URL
 #   REPO_FULL_NAME       e.g. your-github-org/pgrust
+#   RUN_ATTEMPT          GitHub run_attempt (1 = initial, 2 = after auto-rerun)
+#   MAX_ATTEMPTS         total attempts allowed under our retry policy (default: 2)
 
 set -euo pipefail
 
@@ -69,29 +71,90 @@ prev_dir = os.environ.get("PREV_DIR_NAME", "")
 history_url = f"https://github.com/{repo}/tree/regression-history/runs/{run_dir}"
 latest_url = f"https://github.com/{repo}/tree/regression-history/runs/latest"
 
-status_emoji = {
-    "completed": ":test_tube:",
-    "aborted":   ":warning:",
-    "missing":   ":x:",
-}.get(summary.get("status", ""), ":test_tube:")
+status = summary.get("status", "")
+def _int_env(name, default):
+    raw = os.environ.get(name, "")
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
 
-header = f"{status_emoji} pgrust regression — {run_dir}"
+run_attempt = _int_env("RUN_ATTEMPT", 1)
+max_attempts = _int_env("MAX_ATTEMPTS", 2)
+is_first_attempt = run_attempt <= 1
+is_final_attempt = run_attempt >= max_attempts
+incomplete_statuses = {"partial", "deadline", "aborted", "missing"}
+will_retry = (not is_final_attempt) and (status in incomplete_statuses)
+
+if status == "completed":
+    if is_first_attempt:
+        emoji, header_suffix = ":test_tube:", ""
+    else:
+        emoji, header_suffix = ":white_check_mark:", " — Complete after retry"
+elif will_retry:
+    emoji = ":warning:"
+    header_suffix = f" — {status.capitalize()}. Auto-rerun queued (attempt {run_attempt} of {max_attempts})."
+elif status in incomplete_statuses and is_final_attempt:
+    emoji = ":rotating_light:"
+    header_suffix = f" — Still {status} after retry. Manual investigation needed."
+else:
+    emoji, header_suffix = ":test_tube:", ""
+
+header = f"{emoji} pgrust regression — {run_dir}{header_suffix}"
+
+attempt_line = f"*Attempt:* {run_attempt} of {max_attempts}"
+if will_retry:
+    attempt_line += " — auto-rerun pending; this Slack message will be superseded by the retry result"
+elif run_attempt > 1:
+    attempt_line += " — final attempt under retry policy"
 
 lines = [
-    f"*Status:* `{summary.get('status', 'unknown')}`  *Commit:* `{sha}`",
+    f"*Status:* `{status or 'unknown'}`  *Commit:* `{sha}`",
+    f"*Run ID:* `{run_dir}`  *Branch:* `regression-history`",
+    attempt_line,
     f"*Tests:* {passed}/{total} passed ({pass_pct}%){passed_delta}",
     f"*Queries:* {q_matched:,}/{q_total:,} matched ({q_pct}%){matched_delta}",
-    f"*Full output:* <{history_url}|runs/{run_dir}>  •  <{latest_url}|runs/latest>",
+    f":mag: *Investigate this run:* <{history_url}|runs/{run_dir}>  •  <{latest_url}|runs/latest>",
     f"*Workflow run:* <{run_url}|view in Actions>",
 ]
 if prev_dir:
     lines.append(f"_Previous run: `{prev_dir}`_")
 
+memory_peaks = summary.get("memory_peaks") or []
+HOTSPOT_THRESHOLD_MB = 1024  # 1 GB
+hotspots = [p for p in memory_peaks if (p.get("peak_rss_mb") or 0) >= HOTSPOT_THRESHOLD_MB]
+
+blocks = [
+    {"type": "header", "text": {"type": "plain_text", "text": header}},
+    {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}},
+]
+
+if hotspots:
+    def _fmt_size(mb):
+        return f"{mb/1024:.1f} GB" if mb >= 1024 else f"{int(mb)} MB"
+
+    hotspot_lines = [":fire: *Memory hotspots* — pgrust_server peak RSS during the test:"]
+    for h in hotspots[:5]:
+        test = h.get("test", "?")
+        peak_mb = h.get("peak_rss_mb") or 0
+        dur = h.get("duration_sec") or 0
+        shard = h.get("shard")
+        suffix = f" ({dur}s, shard {shard})" if shard is not None else f" ({dur}s)"
+        hotspot_lines.append(f"• `{test}` — peak {_fmt_size(peak_mb)}{suffix}")
+        hotspot_lines.append(
+            f"  └─ `runs/{run_dir}/output/{test}.out` • `runs/{run_dir}/diff/{test}.diff` (on `regression-history`)"
+        )
+    if len(hotspots) > 5:
+        hotspot_lines.append(f"_...and {len(hotspots) - 5} more above {HOTSPOT_THRESHOLD_MB} MB._")
+    hotspot_lines.append(
+        "_Upstream PG holds these tests well under 100MB — peaks above ~1GB suggest a pgrust memory regression worth investigating. To dig in: `git fetch origin regression-history && git show origin/regression-history:runs/" + run_dir + "/output/<test>.out`._"
+    )
+    blocks.append(
+        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(hotspot_lines)}}
+    )
+
 payload = {
-    "blocks": [
-        {"type": "header", "text": {"type": "plain_text", "text": header}},
-        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}},
-    ],
+    "blocks": blocks,
     "text": header,  # fallback for notifications
 }
 print(json.dumps(payload))

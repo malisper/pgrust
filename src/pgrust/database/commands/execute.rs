@@ -1,14 +1,18 @@
 use super::super::*;
 use crate::backend::executor::{
-    ExecutorTransactionState, SharedExecutorTransactionState, execute_planned_stmt,
-    execute_readonly_statement_with_config,
+    ExecutorTransactionState, Expr, SharedExecutorTransactionState, TupleSlot, cast_value,
+    eval_expr, execute_planned_stmt, execute_readonly_statement_with_config,
 };
 use crate::backend::parser::{
     CatalogLookup, CommonTableExpr, CteBody, FromItem, InsertSource, InsertStatement, ParseOptions,
-    SelectStatement, bind_insert_with_outer_scopes_and_ctes, bound_cte_from_query_rows,
+    PreparedExternalParam, SelectStatement, bind_insert_with_outer_scopes_and_ctes,
+    bind_scalar_expr_in_named_slot_scope, bound_cte_from_query_rows, resolve_raw_type_name,
+    with_external_param_types,
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::misc::notices::push_warning_with_hint;
 use crate::backend::utils::misc::stack_depth::StackDepthGuard;
+use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::ReplicaIdentityKind;
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::QueryColumn;
@@ -22,6 +26,150 @@ fn restrict_nonsystem_view_enabled(gucs: &std::collections::HashMap<String, Stri
                 .any(|part| part.trim().trim_matches('\'').eq_ignore_ascii_case("view"))
         })
         .unwrap_or(false)
+}
+
+fn normalize_direct_guc_name(name: &str) -> String {
+    name.trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_ascii_lowercase()
+}
+
+fn parse_direct_bool_guc(value: &str) -> Option<bool> {
+    match value
+        .trim()
+        .trim_matches('\'')
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "on" | "true" | "yes" | "1" | "t" => Some(true),
+        "off" | "false" | "no" | "0" | "f" => Some(false),
+        _ => None,
+    }
+}
+
+fn direct_guc_default(name: &str) -> Option<&'static str> {
+    match name {
+        "enable_partitionwise_join" => Some("off"),
+        "enable_partitionwise_aggregate" => Some("off"),
+        "enable_seqscan"
+        | "enable_indexscan"
+        | "enable_indexonlyscan"
+        | "enable_bitmapscan"
+        | "enable_nestloop"
+        | "enable_hashjoin"
+        | "enable_mergejoin"
+        | "enable_memoize"
+        | "enable_material"
+        | "enable_hashagg"
+        | "enable_sort" => Some("on"),
+        "debug_parallel_query" => Some("off"),
+        "max_parallel_workers_per_gather" => Some("2"),
+        _ => None,
+    }
+}
+
+fn direct_bool_config(
+    gucs: &std::collections::HashMap<String, String>,
+    name: &str,
+    default: bool,
+) -> bool {
+    gucs.get(name)
+        .and_then(|value| parse_direct_bool_guc(value))
+        .unwrap_or(default)
+}
+
+fn direct_usize_config(
+    gucs: &std::collections::HashMap<String, String>,
+    name: &str,
+    default: usize,
+) -> usize {
+    gucs.get(name)
+        .and_then(|value| value.trim().trim_matches('\'').parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn direct_planner_config(gucs: &std::collections::HashMap<String, String>) -> PlannerConfig {
+    PlannerConfig {
+        enable_partitionwise_join: direct_bool_config(gucs, "enable_partitionwise_join", false),
+        enable_partitionwise_aggregate: direct_bool_config(
+            gucs,
+            "enable_partitionwise_aggregate",
+            false,
+        ),
+        enable_seqscan: direct_bool_config(gucs, "enable_seqscan", true),
+        enable_indexscan: direct_bool_config(gucs, "enable_indexscan", true),
+        enable_indexonlyscan: direct_bool_config(gucs, "enable_indexonlyscan", true),
+        enable_bitmapscan: direct_bool_config(gucs, "enable_bitmapscan", true),
+        enable_nestloop: direct_bool_config(gucs, "enable_nestloop", true),
+        enable_hashjoin: direct_bool_config(gucs, "enable_hashjoin", true),
+        enable_mergejoin: direct_bool_config(gucs, "enable_mergejoin", true),
+        enable_memoize: direct_bool_config(gucs, "enable_memoize", true),
+        enable_material: direct_bool_config(gucs, "enable_material", true),
+        retain_partial_index_filters: false,
+        enable_hashagg: direct_bool_config(gucs, "enable_hashagg", true),
+        enable_sort: direct_bool_config(gucs, "enable_sort", true),
+        force_parallel_gather: direct_bool_config(gucs, "debug_parallel_query", false),
+        max_parallel_workers_per_gather: direct_usize_config(
+            gucs,
+            "max_parallel_workers_per_gather",
+            2,
+        ),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedExternalBinding {
+    paramid: usize,
+    expr: Expr,
+    ty: SqlType,
+}
+
+fn bind_prepared_external_params(
+    params: &[PreparedExternalParam],
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<PreparedExternalBinding>, ExecError> {
+    params
+        .iter()
+        .map(|param| {
+            let (expr, inferred) =
+                bind_scalar_expr_in_named_slot_scope(&param.arg, &[], &[], catalog, &[])
+                    .map_err(ExecError::Parse)?;
+            let ty = match &param.type_name {
+                Some(type_name) => {
+                    resolve_raw_type_name(type_name, catalog).map_err(ExecError::Parse)?
+                }
+                None => inferred,
+            };
+            Ok(PreparedExternalBinding {
+                paramid: param.paramid,
+                expr,
+                ty,
+            })
+        })
+        .collect()
+}
+
+fn prepared_external_types(bindings: &[PreparedExternalBinding]) -> Vec<(usize, SqlType)> {
+    bindings
+        .iter()
+        .map(|binding| (binding.paramid, binding.ty))
+        .collect()
+}
+
+fn install_prepared_external_params(
+    bindings: &[PreparedExternalBinding],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let mut slot = TupleSlot::empty(0);
+    for binding in bindings {
+        let value = eval_expr(&binding.expr, &mut slot, ctx)?;
+        let value = cast_value(value, binding.ty)?;
+        ctx.expr_bindings
+            .external_params
+            .insert(binding.paramid, value);
+    }
+    Ok(())
 }
 
 fn reject_restricted_view_access(name: &str, catalog: &dyn CatalogLookup) -> Result<(), ExecError> {
@@ -87,11 +235,14 @@ fn reject_restricted_views_in_from_item(
             reject_restricted_views_in_from_item(left, catalog)?;
             reject_restricted_views_in_from_item(right, catalog)
         }
-        FromItem::Alias { source, .. } | FromItem::Lateral(source) => {
+        FromItem::Alias { source, .. }
+        | FromItem::Lateral(source)
+        | FromItem::TableSample { source, .. } => {
             reject_restricted_views_in_from_item(source, catalog)
         }
         FromItem::Values { .. }
         | FromItem::FunctionCall { .. }
+        | FromItem::RowsFrom { .. }
         | FromItem::JsonTable(_)
         | FromItem::XmlTable(_) => Ok(()),
     }
@@ -153,7 +304,214 @@ fn apply_writable_cte_column_aliases(
     Ok(columns)
 }
 
+fn oa_sql_tokens(sql: &str) -> Vec<String> {
+    sql.split_whitespace()
+        .map(oa_clean_sql_token)
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn oa_clean_sql_token(token: &str) -> String {
+    let trimmed = token.trim_matches(|ch: char| matches!(ch, ';' | ',' | '(' | ')'));
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        return trimmed[1..trimmed.len() - 1].replace("\"\"", "\"");
+    }
+    trimmed.to_string()
+}
+
+fn oa_token_after(tokens: &[String], pattern: &[&str]) -> Option<String> {
+    tokens
+        .windows(pattern.len().saturating_add(1))
+        .find(|window| {
+            pattern.iter().enumerate().all(|(idx, expected)| {
+                window
+                    .get(idx)
+                    .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+            })
+        })
+        .and_then(|window| window.get(pattern.len()).cloned())
+}
+
+fn oa_first_token_after_prefix(sql: &str, prefix: &str) -> Option<String> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with(prefix) {
+        return None;
+    }
+    trimmed
+        .get(prefix.len()..)?
+        .split_whitespace()
+        .next()
+        .map(oa_clean_sql_token)
+}
+
+fn oa_default_acl_objtype(name: &str) -> Result<char, ExecError> {
+    match name.to_ascii_lowercase().as_str() {
+        "table" | "tables" => Ok('r'),
+        "sequence" | "sequences" => Ok('S'),
+        "function" | "functions" | "routine" | "routines" => Ok('f'),
+        "type" | "types" => Ok('T'),
+        "schema" | "schemas" => Ok('n'),
+        _ => Err(ExecError::DetailedError {
+            message: format!("unrecognized default ACL object type \"{name}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        }),
+    }
+}
+
+fn oa_unsupported_ddl(feature: &str, sql: &str) -> ExecError {
+    ExecError::Parse(ParseError::FeatureNotSupported(format!("{feature}: {sql}")))
+}
+
 impl Database {
+    fn execute_object_address_unsupported_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &crate::backend::parser::UnsupportedStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<Option<StatementResult>, ExecError> {
+        match stmt.feature {
+            "ALTER DEFAULT PRIVILEGES" => {
+                self.execute_alter_default_privileges_for_object_address(
+                    client_id,
+                    &stmt.sql,
+                    configured_search_path,
+                )?;
+                Ok(Some(StatementResult::AffectedRows(0)))
+            }
+            "CREATE TRANSFORM" => {
+                self.execute_create_transform_for_object_address(
+                    client_id,
+                    &stmt.sql,
+                    configured_search_path,
+                )?;
+                Ok(Some(StatementResult::AffectedRows(0)))
+            }
+            "CREATE SUBSCRIPTION" => {
+                self.execute_create_subscription_for_object_address(client_id, &stmt.sql);
+                Ok(Some(StatementResult::AffectedRows(0)))
+            }
+            "DROP SUBSCRIPTION" => {
+                self.execute_drop_subscription_for_object_address(&stmt.sql);
+                Ok(Some(StatementResult::AffectedRows(0)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn execute_alter_default_privileges_for_object_address(
+        &self,
+        client_id: ClientId,
+        sql: &str,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<(), ExecError> {
+        // :HACK: Track only object-address identity rows, not default privilege enforcement.
+        let tokens = oa_sql_tokens(sql);
+        let role_name = oa_token_after(&tokens, &["for", "role"])
+            .ok_or_else(|| oa_unsupported_ddl("ALTER DEFAULT PRIVILEGES", sql))?;
+        let namespace_name = oa_token_after(&tokens, &["in", "schema"]);
+        let object_kind = oa_token_after(&tokens, &["on"])
+            .ok_or_else(|| oa_unsupported_ddl("ALTER DEFAULT PRIVILEGES", sql))?;
+        let objtype = oa_default_acl_objtype(&object_kind)?;
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let role = catalog
+            .authid_rows()
+            .into_iter()
+            .find(|row| row.rolname.eq_ignore_ascii_case(&role_name))
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("role \"{role_name}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            })?;
+        let namespace = namespace_name
+            .as_deref()
+            .map(|name| {
+                catalog
+                    .namespace_rows()
+                    .into_iter()
+                    .find(|row| row.nspname.eq_ignore_ascii_case(name))
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("schema \"{name}\" does not exist"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "3F000",
+                    })
+            })
+            .transpose()?;
+        self.object_addresses.write().upsert_default_acl(
+            role.oid,
+            role.rolname,
+            namespace.as_ref().map(|row| row.oid),
+            namespace.map(|row| row.nspname),
+            objtype,
+        );
+        Ok(())
+    }
+
+    fn execute_create_transform_for_object_address(
+        &self,
+        client_id: ClientId,
+        sql: &str,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<(), ExecError> {
+        // :HACK: Record transform identity only; transform execution is intentionally absent.
+        let tokens = oa_sql_tokens(sql);
+        let type_name = oa_token_after(&tokens, &["for"])
+            .ok_or_else(|| oa_unsupported_ddl("CREATE TRANSFORM", sql))?;
+        let language_name = oa_token_after(&tokens, &["language"])
+            .ok_or_else(|| oa_unsupported_ddl("CREATE TRANSFORM", sql))?;
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let raw_type = crate::backend::parser::parse_type_name(&type_name).unwrap_or_else(|_| {
+            crate::backend::parser::RawTypeName::Named {
+                name: type_name.clone(),
+                array_bounds: 0,
+            }
+        });
+        let sql_type = crate::backend::parser::resolve_raw_type_name(&raw_type, &catalog)
+            .map_err(ExecError::Parse)?;
+        let type_oid = catalog
+            .type_oid_for_sql_type(sql_type)
+            .filter(|oid| *oid != 0)
+            .unwrap_or(sql_type.type_oid);
+        if type_oid == 0 {
+            return Err(ExecError::Parse(ParseError::UnsupportedType(type_name)));
+        }
+        let language = catalog
+            .language_row_by_name(&language_name)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("language \"{language_name}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            })?;
+        self.object_addresses
+            .write()
+            .upsert_transform(type_oid, language.oid);
+        Ok(())
+    }
+
+    fn execute_create_subscription_for_object_address(&self, client_id: ClientId, sql: &str) {
+        // :HACK: Store enough subscription identity for object-address regression coverage.
+        if let Some(name) = oa_first_token_after_prefix(sql, "create subscription") {
+            self.object_addresses
+                .write()
+                .upsert_subscription(name, self.auth_state(client_id).current_user_oid());
+        }
+        push_warning_with_hint(
+            "subscription was created, but is not connected",
+            "To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription.",
+        );
+    }
+
+    fn execute_drop_subscription_for_object_address(&self, sql: &str) {
+        if let Some(name) = oa_first_token_after_prefix(sql, "drop subscription") {
+            self.object_addresses.write().drop_subscription(&name);
+        }
+    }
+
     pub(crate) fn execute_alter_table_replica_identity_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -330,6 +688,70 @@ impl Database {
         )
     }
 
+    fn direct_gucs_for_client(
+        &self,
+        client_id: ClientId,
+    ) -> std::collections::HashMap<String, String> {
+        self.session_guc_states
+            .read()
+            .get(&client_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn apply_direct_guc_statement(
+        &self,
+        client_id: ClientId,
+        stmt: &Statement,
+    ) -> Result<Option<StatementResult>, ExecError> {
+        match stmt {
+            Statement::Set(set_stmt) => {
+                let name = normalize_direct_guc_name(&set_stmt.name);
+                if direct_guc_default(&name).is_some() {
+                    let mut states = self.session_guc_states.write();
+                    let gucs = states.entry(client_id).or_default();
+                    if let Some(value) = set_stmt.value.as_ref() {
+                        if parse_direct_bool_guc(value).is_none() {
+                            return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                                value.clone(),
+                            )));
+                        }
+                        gucs.insert(name, value.trim().trim_matches('\'').to_ascii_lowercase());
+                    } else {
+                        gucs.remove(&name);
+                    }
+                }
+                Ok(Some(StatementResult::AffectedRows(0)))
+            }
+            Statement::Reset(reset_stmt) => {
+                let mut states = self.session_guc_states.write();
+                if let Some(name) = reset_stmt.name.as_ref() {
+                    let name = normalize_direct_guc_name(name);
+                    if let Some(gucs) = states.get_mut(&client_id) {
+                        gucs.remove(&name);
+                    }
+                } else {
+                    states.remove(&client_id);
+                }
+                Ok(Some(StatementResult::AffectedRows(0)))
+            }
+            Statement::Show(show_stmt) => {
+                let name = normalize_direct_guc_name(&show_stmt.name);
+                let Some(default) = direct_guc_default(&name) else {
+                    return Ok(Some(StatementResult::AffectedRows(0)));
+                };
+                let gucs = self.direct_gucs_for_client(client_id);
+                let value = gucs.get(&name).map(String::as_str).unwrap_or(default);
+                Ok(Some(StatementResult::Query {
+                    columns: vec![QueryColumn::text(show_stmt.name.clone())],
+                    column_names: vec![show_stmt.name.clone()],
+                    rows: vec![vec![Value::Text(value.into())]],
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub(crate) fn execute_with_search_path(
         &self,
         client_id: ClientId,
@@ -360,11 +782,18 @@ impl Database {
                         ..ParseOptions::default()
                     },
                 )?;
-                self.execute_statement_with_search_path_and_datetime_config(
+                if let Some(result) = self.apply_direct_guc_statement(client_id, &stmt)? {
+                    return Ok(result);
+                }
+                let gucs = self.direct_gucs_for_client(client_id);
+                let planner_config = direct_planner_config(&gucs);
+                self.execute_statement_with_search_path_datetime_config_gucs_and_planner_config(
                     client_id,
                     stmt,
                     configured_search_path,
                     datetime_config,
+                    &gucs,
+                    planner_config,
                 )
             })
         })
@@ -456,6 +885,44 @@ impl Database {
         )
     }
 
+    pub(crate) fn execute_prepared_statement_with_search_path_datetime_config_gucs_and_planner_config(
+        &self,
+        client_id: ClientId,
+        stmt: Statement,
+        external_params: &[PreparedExternalParam],
+        configured_search_path: Option<&[String]>,
+        datetime_config: &DateTimeConfig,
+        gucs: &std::collections::HashMap<String, String>,
+        planner_config: PlannerConfig,
+    ) -> Result<StatementResult, ExecError> {
+        let datetime_config = autocommit_datetime_config(datetime_config);
+        let statement_lock_scope_id = Some(self.allocate_statement_lock_scope_id());
+        let stats_state = self.session_stats_state(client_id);
+        stats_state.write().begin_top_level_xact();
+        let advisory_locks = std::sync::Arc::clone(&self.advisory_locks);
+        let row_locks = std::sync::Arc::clone(&self.row_locks);
+        let result = self.execute_statement_with_search_path_inner(
+            client_id,
+            stmt,
+            statement_lock_scope_id,
+            configured_search_path,
+            &datetime_config,
+            gucs,
+            planner_config,
+            crate::backend::executor::PgPrngState::shared(),
+            external_params,
+        );
+        if let Some(scope_id) = statement_lock_scope_id {
+            advisory_locks.unlock_all_statement(client_id, scope_id);
+            row_locks.unlock_all_statement(client_id, scope_id);
+        }
+        match &result {
+            Ok(_) => stats_state.write().commit_top_level_xact(&self.stats),
+            Err(_) => stats_state.write().rollback_top_level_xact(),
+        }
+        result
+    }
+
     pub(crate) fn execute_statement_with_search_path_datetime_config_gucs_planner_config_and_random_state(
         &self,
         client_id: ClientId,
@@ -481,6 +948,7 @@ impl Database {
             gucs,
             planner_config,
             random_state,
+            &[],
         );
         if let Some(scope_id) = statement_lock_scope_id {
             advisory_locks.unlock_all_statement(client_id, scope_id);
@@ -563,6 +1031,7 @@ impl Database {
         gucs: &std::collections::HashMap<String, String>,
         planner_config: PlannerConfig,
         random_state: std::sync::Arc<parking_lot::Mutex<crate::backend::executor::PgPrngState>>,
+        external_params: &[PreparedExternalParam],
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::{
@@ -585,6 +1054,7 @@ impl Database {
                         gucs,
                         planner_config,
                         std::sync::Arc::clone(&random_state),
+                        &[],
                     )?;
                 }
                 Ok(StatementResult::AffectedRows(0))
@@ -721,6 +1191,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableSetTablespace(ref alter_stmt) => self
+                .execute_alter_table_set_tablespace_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableReset(ref alter_stmt) => self
                 .execute_alter_table_reset_stmt_with_search_path(
                     client_id,
@@ -769,6 +1245,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterMaterializedViewSetAccessMethod(ref alter_stmt) => self
+                .execute_alter_materialized_view_set_access_method_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterIndexAlterColumnStatistics(ref alter_stmt) => self
                 .execute_alter_index_alter_column_statistics_stmt_with_search_path(
                     client_id,
@@ -792,6 +1274,7 @@ impl Database {
                         gucs,
                         planner_config,
                         std::sync::Arc::clone(&random_state),
+                        &[],
                     )?;
                 }
                 Ok(StatementResult::AffectedRows(0))
@@ -846,6 +1329,7 @@ impl Database {
                     client_id,
                     alter_stmt,
                     configured_search_path,
+                    &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 ),
             Statement::AlterTableAlterColumnDefault(ref alter_stmt) => self
                 .execute_alter_table_alter_column_default_stmt_with_search_path(
@@ -1044,6 +1528,9 @@ impl Database {
             Statement::ReassignOwned(ref reassign_stmt) => {
                 self.execute_reassign_owned_stmt(client_id, reassign_stmt)
             }
+            Statement::CommentOnDatabase(ref comment_stmt) => {
+                self.execute_comment_on_database_stmt(client_id, comment_stmt)
+            }
             Statement::CommentOnRole(ref comment_stmt) => {
                 self.execute_comment_on_role_stmt(client_id, comment_stmt)
             }
@@ -1064,10 +1551,24 @@ impl Database {
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::Unsupported(ref unsupported_stmt) => {
-                if unsupported_stmt.feature == "ALTER DEFAULT PRIVILEGES" {
-                    // :HACK: default ACL storage is not implemented yet; keep
-                    // this DDL accepted as a no-op for PostgreSQL regression setup.
-                    return Ok(StatementResult::AffectedRows(0));
+                if let Some(result) = self.execute_object_address_unsupported_stmt(
+                    client_id,
+                    unsupported_stmt,
+                    configured_search_path,
+                )? {
+                    return Ok(result);
+                }
+                if unsupported_stmt.feature == "ALTER TABLE form" {
+                    let lower = unsupported_stmt.sql.to_ascii_lowercase();
+                    if lower.contains(" set without oids") {
+                        return Ok(StatementResult::AffectedRows(0));
+                    }
+                    if lower.contains(" set with oids") {
+                        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "valid ALTER TABLE form",
+                            actual: "syntax error at or near \"WITH\"".into(),
+                        }));
+                    }
                 }
                 Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                     "{}: {}",
@@ -1145,6 +1646,12 @@ impl Database {
                 ),
             Statement::DropOperatorFamily(ref drop_stmt) => self
                 .execute_drop_operator_family_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
+            Statement::DropOperatorClass(ref drop_stmt) => self
+                .execute_drop_operator_class_stmt_with_search_path(
                     client_id,
                     drop_stmt,
                     configured_search_path,
@@ -1269,6 +1776,7 @@ impl Database {
                     pending_table_locks: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1357,6 +1865,12 @@ impl Database {
                 ),
             Statement::CommentOnTrigger(ref comment_stmt) => self
                 .execute_comment_on_trigger_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    configured_search_path,
+                ),
+            Statement::CommentOnEventTrigger(ref comment_stmt) => self
+                .execute_comment_on_event_trigger_stmt_with_search_path(
                     client_id,
                     comment_stmt,
                     configured_search_path,
@@ -1474,6 +1988,9 @@ impl Database {
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let visible_catalog =
                     self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                let external_bindings =
+                    bind_prepared_external_params(external_params, &visible_catalog)?;
+                let external_types = prepared_external_types(&external_bindings);
                 if restrict_nonsystem_view_enabled(gucs) {
                     match &stmt {
                         Statement::Select(select) => {
@@ -1487,24 +2004,13 @@ impl Database {
                         _ => {}
                     }
                 }
-                let (stmt, planned_select, planned_select_for_update, rels) = {
-                    let mut rels = std::collections::BTreeSet::new();
-                    let mut planned_select = None;
-                    let mut planned_select_for_update = false;
-                    match &stmt {
-                        Statement::Select(select) => {
-                            let planned_stmt = crate::backend::parser::pg_plan_query_with_config(
-                                select,
-                                &visible_catalog,
-                                planner_config,
-                            )?;
-                            collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
-                            planned_select_for_update = select.locking_clause.is_some();
-                            planned_select = Some(planned_stmt);
-                        }
-                        Statement::Values(_) => {}
-                        Statement::Explain(explain) => {
-                            if let Statement::Select(select) = explain.statement.as_ref() {
+                let (stmt, planned_select, planned_select_for_update, rels) =
+                    with_external_param_types(&external_types, || {
+                        let mut rels = std::collections::BTreeSet::new();
+                        let mut planned_select = None;
+                        let mut planned_select_for_update = false;
+                        match &stmt {
+                            Statement::Select(select) => {
                                 let planned_stmt =
                                     crate::backend::parser::pg_plan_query_with_config(
                                         select,
@@ -1512,17 +2018,30 @@ impl Database {
                                         planner_config,
                                     )?;
                                 collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
+                                planned_select_for_update = select.locking_clause.is_some();
+                                planned_select = Some(planned_stmt);
                             }
+                            Statement::Values(_) => {}
+                            Statement::Explain(explain) => {
+                                if let Statement::Select(select) = explain.statement.as_ref() {
+                                    let planned_stmt =
+                                        crate::backend::parser::pg_plan_query_with_config(
+                                            select,
+                                            &visible_catalog,
+                                            planner_config,
+                                        )?;
+                                    collect_rels_from_planned_stmt(&planned_stmt, &mut rels);
+                                }
+                            }
+                            _ => unreachable!(),
                         }
-                        _ => unreachable!(),
-                    }
-                    (
-                        stmt,
-                        planned_select,
-                        planned_select_for_update,
-                        rels.into_iter().collect::<Vec<_>>(),
-                    )
-                };
+                        Ok::<_, ExecError>((
+                            stmt,
+                            planned_select,
+                            planned_select_for_update,
+                            rels.into_iter().collect::<Vec<_>>(),
+                        ))
+                    })?;
 
                 lock_relations_interruptible(
                     &self.table_locks,
@@ -1589,6 +2108,7 @@ impl Database {
                         visible_catalog.clone(),
                     )),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1597,7 +2117,8 @@ impl Database {
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                     trigger_depth: 0,
                 };
-                let result = match planned_select {
+                install_prepared_external_params(&external_bindings, &mut ctx)?;
+                let result = with_external_param_types(&external_types, || match planned_select {
                     Some(planned_stmt) => {
                         if planned_select_for_update {
                             check_planned_stmt_select_for_update_privileges(&planned_stmt, &ctx)?;
@@ -1612,7 +2133,7 @@ impl Database {
                         &mut ctx,
                         planner_config,
                     ),
-                };
+                });
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
                 let mut catalog_effects = std::mem::take(&mut ctx.catalog_effects);
@@ -1717,6 +2238,7 @@ impl Database {
                     pending_table_locks: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1886,7 +2408,11 @@ impl Database {
             }
             Statement::Update(ref update_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                let bound = bind_update(update_stmt, &catalog)?;
+                let external_bindings = bind_prepared_external_params(external_params, &catalog)?;
+                let external_types = prepared_external_types(&external_bindings);
+                let bound = with_external_param_types(&external_types, || {
+                    bind_update(update_stmt, &catalog)
+                })?;
                 let prepared = super::rules::prepare_bound_update_for_execution(bound, &catalog)?;
                 let lock_requests = merge_table_lock_requests(
                     &update_foreign_key_lock_requests(&prepared.stmt),
@@ -1953,6 +2479,7 @@ impl Database {
                     pending_table_locks: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1961,6 +2488,7 @@ impl Database {
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                     trigger_depth: 0,
                 };
+                install_prepared_external_params(&external_bindings, &mut ctx)?;
                 let result = super::rules::execute_bound_update_with_rules(
                     prepared.stmt,
                     &catalog,
@@ -2069,6 +2597,7 @@ impl Database {
                     pending_table_locks: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -2157,14 +2686,38 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateEventTrigger(ref create_stmt) => self
+                .execute_create_event_trigger_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableTriggerState(ref alter_stmt) => self
                 .execute_alter_table_trigger_state_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterEventTrigger(ref alter_stmt) => self
+                .execute_alter_event_trigger_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterEventTriggerOwner(ref alter_stmt) => self
+                .execute_alter_event_trigger_owner_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTriggerRename(ref alter_stmt) => self
                 .execute_alter_trigger_rename_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterEventTriggerRename(ref alter_stmt) => self
+                .execute_alter_event_trigger_rename_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,
@@ -2226,6 +2779,11 @@ impl Database {
                     0,
                     configured_search_path,
                 ),
+            Statement::Cluster(ref cluster_stmt) => self.execute_cluster_stmt_with_search_path(
+                client_id,
+                cluster_stmt,
+                configured_search_path,
+            ),
             Statement::DropTable(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
                 let guard =
@@ -2318,6 +2876,12 @@ impl Database {
                 ),
             Statement::DropTrigger(ref drop_stmt) => self
                 .execute_drop_trigger_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
+            Statement::DropEventTrigger(ref drop_stmt) => self
+                .execute_drop_event_trigger_stmt_with_search_path(
                     client_id,
                     drop_stmt,
                     configured_search_path,
@@ -2528,6 +3092,7 @@ impl Database {
                     pending_table_locks: Vec::new(),
                     catalog: Some(crate::backend::executor::executor_catalog(catalog.clone())),
                     scalar_function_cache: std::collections::HashMap::new(),
+                    srf_rows_cache: std::collections::HashMap::new(),
                     plpgsql_function_cache: self.plpgsql_function_cache(client_id),
                     pinned_cte_tables: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -2762,6 +3327,7 @@ impl Database {
             pending_table_locks: Vec::new(),
             catalog: visible_catalog_snapshot,
             scalar_function_cache: std::collections::HashMap::new(),
+            srf_rows_cache: std::collections::HashMap::new(),
             plpgsql_function_cache: self.plpgsql_function_cache(client_id),
             pinned_cte_tables: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
