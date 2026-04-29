@@ -64,6 +64,7 @@ struct ExtendedStatistic {
     target_ids: Vec<i16>,
     expressions: Vec<(i16, Expr)>,
     expression_stats: HashMap<i16, PgStatisticRow>,
+    statistics_target: usize,
     ndistinct: Option<PgNdistinctPayload>,
     dependencies: Option<PgDependenciesPayload>,
     mcv: Option<PgMcvListPayload>,

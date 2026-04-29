@@ -1172,6 +1172,15 @@ fn bind_row_expr_fields(
     Ok(field_exprs)
 }
 
+fn row_comparison_items(expr: &SqlExpr) -> Option<Vec<SqlExpr>> {
+    match expr {
+        SqlExpr::Row(items) => Some(items.clone()),
+        SqlExpr::Column(name) if name.ends_with(".*") => Some(vec![expr.clone()]),
+        SqlExpr::FieldSelect { field, .. } if field == "*" => Some(vec![expr.clone()]),
+        _ => None,
+    }
+}
+
 fn overlaps_row_items(expr: &SqlExpr) -> Result<(&SqlExpr, &SqlExpr), ParseError> {
     let SqlExpr::Row(items) = expr else {
         return Err(ParseError::UnexpectedToken {
@@ -2982,6 +2991,16 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 grouped_outer,
                 ctes,
             )?,
+            "<<<" => bind_catalog_binary_operator_expr(
+                "<<<",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
             _ => {
                 return Err(ParseError::UnexpectedToken {
                     expected: "bound builtin operator",
@@ -3756,14 +3775,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     grouped_outer,
                     ctes,
                 )?
-            } else if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
-                (left.as_ref(), right.as_ref())
+            } else if let (Some(left_items), Some(right_items)) =
+                (row_comparison_items(left), row_comparison_items(right))
             {
                 bind_row_comparison_expr(
                     "=",
                     OpExprKind::Eq,
-                    left_items,
-                    right_items,
+                    &left_items,
+                    &right_items,
                     scope,
                     catalog,
                     outer_scopes,
@@ -3843,14 +3862,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     grouped_outer,
                     ctes,
                 )?
-            } else if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
-                (left.as_ref(), right.as_ref())
+            } else if let (Some(left_items), Some(right_items)) =
+                (row_comparison_items(left), row_comparison_items(right))
             {
                 bind_row_comparison_expr(
                     "<>",
                     OpExprKind::NotEq,
-                    left_items,
-                    right_items,
+                    &left_items,
+                    &right_items,
                     scope,
                     catalog,
                     outer_scopes,
@@ -3918,14 +3937,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::Lt(left, right) => {
-            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
-                (left.as_ref(), right.as_ref())
+            if let (Some(left_items), Some(right_items)) =
+                (row_comparison_items(left), row_comparison_items(right))
             {
                 bind_row_comparison_expr(
                     "<",
                     OpExprKind::Lt,
-                    left_items,
-                    right_items,
+                    &left_items,
+                    &right_items,
                     scope,
                     catalog,
                     outer_scopes,
@@ -3980,14 +3999,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::LtEq(left, right) => {
-            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
-                (left.as_ref(), right.as_ref())
+            if let (Some(left_items), Some(right_items)) =
+                (row_comparison_items(left), row_comparison_items(right))
             {
                 bind_row_comparison_expr(
                     "<=",
                     OpExprKind::LtEq,
-                    left_items,
-                    right_items,
+                    &left_items,
+                    &right_items,
                     scope,
                     catalog,
                     outer_scopes,
@@ -4042,14 +4061,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::Gt(left, right) => {
-            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
-                (left.as_ref(), right.as_ref())
+            if let (Some(left_items), Some(right_items)) =
+                (row_comparison_items(left), row_comparison_items(right))
             {
                 bind_row_comparison_expr(
                     ">",
                     OpExprKind::Gt,
-                    left_items,
-                    right_items,
+                    &left_items,
+                    &right_items,
                     scope,
                     catalog,
                     outer_scopes,
@@ -4104,14 +4123,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::GtEq(left, right) => {
-            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
-                (left.as_ref(), right.as_ref())
+            if let (Some(left_items), Some(right_items)) =
+                (row_comparison_items(left), row_comparison_items(right))
             {
                 bind_row_comparison_expr(
                     ">=",
                     OpExprKind::GtEq,
-                    left_items,
-                    right_items,
+                    &left_items,
+                    &right_items,
                     scope,
                     catalog,
                     outer_scopes,

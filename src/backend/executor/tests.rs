@@ -23367,6 +23367,44 @@ fn alter_function_signature_accepts_argument_names() {
 }
 
 #[test]
+fn plpgsql_return_positional_comparison() {
+    let db = Database::open(temp_dir("plpgsql_return_positional_comparison"), 16).unwrap();
+    db.execute(
+        1,
+        "create function cmp_leak(int, int) returns bool \
+         language plpgsql as $$begin return $1 < $2; end$$",
+    )
+    .unwrap();
+
+    assert_query_rows(
+        db.execute(1, "select cmp_leak(1, 2), cmp_leak(2, 1)")
+            .unwrap(),
+        vec![vec![Value::Bool(true), Value::Bool(false)]],
+    );
+}
+
+#[test]
+fn custom_plpgsql_operator_with_scalarltsel_runs() {
+    let db = Database::open(temp_dir("custom_plpgsql_operator_scalarltsel"), 16).unwrap();
+    db.execute(
+        1,
+        "create function cmp_leak_op(int, int) returns bool \
+         language plpgsql as $$begin return $1 < $2; end$$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator <<< (procedure = cmp_leak_op, leftarg = int, rightarg = int, restrict = scalarltsel)",
+    )
+    .unwrap();
+
+    assert_query_rows(
+        db.execute(1, "select 1 <<< 2, 2 <<< 1").unwrap(),
+        vec![vec![Value::Bool(true), Value::Bool(false)]],
+    );
+}
+
+#[test]
 fn sql_function_scan_expands_named_composite_record_result() {
     let db = Database::open(temp_dir("sql_function_scan_named_composite"), 16).unwrap();
     db.execute(1, "create table int8_tbl(q1 int8, q2 int8)")
